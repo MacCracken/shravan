@@ -19,14 +19,14 @@
 - [x] Integration tests
 - [x] Criterion benchmarks
 
+### v0.2.0 (2026-03-28) -- FLAC Completeness
+
+- [x] LPC subframe decoding (orders 1-32)
+- [x] FLAC encoder (Fixed prediction, Rice coding, mid-side stereo, MD5)
+- [x] CRC-8/CRC-16 verification (decode validation + encode emission)
+- [x] Seeking support (`decode_range()`, SEEKTABLE parsing)
+
 ## Backlog
-
-### v0.2.0 -- FLAC Completeness
-
-- [ ] LPC subframe decoding
-- [ ] FLAC encoder
-- [ ] CRC-8/CRC-16 verification
-- [ ] Seeking support
 
 ### v0.3.0 -- Extended Formats
 

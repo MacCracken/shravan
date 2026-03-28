@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-28
+
+### Added
+
+- **FLAC encoder**: Fixed prediction (orders 0-4) with automatic order selection, Rice entropy coding with optimal parameter selection, mid-side stereo channel decorrelation, MD5 signature computation
+- **LPC subframe decoding**: Full support for LPC orders 1-32 with quantized coefficients and variable precision
+- **CRC verification**: CRC-8 (frame header) and CRC-16 (full frame) validation on decode, correct CRC emission on encode
+- **FLAC seeking**: `decode_range()` for sample-accurate seeking, SEEKTABLE metadata block parsing, range-based decoding with start/end sample positions
+- **BitWriter**: MSB-first bitstream writer for FLAC frame construction
+- FLAC encode/decode benchmarks (Criterion)
+
+### Fixed
+
+- `resample()` now rejects `source_rate=0` instead of panicking with capacity overflow
+- WAV chunk parser uses saturating arithmetic to prevent overflow on malicious chunk sizes
+
 ## [0.1.0] - 2026-03-26
 
 ### Added
