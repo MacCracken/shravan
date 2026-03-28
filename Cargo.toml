@@ -1,0 +1,39 @@
+[package]
+name = "shravan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-only"
+description = "shravan — Audio codecs: WAV, FLAC, PCM conversion, and resampling"
+homepage = "https://github.com/MacCracken/shravan"
+repository = "https://github.com/MacCracken/shravan"
+readme = "README.md"
+documentation = "https://docs.rs/shravan"
+keywords = ["audio", "codec", "wav", "flac", "pcm"]
+categories = ["multimedia::audio", "encoding"]
+exclude = [".claude/", ".github/", "docs/", "scripts/"]
+
+[dependencies]
+libm = "0.2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+thiserror = { version = "2", default-features = false }
+tracing = { version = "0.1", default-features = false, optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = "1"
+
+[features]
+default = ["std", "wav", "flac", "pcm"]
+full = ["std", "wav", "flac", "pcm", "resample", "tag", "logging"]
+std = ["serde/std", "thiserror/std"]
+wav = []
+flac = []
+pcm = []
+resample = []
+tag = []
+logging = ["dep:tracing"]
+
+[[bench]]
+name = "benchmarks"
+harness = false
