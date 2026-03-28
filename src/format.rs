@@ -46,7 +46,6 @@ pub struct FormatInfo {
 /// Detect the audio format from the first bytes of a file.
 ///
 /// Requires at least 4 bytes of header data.
-#[must_use]
 pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
     if header.len() < 4 {
         return Err(ShravanError::InvalidHeader(
@@ -65,6 +64,7 @@ pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

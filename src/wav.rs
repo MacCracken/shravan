@@ -44,14 +44,10 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     // Validate RIFF header
     if data.len() < 44 {
-        return Err(ShravanError::InvalidHeader(
-            "WAV file too short".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("WAV file too short".into()));
     }
     if &data[0..4] != b"RIFF" {
-        return Err(ShravanError::InvalidHeader(
-            "missing RIFF magic".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("missing RIFF magic".into()));
     }
     if &data[8..12] != b"WAVE" {
         return Err(ShravanError::InvalidHeader(
@@ -78,9 +74,7 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
 
         if chunk_id == b"fmt " {
             if chunk_size < 16 {
-                return Err(ShravanError::InvalidHeader(
-                    "fmt chunk too small".into(),
-                ));
+                return Err(ShravanError::InvalidHeader("fmt chunk too small".into()));
             }
             fmt_format_code = read_u16_le(data, pos + 8)?;
             fmt_channels = read_u16_le(data, pos + 10)?;
@@ -95,8 +89,9 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         }
 
         // Move to next chunk (chunk sizes are padded to even boundaries)
-        let advance = 8 + chunk_size + (chunk_size & 1);
-        pos += advance;
+        let padded_size = chunk_size.saturating_add(chunk_size & 1);
+        let advance = padded_size.saturating_add(8);
+        pos = pos.saturating_add(advance);
 
         if fmt_found && data_found {
             break;
@@ -104,14 +99,10 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     }
 
     if !fmt_found {
-        return Err(ShravanError::InvalidHeader(
-            "missing fmt chunk".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("missing fmt chunk".into()));
     }
     if !data_found {
-        return Err(ShravanError::InvalidHeader(
-            "missing data chunk".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("missing data chunk".into()));
     }
     if fmt_channels == 0 {
         return Err(ShravanError::InvalidChannels(0));
@@ -134,40 +125,32 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
                 .map(|&b| (b as f32 - 128.0) / 128.0)
                 .collect()
         }
-        (WAV_FORMAT_PCM, 16) => {
-            audio_data
-                .chunks_exact(2)
-                .map(|c| {
-                    let s = i16::from_le_bytes([c[0], c[1]]);
-                    s as f32 / 32768.0
-                })
-                .collect()
-        }
-        (WAV_FORMAT_PCM, 24) => {
-            audio_data
-                .chunks_exact(3)
-                .map(|c| {
-                    let raw = i32::from(c[0]) | (i32::from(c[1]) << 8) | (i32::from(c[2]) << 16);
-                    let extended = (raw << 8) >> 8;
-                    extended as f32 / 8_388_608.0
-                })
-                .collect()
-        }
-        (WAV_FORMAT_PCM, 32) => {
-            audio_data
-                .chunks_exact(4)
-                .map(|c| {
-                    let s = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-                    s as f32 / 2_147_483_648.0
-                })
-                .collect()
-        }
-        (WAV_FORMAT_IEEE_FLOAT, 32) => {
-            audio_data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect::<Vec<f32>>()
-        }
+        (WAV_FORMAT_PCM, 16) => audio_data
+            .chunks_exact(2)
+            .map(|c| {
+                let s = i16::from_le_bytes([c[0], c[1]]);
+                s as f32 / 32768.0
+            })
+            .collect(),
+        (WAV_FORMAT_PCM, 24) => audio_data
+            .chunks_exact(3)
+            .map(|c| {
+                let raw = i32::from(c[0]) | (i32::from(c[1]) << 8) | (i32::from(c[2]) << 16);
+                let extended = (raw << 8) >> 8;
+                extended as f32 / 8_388_608.0
+            })
+            .collect(),
+        (WAV_FORMAT_PCM, 32) => audio_data
+            .chunks_exact(4)
+            .map(|c| {
+                let s = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                s as f32 / 2_147_483_648.0
+            })
+            .collect(),
+        (WAV_FORMAT_IEEE_FLOAT, 32) => audio_data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect::<Vec<f32>>(),
         _ => {
             return Err(ShravanError::DecodeError(format!(
                 "unsupported WAV format: code={fmt_format_code}, bits={fmt_bits_per_sample}"
@@ -204,7 +187,12 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
 ///
 /// Returns errors for invalid parameters or unsupported formats.
 #[cfg(feature = "pcm")]
-pub fn encode(samples: &[f32], sample_rate: u32, channels: u16, format: PcmFormat) -> Result<Vec<u8>> {
+pub fn encode(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    format: PcmFormat,
+) -> Result<Vec<u8>> {
     if channels == 0 {
         return Err(ShravanError::InvalidChannels(0));
     }
@@ -266,15 +254,13 @@ pub fn encode(samples: &[f32], sample_rate: u32, channels: u16, format: PcmForma
 #[cfg(feature = "pcm")]
 fn encode_samples(samples: &[f32], format: PcmFormat) -> Result<Vec<u8>> {
     match format {
-        PcmFormat::I8 => {
-            Ok(samples
-                .iter()
-                .map(|&s| {
-                    let clamped = s.clamp(-1.0, 1.0);
-                    ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
-                })
-                .collect())
-        }
+        PcmFormat::I8 => Ok(samples
+            .iter()
+            .map(|&s| {
+                let clamped = s.clamp(-1.0, 1.0);
+                ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
+            })
+            .collect()),
         PcmFormat::I16 => {
             let mut out = Vec::with_capacity(samples.len() * 2);
             for &s in samples {
@@ -318,6 +304,7 @@ fn encode_samples(samples: &[f32], format: PcmFormat) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -368,10 +355,7 @@ mod tests {
         assert_eq!(decoded.len(), samples.len());
 
         for (a, b) in samples.iter().zip(decoded.iter()) {
-            assert!(
-                (a - b).abs() < 0.001,
-                "sample mismatch: {a} vs {b}"
-            );
+            assert!((a - b).abs() < 0.001, "sample mismatch: {a} vs {b}");
         }
     }
 
@@ -387,10 +371,7 @@ mod tests {
         assert_eq!(info.bit_depth, 32);
 
         for (a, b) in samples.iter().zip(decoded.iter()) {
-            assert!(
-                (a - b).abs() < f32::EPSILON,
-                "sample mismatch: {a} vs {b}"
-            );
+            assert!((a - b).abs() < f32::EPSILON, "sample mismatch: {a} vs {b}");
         }
     }
 
@@ -415,10 +396,7 @@ mod tests {
 
         assert_eq!(info.bit_depth, 24);
         for (a, b) in samples.iter().zip(decoded.iter()) {
-            assert!(
-                (a - b).abs() < 0.001,
-                "sample mismatch: {a} vs {b}"
-            );
+            assert!((a - b).abs() < 0.001, "sample mismatch: {a} vs {b}");
         }
     }
 
@@ -431,10 +409,7 @@ mod tests {
 
         assert_eq!(info.bit_depth, 32);
         for (a, b) in samples.iter().zip(decoded.iter()) {
-            assert!(
-                (a - b).abs() < 0.001,
-                "sample mismatch: {a} vs {b}"
-            );
+            assert!((a - b).abs() < 0.001, "sample mismatch: {a} vs {b}");
         }
     }
 

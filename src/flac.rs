@@ -81,9 +81,7 @@ impl<'a> BitReader<'a> {
             }
             count += 1;
             if count > 1_000_000 {
-                return Err(ShravanError::DecodeError(
-                    "unary value too large".into(),
-                ));
+                return Err(ShravanError::DecodeError("unary value too large".into()));
             }
         }
     }
@@ -186,9 +184,7 @@ fn parse_streaminfo(data: &[u8], offset: usize) -> Result<StreamInfo> {
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     // Verify magic
     if data.len() < 4 || &data[0..4] != b"fLaC" {
-        return Err(ShravanError::InvalidHeader(
-            "missing fLaC magic".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("missing fLaC magic".into()));
     }
 
     // Parse metadata blocks
@@ -201,8 +197,9 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         }
         let is_last = (data[pos] & 0x80) != 0;
         let block_type = data[pos] & 0x7F;
-        let block_size =
-            (u32::from(data[pos + 1]) << 16) | (u32::from(data[pos + 2]) << 8) | u32::from(data[pos + 3]);
+        let block_size = (u32::from(data[pos + 1]) << 16)
+            | (u32::from(data[pos + 2]) << 8)
+            | u32::from(data[pos + 3]);
         pos += 4;
 
         if block_type == STREAMINFO {
@@ -216,9 +213,8 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         }
     }
 
-    let info = stream_info.ok_or_else(|| {
-        ShravanError::InvalidHeader("missing STREAMINFO block".into())
-    })?;
+    let info = stream_info
+        .ok_or_else(|| ShravanError::InvalidHeader("missing STREAMINFO block".into()))?;
 
     if info.sample_rate == 0 {
         return Err(ShravanError::InvalidSampleRate(0));
@@ -299,7 +295,11 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         apply_decorrelation(&mut channel_data, decorrelation);
 
         // Interleave and convert to f32
-        let frame_scale = if frame_bps != bps { 1.0f64 / f64::from(1u32 << (frame_bps - 1)) } else { scale };
+        let frame_scale = if frame_bps != bps {
+            1.0f64 / f64::from(1u32 << (frame_bps - 1))
+        } else {
+            scale
+        };
         for i in 0..block_size as usize {
             for ch_samples in &channel_data {
                 if i < ch_samples.len() {
@@ -349,33 +349,30 @@ fn apply_decorrelation(channels: &mut [Vec<i64>], mode: ChannelDecorrelation) {
         return;
     }
     let len = channels[0].len().min(channels[1].len());
+    let (ch0, rest) = channels.split_at_mut(1);
+    let ch0 = &mut ch0[0][..len];
+    let ch1 = &mut rest[0][..len];
     match mode {
         ChannelDecorrelation::Independent => {}
         ChannelDecorrelation::LeftSide => {
             // ch0 = left, ch1 = left - right -> right = left - side
-            for i in 0..len {
-                channels[1][i] = channels[0][i] - channels[1][i];
+            for (l, s) in ch0.iter().zip(ch1.iter_mut()) {
+                *s = *l - *s;
             }
         }
         ChannelDecorrelation::RightSide => {
             // ch0 = left - right, ch1 = right -> left = side + right
-            for i in 0..len {
-                channels[0][i] = channels[0][i] + channels[1][i];
+            for (s, r) in ch0.iter_mut().zip(ch1.iter()) {
+                *s += *r;
             }
         }
         ChannelDecorrelation::MidSide => {
-            // ch0 = (left + right) / 2, ch1 = left - right
-            // left = mid + (side + 1) / 2, but we need to be careful with integer math
-            // Actually: mid = (left + right) / 2 (truncated), side = left - right
-            // So: left = mid + ((side + (side & 1)) >> 1), right = left - side
-            // Simplified: side = ch1, mid = ch0
-            // left = ((2 * mid) + side + (side & 1)) >> 1 ... but actually FLAC spec says:
-            // mid is shifted: mid <<= 1, mid |= (side & 1), left = (mid + side) >> 1, right = (mid - side) >> 1
-            for i in 0..len {
-                let mid = (channels[0][i] << 1) | (channels[1][i] & 1);
-                let side = channels[1][i];
-                channels[0][i] = (mid + side) >> 1;
-                channels[1][i] = (mid - side) >> 1;
+            // FLAC spec: mid <<= 1, mid |= (side & 1), left = (mid + side) >> 1, right = (mid - side) >> 1
+            for (m, s) in ch0.iter_mut().zip(ch1.iter_mut()) {
+                let mid = (*m << 1) | (*s & 1);
+                let side = *s;
+                *m = (mid + side) >> 1;
+                *s = (mid - side) >> 1;
             }
         }
     }
@@ -403,7 +400,9 @@ fn find_frame_sync(reader: &mut BitReader<'_>) -> Result<u16> {
 /// Decode block size from the 4-bit code.
 fn decode_block_size(code: u8, reader: &mut BitReader<'_>) -> Result<u32> {
     match code {
-        0 => Err(ShravanError::DecodeError("reserved block size code 0".into())),
+        0 => Err(ShravanError::DecodeError(
+            "reserved block size code 0".into(),
+        )),
         1 => Ok(192),
         2..=5 => Ok(576 << (code - 2)),
         6 => {
@@ -448,7 +447,9 @@ fn decode_sample_rate(code: u8, reader: &mut BitReader<'_>, streaminfo_rate: u32
             let val = reader.read_bits(16)?;
             Ok(val * 10)
         }
-        15 => Err(ShravanError::DecodeError("invalid sample rate code 15".into())),
+        15 => Err(ShravanError::DecodeError(
+            "invalid sample rate code 15".into(),
+        )),
         _ => Err(ShravanError::DecodeError(format!(
             "invalid sample rate code: {code}"
         ))),
@@ -570,19 +571,17 @@ fn decode_fixed(
     let residuals = decode_residual(reader, block_size, order)?;
 
     // Apply fixed prediction
-    for i in 0..residuals.len() {
+    for (i, &residual) in residuals.iter().enumerate() {
         let idx = order + i;
         let predicted = match order {
-            0 => residuals[i],
-            1 => samples[idx - 1] + residuals[i],
-            2 => 2 * samples[idx - 1] - samples[idx - 2] + residuals[i],
-            3 => {
-                3 * samples[idx - 1] - 3 * samples[idx - 2] + samples[idx - 3] + residuals[i]
-            }
+            0 => residual,
+            1 => samples[idx - 1] + residual,
+            2 => 2 * samples[idx - 1] - samples[idx - 2] + residual,
+            3 => 3 * samples[idx - 1] - 3 * samples[idx - 2] + samples[idx - 3] + residual,
             4 => {
                 4 * samples[idx - 1] - 6 * samples[idx - 2] + 4 * samples[idx - 3]
                     - samples[idx - 4]
-                    + residuals[i]
+                    + residual
             }
             _ => {
                 return Err(ShravanError::DecodeError(format!(
@@ -604,8 +603,8 @@ fn decode_residual(
 ) -> Result<Vec<i64>> {
     let coding_method = reader.read_bits(2)?;
     let rice_param_bits: u8 = match coding_method {
-        0 => 4,  // RICE
-        1 => 5,  // RICE2
+        0 => 4, // RICE
+        1 => 5, // RICE2
         _ => {
             return Err(ShravanError::DecodeError(format!(
                 "unsupported residual coding method: {coding_method}"
@@ -673,6 +672,14 @@ fn sign_extend(value: i64, bits: u8) -> i64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::identity_op,
+    clippy::erasing_op,
+    clippy::eq_op,
+    clippy::needless_late_init
+)]
 mod tests {
     use super::*;
 
@@ -763,7 +770,8 @@ mod tests {
         let sr_hi = (sample_rate >> 12) as u8;
         let sr_mid = ((sample_rate >> 4) & 0xFF) as u8;
         let sr_lo_and_ch_bps = ((sample_rate & 0x0F) << 4) as u8 | (0 << 1) | ((15 >> 4) & 1);
-        let bps_lo_and_total_hi = ((15 & 0x0F) << 4) as u8 | ((block_size as u64 >> 32) & 0x0F) as u8;
+        let bps_lo_and_total_hi =
+            ((15 & 0x0F) << 4) as u8 | ((block_size as u64 >> 32) & 0x0F) as u8;
         out.push(sr_hi);
         out.push(sr_mid);
         out.push(sr_lo_and_ch_bps);

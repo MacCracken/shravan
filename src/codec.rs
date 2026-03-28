@@ -1,7 +1,9 @@
 //! Unified codec interface — auto-detect and decode audio data.
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Result, ShravanError};
-use crate::format::{detect_format, AudioFormat, FormatInfo};
+use crate::format::{AudioFormat, FormatInfo, detect_format};
 
 /// Auto-detect the format and decode audio data.
 ///
@@ -43,6 +45,7 @@ pub trait AudioCodec {
 
 #[cfg(feature = "wav")]
 /// WAV codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WavCodec;
 
 #[cfg(feature = "wav")]
@@ -54,6 +57,7 @@ impl AudioCodec for WavCodec {
 
 #[cfg(feature = "flac")]
 /// FLAC codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FlacCodec;
 
 #[cfg(feature = "flac")]
@@ -64,6 +68,7 @@ impl AudioCodec for FlacCodec {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -20,13 +20,11 @@ fn main() {
             .collect();
 
         println!("Generated {num_samples} samples of {frequency} Hz sine wave");
-        println!(
-            "  Sample rate: {sample_rate} Hz, Duration: {duration_secs} s"
-        );
+        println!("  Sample rate: {sample_rate} Hz, Duration: {duration_secs} s");
 
         // Encode as 16-bit WAV
-        let wav_data = wav::encode(&samples, sample_rate, 1, PcmFormat::I16)
-            .expect("WAV encoding failed");
+        let wav_data =
+            wav::encode(&samples, sample_rate, 1, PcmFormat::I16).expect("WAV encoding failed");
         println!("Encoded to WAV: {} bytes", wav_data.len());
 
         // Decode back
@@ -49,10 +47,7 @@ fn main() {
             .fold(0.0f32, f32::max);
 
         println!("  Max roundtrip error: {max_error:.6}");
-        assert!(
-            max_error < 0.001,
-            "Roundtrip error too large: {max_error}"
-        );
+        assert!(max_error < 0.001, "Roundtrip error too large: {max_error}");
         println!("Roundtrip verification passed.");
     }
 

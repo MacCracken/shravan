@@ -38,9 +38,9 @@
 
 extern crate alloc;
 
+pub mod codec;
 pub mod error;
 pub mod format;
-pub mod codec;
 
 #[cfg(feature = "pcm")]
 pub mod pcm;

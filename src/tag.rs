@@ -40,9 +40,7 @@ pub fn read_id3v2(data: &[u8]) -> Result<AudioMetadata> {
         ));
     }
     if &data[0..3] != b"ID3" {
-        return Err(ShravanError::InvalidHeader(
-            "missing ID3 magic".into(),
-        ));
+        return Err(ShravanError::InvalidHeader("missing ID3 magic".into()));
     }
 
     let major_version = data[3];
@@ -199,10 +197,13 @@ fn decode_utf16(data: &[u8], little_endian: bool) -> Option<String> {
         })
         .collect();
 
-    String::from_utf16(&units).ok().map(|s| {
-        let trimmed = s.trim_end_matches('\0');
-        trimmed.to_string()
-    }).filter(|s| !s.is_empty())
+    String::from_utf16(&units)
+        .ok()
+        .map(|s| {
+            let trimmed = s.trim_end_matches('\0');
+            trimmed.to_string()
+        })
+        .filter(|s| !s.is_empty())
 }
 
 /// Decode a syncsafe integer (4 bytes, 7 bits each).
@@ -259,21 +260,21 @@ pub fn read_vorbis_comment(data: &[u8]) -> Result<AudioMetadata> {
         pos += comment_len;
 
         // Parse field=value
-        if let Ok(s) = core::str::from_utf8(comment) {
-            if let Some(eq_pos) = s.find('=') {
-                let field = &s[..eq_pos];
-                let value = &s[eq_pos + 1..];
-                if !value.is_empty() {
-                    match field.to_ascii_uppercase().as_str() {
-                        "TITLE" => meta.title = Some(value.to_string()),
-                        "ARTIST" => meta.artist = Some(value.to_string()),
-                        "ALBUM" => meta.album = Some(value.to_string()),
-                        "TRACKNUMBER" => meta.track_number = Some(value.to_string()),
-                        "DATE" => meta.year = Some(value.to_string()),
-                        "GENRE" => meta.genre = Some(value.to_string()),
-                        "COMMENT" => meta.comment = Some(value.to_string()),
-                        _ => {}
-                    }
+        if let Ok(s) = core::str::from_utf8(comment)
+            && let Some(eq_pos) = s.find('=')
+        {
+            let field = &s[..eq_pos];
+            let value = &s[eq_pos + 1..];
+            if !value.is_empty() {
+                match field.to_ascii_uppercase().as_str() {
+                    "TITLE" => meta.title = Some(value.to_string()),
+                    "ARTIST" => meta.artist = Some(value.to_string()),
+                    "ALBUM" => meta.album = Some(value.to_string()),
+                    "TRACKNUMBER" => meta.track_number = Some(value.to_string()),
+                    "DATE" => meta.year = Some(value.to_string()),
+                    "GENRE" => meta.genre = Some(value.to_string()),
+                    "COMMENT" => meta.comment = Some(value.to_string()),
+                    _ => {}
                 }
             }
         }
@@ -296,10 +297,11 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    fn build_id3v2_tag(frames: &[(& [u8; 4], &str)]) -> Vec<u8> {
+    fn build_id3v2_tag(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
         let mut frame_data = Vec::new();
         for (id, value) in frames {
             frame_data.extend_from_slice(*id);
@@ -372,15 +374,18 @@ mod tests {
 
     #[test]
     fn vorbis_comment_parse() {
-        let data = build_vorbis_comment("shravan 0.1.0", &[
-            ("TITLE", "Test Track"),
-            ("ARTIST", "Test Musician"),
-            ("ALBUM", "Test Record"),
-            ("TRACKNUMBER", "3"),
-            ("DATE", "2025"),
-            ("GENRE", "Electronic"),
-            ("COMMENT", "A test comment"),
-        ]);
+        let data = build_vorbis_comment(
+            "shravan 0.1.0",
+            &[
+                ("TITLE", "Test Track"),
+                ("ARTIST", "Test Musician"),
+                ("ALBUM", "Test Record"),
+                ("TRACKNUMBER", "3"),
+                ("DATE", "2025"),
+                ("GENRE", "Electronic"),
+                ("COMMENT", "A test comment"),
+            ],
+        );
 
         let meta = read_vorbis_comment(&data).unwrap();
         assert_eq!(meta.title.as_deref(), Some("Test Track"));
@@ -394,10 +399,8 @@ mod tests {
 
     #[test]
     fn vorbis_comment_case_insensitive() {
-        let data = build_vorbis_comment("test", &[
-            ("title", "Lower Case"),
-            ("Artist", "Mixed Case"),
-        ]);
+        let data =
+            build_vorbis_comment("test", &[("title", "Lower Case"), ("Artist", "Mixed Case")]);
 
         let meta = read_vorbis_comment(&data).unwrap();
         assert_eq!(meta.title.as_deref(), Some("Lower Case"));

@@ -1,13 +1,13 @@
 //! Error types for shravan.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Result type alias for shravan operations.
 pub type Result<T> = core::result::Result<T, ShravanError>;
 
 /// Errors produced by shravan codec operations.
-#[must_use]
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ShravanError {
     /// The audio format is not supported.

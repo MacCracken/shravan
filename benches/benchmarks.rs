@@ -38,15 +38,7 @@ fn resample_4096(c: &mut Criterion) {
         .collect();
 
     c.bench_function("resample_4096_44100_to_48000", |b| {
-        b.iter(|| {
-            resample::resample(
-                black_box(&samples),
-                1,
-                44100,
-                48000,
-                ResampleQuality::Good,
-            )
-        });
+        b.iter(|| resample::resample(black_box(&samples), 1, 44100, 48000, ResampleQuality::Good));
     });
 }
 
@@ -76,5 +68,9 @@ criterion_main!(pcm_benches);
 criterion_main!(resample_benches);
 
 // Fallback: if nothing is enabled, still need a main
-#[cfg(not(any(feature = "pcm", all(feature = "wav", feature = "pcm"), feature = "resample")))]
+#[cfg(not(any(
+    feature = "pcm",
+    all(feature = "wav", feature = "pcm"),
+    feature = "resample"
+)))]
 fn main() {}

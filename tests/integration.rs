@@ -1,6 +1,6 @@
 //! Integration tests for shravan.
 
-use shravan::format::{detect_format, AudioFormat, FormatInfo};
+use shravan::format::{AudioFormat, FormatInfo, detect_format};
 
 #[cfg(feature = "pcm")]
 use shravan::pcm::{self, PcmFormat};
@@ -30,10 +30,7 @@ fn wav_i16_roundtrip() {
     assert_eq!(decoded.len(), samples.len());
 
     for (a, b) in samples.iter().zip(decoded.iter()) {
-        assert!(
-            (a - b).abs() < 0.001,
-            "i16 roundtrip mismatch: {a} vs {b}"
-        );
+        assert!((a - b).abs() < 0.001, "i16 roundtrip mismatch: {a} vs {b}");
     }
 }
 
@@ -250,4 +247,101 @@ fn codec_open_wav() {
 fn codec_open_unknown() {
     let data = vec![0u8; 100];
     assert!(shravan::codec::open(&data).is_err());
+}
+
+// --- Serde roundtrip: codec structs ---
+
+#[cfg(feature = "wav")]
+#[test]
+fn serde_roundtrip_wav_codec() {
+    use shravan::codec::WavCodec;
+    let codec = WavCodec;
+    let json = serde_json::to_string(&codec).unwrap();
+    let back: WavCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(codec, back);
+}
+
+#[cfg(feature = "flac")]
+#[test]
+fn serde_roundtrip_flac_codec() {
+    use shravan::codec::FlacCodec;
+    let codec = FlacCodec;
+    let json = serde_json::to_string(&codec).unwrap();
+    let back: FlacCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(codec, back);
+}
+
+#[test]
+fn serde_roundtrip_shravan_error() {
+    use shravan::ShravanError;
+    let errors = [
+        ShravanError::UnsupportedFormat,
+        ShravanError::InvalidHeader("bad header".into()),
+        ShravanError::DecodeError("decode failed".into()),
+        ShravanError::EncodeError("encode failed".into()),
+        ShravanError::EndOfStream,
+        ShravanError::InvalidSampleRate(0),
+        ShravanError::InvalidChannels(0),
+    ];
+    for err in &errors {
+        let json = serde_json::to_string(err).unwrap();
+        let back: ShravanError = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{err}"), format!("{back}"));
+    }
+}
+
+// --- WAV edge case tests ---
+
+#[cfg(all(feature = "wav", feature = "pcm"))]
+#[test]
+fn wav_i8_roundtrip() {
+    let samples = vec![0.0f32, 0.5, -0.5, -1.0];
+    let encoded = wav::encode(&samples, 44100, 1, PcmFormat::I8).unwrap();
+    let (info, decoded) = wav::decode(&encoded).unwrap();
+
+    assert_eq!(info.bit_depth, 8);
+    assert_eq!(decoded.len(), samples.len());
+    for (a, b) in samples.iter().zip(decoded.iter()) {
+        assert!((a - b).abs() < 0.02, "i8 roundtrip mismatch: {a} vs {b}");
+    }
+}
+
+#[cfg(all(feature = "wav", feature = "pcm"))]
+#[test]
+fn wav_malformed_chunk_size() {
+    // WAV with garbage chunk size should not panic
+    let mut data = vec![0u8; 100];
+    data[0..4].copy_from_slice(b"RIFF");
+    data[4..8].copy_from_slice(&96u32.to_le_bytes());
+    data[8..12].copy_from_slice(b"WAVE");
+    // Fake chunk with max u32 size
+    data[12..16].copy_from_slice(b"JUNK");
+    data[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    // Should not panic, just return an error
+    let _ = wav::decode(&data);
+}
+
+// --- PCM edge case tests ---
+
+#[cfg(feature = "pcm")]
+#[test]
+fn pcm_deinterleave_empty_channels() {
+    let planes = shravan::pcm::deinterleave(&[1.0, 2.0, 3.0], 0);
+    assert!(planes.is_empty());
+}
+
+#[cfg(feature = "pcm")]
+#[test]
+fn pcm_interleave_empty() {
+    let result = shravan::pcm::interleave(&[]);
+    assert!(result.is_empty());
+}
+
+// --- Resample edge case tests ---
+
+#[cfg(feature = "resample")]
+#[test]
+fn resample_source_rate_zero() {
+    let samples = vec![0.0f32; 100];
+    assert!(resample::resample(&samples, 1, 0, 44100, ResampleQuality::Draft).is_err());
 }

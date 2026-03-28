@@ -53,6 +53,9 @@ pub fn resample(
     target_rate: u32,
     quality: ResampleQuality,
 ) -> Result<Vec<f32>> {
+    if source_rate == 0 {
+        return Err(ShravanError::InvalidSampleRate(0));
+    }
     if target_rate == 0 {
         return Err(ShravanError::InvalidSampleRate(0));
     }
@@ -137,6 +140,7 @@ fn windowed_sinc(x: f64, half_width: f64) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

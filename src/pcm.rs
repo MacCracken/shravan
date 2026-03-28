@@ -192,6 +192,7 @@ pub fn deinterleave(samples: &[f32], channels: u16) -> Vec<Vec<f32>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
