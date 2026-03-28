@@ -42,6 +42,18 @@ fn resample_4096(c: &mut Criterion) {
     });
 }
 
+#[cfg(feature = "simd")]
+fn simd_i16_to_f32_4096(c: &mut Criterion) {
+    use shravan::simd;
+
+    let samples: Vec<i16> = (0..4096).map(|i| (i % 65536 - 32768) as i16).collect();
+    let mut dst = vec![0.0f32; 4096];
+
+    c.bench_function("simd_i16_to_f32_4096", |b| {
+        b.iter(|| simd::i16_to_f32(black_box(&samples), black_box(&mut dst)));
+    });
+}
+
 #[cfg(feature = "flac")]
 fn flac_encode_1sec(c: &mut Criterion) {
     use shravan::flac;
@@ -72,8 +84,11 @@ fn flac_decode_1sec(c: &mut Criterion) {
 #[cfg(all(feature = "wav", feature = "pcm"))]
 criterion_group!(wav_benches, wav_decode_1sec);
 
-#[cfg(feature = "pcm")]
+#[cfg(all(feature = "pcm", not(feature = "simd")))]
 criterion_group!(pcm_benches, pcm_i16_to_f32_4096);
+
+#[cfg(all(feature = "pcm", feature = "simd"))]
+criterion_group!(pcm_benches, pcm_i16_to_f32_4096, simd_i16_to_f32_4096);
 
 #[cfg(feature = "resample")]
 criterion_group!(resample_benches, resample_4096);

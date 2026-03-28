@@ -11,10 +11,12 @@
 //! |------------|---------|-------------------------------------|
 //! | `std`      | yes     | Standard library support             |
 //! | `wav`      | yes     | WAV encode/decode                   |
-//! | `flac`     | yes     | FLAC decode                         |
+//! | `flac`     | yes     | FLAC decode/encode                  |
 //! | `pcm`      | yes     | PCM format conversions              |
 //! | `resample` | no      | Sinc resampler                      |
 //! | `tag`      | no      | ID3v2 / Vorbis Comment tag reading  |
+//! | `simd`     | no      | SIMD-accelerated PCM conversion     |
+//! | `dither`   | no      | Dithering for bit-depth reduction   |
 //! | `logging`  | no      | tracing instrumentation             |
 //!
 //! ## Quick start
@@ -32,8 +34,7 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![forbid(unsafe_code)]
-#![deny(clippy::unwrap_used, clippy::panic)]
+#![deny(unsafe_code, clippy::unwrap_used, clippy::panic)]
 #![warn(missing_docs)]
 
 extern crate alloc;
@@ -56,6 +57,13 @@ pub mod resample;
 
 #[cfg(feature = "tag")]
 pub mod tag;
+
+#[cfg(feature = "simd")]
+#[allow(unsafe_code)]
+pub mod simd;
+
+#[cfg(feature = "dither")]
+pub mod dither;
 
 // Re-exports for convenience.
 pub use error::{Result, ShravanError};

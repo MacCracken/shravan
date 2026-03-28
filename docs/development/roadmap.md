@@ -41,10 +41,16 @@
 - [ ] Async I/O support (behind feature gate)
 - [ ] Memory-mapped file support
 
+### v0.2.1 (2026-03-28) -- SIMD & Dithering (ported from dhvani)
+
+- [x] SIMD-accelerated PCM conversion (SSE2/NEON, `simd` feature)
+- [x] TPDF and noise-shaped dithering (`dither` feature)
+- [x] Extended PCM: f64, u8 conversions
+
 ## Future
 
-- SIMD-accelerated PCM conversion
 - Multi-channel resampling optimizations
+- SIMD-accelerated resampling (weighted_sum kernel ready)
 - Metadata writing (ID3v2, Vorbis Comment)
 - Waveform analysis utilities
 

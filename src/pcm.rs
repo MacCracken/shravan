@@ -153,6 +153,43 @@ pub fn f32_to_i24_packed(samples: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Convert 64-bit float samples to 32-bit float.
+#[must_use]
+#[inline]
+pub fn f64_to_f32(samples: &[f64]) -> Vec<f32> {
+    samples.iter().map(|&s| s as f32).collect()
+}
+
+/// Convert 32-bit float samples to 64-bit float.
+#[must_use]
+#[inline]
+pub fn f32_to_f64(samples: &[f32]) -> Vec<f64> {
+    samples.iter().map(|&s| f64::from(s)).collect()
+}
+
+/// Convert unsigned 8-bit PCM samples (0..255, center at 128) to f32 in \[-1.0, ~1.0\].
+#[must_use]
+#[inline]
+pub fn u8_to_f32(samples: &[u8]) -> Vec<f32> {
+    samples
+        .iter()
+        .map(|&s| (f32::from(s) - 128.0) / 128.0)
+        .collect()
+}
+
+/// Convert f32 samples to unsigned 8-bit PCM (0..255, center at 128).
+#[must_use]
+#[inline]
+pub fn f32_to_u8(samples: &[f32]) -> Vec<u8> {
+    samples
+        .iter()
+        .map(|&s| {
+            let clamped = s.clamp(-1.0, 1.0);
+            ((clamped * 128.0) + 128.0).clamp(0.0, 255.0) as u8
+        })
+        .collect()
+}
+
 /// Interleave separate channel buffers into a single interleaved buffer.
 ///
 /// All channels must have the same length.
@@ -280,5 +317,31 @@ mod tests {
         assert_eq!(PcmFormat::I16.bit_depth(), 16);
         assert_eq!(PcmFormat::I24.bit_depth(), 24);
         assert_eq!(PcmFormat::F32.bit_depth(), 32);
+    }
+
+    #[test]
+    fn f64_f32_roundtrip() {
+        let original = vec![0.0f64, 0.5, -0.5, 1.0, -1.0];
+        let f32s = f64_to_f32(&original);
+        let back = f32_to_f64(&f32s);
+        for (a, b) in original.iter().zip(back.iter()) {
+            assert!((*a - *b).abs() < 1e-6, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn u8_f32_roundtrip() {
+        let original: Vec<u8> = vec![0, 64, 128, 192, 255];
+        let f32s = u8_to_f32(&original);
+        let back = f32_to_u8(&f32s);
+        for (a, b) in original.iter().zip(back.iter()) {
+            assert!((*a as i16 - *b as i16).abs() <= 1, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn u8_center_is_zero() {
+        let f32s = u8_to_f32(&[128]);
+        assert!((f32s[0]).abs() < f32::EPSILON);
     }
 }
