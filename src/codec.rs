@@ -30,6 +30,30 @@ pub fn open(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         #[cfg(not(feature = "flac"))]
         AudioFormat::Flac => Err(ShravanError::UnsupportedFormat),
 
+        #[cfg(feature = "ogg")]
+        AudioFormat::Ogg => crate::ogg::decode(data),
+
+        #[cfg(not(feature = "ogg"))]
+        AudioFormat::Ogg => Err(ShravanError::UnsupportedFormat),
+
+        #[cfg(feature = "aiff")]
+        AudioFormat::Aiff => crate::aiff::decode(data),
+
+        #[cfg(not(feature = "aiff"))]
+        AudioFormat::Aiff => Err(ShravanError::UnsupportedFormat),
+
+        #[cfg(feature = "mp3")]
+        AudioFormat::Mp3 => crate::mp3::decode(data),
+
+        #[cfg(not(feature = "mp3"))]
+        AudioFormat::Mp3 => Err(ShravanError::UnsupportedFormat),
+
+        #[cfg(feature = "opus")]
+        AudioFormat::Opus => crate::opus::decode(data),
+
+        #[cfg(not(feature = "opus"))]
+        AudioFormat::Opus => Err(ShravanError::UnsupportedFormat),
+
         // RawPcm and any future variants
         _ => Err(ShravanError::UnsupportedFormat),
     }
@@ -64,6 +88,54 @@ pub struct FlacCodec;
 impl AudioCodec for FlacCodec {
     fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         crate::flac::decode(data)
+    }
+}
+
+#[cfg(feature = "ogg")]
+/// Ogg container codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OggCodec;
+
+#[cfg(feature = "ogg")]
+impl AudioCodec for OggCodec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::ogg::decode(data)
+    }
+}
+
+#[cfg(feature = "aiff")]
+/// AIFF codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AiffCodec;
+
+#[cfg(feature = "aiff")]
+impl AudioCodec for AiffCodec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::aiff::decode(data)
+    }
+}
+
+#[cfg(feature = "mp3")]
+/// MP3 codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Mp3Codec;
+
+#[cfg(feature = "mp3")]
+impl AudioCodec for Mp3Codec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::mp3::decode(data)
+    }
+}
+
+#[cfg(feature = "opus")]
+/// Opus codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OpusCodec;
+
+#[cfg(feature = "opus")]
+impl AudioCodec for OpusCodec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::opus::decode(data)
     }
 }
 

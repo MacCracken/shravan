@@ -14,6 +14,14 @@ pub enum AudioFormat {
     Flac,
     /// Raw PCM samples (no container).
     RawPcm,
+    /// Ogg container (Vorbis, Opus, etc.).
+    Ogg,
+    /// Audio Interchange File Format.
+    Aiff,
+    /// MPEG Audio Layer III.
+    Mp3,
+    /// Opus (in Ogg container).
+    Opus,
 }
 
 impl core::fmt::Display for AudioFormat {
@@ -22,6 +30,10 @@ impl core::fmt::Display for AudioFormat {
             Self::Wav => f.write_str("WAV"),
             Self::Flac => f.write_str("FLAC"),
             Self::RawPcm => f.write_str("Raw PCM"),
+            Self::Ogg => f.write_str("Ogg"),
+            Self::Aiff => f.write_str("AIFF"),
+            Self::Mp3 => f.write_str("MP3"),
+            Self::Opus => f.write_str("Opus"),
         }
     }
 }
@@ -58,6 +70,22 @@ pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
     }
     if header.starts_with(b"fLaC") {
         return Ok(AudioFormat::Flac);
+    }
+    if header.starts_with(b"OggS") {
+        return Ok(AudioFormat::Ogg);
+    }
+    if header.starts_with(b"FORM")
+        && header.len() >= 12
+        && (&header[8..12] == b"AIFF" || &header[8..12] == b"AIFC")
+    {
+        return Ok(AudioFormat::Aiff);
+    }
+    // MP3: ID3v2 tag or MPEG sync word
+    if header.starts_with(b"ID3") {
+        return Ok(AudioFormat::Mp3);
+    }
+    if header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
+        return Ok(AudioFormat::Mp3);
     }
 
     Err(ShravanError::UnsupportedFormat)
@@ -97,5 +125,39 @@ mod tests {
         assert_eq!(AudioFormat::Wav.to_string(), "WAV");
         assert_eq!(AudioFormat::Flac.to_string(), "FLAC");
         assert_eq!(AudioFormat::RawPcm.to_string(), "Raw PCM");
+        assert_eq!(AudioFormat::Ogg.to_string(), "Ogg");
+        assert_eq!(AudioFormat::Aiff.to_string(), "AIFF");
+        assert_eq!(AudioFormat::Mp3.to_string(), "MP3");
+        assert_eq!(AudioFormat::Opus.to_string(), "Opus");
+    }
+
+    #[test]
+    fn detect_ogg() {
+        let header = b"OggS\x00\x02\x00\x00";
+        assert_eq!(detect_format(header).unwrap(), AudioFormat::Ogg);
+    }
+
+    #[test]
+    fn detect_aiff() {
+        let header = b"FORM\x00\x00\x00\x24AIFF";
+        assert_eq!(detect_format(header).unwrap(), AudioFormat::Aiff);
+    }
+
+    #[test]
+    fn detect_aifc() {
+        let header = b"FORM\x00\x00\x00\x24AIFC";
+        assert_eq!(detect_format(header).unwrap(), AudioFormat::Aiff);
+    }
+
+    #[test]
+    fn detect_mp3_id3() {
+        let header = b"ID3\x04\x00\x00\x00\x00";
+        assert_eq!(detect_format(header).unwrap(), AudioFormat::Mp3);
+    }
+
+    #[test]
+    fn detect_mp3_sync() {
+        let header = [0xFF, 0xFB, 0x90, 0x00];
+        assert_eq!(detect_format(&header).unwrap(), AudioFormat::Mp3);
     }
 }

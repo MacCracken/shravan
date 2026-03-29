@@ -28,12 +28,12 @@
 
 ## Backlog
 
-### v0.3.0 -- Extended Formats
+### v0.3.0 (2026-03-28) -- Extended Formats
 
-- [ ] Ogg container parsing
-- [ ] AIFF decoder
-- [ ] MP3 frame sync (decode via external crate)
-- [ ] Opus header parsing
+- [x] Ogg container parsing (page demux, packet extraction, CRC-32)
+- [x] AIFF decoder/encoder (FORM/AIFF, FORM/AIFC, 80-bit float, BE PCM)
+- [x] MP3 frame sync (header parsing, bitrate/sample rate tables, ID3v2 skip)
+- [x] Opus header parsing (OpusHead, OpusTags via Ogg)
 
 ### v0.4.0 -- Streaming
 

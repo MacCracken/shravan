@@ -58,6 +58,18 @@ pub mod resample;
 #[cfg(feature = "tag")]
 pub mod tag;
 
+#[cfg(feature = "ogg")]
+pub mod ogg;
+
+#[cfg(feature = "aiff")]
+pub mod aiff;
+
+#[cfg(feature = "mp3")]
+pub mod mp3;
+
+#[cfg(feature = "opus")]
+pub mod opus;
+
 #[cfg(feature = "simd")]
 #[allow(unsafe_code)]
 pub mod simd;
