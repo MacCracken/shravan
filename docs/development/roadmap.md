@@ -2,18 +2,17 @@
 
 ## Backlog
 
-### v0.4.0 -- Streaming
+### v0.5.0 -- Async & Performance
 
-- [ ] Streaming decoder (chunk-at-a-time)
 - [ ] Async I/O support (behind feature gate)
-- [ ] Memory-mapped file support
+- [ ] SIMD-accelerated resampling (weighted_sum kernel ready)
+- [ ] Multi-channel resampling optimizations
 
 ## Future
 
-- Multi-channel resampling optimizations
-- SIMD-accelerated resampling (weighted_sum kernel ready)
 - Metadata writing (ID3v2, Vorbis Comment)
 - Waveform analysis utilities
+- Memory-mapped file support (mmap)
 
 ## v1.0 Criteria
 

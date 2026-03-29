@@ -1,6 +1,6 @@
 [package]
 name = "shravan"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
@@ -25,7 +25,7 @@ serde_json = "1"
 
 [features]
 default = ["std", "wav", "flac", "pcm"]
-full = ["std", "wav", "flac", "pcm", "resample", "tag", "ogg", "aiff", "mp3", "opus", "simd", "dither", "logging"]
+full = ["std", "wav", "flac", "pcm", "resample", "tag", "ogg", "aiff", "mp3", "opus", "simd", "dither", "streaming", "logging"]
 std = ["serde/std", "thiserror/std"]
 wav = []
 flac = []
@@ -38,6 +38,7 @@ mp3 = []
 opus = ["ogg"]
 simd = ["std"]
 dither = []
+streaming = ["std"]
 logging = ["dep:tracing"]
 
 [[bench]]

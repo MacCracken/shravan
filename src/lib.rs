@@ -77,6 +77,9 @@ pub mod simd;
 #[cfg(feature = "dither")]
 pub mod dither;
 
+#[cfg(feature = "streaming")]
+pub mod stream;
+
 // Re-exports for convenience.
 pub use error::{Result, ShravanError};
 pub use format::{AudioFormat, FormatInfo};
