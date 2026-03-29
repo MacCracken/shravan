@@ -4,12 +4,12 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
-description = "shravan — Audio codecs: WAV, FLAC, PCM conversion, and resampling"
+description = "shravan — Audio codecs: WAV, FLAC, AIFF, Ogg, MP3, Opus, PCM conversion, and resampling"
 homepage = "https://github.com/MacCracken/shravan"
 repository = "https://github.com/MacCracken/shravan"
 readme = "README.md"
 documentation = "https://docs.rs/shravan"
-keywords = ["audio", "codec", "wav", "flac", "pcm"]
+keywords = ["audio", "codec", "wav", "flac", "aiff"]
 categories = ["multimedia::audio", "encoding"]
 exclude = [".claude/", ".github/", "docs/", "scripts/"]
 

@@ -7,7 +7,7 @@
 - **Type**: Flat library crate
 - **License**: GPL-3.0
 - **MSRV**: 1.89
-- **Version**: SemVer 0.1.0
+- **Version**: SemVer 0.3.0
 
 ## Consumers
 
@@ -22,7 +22,7 @@ tarang (media framework), jalwa (media player), dhvani (audio engine), shruti (D
 2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
 3. Get baseline benchmarks
 4. Internal deep review
-5. External research -- audio codec specs, PCM standards, FLAC format
+5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus), PCM standards
 6. Cleanliness check -- must be clean after review
 7. Additional tests/benchmarks from findings
 8. Post-review benchmarks

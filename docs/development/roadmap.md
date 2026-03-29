@@ -26,7 +26,11 @@
 - [x] CRC-8/CRC-16 verification (decode validation + encode emission)
 - [x] Seeking support (`decode_range()`, SEEKTABLE parsing)
 
-## Backlog
+### v0.2.1 (2026-03-28) -- SIMD & Dithering (ported from dhvani)
+
+- [x] SIMD-accelerated PCM conversion (SSE2/NEON, `simd` feature)
+- [x] TPDF and noise-shaped dithering (`dither` feature)
+- [x] Extended PCM: f64, u8 conversions
 
 ### v0.3.0 (2026-03-28) -- Extended Formats
 
@@ -35,17 +39,13 @@
 - [x] MP3 frame sync (header parsing, bitrate/sample rate tables, ID3v2 skip)
 - [x] Opus header parsing (OpusHead, OpusTags via Ogg)
 
+## Backlog
+
 ### v0.4.0 -- Streaming
 
 - [ ] Streaming decoder (chunk-at-a-time)
 - [ ] Async I/O support (behind feature gate)
 - [ ] Memory-mapped file support
-
-### v0.2.1 (2026-03-28) -- SIMD & Dithering (ported from dhvani)
-
-- [x] SIMD-accelerated PCM conversion (SSE2/NEON, `simd` feature)
-- [x] TPDF and noise-shaped dithering (`dither` feature)
-- [x] Extended PCM: f64, u8 conversions
 
 ## Future
 

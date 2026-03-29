@@ -200,11 +200,12 @@ pub fn parse_frame_header(header: &[u8; 4]) -> Result<Mp3FrameInfo> {
     let frame_size = match layer {
         MpegLayer::I => (12 * bitrate as usize * 1000 / sample_rate as usize + padding_bytes) * 4,
         MpegLayer::II | MpegLayer::III => {
-            let spf_divisor = match version {
-                MpegVersion::V1 => 1152,
-                MpegVersion::V2 | MpegVersion::V25 => 576,
+            // Layer II always uses 1152 samples/frame; Layer III uses 576 for MPEG2/2.5
+            let spf = match (layer, version) {
+                (MpegLayer::III, MpegVersion::V2 | MpegVersion::V25) => 576,
+                _ => 1152,
             };
-            spf_divisor * bitrate as usize * 1000 / (8 * sample_rate as usize) + padding_bytes
+            spf * bitrate as usize * 1000 / (8 * sample_rate as usize) + padding_bytes
         }
     };
 

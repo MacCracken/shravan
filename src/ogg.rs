@@ -134,7 +134,7 @@ fn parse_page(data: &[u8], pos: usize) -> Result<(OggPage, usize)> {
     let granule_position = read_i64_le(data, pos + 6)?;
     let serial = read_u32_le(data, pos + 14)?;
     let page_seq = read_u32_le(data, pos + 18)?;
-    let _crc = read_u32_le(data, pos + 22)?;
+    let expected_crc = read_u32_le(data, pos + 22)?;
     let num_segments = data[pos + 26] as usize;
 
     let seg_table_start = pos + 27;
@@ -155,9 +155,9 @@ fn parse_page(data: &[u8], pos: usize) -> Result<(OggPage, usize)> {
     // CRC verification
     let page_end = body_start + body_size;
     let computed_crc = crc32_ogg_page(&data[pos..page_end]);
-    if computed_crc != _crc {
+    if computed_crc != expected_crc {
         return Err(ShravanError::DecodeError(format!(
-            "Ogg page CRC mismatch: expected {_crc:#010X}, got {computed_crc:#010X}"
+            "Ogg page CRC mismatch: expected {expected_crc:#010X}, got {computed_crc:#010X}"
         )));
     }
 

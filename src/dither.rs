@@ -7,11 +7,13 @@ use alloc::vec::Vec;
 
 /// Apply TPDF dithering for bit-depth reduction.
 ///
-/// `target_bits` is the target bit depth (e.g., 16 for f32 -> i16 conversion).
+/// `target_bits` is the target bit depth (1..=32, e.g., 16 for f32 -> i16 conversion).
 /// The dither noise amplitude is ±1 LSB of the target format.
+/// Values outside 1..=32 are clamped.
 #[must_use]
 pub fn tpdf_dither(samples: &[f32], target_bits: u32) -> Vec<f32> {
-    let quant_step = 1.0 / (1_u64 << (target_bits - 1)) as f32;
+    let bits = target_bits.clamp(1, 32);
+    let quant_step = 1.0 / (1_u64 << (bits - 1)) as f32;
     let mut rng_state: u32 = 0x12345678;
     samples
         .iter()
@@ -35,9 +37,11 @@ pub fn tpdf_dither(samples: &[f32], target_bits: u32) -> Vec<f32> {
 ///
 /// Produces lower perceived noise than TPDF by shaping the noise spectrum
 /// to frequencies where human hearing is less sensitive.
+/// `target_bits` is clamped to 1..=32.
 #[must_use]
 pub fn noise_shaped_dither(samples: &[f32], target_bits: u32) -> Vec<f32> {
-    let quant_step = 1.0 / (1_u64 << (target_bits - 1)) as f32;
+    let bits = target_bits.clamp(1, 32);
+    let quant_step = 1.0 / (1_u64 << (bits - 1)) as f32;
     let mut rng_state: u32 = 0x12345678;
     let mut error: f32 = 0.0;
     samples
