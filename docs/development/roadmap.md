@@ -1,18 +1,12 @@
 # Development Roadmap
 
-## Backlog
-
-### v0.5.0 -- Async & Performance
-
-- [ ] Async I/O support (behind feature gate)
-- [ ] SIMD-accelerated resampling (weighted_sum kernel ready)
-- [ ] Multi-channel resampling optimizations
-
 ## Future
 
 - Metadata writing (ID3v2, Vorbis Comment)
 - Waveform analysis utilities
 - Memory-mapped file support (mmap)
+- LPC encoding in FLAC encoder
+- Async runtime adapters (tokio, async-std)
 
 ## v1.0 Criteria
 

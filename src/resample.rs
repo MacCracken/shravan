@@ -72,6 +72,49 @@ pub fn resample(
         return Ok(Vec::new());
     }
 
+    // Multi-channel optimization: deinterleave for sequential memory access,
+    // resample each channel independently, then reinterleave.
+    if ch > 1 {
+        let channel_bufs: Vec<Vec<f32>> = (0..ch)
+            .map(|c| {
+                let mut buf = Vec::with_capacity(frames);
+                for f in 0..frames {
+                    buf.push(samples[f * ch + c]);
+                }
+                buf
+            })
+            .collect();
+
+        let mut out_channels: Vec<Vec<f32>> = Vec::with_capacity(ch);
+        for buf in &channel_bufs {
+            out_channels.push(resample_mono(buf, source_rate, target_rate, quality)?);
+        }
+
+        let new_frames = out_channels[0].len();
+        let mut out = Vec::with_capacity(new_frames * ch);
+        for f in 0..new_frames {
+            for c_buf in &out_channels {
+                out.push(if f < c_buf.len() { c_buf[f] } else { 0.0 });
+            }
+        }
+        return Ok(out);
+    }
+
+    resample_mono(samples, source_rate, target_rate, quality)
+}
+
+/// Resample a single channel of f32 audio.
+fn resample_mono(
+    samples: &[f32],
+    source_rate: u32,
+    target_rate: u32,
+    quality: ResampleQuality,
+) -> Result<Vec<f32>> {
+    let frames = samples.len();
+    if frames == 0 {
+        return Ok(Vec::new());
+    }
+
     let ratio = target_rate as f64 / source_rate as f64;
     let new_frames = (frames as f64 * ratio).ceil() as usize;
     let half_width = quality.kernel_half_width();
@@ -83,8 +126,17 @@ pub fn resample(
         (1.0, 1.0)
     };
 
-    let mut out = vec![0.0f32; new_frames * ch];
+    let mut out = vec![0.0f32; new_frames];
 
+    // Pre-allocate temp buffers for SIMD kernel accumulation
+    #[cfg(feature = "simd")]
+    let max_kernel_len = ((half_width as f64 / filter_scale).ceil() as usize) * 2 + 1;
+    #[cfg(feature = "simd")]
+    let mut kernel_samples = Vec::with_capacity(max_kernel_len);
+    #[cfg(feature = "simd")]
+    let mut kernel_weights = Vec::with_capacity(max_kernel_len);
+
+    #[allow(clippy::needless_range_loop)]
     for frame in 0..new_frames {
         let src_pos = frame as f64 / ratio;
         let src_center = src_pos.floor() as i64;
@@ -92,7 +144,30 @@ pub fn resample(
 
         let scaled_half = (half_width as f64 / filter_scale).ceil() as i64;
 
-        for c in 0..ch {
+        #[cfg(feature = "simd")]
+        {
+            kernel_samples.clear();
+            kernel_weights.clear();
+
+            for i in -scaled_half..=scaled_half {
+                let src_idx = src_center + i;
+                if src_idx < 0 || src_idx >= frames as i64 {
+                    continue;
+                }
+                let x = (i as f64 - frac) * kernel_scale;
+                let w = windowed_sinc(x, scaled_half as f64) as f32;
+                kernel_samples.push(samples[src_idx as usize]);
+                kernel_weights.push(w);
+            }
+
+            let (sum, weight_sum) = crate::simd::weighted_sum(&kernel_samples, &kernel_weights);
+            if weight_sum.abs() > 1e-7 {
+                out[frame] = sum / weight_sum;
+            }
+        }
+
+        #[cfg(not(feature = "simd"))]
+        {
             let mut sum = 0.0f64;
             let mut weight_sum = 0.0f64;
 
@@ -104,14 +179,13 @@ pub fn resample(
 
                 let x = (i as f64 - frac) * kernel_scale;
                 let w = windowed_sinc(x, scaled_half as f64);
-                let sample = samples[src_idx as usize * ch + c] as f64;
+                let sample = samples[src_idx as usize] as f64;
                 sum += sample * w;
                 weight_sum += w;
             }
 
-            let idx = frame * ch + c;
             if weight_sum.abs() > 1e-10 {
-                out[idx] = (sum / weight_sum) as f32;
+                out[frame] = (sum / weight_sum) as f32;
             }
         }
     }
@@ -219,6 +293,41 @@ mod tests {
             assert!(!out.is_empty());
             assert!(out.iter().all(|s| s.is_finite()));
         }
+    }
+
+    #[test]
+    fn stereo_resample_roundtrip() {
+        let sr = 44100u32;
+        let frames = 2048;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / sr as f32;
+            samples.push(libm::sinf(2.0 * core::f32::consts::PI * 440.0 * t));
+            samples.push(libm::sinf(2.0 * core::f32::consts::PI * 880.0 * t));
+        }
+
+        let up = resample(&samples, 2, 44100, 48000, ResampleQuality::Good).unwrap();
+        assert_eq!(up.len() % 2, 0); // must be even (stereo)
+        let back = resample(&up, 2, 48000, 44100, ResampleQuality::Good).unwrap();
+
+        let rms_orig = rms(&samples);
+        let rms_back = rms(&back);
+        assert!(
+            (rms_back - rms_orig).abs() < rms_orig * 0.15,
+            "Stereo roundtrip RMS: {rms_back} vs original: {rms_orig}"
+        );
+    }
+
+    #[test]
+    fn multichannel_4ch() {
+        let frames = 1024;
+        let ch = 4;
+        let samples: Vec<f32> = (0..frames * ch)
+            .map(|i| libm::sinf(i as f32 * 0.1))
+            .collect();
+        let out = resample(&samples, ch as u16, 44100, 48000, ResampleQuality::Draft).unwrap();
+        assert_eq!(out.len() % ch, 0);
+        assert!(out.iter().all(|s| s.is_finite()));
     }
 
     fn rms(samples: &[f32]) -> f32 {
