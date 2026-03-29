@@ -345,3 +345,127 @@ fn resample_source_rate_zero() {
     let samples = vec![0.0f32; 100];
     assert!(resample::resample(&samples, 1, 0, 44100, ResampleQuality::Draft).is_err());
 }
+
+// --- Codec struct serde tests for new types ---
+
+#[cfg(feature = "ogg")]
+#[test]
+fn serde_roundtrip_ogg_codec() {
+    use shravan::codec::OggCodec;
+    let json = serde_json::to_string(&OggCodec).unwrap();
+    let back: OggCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(OggCodec, back);
+}
+
+#[cfg(feature = "aiff")]
+#[test]
+fn serde_roundtrip_aiff_codec() {
+    use shravan::codec::AiffCodec;
+    let json = serde_json::to_string(&AiffCodec).unwrap();
+    let back: AiffCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(AiffCodec, back);
+}
+
+#[cfg(feature = "mp3")]
+#[test]
+fn serde_roundtrip_mp3_codec() {
+    use shravan::codec::Mp3Codec;
+    let json = serde_json::to_string(&Mp3Codec).unwrap();
+    let back: Mp3Codec = serde_json::from_str(&json).unwrap();
+    assert_eq!(Mp3Codec, back);
+}
+
+#[cfg(feature = "opus")]
+#[test]
+fn serde_roundtrip_opus_codec() {
+    use shravan::codec::OpusCodec;
+    let json = serde_json::to_string(&OpusCodec).unwrap();
+    let back: OpusCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(OpusCodec, back);
+}
+
+// --- codec::open for new formats ---
+
+#[cfg(all(feature = "aiff", feature = "pcm"))]
+#[test]
+fn codec_open_aiff() {
+    let samples = vec![0.5f32; 100];
+    let encoded = shravan::aiff::encode(&samples, 44100, 1, 16).unwrap();
+    let (info, decoded) = shravan::codec::open(&encoded).unwrap();
+    assert_eq!(info.format, shravan::AudioFormat::Aiff);
+    assert_eq!(decoded.len(), 100);
+}
+
+// --- Tag edge case tests ---
+
+#[cfg(feature = "tag")]
+#[test]
+fn tag_id3v2_empty_frames() {
+    use shravan::tag;
+    // Build an ID3v2 tag with zero-length text frames
+    let mut data = Vec::new();
+    data.extend_from_slice(b"ID3");
+    data.push(3); // v2.3
+    data.push(0);
+    data.push(0);
+    // size = 0 (no frames)
+    data.extend_from_slice(&[0, 0, 0, 0]);
+    let meta = tag::read_id3v2(&data).unwrap();
+    assert!(meta.title.is_none());
+}
+
+#[cfg(feature = "tag")]
+#[test]
+fn tag_vorbis_empty_comments() {
+    use shravan::tag;
+    let mut data = Vec::new();
+    data.extend_from_slice(&4u32.to_le_bytes()); // vendor len
+    data.extend_from_slice(b"test");
+    data.extend_from_slice(&0u32.to_le_bytes()); // 0 comments
+    let meta = tag::read_vorbis_comment(&data).unwrap();
+    assert!(meta.title.is_none());
+}
+
+// --- AIFF codec::open for AIFF-C ---
+
+#[cfg(feature = "aiff")]
+#[test]
+fn format_detection_all_types() {
+    use shravan::format::{AudioFormat, detect_format};
+
+    assert_eq!(detect_format(b"RIFF____WAVE").unwrap(), AudioFormat::Wav);
+    assert_eq!(detect_format(b"fLaC____").unwrap(), AudioFormat::Flac);
+    assert_eq!(detect_format(b"OggS____").unwrap(), AudioFormat::Ogg);
+    assert_eq!(detect_format(b"FORM____AIFF").unwrap(), AudioFormat::Aiff);
+    assert_eq!(detect_format(b"FORM____AIFC").unwrap(), AudioFormat::Aiff);
+    assert_eq!(detect_format(b"ID3_____").unwrap(), AudioFormat::Mp3);
+    assert_eq!(
+        detect_format(&[0xFF, 0xFB, 0x90, 0x00]).unwrap(),
+        AudioFormat::Mp3
+    );
+    assert!(detect_format(b"\x00\x00\x00\x00").is_err());
+}
+
+// --- Streaming edge cases ---
+
+#[cfg(all(feature = "streaming", feature = "wav", feature = "pcm"))]
+#[test]
+fn streaming_wav_double_flush() {
+    use shravan::stream::{StreamDecoder, StreamEvent, WavStreamDecoder};
+    let samples = vec![0.5f32; 100];
+    let encoded = shravan::wav::encode(&samples, 44100, 1, shravan::pcm::PcmFormat::I16).unwrap();
+
+    let mut dec = WavStreamDecoder::new();
+    let _ = dec.feed(&encoded).unwrap();
+    let _events1 = dec.flush().unwrap();
+    let events2 = dec.flush().unwrap(); // double flush
+    // Second flush should just return End or empty
+    assert!(events2.is_empty() || events2.iter().all(|e| matches!(e, StreamEvent::End)));
+}
+
+#[cfg(all(feature = "streaming", feature = "wav", feature = "pcm"))]
+#[test]
+fn streaming_decode_file_nonexistent() {
+    let result = shravan::stream::decode_file(std::path::Path::new("/nonexistent/file.wav"));
+    assert!(result.is_err());
+}

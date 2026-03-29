@@ -10,6 +10,7 @@ use crate::pcm::PcmFormat;
 /// WAV format codes.
 const WAV_FORMAT_PCM: u16 = 1;
 const WAV_FORMAT_IEEE_FLOAT: u16 = 3;
+const WAV_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 /// Read a little-endian u16 from a byte slice at the given offset.
 #[inline]
@@ -81,6 +82,18 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
             fmt_sample_rate = read_u32_le(data, pos + 12)?;
             // skip byte_rate (4 bytes) and block_align (2 bytes)
             fmt_bits_per_sample = read_u16_le(data, pos + 22)?;
+
+            // WAVE_FORMAT_EXTENSIBLE: actual format is in the SubFormat GUID
+            if fmt_format_code == WAV_FORMAT_EXTENSIBLE && chunk_size >= 40 {
+                // wValidBitsPerSample at offset 18, dwChannelMask at 20
+                let valid_bits = read_u16_le(data, pos + 26)?;
+                if valid_bits > 0 {
+                    fmt_bits_per_sample = valid_bits;
+                }
+                // SubFormat GUID starts at offset 24 from fmt data (pos+8+24 = pos+32)
+                // First 2 bytes of GUID are the actual format code
+                fmt_format_code = read_u16_le(data, pos + 32)?;
+            }
             fmt_found = true;
         } else if chunk_id == b"data" {
             data_start = pos + 8;
