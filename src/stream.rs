@@ -16,6 +16,10 @@ use crate::format::{AudioFormat, FormatInfo};
 // ---------------------------------------------------------------------------
 
 /// Event emitted by a streaming decoder.
+///
+/// Streaming types are transient state machines and intentionally do not
+/// implement `Serialize`/`Deserialize` — serializing a mid-stream decoder
+/// is not meaningful.
 #[non_exhaustive]
 pub enum StreamEvent {
     /// Format info parsed from header (emitted once, first).
@@ -167,8 +171,7 @@ impl WavStreamDecoder {
             return Err(ShravanError::InvalidSampleRate(0));
         }
 
-        // We don't know the full duration yet in streaming mode; set to 0 and
-        // update on flush.
+        // Duration is estimated from the header's declared data_size.
         let total_frames = {
             let bytes_per_sample = usize::from(fmt_bits_per_sample / 8);
             let frame_bytes = usize::from(fmt_channels) * bytes_per_sample;
@@ -313,6 +316,7 @@ impl StreamDecoder for WavStreamDecoder {
 }
 
 /// Convert raw WAV PCM bytes to f32 samples.
+#[inline]
 fn wav_pcm_to_f32(data: &[u8], format_code: u16, bits_per_sample: u16) -> Result<Vec<f32>> {
     const WAV_FORMAT_PCM: u16 = 1;
     const WAV_FORMAT_IEEE_FLOAT: u16 = 3;
@@ -394,11 +398,14 @@ impl FlacStreamDecoder {
     }
 
     /// Try decoding accumulated data. Returns newly decoded samples.
+    ///
+    /// Uses `decode_range` with sample offset to skip already-emitted frames.
+    /// The buffer retains all bytes (including already-decoded frames) because
+    /// `decode_range` requires the FLAC header at the start. Frame sync scanning
+    /// is lightweight so the re-scan cost is minimal. Memory usage is proportional
+    /// to total bytes fed — for long streams, prefer one-shot `flac::decode()`
+    /// or limit the input size.
     fn try_decode(&mut self, events: &mut Vec<StreamEvent>) -> Result<()> {
-        // Attempt a full decode of the accumulated buffer. This will decode
-        // all complete frames and stop at incomplete ones (returning EndOfStream
-        // or similar). We use the one-shot decode_range, skipping already-emitted
-        // samples.
         match crate::flac::decode_range(&self.buffer, self.samples_emitted, None) {
             Ok((info, samples)) => {
                 if !samples.is_empty() {
@@ -800,6 +807,7 @@ impl StreamDecoder for AiffStreamDecoder {
 }
 
 /// Convert raw AIFF PCM bytes to f32 samples.
+#[inline]
 fn aiff_pcm_to_f32(data: &[u8], bits_per_sample: u16, big_endian: bool) -> Result<Vec<f32>> {
     match (bits_per_sample, big_endian) {
         (8, _) => Ok(data.iter().map(|&b| b as i8 as f32 / 128.0).collect()),
