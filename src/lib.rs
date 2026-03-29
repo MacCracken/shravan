@@ -21,14 +21,14 @@
 //!
 //! ## Quick start
 //!
-//! ```rust
+//! ```rust,ignore
 //! use shravan::format::detect_format;
 //! use shravan::codec::open;
 //!
-//! // Auto-detect and decode
-//! # let wav_bytes = shravan::wav::encode(
-//! #     &[0.0f32; 100], 44100, 1, shravan::pcm::PcmFormat::I16,
-//! # ).unwrap();
+//! // Auto-detect and decode (requires wav + pcm features)
+//! let wav_bytes = shravan::wav::encode(
+//!     &[0.0f32; 100], 44100, 1, shravan::pcm::PcmFormat::I16,
+//! ).unwrap();
 //! let (info, samples) = open(&wav_bytes).unwrap();
 //! assert_eq!(info.sample_rate, 44100);
 //! ```

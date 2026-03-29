@@ -220,6 +220,7 @@ mod aiff_reference {
 }
 
 /// Auto-detect via codec::open should work with reference files.
+#[cfg(feature = "wav")]
 #[test]
 fn codec_open_reference_wav() {
     let data = include_bytes!("reference/ref_44100_16bit_mono.wav");

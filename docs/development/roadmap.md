@@ -2,11 +2,16 @@
 
 ## v1.1.0
 
+- High-resolution audio support (88.2/96/176.4/192/352.8/384 kHz sample rates, 32-bit integer, 64-bit float)
 - Metadata writing (ID3v2, Vorbis Comment)
 - Waveform analysis utilities
 - Memory-mapped file support (mmap)
 - LPC encoding in FLAC encoder
 - Async runtime adapters (tokio, async-std)
+
+## Future
+
+- DSD support (DSD64/DSD128/DSD256, DoP)
 
 ## v1.0 Criteria — All Met
 

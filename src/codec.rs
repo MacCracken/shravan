@@ -1,5 +1,8 @@
 //! Unified codec interface — auto-detect and decode audio data.
 
+use alloc::vec::Vec;
+
+#[allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ShravanError};
@@ -143,6 +146,7 @@ impl AudioCodec for OpusCodec {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[cfg(feature = "wav")]
     #[test]

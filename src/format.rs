@@ -95,6 +95,7 @@ pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     #[test]
     fn detect_wav() {

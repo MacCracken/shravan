@@ -1,5 +1,7 @@
 //! Error types for shravan.
 
+use alloc::string::String;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
