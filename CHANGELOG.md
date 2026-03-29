@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codec structs: `OggCodec`, `AiffCodec`, `Mp3Codec`, `OpusCodec` (all with Serialize/Deserialize)
 - Feature gates: `ogg`, `aiff`, `mp3`, `opus` (opus depends on ogg)
 
+### Fixed
+
+- MP3 frame size calculation for Layer II with MPEG-2/2.5 (used wrong samples-per-frame divisor)
+- Dither functions now clamp `target_bits` to 1..=32 instead of panicking on 0
+
 ## [0.2.1] - 2026-03-28
 
 ### Added
