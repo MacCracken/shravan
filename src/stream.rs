@@ -359,6 +359,7 @@ fn wav_pcm_to_f32(data: &[u8], format_code: u16, bits_per_sample: u16) -> Result
 // FLAC streaming decoder
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "flac")]
 /// State machine for the FLAC streaming decoder.
 enum FlacState {
     ParsingMetadata,
@@ -366,6 +367,7 @@ enum FlacState {
     Done,
 }
 
+#[cfg(feature = "flac")]
 /// Streaming FLAC decoder that processes data chunk-at-a-time.
 ///
 /// Strategy: accumulate bytes and decode all available complete frames.
@@ -379,12 +381,14 @@ pub struct FlacStreamDecoder {
     samples_emitted: u64,
 }
 
+#[cfg(feature = "flac")]
 impl Default for FlacStreamDecoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "flac")]
 impl FlacStreamDecoder {
     /// Create a new FLAC streaming decoder.
     #[must_use]
@@ -427,6 +431,7 @@ impl FlacStreamDecoder {
     }
 }
 
+#[cfg(feature = "flac")]
 impl StreamDecoder for FlacStreamDecoder {
     fn feed(&mut self, data: &[u8]) -> Result<Vec<StreamEvent>> {
         let mut events = Vec::new();
@@ -508,6 +513,7 @@ impl StreamDecoder for FlacStreamDecoder {
 // AIFF streaming decoder
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "aiff")]
 /// State machine for the AIFF streaming decoder.
 enum AiffState {
     ParsingHeader,
@@ -515,6 +521,7 @@ enum AiffState {
     Done,
 }
 
+#[cfg(feature = "aiff")]
 /// AIFF header fields extracted during parsing.
 struct AiffHeader {
     channels: u16,
@@ -525,6 +532,7 @@ struct AiffHeader {
     big_endian: bool,
 }
 
+#[cfg(feature = "aiff")]
 /// Streaming AIFF decoder that processes data chunk-at-a-time.
 pub struct AiffStreamDecoder {
     state: AiffState,
@@ -535,12 +543,14 @@ pub struct AiffStreamDecoder {
     data_consumed: usize,
 }
 
+#[cfg(feature = "aiff")]
 impl Default for AiffStreamDecoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "aiff")]
 impl AiffStreamDecoder {
     /// Create a new AIFF streaming decoder with the default chunk size (4096 frames).
     #[must_use]
@@ -758,6 +768,7 @@ impl AiffStreamDecoder {
     }
 }
 
+#[cfg(feature = "aiff")]
 impl StreamDecoder for AiffStreamDecoder {
     fn feed(&mut self, data: &[u8]) -> Result<Vec<StreamEvent>> {
         let mut events = Vec::new();
@@ -806,6 +817,7 @@ impl StreamDecoder for AiffStreamDecoder {
     }
 }
 
+#[cfg(feature = "aiff")]
 /// Convert raw AIFF PCM bytes to f32 samples.
 #[inline]
 fn aiff_pcm_to_f32(data: &[u8], bits_per_sample: u16, big_endian: bool) -> Result<Vec<f32>> {
@@ -861,6 +873,7 @@ fn aiff_pcm_to_f32(data: &[u8], bits_per_sample: u16, big_endian: bool) -> Resul
     }
 }
 
+#[cfg(feature = "aiff")]
 /// Convert an 80-bit IEEE 754 extended-precision float to `f64`.
 ///
 /// Duplicate of `aiff::extended_to_f64` to avoid cross-module dependency on
