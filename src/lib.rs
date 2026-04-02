@@ -2,22 +2,29 @@
 //!
 //! **shravan** (Sanskrit: hearing / perception) — Audio codecs for the AGNOS ecosystem.
 //!
-//! Provides WAV and FLAC decoding/encoding, PCM sample format conversion,
-//! sinc resampling, and audio metadata tag reading.
+//! Provides encode/decode for WAV, FLAC, AIFF, Ogg/Opus, AAC, ALAC, and MP3,
+//! plus PCM sample format conversion, sinc resampling, and metadata tag reading.
 //!
 //! ## Feature flags
 //!
-//! | Feature    | Default | Description                         |
-//! |------------|---------|-------------------------------------|
-//! | `std`      | yes     | Standard library support             |
-//! | `wav`      | yes     | WAV encode/decode                   |
-//! | `flac`     | yes     | FLAC decode/encode                  |
-//! | `pcm`      | yes     | PCM format conversions              |
-//! | `resample` | no      | Sinc resampler                      |
-//! | `tag`      | no      | ID3v2 / Vorbis Comment tag reading  |
-//! | `simd`     | no      | SIMD-accelerated PCM conversion     |
-//! | `dither`   | no      | Dithering for bit-depth reduction   |
-//! | `logging`  | no      | tracing instrumentation             |
+//! | Feature     | Default | Description                              |
+//! |-------------|---------|------------------------------------------|
+//! | `std`       | yes     | Standard library support                  |
+//! | `wav`       | yes     | WAV encode/decode                        |
+//! | `flac`      | yes     | FLAC encode/decode                       |
+//! | `pcm`       | yes     | PCM format conversions                   |
+//! | `resample`  | no      | Sinc resampler                           |
+//! | `tag`       | no      | ID3v2 / Vorbis Comment tag reading       |
+//! | `ogg`       | no      | Ogg container parsing/muxing             |
+//! | `aiff`      | no      | AIFF/AIFF-C encode/decode                |
+//! | `mp3`       | no      | MP3 frame parsing (header only)          |
+//! | `opus`      | no      | Opus header parsing + CELT-mode encode   |
+//! | `aac`       | no      | AAC-LC decode (ADTS) + encode (requires `std`) |
+//! | `alac`      | no      | Apple Lossless decode (raw frames)       |
+//! | `simd`      | no      | SIMD-accelerated PCM conversion          |
+//! | `dither`    | no      | Dithering for bit-depth reduction        |
+//! | `streaming` | no      | Streaming decoders (requires `std`)      |
+//! | `logging`   | no      | tracing instrumentation                  |
 //!
 //! ## Quick start
 //!
