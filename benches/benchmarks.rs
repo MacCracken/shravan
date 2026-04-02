@@ -1,6 +1,8 @@
 //! Criterion benchmarks for shravan.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 
 #[cfg(all(feature = "wav", feature = "pcm"))]
 fn wav_decode_1sec(c: &mut Criterion) {

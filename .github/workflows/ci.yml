@@ -34,11 +34,19 @@ jobs:
       - run: cargo install cargo-audit
       - run: cargo audit
   deny:
-    name: Supply Chain
+    name: Supply Chain (deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+  vet:
+    name: Supply Chain (vet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-vet
+      - run: cargo vet --locked
   test:
     name: Test (${{ matrix.name }})
     needs: [check]
