@@ -41,6 +41,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod error;
+pub(crate) mod fft;
 pub mod format;
 
 #[cfg(feature = "pcm")]

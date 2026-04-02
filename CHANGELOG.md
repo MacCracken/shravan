@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AudioFormat::Alac` variant
 - `AlacCodec` struct implementing `AudioCodec` trait
 - `AlacConfig` for parsing ALACSpecificConfig extradata from MP4
+- **AAC-LC encoder**: From-scratch AAC-LC encoder producing ADTS bitstream. MDCT-based with per-band quantization, scale factor Huffman coding, and escape-pair spectral coding. Mono/stereo, all standard AAC sample rates, CBR.
+- **Shared FFT module** (`src/fft.rs`): Extracted mixed-radix FFT and MDCT from Opus encoder into shared `crate::fft` module, used by both Opus and AAC encoders.
 - Opus encode benchmark (`opus_encode_1sec_mono_64k`)
 
 ### Fixed

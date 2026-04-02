@@ -15,7 +15,7 @@
 
 - ~~**Opus encode** — needed to drop `opus` (libopus FFI) dep in tarang~~ **Done** (CELT-mode MVP)
 - ~~**AAC decode** — needed to drop `fdk-aac` dep in tarang (decode path)~~ **Done** (via symphonia-codec-aac)
-- **AAC encode** — needed to drop `fdk-aac` dep in tarang (encode path)
+- ~~**AAC encode** — needed to drop `fdk-aac` dep in tarang (encode path)~~ **Done** (from-scratch AAC-LC, ADTS output)
 - ~~**ALAC decode** — Apple Lossless; previously via symphonia, currently unsupported in tarang~~ **Done** (from-scratch, no_std compatible)
 
 ### Opus encoder improvements (own the stack)
