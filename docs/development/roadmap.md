@@ -9,6 +9,25 @@
 - LPC encoding in FLAC encoder
 - Async runtime adapters (tokio, async-std)
 
+## v1.3.0 — Performance
+
+### Opus encoder (27ms/s → target <10ms/s)
+
+- Specialized radix-2/3/5 FFT butterflies with precomputed twiddle tables (current generic combine is O(R×N) per stage)
+- N/4-point MDCT via proper folding (current uses 2N-point FFT — 4x more work than necessary)
+- Cache-friendly memory layout for FFT scratch buffers
+
+### Resampler (3.3ms/4096 samples → target <1ms)
+
+- Polyphase filter bank structure (avoid recomputing sinc taps per output sample)
+- SIMD inner loop for polyphase convolution (extend existing `weighted_sum`)
+- Pre-tabulated sinc coefficients per quality level
+
+### FLAC encoder (1.35ms/s — already good, compression ratio improvements)
+
+- LPC encoding (currently Fixed prediction only — LPC gives 5-15% better compression)
+- Adaptive block sizing based on signal characteristics
+
 ## Future
 
 ### Codec gaps — All Done

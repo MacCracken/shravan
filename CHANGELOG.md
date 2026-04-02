@@ -5,27 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-04-02
+
+Four new codecs to eliminate tarang's C FFI audio codec dependencies.
 
 ### Added
-- **AAC decoder**: ADTS container parsing with symphonia-codec-aac backend. Feature-gated behind `aac` (requires `std`). Supports AAC-LC mono through 7.1 channel configurations.
-- **Opus encoder**: From-scratch CELT-mode encoder producing valid Ogg/Opus files. Mono/stereo, 48 kHz, CBR 32-256 kbps, 20ms frames. Feature-gated behind `opus`.
-- **Ogg muxer**: Page construction with CRC-32, lacing, BOS/EOS flags. Used by Opus encoder, available for future Ogg-based codecs.
-- `AudioFormat::Aac` variant with ADTS format detection (0xFFF sync + layer=0)
-- `AacCodec` struct implementing `AudioCodec` trait
-- `#[must_use]` on all public functions returning `Result` (22 functions across all modules)
-- `#[inline]` on `resample_mono()` hot-path function
-- **ALAC decoder**: From-scratch Apple Lossless decoder for raw frames (no MP4 container dependency). 16/20/24/32-bit, mono/stereo, LPC prediction, adaptive Rice-Golomb coding, stereo de-matrixing. Feature-gated behind `alac`. `no_std` compatible.
-- `AudioFormat::Alac` variant
-- `AlacCodec` struct implementing `AudioCodec` trait
-- `AlacConfig` for parsing ALACSpecificConfig extradata from MP4
-- **AAC-LC encoder**: From-scratch AAC-LC encoder producing ADTS bitstream. MDCT-based with per-band quantization, scale factor Huffman coding, and escape-pair spectral coding. Mono/stereo, all standard AAC sample rates, CBR.
-- **Shared FFT module** (`src/fft.rs`): Extracted mixed-radix FFT and MDCT from Opus encoder into shared `crate::fft` module, used by both Opus and AAC encoders.
-- Opus encode benchmark (`opus_encode_1sec_mono_64k`)
+
+- **AAC-LC decoder**: ADTS parsing + symphonia-codec-aac backend, mono through 7.1 channels. Feature: `aac` (requires `std`)
+- **AAC-LC encoder**: From-scratch MDCT-based encoder producing ADTS bitstream. Per-band quantization, scale factor Huffman coding, escape-pair spectral coding. Mono/stereo, all standard AAC sample rates, CBR. Feature: `aac`
+- **Opus CELT encoder**: From-scratch CELT-mode encoder producing valid Ogg/Opus files. Mono/stereo, 48 kHz, CBR 32-256 kbps, 20ms frames. Feature: `opus`
+- **ALAC decoder**: From-scratch Apple Lossless decoder for raw frames from MP4. 16/20/24/32-bit, mono/stereo, LPC prediction, adaptive Rice-Golomb coding, stereo de-matrixing. `no_std` compatible. Feature: `alac`
+- **Ogg muxer**: Page construction with CRC-32, lacing, BOS/EOS flags
+- **Mixed-radix FFT** (`src/fft.rs`): Shared O(N log N) FFT (factors of 2, 3, 5) and MDCT, used by Opus and AAC encoders
+- `AudioFormat::Aac`, `AudioFormat::Alac` variants with ADTS format detection
+- `AacCodec`, `AlacCodec` structs implementing `AudioCodec` trait
+- `AlacConfig` for parsing ALACSpecificConfig from MP4 extradata
+- `#[must_use]` on all 22 public `Result`-returning functions
+- Opus encode benchmark
 
 ### Fixed
-- ADTS/MP3 format detection: properly distinguishes AAC (layer=0) from MP3 (layer!=0) on MPEG sync word
-- Opus encoder TOC byte correctly reflects mono-coded bitstream (s=0) regardless of input channel count
+
+- ADTS/MP3 format detection correctly distinguishes AAC (layer=0) from MP3 (layer!=0)
+- Opus encoder TOC byte reflects mono-coded bitstream regardless of input channel count
 
 ## [1.0.1] - 2026-03-28
 
