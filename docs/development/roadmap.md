@@ -11,6 +11,15 @@
 
 ## Future
 
+### Codec gaps (needed by tarang to drop remaining C deps)
+
+- **Opus encode** — needed to drop `opus` (libopus FFI) dep in tarang
+- **AAC decode** — needed to drop `fdk-aac` dep in tarang (decode path)
+- **AAC encode** — needed to drop `fdk-aac` dep in tarang (encode path)
+- **ALAC decode** — Apple Lossless; previously via symphonia, currently unsupported in tarang
+
+### Other
+
 - DSD support (DSD64/DSD128/DSD256, DoP)
 
 ## v1.0 Criteria — All Met
