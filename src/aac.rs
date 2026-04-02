@@ -170,54 +170,76 @@ fn audio_buffer_ref_to_f32(
     use symphonia_core::audio::AudioBufferRef;
     use symphonia_core::conv::IntoSample;
 
+    // Use the actual channel count from the buffer, capped to expected channels
+    let buf_channels = buf_ref.spec().channels.count();
+    let ch_count = channels.min(buf_channels);
+
     match buf_ref {
         AudioBufferRef::F32(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
+                for ch in 0..ch_count {
                     out.push(buf.chan(ch)[frame]);
+                }
+                // Pad missing channels with silence
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }
         AudioBufferRef::S16(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
+                for ch in 0..ch_count {
                     out.push(buf.chan(ch)[frame].into_sample());
+                }
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }
         AudioBufferRef::S32(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
+                for ch in 0..ch_count {
                     out.push(buf.chan(ch)[frame].into_sample());
+                }
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }
         AudioBufferRef::F64(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
+                for ch in 0..ch_count {
                     out.push(buf.chan(ch)[frame].into_sample());
+                }
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }
         AudioBufferRef::S24(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
-                    // i24 -> i32 -> f32
+                for ch in 0..ch_count {
                     let val: i32 = buf.chan(ch)[frame].into_sample();
                     out.push(val.into_sample());
+                }
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }
         AudioBufferRef::U8(buf) => {
             let frames = buf.frames();
             for frame in 0..frames {
-                for ch in 0..channels {
+                for ch in 0..ch_count {
                     out.push(buf.chan(ch)[frame].into_sample());
+                }
+                for _ in ch_count..channels {
+                    out.push(0.0);
                 }
             }
         }

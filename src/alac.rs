@@ -471,7 +471,20 @@ fn decode_element(
         return Ok(Vec::new());
     }
 
+    // Cap to a reasonable maximum to prevent malicious allocation
+    // ALAC max frame length is 16384 per spec
+    if num_samples > 16384 {
+        return Err(ShravanError::DecodeError(format!(
+            "ALAC sample count {num_samples} exceeds max frame length 16384"
+        )));
+    }
+
     let shifted_bits = u32::from(bytes_shifted) * 8;
+    if shifted_bits >= max_bits {
+        return Err(ShravanError::DecodeError(
+            "ALAC bytes_shifted exceeds bit depth".into(),
+        ));
+    }
     let effective_bits = max_bits - shifted_bits;
 
     if escape_flag {
