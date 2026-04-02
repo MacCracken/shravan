@@ -176,7 +176,17 @@ fn serde_roundtrip_format_info() {
 
 #[test]
 fn serde_roundtrip_audio_format() {
-    for fmt in [AudioFormat::Wav, AudioFormat::Flac, AudioFormat::RawPcm] {
+    for fmt in [
+        AudioFormat::Wav,
+        AudioFormat::Flac,
+        AudioFormat::RawPcm,
+        AudioFormat::Ogg,
+        AudioFormat::Aiff,
+        AudioFormat::Mp3,
+        AudioFormat::Opus,
+        AudioFormat::Aac,
+        AudioFormat::Alac,
+    ] {
         let json = serde_json::to_string(&fmt).unwrap();
         let back: AudioFormat = serde_json::from_str(&json).unwrap();
         assert_eq!(fmt, back);
@@ -391,6 +401,15 @@ fn serde_roundtrip_aac_codec() {
     let json = serde_json::to_string(&AacCodec).unwrap();
     let back: AacCodec = serde_json::from_str(&json).unwrap();
     assert_eq!(AacCodec, back);
+}
+
+#[cfg(feature = "alac")]
+#[test]
+fn serde_roundtrip_alac_codec() {
+    use shravan::codec::AlacCodec;
+    let json = serde_json::to_string(&AlacCodec).unwrap();
+    let back: AlacCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(AlacCodec, back);
 }
 
 // --- codec::open for new formats ---

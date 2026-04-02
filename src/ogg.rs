@@ -301,8 +301,17 @@ pub(crate) fn build_page(
         }
     }
 
-    let num_segments = segments.len();
-    let page_size = 27 + num_segments + payload.len();
+    // Ogg spec: max 255 segments per page. Truncate if payload is too large.
+    // Callers encoding large packets should split across continuation pages.
+    let num_segments = segments.len().min(255);
+    let actual_payload = if segments.len() > 255 {
+        // Only include payload bytes covered by the first 255 segments
+        let covered: usize = segments[..255].iter().map(|&s| s as usize).sum();
+        covered
+    } else {
+        payload.len()
+    };
+    let page_size = 27 + num_segments + actual_payload;
     let mut page = Vec::with_capacity(page_size);
 
     // Capture pattern
@@ -321,10 +330,10 @@ pub(crate) fn build_page(
     page.extend_from_slice(&[0u8; 4]);
     // Number of segments
     page.push(num_segments as u8);
-    // Segment table
-    page.extend_from_slice(&segments);
-    // Body
-    page.extend_from_slice(payload);
+    // Segment table (only first num_segments entries)
+    page.extend_from_slice(&segments[..num_segments]);
+    // Body (only bytes covered by included segments)
+    page.extend_from_slice(&payload[..actual_payload]);
 
     // Compute and fill CRC
     let crc = crc32_ogg_page(&page);

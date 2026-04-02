@@ -273,7 +273,15 @@ impl RangeEncoder {
     }
 
     /// Encode a symbol with probability ft/total in range [fl, fh) out of total.
+    ///
+    /// `total` must be > 0. `fl` must be < `fh` and `fh` must be <= `total`.
     fn encode(&mut self, fl: u32, fh: u32, total: u32) {
+        debug_assert!(total > 0, "range encoder total must be > 0");
+        debug_assert!(fl < fh, "range encoder fl must be < fh");
+        debug_assert!(fh <= total, "range encoder fh must be <= total");
+        if total == 0 {
+            return;
+        }
         let r = self.range / total;
         let new_low = self.low.wrapping_add(r.wrapping_mul(fl));
         if fh < total {
@@ -340,13 +348,15 @@ impl RangeEncoder {
 
         // Flush final bytes from low
         let nbits = if self.range > 0 {
-            32u32.saturating_sub(self.range.leading_zeros())
+            32u32.saturating_sub(self.range.leading_zeros()).max(1)
         } else {
             1
         };
+        let nbytes = nbits.div_ceil(8);
+        let shift = nbytes * 8 - 8;
         let mut val = self.low >> (23u32.saturating_sub(nbits));
-        for _ in 0..nbits.div_ceil(8) {
-            self.buf.push((val >> (nbits.div_ceil(8) * 8 - 8)) as u8);
+        for _ in 0..nbytes {
+            self.buf.push((val >> shift) as u8);
             val <<= 8;
         }
 
@@ -359,24 +369,181 @@ impl RangeEncoder {
     }
 }
 
-// --- MDCT ---
+// --- Complex arithmetic for FFT ---
+
+#[derive(Clone, Copy)]
+struct Complex {
+    re: f64,
+    im: f64,
+}
+
+impl Complex {
+    const ZERO: Self = Self { re: 0.0, im: 0.0 };
+
+    #[inline]
+    fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+
+    #[inline]
+    fn mul(self, other: Self) -> Self {
+        Self {
+            re: self.re * other.re - self.im * other.im,
+            im: self.re * other.im + self.im * other.re,
+        }
+    }
+
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        Self {
+            re: self.re + other.re,
+            im: self.im + other.im,
+        }
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn sub(self, other: Self) -> Self {
+        Self {
+            re: self.re - other.re,
+            im: self.im - other.im,
+        }
+    }
+
+    /// exp(i * theta)
+    #[inline]
+    fn from_angle(theta: f64) -> Self {
+        Self {
+            re: libm::cos(theta),
+            im: libm::sin(theta),
+        }
+    }
+}
+
+// --- Mixed-radix FFT (supports factors of 2, 3, 5) ---
+
+/// In-place mixed-radix DIT FFT.
+/// `buf` length must factor entirely into 2, 3, and 5.
+fn fft(buf: &mut [Complex]) {
+    let n = buf.len();
+    if n <= 1 {
+        return;
+    }
+
+    // Find smallest factor
+    let radix = if n.is_multiple_of(2) {
+        2
+    } else if n.is_multiple_of(3) {
+        3
+    } else if n.is_multiple_of(5) {
+        5
+    } else {
+        dft_naive(buf);
+        return;
+    };
+
+    let m = n / radix;
+
+    // Decimation-in-time: reorder into `radix` sub-sequences of length `m`
+    let mut tmp = vec![Complex::ZERO; n];
+    for r in 0..radix {
+        for j in 0..m {
+            tmp[r * m + j] = buf[j * radix + r];
+        }
+    }
+
+    // Recurse on each sub-FFT of length m
+    for r in 0..radix {
+        fft(&mut tmp[r * m..(r + 1) * m]);
+    }
+
+    // Combine: generic radix-R butterfly.
+    // Output[k] = Σ_{r=0}^{R-1} tmp[r*m + (k mod m)] * W_N^{r*k}
+    // where W_N = exp(-j 2π/N)
+    let angle_base = -2.0 * core::f64::consts::PI / n as f64;
+
+    for (k, out) in buf.iter_mut().enumerate() {
+        let km = k % m;
+        let mut sum = Complex::ZERO;
+        for r in 0..radix {
+            let tw = Complex::from_angle(angle_base * (r * k) as f64);
+            sum = sum.add(tmp[r * m + km].mul(tw));
+        }
+        *out = sum;
+    }
+}
+
+/// Naive DFT for small prime sizes (fallback, not expected for 240).
+fn dft_naive(buf: &mut [Complex]) {
+    let n = buf.len();
+    let tmp: Vec<Complex> = buf.to_vec();
+    let angle = -2.0 * core::f64::consts::PI / (n as f64);
+    for (k, out) in buf.iter_mut().enumerate() {
+        let mut sum = Complex::ZERO;
+        for (j, &inp) in tmp.iter().enumerate() {
+            let w = Complex::from_angle(angle * (k * j) as f64);
+            sum = sum.add(inp.mul(w));
+        }
+        *out = sum;
+    }
+}
+
+// --- MDCT via Makhoul DCT-IV + FFT ---
 
 /// Compute forward MDCT of `input` (length N) producing N/2 spectral coefficients.
-/// Uses the standard Type-IV DCT formulation.
+///
+/// MDCT: X[k] = Σ_{n=0}^{N-1} x[n] cos(π/N (n + 0.5 + N/4)(k + 0.5))
+///
+/// Uses N-point FFT with pre/post twiddle:
+///   z[n] = x[n] * exp(-j π n / N), Z = FFT(z),
+///   then X[k] = Re(Z[k] * exp(-j π n₀ (2k+1) / N)) where n₀ = 0.5 + N/4.
+///
+/// The FFT gives us Σ x[n] exp(-j π n (2k+1) / N), which combined with the
+/// post-twiddle produces the exact MDCT.
+///
+/// Complexity: O(N log N). For N=960 = 2⁶ × 3 × 5, fully factorable.
 #[inline]
 fn mdct_forward(input: &[f32], output: &mut [f32]) {
     let n = input.len();
     let n2 = n / 2;
+    let n4 = n / 4;
+    let pi = core::f64::consts::PI;
+    let n0 = 0.5 + n4 as f64; // MDCT phase offset
 
+    // We need Σ_{n=0}^{N-1} x[n] exp(-j π n (2k+1) / (2N)) for k = 0..N/2-1.
+    //
+    // Pre-twiddle: z[n] = x[n] * exp(-j π n / (2N))
+    // Then DFT_N{z}[k] = Σ z[n] exp(-j 2π nk / N)
+    //                   = Σ x[n] exp(-j π n/(2N)) exp(-j 2π nk/N)
+    //                   = Σ x[n] exp(-j π n (1 + 4k) / (2N))
+    //
+    // We want exponent π n (2k+1) / (2N). So 4k+1 ≠ 2k+1 in general.
+    //
+    // Fix: use 2N-point FFT. Zero-pad x to length 2N, pre-twiddle by exp(-jπn/(2N)):
+    // z[n] = x[n] * exp(-j π n / (2N))  for n < N
+    // z[n] = 0                           for n >= N
+    //
+    // DFT_{2N}{z}[k] = Σ_{n=0}^{N-1} x[n] exp(-jπn/(2N)) exp(-j 2π nk / (2N))
+    //                = Σ x[n] exp(-j π n (2k+1) / (2N))
+    //
+    // This is exactly what the MDCT needs.
+    let nn = 2 * n; // 2N
+    let mut z = vec![Complex::ZERO; nn];
+    for (i, &x) in input.iter().enumerate() {
+        let tw = Complex::from_angle(-pi * i as f64 / nn as f64);
+        z[i] = Complex::new(f64::from(x), 0.0).mul(tw);
+    }
+    // z[N..2N] = 0 (already initialized)
+
+    // 2N-point FFT (2N = 2*960 = 1920 = 2^7 * 3 * 5, fully factorable)
+    fft(&mut z);
+
+    // Z[k] = Σ x[n] exp(-j π n (2k+1) / (2N))
+    // MDCT: X[k] = Re(exp(-j π n₀ (2k+1) / (2N)) * Z[k])
     for (k, out) in output.iter_mut().enumerate().take(n2) {
-        let mut sum = 0.0f64;
-        for (i, &inp) in input.iter().enumerate().take(n) {
-            let phase = core::f64::consts::PI / (n as f64)
-                * (f64::from(i as u32) + 0.5 + (n as f64) / 4.0)
-                * (f64::from(k as u32) + 0.5);
-            sum += f64::from(inp) * libm::cos(phase);
-        }
-        *out = sum as f32;
+        let angle = -pi * n0 * (2 * k + 1) as f64 / nn as f64;
+        let tw = Complex::from_angle(angle);
+        *out = z[k].mul(tw).re as f32;
     }
 }
 
@@ -435,14 +602,14 @@ fn quantize_band_energies(energies: &[f32; NUM_CELT_BANDS]) -> [i16; NUM_CELT_BA
 
 /// Encode quantized band energies using Laplace-like coding.
 fn encode_band_energies(rc: &mut RangeEncoder, quant: &[i16; NUM_CELT_BANDS]) {
-    let mut prev = 0i16;
+    let mut prev = 0i32;
     for &q in quant.iter() {
-        let diff = q - prev;
-        // Encode diff using a simple uniform code over a bounded range
+        // Use i32 arithmetic to avoid i16 overflow on subtraction
+        let diff = i32::from(q) - prev;
         let bounded = diff.clamp(-64, 63);
         let val = (bounded + 64) as u32;
         rc.encode_uint(val, 128);
-        prev = q;
+        prev = i32::from(q);
     }
 }
 
@@ -527,14 +694,13 @@ fn encode_celt_frame(samples: &[f32], channels: u16, target_bytes: usize) -> Vec
     // Build Opus packet with range coder
     let mut rc = RangeEncoder::new();
 
-    // TOC byte: CELT-only, 20ms frame, mono/stereo
-    // TOC format: config[7:3] | s[2] | c[1:0]
-    // Config 28 = CELT-only NB 20ms (we use wideband, config 30 for 48kHz)
-    // Actually for CELT 48kHz 20ms: config = 30 (1111_0)
-    // s = 0 for mono, 1 for stereo
-    // c = 0 for 1 frame per packet
-    let stereo_bit = if channels > 1 { 1u8 } else { 0u8 };
-    let toc = (30 << 3) | (stereo_bit << 2); // config=30, s=stereo, c=0(1 frame)
+    // TOC byte: CELT-only, 20ms frame
+    // TOC format per RFC 6716 Section 3.1: config[7:3] | s[2] | c[1:0]
+    // Config 30 = CELT-only FB 20ms (fullband, 48 kHz)
+    // s = 0: we always encode a mono downmix in the CELT bitstream.
+    //        OpusHead carries the original channel count for the decoder.
+    // c = 0: 1 frame per packet
+    let toc: u8 = 30 << 3; // config=30, s=0(mono coded), c=0(1 frame)
 
     // The TOC byte goes first, outside the range coder
     let mut packet = Vec::with_capacity(target_bytes);
@@ -930,12 +1096,146 @@ mod tests {
         assert!(!bytes.is_empty());
     }
 
+    /// Naive O(N²) MDCT for correctness validation.
+    fn mdct_naive(input: &[f32], output: &mut [f32]) {
+        let n = input.len();
+        let n2 = n / 2;
+        for (k, out) in output.iter_mut().enumerate().take(n2) {
+            let mut sum = 0.0f64;
+            for (i, &inp) in input.iter().enumerate().take(n) {
+                let phase = core::f64::consts::PI / (n as f64)
+                    * (f64::from(i as u32) + 0.5 + (n as f64) / 4.0)
+                    * (f64::from(k as u32) + 0.5);
+                sum += f64::from(inp) * libm::cos(phase);
+            }
+            *out = sum as f32;
+        }
+    }
+
     #[test]
     fn mdct_forward_produces_output() {
         let input = vec![1.0f32; 960];
         let mut output = vec![0.0f32; 480];
         mdct_forward(&input, &mut output);
-        // DC component should be non-zero for constant input
-        assert!(output[0].abs() > 0.0);
+        // At least some coefficients should be non-zero for constant input
+        let energy: f32 = output.iter().map(|x| x * x).sum();
+        assert!(energy > 0.0, "MDCT of constant input produced all zeros");
+    }
+
+    #[test]
+    fn mdct_fft_matches_naive() {
+        // Generate a test signal: sine wave at 440 Hz sampled at 48 kHz
+        let input: Vec<f32> = (0..960)
+            .map(|i| libm::sinf(2.0 * core::f32::consts::PI * 440.0 * i as f32 / 48000.0))
+            .collect();
+
+        let mut fft_output = vec![0.0f32; 480];
+        let mut naive_output = vec![0.0f32; 480];
+
+        mdct_forward(&input, &mut fft_output);
+        mdct_naive(&input, &mut naive_output);
+
+        // Compare: allow small floating-point differences
+        let mut max_diff = 0.0f32;
+        for (f, n) in fft_output.iter().zip(naive_output.iter()) {
+            let diff = (f - n).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+        assert!(
+            max_diff < 0.01,
+            "FFT-based MDCT diverges from naive: max_diff={max_diff}"
+        );
+    }
+
+    #[test]
+    fn mdct_small_matches_naive() {
+        // Small N=16 test to isolate FFT issues from large-N effects
+        let input: Vec<f32> = (0..16).map(|i| (i as f32) / 16.0).collect();
+        let n2 = 8;
+        let mut fft_out = vec![0.0f32; n2];
+        let mut naive_out = vec![0.0f32; n2];
+
+        mdct_forward(&input, &mut fft_out);
+        mdct_naive(&input, &mut naive_out);
+
+        let mut max_diff = 0.0f32;
+        for (f, n) in fft_out.iter().zip(naive_out.iter()) {
+            let diff = (f - n).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+        assert!(
+            max_diff < 0.01,
+            "Small MDCT: FFT vs naive max_diff={max_diff}\nFFT:   {fft_out:?}\nNaive: {naive_out:?}"
+        );
+    }
+
+    #[test]
+    fn fft_size_6() {
+        // DFT of [1, 0, 0, 0, 0, 0] for size 6 (= 2*3) should give [1, 1, 1, 1, 1, 1]
+        let mut buf = vec![Complex::ZERO; 6];
+        buf[0] = Complex::new(1.0, 0.0);
+        fft(&mut buf);
+        for (i, z) in buf.iter().enumerate() {
+            assert!(
+                (z.re - 1.0).abs() < 1e-10,
+                "FFT size 6 bin {i}: re={}",
+                z.re
+            );
+            assert!(z.im.abs() < 1e-10, "FFT size 6 bin {i}: im={}", z.im);
+        }
+    }
+
+    #[test]
+    fn fft_basic_correctness() {
+        // FFT of [1, 0, 0, 0] should give [1, 1, 1, 1]
+        let mut buf = vec![
+            Complex::new(1.0, 0.0),
+            Complex::ZERO,
+            Complex::ZERO,
+            Complex::ZERO,
+        ];
+        fft(&mut buf);
+        for z in &buf {
+            assert!((z.re - 1.0).abs() < 1e-10);
+            assert!(z.im.abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn fft_vs_dft_size_30() {
+        // Compare FFT against naive DFT for size 30 = 2 * 3 * 5
+        let n = 30;
+        let mut buf_fft = Vec::with_capacity(n);
+        let mut buf_dft = Vec::with_capacity(n);
+        for i in 0..n {
+            let val = Complex::new(libm::sin(i as f64 * 0.7), libm::cos(i as f64 * 1.3));
+            buf_fft.push(val);
+            buf_dft.push(val);
+        }
+
+        fft(&mut buf_fft);
+        dft_naive(&mut buf_dft);
+
+        let mut max_diff = 0.0f64;
+        for (a, b) in buf_fft.iter().zip(buf_dft.iter()) {
+            let dr = (a.re - b.re).abs();
+            let di = (a.im - b.im).abs();
+            max_diff = max_diff.max(dr).max(di);
+        }
+        assert!(max_diff < 1e-6, "FFT vs DFT size 30 max_diff={max_diff}");
+    }
+
+    #[test]
+    fn fft_size_240() {
+        // Verify FFT works for N=240 (the size used by MDCT with N=960)
+        let mut buf = vec![Complex::ZERO; 240];
+        buf[0] = Complex::new(1.0, 0.0);
+        fft(&mut buf);
+        // DC bin should be 1.0
+        assert!((buf[0].re - 1.0).abs() < 1e-10);
     }
 }

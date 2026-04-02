@@ -24,6 +24,8 @@ pub enum AudioFormat {
     Opus,
     /// Advanced Audio Coding (ADTS or raw).
     Aac,
+    /// Apple Lossless Audio Codec.
+    Alac,
 }
 
 impl core::fmt::Display for AudioFormat {
@@ -37,6 +39,7 @@ impl core::fmt::Display for AudioFormat {
             Self::Mp3 => f.write_str("MP3"),
             Self::Opus => f.write_str("Opus"),
             Self::Aac => f.write_str("AAC"),
+            Self::Alac => f.write_str("ALAC"),
         }
     }
 }

@@ -161,6 +161,18 @@ impl AudioCodec for AacCodec {
     }
 }
 
+#[cfg(feature = "alac")]
+/// ALAC (Apple Lossless) codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AlacCodec;
+
+#[cfg(feature = "alac")]
+impl AudioCodec for AlacCodec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::alac::decode(data)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

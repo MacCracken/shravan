@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **AAC decoder**: ADTS container parsing with symphonia-codec-aac backend. Feature-gated behind `aac` (requires `std`). Supports AAC-LC mono through 7.1 channel configurations.
+- **Opus encoder**: From-scratch CELT-mode encoder producing valid Ogg/Opus files. Mono/stereo, 48 kHz, CBR 32-256 kbps, 20ms frames. Feature-gated behind `opus`.
+- **Ogg muxer**: Page construction with CRC-32, lacing, BOS/EOS flags. Used by Opus encoder, available for future Ogg-based codecs.
+- `AudioFormat::Aac` variant with ADTS format detection (0xFFF sync + layer=0)
+- `AacCodec` struct implementing `AudioCodec` trait
+- `#[must_use]` on all public functions returning `Result` (22 functions across all modules)
+- `#[inline]` on `resample_mono()` hot-path function
+- **ALAC decoder**: From-scratch Apple Lossless decoder for raw frames (no MP4 container dependency). 16/20/24/32-bit, mono/stereo, LPC prediction, adaptive Rice-Golomb coding, stereo de-matrixing. Feature-gated behind `alac`. `no_std` compatible.
+- `AudioFormat::Alac` variant
+- `AlacCodec` struct implementing `AudioCodec` trait
+- `AlacConfig` for parsing ALACSpecificConfig extradata from MP4
+- Opus encode benchmark (`opus_encode_1sec_mono_64k`)
+
+### Fixed
+- ADTS/MP3 format detection: properly distinguishes AAC (layer=0) from MP3 (layer!=0) on MPEG sync word
+- Opus encoder TOC byte correctly reflects mono-coded bitstream (s=0) regardless of input channel count
+
 ## [1.0.1] - 2026-03-28
 
 ### Fixed

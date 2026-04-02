@@ -81,86 +81,46 @@ fn flac_decode_1sec(c: &mut Criterion) {
     });
 }
 
-#[cfg(all(feature = "wav", feature = "pcm"))]
-criterion_group!(wav_benches, wav_decode_1sec);
+#[cfg(feature = "opus")]
+fn opus_encode_1sec(c: &mut Criterion) {
+    use shravan::opus;
 
-#[cfg(all(feature = "pcm", not(feature = "simd")))]
-criterion_group!(pcm_benches, pcm_i16_to_f32_4096);
+    // 1 second mono sine at 48 kHz (Opus native rate)
+    let samples: Vec<f32> = (0..48000)
+        .map(|i| libm::sinf(2.0 * core::f32::consts::PI * 440.0 * i as f32 / 48000.0))
+        .collect();
 
-#[cfg(all(feature = "pcm", feature = "simd"))]
-criterion_group!(pcm_benches, pcm_i16_to_f32_4096, simd_i16_to_f32_4096);
+    c.bench_function("opus_encode_1sec_mono_64k", |b| {
+        b.iter(|| opus::encode(black_box(&samples), 48000, 1, 64000));
+    });
+}
 
-#[cfg(feature = "resample")]
-criterion_group!(resample_benches, resample_4096);
+// --- Benchmark groups ---
+// Use a single function to collect all enabled benchmarks, avoiding
+// the combinatorial explosion of cfg-gated criterion_main! macros.
 
-#[cfg(feature = "flac")]
-criterion_group!(flac_benches, flac_encode_1sec, flac_decode_1sec);
+fn all_benchmarks(c: &mut Criterion) {
+    #[cfg(all(feature = "wav", feature = "pcm"))]
+    wav_decode_1sec(c);
 
-// Combine all enabled benchmark groups.
-#[cfg(all(
-    feature = "wav",
-    feature = "pcm",
-    feature = "resample",
-    feature = "flac"
-))]
-criterion_main!(wav_benches, pcm_benches, resample_benches, flac_benches);
+    #[cfg(feature = "pcm")]
+    pcm_i16_to_f32_4096(c);
 
-#[cfg(all(
-    feature = "wav",
-    feature = "pcm",
-    feature = "resample",
-    not(feature = "flac")
-))]
-criterion_main!(wav_benches, pcm_benches, resample_benches);
+    #[cfg(feature = "simd")]
+    simd_i16_to_f32_4096(c);
 
-#[cfg(all(
-    feature = "wav",
-    feature = "pcm",
-    not(feature = "resample"),
-    feature = "flac"
-))]
-criterion_main!(wav_benches, pcm_benches, flac_benches);
+    #[cfg(feature = "resample")]
+    resample_4096(c);
 
-#[cfg(all(
-    feature = "wav",
-    feature = "pcm",
-    not(feature = "resample"),
-    not(feature = "flac")
-))]
-criterion_main!(wav_benches, pcm_benches);
+    #[cfg(feature = "flac")]
+    {
+        flac_encode_1sec(c);
+        flac_decode_1sec(c);
+    }
 
-#[cfg(all(
-    not(feature = "wav"),
-    feature = "pcm",
-    feature = "resample",
-    feature = "flac"
-))]
-criterion_main!(pcm_benches, resample_benches, flac_benches);
+    #[cfg(feature = "opus")]
+    opus_encode_1sec(c);
+}
 
-#[cfg(all(
-    not(feature = "wav"),
-    feature = "pcm",
-    feature = "resample",
-    not(feature = "flac")
-))]
-criterion_main!(pcm_benches, resample_benches);
-
-#[cfg(all(
-    not(feature = "wav"),
-    feature = "pcm",
-    not(feature = "resample"),
-    feature = "flac"
-))]
-criterion_main!(pcm_benches, flac_benches);
-
-#[cfg(all(
-    not(feature = "wav"),
-    feature = "pcm",
-    not(feature = "resample"),
-    not(feature = "flac")
-))]
-criterion_main!(pcm_benches);
-
-// Fallback: if nothing useful is enabled
-#[cfg(not(any(feature = "pcm", feature = "flac")))]
-fn main() {}
+criterion_group!(benches, all_benchmarks);
+criterion_main!(benches);

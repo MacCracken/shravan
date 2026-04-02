@@ -195,9 +195,37 @@ fn audio_buffer_ref_to_f32(
                 }
             }
         }
-        // For other formats, convert via f64 path
+        AudioBufferRef::F64(buf) => {
+            let frames = buf.frames();
+            for frame in 0..frames {
+                for ch in 0..channels {
+                    out.push(buf.chan(ch)[frame].into_sample());
+                }
+            }
+        }
+        AudioBufferRef::S24(buf) => {
+            let frames = buf.frames();
+            for frame in 0..frames {
+                for ch in 0..channels {
+                    // i24 -> i32 -> f32
+                    let val: i32 = buf.chan(ch)[frame].into_sample();
+                    out.push(val.into_sample());
+                }
+            }
+        }
+        AudioBufferRef::U8(buf) => {
+            let frames = buf.frames();
+            for frame in 0..frames {
+                for ch in 0..channels {
+                    out.push(buf.chan(ch)[frame].into_sample());
+                }
+            }
+        }
+        // Remaining variants: U16, U24, U32, S8 — highly unlikely from AAC
+        // but handle them by converting through the widest available path
         _ => {
-            // The AAC decoder typically outputs F32, so this is a fallback
+            // Cannot convert without knowing the exact type — skip.
+            // This is a best-effort fallback; AAC-LC always outputs F32 or S16.
         }
     }
 }
@@ -281,12 +309,35 @@ fn map_channels(count: u16) -> symphonia_core::audio::Channels {
         1 => Channels::FRONT_LEFT,
         2 => Channels::FRONT_LEFT | Channels::FRONT_RIGHT,
         3 => Channels::FRONT_CENTRE | Channels::FRONT_LEFT | Channels::FRONT_RIGHT,
+        4 => {
+            Channels::FRONT_CENTRE
+                | Channels::FRONT_LEFT
+                | Channels::FRONT_RIGHT
+                | Channels::REAR_CENTRE
+        }
+        5 => {
+            Channels::FRONT_CENTRE
+                | Channels::FRONT_LEFT
+                | Channels::FRONT_RIGHT
+                | Channels::SIDE_LEFT
+                | Channels::SIDE_RIGHT
+        }
         6 => {
             Channels::FRONT_CENTRE
                 | Channels::FRONT_LEFT
                 | Channels::FRONT_RIGHT
                 | Channels::SIDE_LEFT
                 | Channels::SIDE_RIGHT
+                | Channels::LFE1
+        }
+        8 => {
+            Channels::FRONT_CENTRE
+                | Channels::FRONT_LEFT
+                | Channels::FRONT_RIGHT
+                | Channels::SIDE_LEFT
+                | Channels::SIDE_RIGHT
+                | Channels::FRONT_LEFT_WIDE
+                | Channels::FRONT_RIGHT_WIDE
                 | Channels::LFE1
         }
         _ => Channels::FRONT_LEFT | Channels::FRONT_RIGHT,

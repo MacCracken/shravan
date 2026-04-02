@@ -73,6 +73,9 @@ pub mod opus;
 #[cfg(feature = "aac")]
 pub mod aac;
 
+#[cfg(feature = "alac")]
+pub mod alac;
+
 #[cfg(feature = "simd")]
 #[allow(unsafe_code)]
 pub mod simd;

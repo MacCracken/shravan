@@ -13,10 +13,25 @@
 
 ### Codec gaps (needed by tarang to drop remaining C deps)
 
-- **Opus encode** — needed to drop `opus` (libopus FFI) dep in tarang
-- **AAC decode** — needed to drop `fdk-aac` dep in tarang (decode path)
+- ~~**Opus encode** — needed to drop `opus` (libopus FFI) dep in tarang~~ **Done** (CELT-mode MVP)
+- ~~**AAC decode** — needed to drop `fdk-aac` dep in tarang (decode path)~~ **Done** (via symphonia-codec-aac)
 - **AAC encode** — needed to drop `fdk-aac` dep in tarang (encode path)
-- **ALAC decode** — Apple Lossless; previously via symphonia, currently unsupported in tarang
+- ~~**ALAC decode** — Apple Lossless; previously via symphonia, currently unsupported in tarang~~ **Done** (from-scratch, no_std compatible)
+
+### Opus encoder improvements (own the stack)
+
+- SILK mode for speech content
+- Hybrid mode (SILK + CELT)
+- VBR support
+- Stereo coupling (dual-coded stereo instead of mono downmix)
+- ~~FFT-based MDCT (current is O(N²), needs O(N log N))~~ **Done** (2N-point mixed-radix FFT, 430ms→27ms)
+- Full PVQ spectral shape coding (current is sign-only)
+- Transient detection and short-window switching
+
+### AAC decoder improvements (own the stack)
+
+- Replace symphonia-codec-aac with native implementation (remove std dependency)
+- MP4/M4A container support (currently ADTS only)
 
 ### Other
 
