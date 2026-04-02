@@ -121,6 +121,7 @@ fn id3v2_skip(data: &[u8]) -> usize {
 ///
 /// Returns [`ShravanError::InvalidHeader`] if the header is invalid (bad sync,
 /// reserved version/layer/bitrate/sample-rate fields).
+#[must_use = "parsed frame info is returned and should not be discarded"]
 pub fn parse_frame_header(header: &[u8; 4]) -> Result<Mp3FrameInfo> {
     // Sync word: first 11 bits must be 1
     if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
@@ -226,6 +227,7 @@ pub fn parse_frame_header(header: &[u8; 4]) -> Result<Mp3FrameInfo> {
 /// # Errors
 ///
 /// Returns [`ShravanError::InvalidHeader`] if no valid frames are found.
+#[must_use = "scanned frame list is returned and should not be discarded"]
 pub fn scan_frames(data: &[u8]) -> Result<Vec<Mp3FrameInfo>> {
     let skip = id3v2_skip(data);
     let mut pos = skip;
@@ -264,6 +266,7 @@ pub fn scan_frames(data: &[u8]) -> Result<Vec<Mp3FrameInfo>> {
 /// # Errors
 ///
 /// Returns errors for missing or invalid frame headers.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     let frames = scan_frames(data)?;
 

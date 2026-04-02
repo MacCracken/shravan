@@ -203,6 +203,7 @@ fn parse_pages(data: &[u8]) -> Result<Vec<OggPage>> {
 /// # Errors
 ///
 /// Returns errors for invalid Ogg structure or truncated data.
+#[must_use = "extracted packets are returned and should not be discarded"]
 pub fn extract_packets(data: &[u8]) -> Result<Vec<Vec<u8>>> {
     let pages = parse_pages(data)?;
     let mut packets: Vec<Vec<u8>> = Vec::new();
@@ -250,6 +251,7 @@ pub fn extract_packets(data: &[u8]) -> Result<Vec<Vec<u8>>> {
 /// # Errors
 ///
 /// Returns errors for invalid Ogg structure, empty streams, or unsupported codecs.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     let packets = extract_packets(data)?;
     if packets.is_empty() {

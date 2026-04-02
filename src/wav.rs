@@ -42,6 +42,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
 /// # Errors
 ///
 /// Returns errors for invalid headers, unsupported formats, or truncated data.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     // Validate RIFF header
     if data.len() < 44 {
@@ -199,6 +200,7 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
 /// # Errors
 ///
 /// Returns errors for invalid parameters or unsupported formats.
+#[must_use = "encoded WAV bytes are returned and should not be discarded"]
 #[cfg(feature = "pcm")]
 pub fn encode(
     samples: &[f32],

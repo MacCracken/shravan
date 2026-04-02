@@ -348,6 +348,7 @@ fn parse_streaminfo(data: &[u8], offset: usize) -> Result<StreamInfo> {
 /// # Errors
 ///
 /// Returns errors for invalid headers, unsupported subframe types, or truncated data.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     decode_range(data, 0, None)
 }
@@ -363,6 +364,7 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
 ///
 /// Returns errors for invalid headers, unsupported subframe types, CRC mismatches,
 /// or truncated data.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode_range(
     data: &[u8],
     start_sample: u64,
@@ -1432,6 +1434,7 @@ fn md5_compute(data: &[u8]) -> [u8; 16] {
 /// # Errors
 ///
 /// Returns errors for invalid parameters.
+#[must_use = "encoded FLAC bytes are returned and should not be discarded"]
 pub fn encode(
     samples: &[f32],
     sample_rate: u32,

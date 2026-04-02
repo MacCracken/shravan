@@ -904,6 +904,7 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns errors if reading fails or the audio format is not supported.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode_reader<R: Read>(reader: &mut R) -> Result<(FormatInfo, Vec<f32>)> {
     let mut buf = Vec::new();
     reader
@@ -917,6 +918,7 @@ pub fn decode_reader<R: Read>(reader: &mut R) -> Result<(FormatInfo, Vec<f32>)> 
 /// # Errors
 ///
 /// Returns errors if the file cannot be read or the format is not supported.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode_file(path: &Path) -> Result<(FormatInfo, Vec<f32>)> {
     let data = std::fs::read(path).map_err(|e| ShravanError::DecodeError(e.to_string()))?;
     crate::codec::open(&data)

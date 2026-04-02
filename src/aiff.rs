@@ -96,6 +96,7 @@ enum Endianness {
 /// # Errors
 ///
 /// Returns errors for invalid headers, unsupported compression, or truncated data.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     // Minimum: FORM(4) + size(4) + AIFF(4) = 12
     if data.len() < 12 {
@@ -301,6 +302,7 @@ fn decode_pcm(audio_data: &[u8], bits: u16, endianness: Endianness) -> Result<Ve
 /// # Errors
 ///
 /// Returns errors for invalid parameters or unsupported bit depths.
+#[must_use = "encoded AIFF bytes are returned and should not be discarded"]
 #[cfg(feature = "pcm")]
 pub fn encode(
     samples: &[f32],

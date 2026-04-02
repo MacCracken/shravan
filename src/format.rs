@@ -58,6 +58,7 @@ pub struct FormatInfo {
 /// Detect the audio format from the first bytes of a file.
 ///
 /// Requires at least 4 bytes of header data.
+#[must_use = "detected format should be used to select a decoder"]
 pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
     if header.len() < 4 {
         return Err(ShravanError::InvalidHeader(

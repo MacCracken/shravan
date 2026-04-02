@@ -17,6 +17,7 @@ use crate::format::{AudioFormat, FormatInfo, detect_format};
 ///
 /// Returns [`ShravanError::UnsupportedFormat`] if the format cannot be detected
 /// or if the required feature is not enabled.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn open(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     let format = detect_format(data)?;
 

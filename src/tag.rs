@@ -32,6 +32,7 @@ pub struct AudioMetadata {
 /// # Errors
 ///
 /// Returns [`ShravanError::InvalidHeader`] if the data does not contain a valid ID3v2 header.
+#[must_use = "parsed metadata is returned and should not be discarded"]
 pub fn read_id3v2(data: &[u8]) -> Result<AudioMetadata> {
     // ID3v2 header: "ID3" + version (2 bytes) + flags (1 byte) + size (4 bytes syncsafe)
     if data.len() < 10 {
@@ -222,6 +223,7 @@ fn syncsafe_to_u32(data: &[u8]) -> u32 {
 /// # Errors
 ///
 /// Returns [`ShravanError::EndOfStream`] if the data is truncated.
+#[must_use = "parsed metadata is returned and should not be discarded"]
 pub fn read_vorbis_comment(data: &[u8]) -> Result<AudioMetadata> {
     if data.len() < 4 {
         return Err(ShravanError::EndOfStream);

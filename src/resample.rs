@@ -46,6 +46,7 @@ impl ResampleQuality {
 ///
 /// Returns [`ShravanError::InvalidSampleRate`] if `target_rate` is zero.
 /// Returns [`ShravanError::InvalidChannels`] if `channels` is zero.
+#[must_use = "resampled audio data is returned and should not be discarded"]
 pub fn resample(
     samples: &[f32],
     channels: u16,
@@ -104,6 +105,7 @@ pub fn resample(
 }
 
 /// Resample a single channel of f32 audio.
+#[inline]
 fn resample_mono(
     samples: &[f32],
     source_rate: u32,

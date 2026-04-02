@@ -34,6 +34,7 @@ pub struct OpusHead {
 /// # Errors
 ///
 /// Returns [`ShravanError::InvalidHeader`] for wrong magic or truncated data.
+#[must_use = "parsed Opus header is returned and should not be discarded"]
 pub fn parse_opus_head(packet: &[u8]) -> Result<OpusHead> {
     if packet.len() < 19 {
         return Err(ShravanError::InvalidHeader(
@@ -73,6 +74,7 @@ pub fn parse_opus_head(packet: &[u8]) -> Result<OpusHead> {
 /// # Errors
 ///
 /// Returns [`ShravanError::InvalidHeader`] for wrong magic or truncated data.
+#[must_use = "parsed Opus tags are returned and should not be discarded"]
 #[cfg(feature = "tag")]
 pub fn parse_opus_tags(packet: &[u8]) -> Result<crate::tag::AudioMetadata> {
     if packet.len() < 8 {
@@ -88,6 +90,7 @@ pub fn parse_opus_tags(packet: &[u8]) -> Result<crate::tag::AudioMetadata> {
 }
 
 /// Parse an `OpusTags` comment packet (tag feature disabled — returns default).
+#[must_use = "parsed Opus tags result should not be discarded"]
 #[cfg(not(feature = "tag"))]
 pub fn parse_opus_tags(packet: &[u8]) -> Result<()> {
     if packet.len() < 8 {
@@ -197,6 +200,7 @@ pub(crate) fn decode_from_packets(
 /// # Errors
 ///
 /// Returns errors for invalid Ogg/Opus structure.
+#[must_use = "decoded audio data is returned and should not be discarded"]
 pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     let packets = crate::ogg::extract_packets(data)?;
     decode_from_packets(&packets, data)
