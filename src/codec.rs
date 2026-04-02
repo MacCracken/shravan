@@ -58,6 +58,12 @@ pub fn open(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         #[cfg(not(feature = "opus"))]
         AudioFormat::Opus => Err(ShravanError::UnsupportedFormat),
 
+        #[cfg(feature = "aac")]
+        AudioFormat::Aac => crate::aac::decode(data),
+
+        #[cfg(not(feature = "aac"))]
+        AudioFormat::Aac => Err(ShravanError::UnsupportedFormat),
+
         // RawPcm and any future variants
         _ => Err(ShravanError::UnsupportedFormat),
     }
@@ -140,6 +146,18 @@ pub struct OpusCodec;
 impl AudioCodec for OpusCodec {
     fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
         crate::opus::decode(data)
+    }
+}
+
+#[cfg(feature = "aac")]
+/// AAC codec implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AacCodec;
+
+#[cfg(feature = "aac")]
+impl AudioCodec for AacCodec {
+    fn decode(&self, data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
+        crate::aac::decode(data)
     }
 }
 

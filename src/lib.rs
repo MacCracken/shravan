@@ -70,6 +70,9 @@ pub mod mp3;
 #[cfg(feature = "opus")]
 pub mod opus;
 
+#[cfg(feature = "aac")]
+pub mod aac;
+
 #[cfg(feature = "simd")]
 #[allow(unsafe_code)]
 pub mod simd;

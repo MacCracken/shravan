@@ -267,6 +267,97 @@ pub fn decode(data: &[u8]) -> Result<(FormatInfo, Vec<f32>)> {
     Err(ShravanError::UnsupportedFormat)
 }
 
+// ---------------------------------------------------------------------------
+// Ogg muxing (page construction)
+// ---------------------------------------------------------------------------
+
+/// Header type flags for Ogg pages.
+#[allow(dead_code)]
+pub(crate) const HEADER_FLAG_CONTINUATION: u8 = 0x01;
+pub(crate) const HEADER_FLAG_BOS: u8 = 0x02;
+pub(crate) const HEADER_FLAG_EOS: u8 = 0x04;
+
+/// Build a single Ogg page from a packet payload.
+///
+/// Constructs a complete page with capture pattern, header, segment table,
+/// body data, and computed CRC-32.
+pub(crate) fn build_page(
+    header_type: u8,
+    granule_position: i64,
+    serial: u32,
+    page_sequence: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    // Compute lacing values: segments of 255 bytes, final segment < 255
+    let mut segments: Vec<u8> = Vec::new();
+    let mut remaining = payload.len();
+    loop {
+        if remaining >= 255 {
+            segments.push(255);
+            remaining -= 255;
+        } else {
+            segments.push(remaining as u8);
+            break;
+        }
+    }
+
+    let num_segments = segments.len();
+    let page_size = 27 + num_segments + payload.len();
+    let mut page = Vec::with_capacity(page_size);
+
+    // Capture pattern
+    page.extend_from_slice(OGG_MAGIC);
+    // Stream structure version
+    page.push(0);
+    // Header type
+    page.push(header_type);
+    // Granule position
+    page.extend_from_slice(&granule_position.to_le_bytes());
+    // Serial number
+    page.extend_from_slice(&serial.to_le_bytes());
+    // Page sequence number
+    page.extend_from_slice(&page_sequence.to_le_bytes());
+    // CRC placeholder
+    page.extend_from_slice(&[0u8; 4]);
+    // Number of segments
+    page.push(num_segments as u8);
+    // Segment table
+    page.extend_from_slice(&segments);
+    // Body
+    page.extend_from_slice(payload);
+
+    // Compute and fill CRC
+    let crc = crc32_ogg_page(&page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+
+    page
+}
+
+/// Mux a sequence of packets into a complete Ogg bitstream.
+///
+/// The first packet becomes a BOS (beginning-of-stream) page.
+/// The last packet gets the EOS (end-of-stream) flag.
+/// `granule_positions` must have the same length as `packets`.
+#[allow(dead_code)]
+pub(crate) fn mux_packets(packets: &[Vec<u8>], granule_positions: &[i64], serial: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    for (i, (packet, &granule)) in packets.iter().zip(granule_positions.iter()).enumerate() {
+        let mut flags = 0u8;
+        if i == 0 {
+            flags |= HEADER_FLAG_BOS;
+        }
+        if i == packets.len() - 1 {
+            flags |= HEADER_FLAG_EOS;
+        }
+
+        let page = build_page(flags, granule, serial, i as u32, packet);
+        out.extend_from_slice(&page);
+    }
+
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -444,5 +535,67 @@ mod tests {
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0], b"abc");
         assert_eq!(packets[1], b"de");
+    }
+
+    // --- Muxing tests ---
+
+    #[test]
+    fn build_page_roundtrip() {
+        let payload = b"hello_ogg_muxer";
+        let page = build_page(HEADER_FLAG_BOS, 0, 42, 0, payload);
+
+        // Parse the page we just built
+        let (parsed, end) = parse_page(&page, 0).unwrap();
+        assert_eq!(end, page.len());
+        assert_eq!(parsed.header_type, HEADER_FLAG_BOS);
+        assert_eq!(parsed.granule_position, 0);
+        assert_eq!(parsed.serial, 42);
+        assert_eq!(parsed.page_seq, 0);
+        assert_eq!(parsed.body, payload);
+    }
+
+    #[test]
+    fn mux_packets_roundtrip() {
+        let packets = vec![
+            b"first_packet".to_vec(),
+            b"second_packet".to_vec(),
+            b"third_packet".to_vec(),
+        ];
+        let granules = vec![0i64, 960, 1920];
+
+        let ogg_data = mux_packets(&packets, &granules, 1);
+
+        // Demux and verify
+        let extracted = extract_packets(&ogg_data).unwrap();
+        assert_eq!(extracted.len(), 3);
+        assert_eq!(extracted[0], b"first_packet");
+        assert_eq!(extracted[1], b"second_packet");
+        assert_eq!(extracted[2], b"third_packet");
+    }
+
+    #[test]
+    fn mux_single_packet_has_bos_and_eos() {
+        let packets = vec![b"only_packet".to_vec()];
+        let granules = vec![0i64];
+
+        let ogg_data = mux_packets(&packets, &granules, 1);
+        let (page, _) = parse_page(&ogg_data, 0).unwrap();
+
+        // Single packet should have both BOS and EOS flags
+        assert_ne!(page.header_type & HEADER_FLAG_BOS, 0);
+        assert_ne!(page.header_type & HEADER_FLAG_EOS, 0);
+    }
+
+    #[test]
+    fn mux_large_packet_lacing() {
+        // A packet larger than 255 bytes should produce multiple lacing values
+        let big_packet = vec![0xAA; 600];
+        let packets = vec![big_packet.clone()];
+        let granules = vec![0i64];
+
+        let ogg_data = mux_packets(&packets, &granules, 1);
+        let extracted = extract_packets(&ogg_data).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0], big_packet);
     }
 }

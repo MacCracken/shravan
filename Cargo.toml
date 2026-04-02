@@ -16,6 +16,8 @@ exclude = [".claude/", ".github/", "docs/", "scripts/"]
 [dependencies]
 libm = "0.2"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+symphonia-codec-aac = { version = "0.5.5", optional = true }
+symphonia-core = { version = "0.5.5", optional = true }
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, optional = true }
 
@@ -25,7 +27,7 @@ serde_json = "1"
 
 [features]
 default = ["std", "wav", "flac", "pcm"]
-full = ["std", "wav", "flac", "pcm", "resample", "tag", "ogg", "aiff", "mp3", "opus", "simd", "dither", "streaming", "logging"]
+full = ["std", "wav", "flac", "pcm", "resample", "tag", "ogg", "aiff", "mp3", "opus", "aac", "simd", "dither", "streaming", "logging"]
 std = ["serde/std", "thiserror/std"]
 wav = []
 flac = []
@@ -36,6 +38,7 @@ ogg = []
 aiff = []
 mp3 = []
 opus = ["ogg"]
+aac = ["std", "dep:symphonia-core", "dep:symphonia-codec-aac"]
 simd = ["std"]
 dither = []
 streaming = ["std"]

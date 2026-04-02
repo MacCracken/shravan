@@ -384,6 +384,15 @@ fn serde_roundtrip_opus_codec() {
     assert_eq!(OpusCodec, back);
 }
 
+#[cfg(feature = "aac")]
+#[test]
+fn serde_roundtrip_aac_codec() {
+    use shravan::codec::AacCodec;
+    let json = serde_json::to_string(&AacCodec).unwrap();
+    let back: AacCodec = serde_json::from_str(&json).unwrap();
+    assert_eq!(AacCodec, back);
+}
+
 // --- codec::open for new formats ---
 
 #[cfg(all(feature = "aiff", feature = "pcm"))]
@@ -442,6 +451,11 @@ fn format_detection_all_types() {
     assert_eq!(
         detect_format(&[0xFF, 0xFB, 0x90, 0x00]).unwrap(),
         AudioFormat::Mp3
+    );
+    // ADTS (AAC): sync=0xFFF, layer=0, protection_absent=1
+    assert_eq!(
+        detect_format(&[0xFF, 0xF1, 0x50, 0x80]).unwrap(),
+        AudioFormat::Aac
     );
     assert!(detect_format(b"\x00\x00\x00\x00").is_err());
 }

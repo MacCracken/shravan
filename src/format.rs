@@ -22,6 +22,8 @@ pub enum AudioFormat {
     Mp3,
     /// Opus (in Ogg container).
     Opus,
+    /// Advanced Audio Coding (ADTS or raw).
+    Aac,
 }
 
 impl core::fmt::Display for AudioFormat {
@@ -34,6 +36,7 @@ impl core::fmt::Display for AudioFormat {
             Self::Aiff => f.write_str("AIFF"),
             Self::Mp3 => f.write_str("MP3"),
             Self::Opus => f.write_str("Opus"),
+            Self::Aac => f.write_str("AAC"),
         }
     }
 }
@@ -86,6 +89,12 @@ pub fn detect_format(header: &[u8]) -> Result<AudioFormat> {
         return Ok(AudioFormat::Mp3);
     }
     if header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
+        // Distinguish ADTS (AAC) from MP3: ADTS has sync 0xFFF (12 bits)
+        // with layer=0 (bits 14-13 of header), while MP3 has layer!=0.
+        if header[1] & 0xF6 == 0xF0 {
+            // 0xFFF sync + layer=0 → ADTS (AAC)
+            return Ok(AudioFormat::Aac);
+        }
         return Ok(AudioFormat::Mp3);
     }
 
@@ -131,6 +140,14 @@ mod tests {
         assert_eq!(AudioFormat::Aiff.to_string(), "AIFF");
         assert_eq!(AudioFormat::Mp3.to_string(), "MP3");
         assert_eq!(AudioFormat::Opus.to_string(), "Opus");
+        assert_eq!(AudioFormat::Aac.to_string(), "AAC");
+    }
+
+    #[test]
+    fn detect_aac_adts() {
+        // ADTS: sync=0xFFF, MPEG-4, layer=0, protection_absent=1
+        let header = [0xFF, 0xF1, 0x50, 0x80];
+        assert_eq!(detect_format(&header).unwrap(), AudioFormat::Aac);
     }
 
     #[test]
