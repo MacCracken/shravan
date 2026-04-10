@@ -1610,6 +1610,12 @@ fn alac_decode(data, len) {
 
 
 include "lib/flac.cyr"
+include "lib/ogg.cyr"
+include "lib/mp3.cyr"
+include "lib/tag.cyr"
+include "lib/fft.cyr"
+include "lib/opus.cyr"
+include "lib/aac.cyr"
 
 # ================================================================
 # Codec module — auto-detect and dispatch
@@ -1625,8 +1631,10 @@ fn codec_open(data, len) {
     if (fmt == FMT_WAV)  { return wav_decode(data, len); }
     if (fmt == FMT_AIFF) { return aiff_decode(data, len); }
     if (fmt == FMT_FLAC) { return flac_decode(data, len); }
+    if (fmt == FMT_OGG)  { return ogg_decode(data, len); }
+    if (fmt == FMT_MP3)  { return mp3_decode(data, len); }
+    if (fmt == FMT_AAC)  { return aac_decode(data, len); }
 
-    # Future: Ogg, Opus, etc.
     return err(ERR_UNSUPPORTED_FMT);
 }
 
@@ -2164,6 +2172,10 @@ fn print_summary() {
 alloc_init();
 shravan_init_constants();
 flac_init();
+ogg_init();
+mp3_init();
+fft_init();
+aac_init();
 
 syscall(1, 1, "shravan v1.1.0 — audio codecs for AGNOS (Cyrius port)\n", 55);
 syscall(1, 1, "running tests...\n", 17);
@@ -2196,6 +2208,43 @@ test_flac_encode_decode_8bit();
 test_flac_encode_decode_24bit();
 test_flac_reject_invalid();
 test_flac_block_size_codes();
+test_ogg_crc32_known_vectors();
+test_ogg_page_parse_roundtrip();
+test_ogg_reject_invalid_magic();
+test_ogg_reject_short_data();
+test_ogg_extract_single_packet();
+test_ogg_extract_multi_packet();
+test_ogg_continuation_pages();
+test_ogg_large_packet_lacing();
+test_ogg_mux_roundtrip();
+test_ogg_mux_single_has_bos_eos();
+test_ogg_crc_mismatch();
+test_ogg_multiple_pages();
+test_ogg_decode_unsupported();
+test_mp3_valid_header_parse();
+test_mp3_reject_bad_sync();
+test_mp3_reject_reserved_version();
+test_mp3_reject_reserved_layer();
+test_mp3_reject_zero_bitrate();
+test_mp3_reject_reserved_sample_rate();
+test_mp3_id3v2_skip_no_tag();
+test_mp3_id3v2_skip_with_tag();
+test_mp3_frame_size_with_padding();
+test_mp3_scan_multiple_frames();
+test_mp3_scan_no_frames();
+test_mp3_mono_channel();
+test_mp3_syncsafe();
+test_mp3_decode_produces_info();
+test_tag_id3v2_parse();
+test_tag_id3v2_reject_non_id3();
+test_tag_id3v2_reject_short();
+test_tag_vorbis_comment_parse();
+test_tag_vorbis_case_insensitive();
+test_tag_vorbis_reject_short();
+test_tag_syncsafe_decode();
+test_fft_all();
+test_opus_all();
+test_aac_all();
 
 print_summary();
 

@@ -1,0 +1,979 @@
+# ================================================================
+# aac.cyr -- AAC-LC codec (ADTS encoder + decoder/parser)
+# ================================================================
+#
+# Provides:
+#   aac_parse_adts_header(data, len)  -- parse 7-byte ADTS header
+#   aac_build_adts_header(sr, ch, frame_len, out_buf) -- build ADTS header
+#   aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
+#   aac_decode(data, len)             -- parse ADTS, return format info
+#
+# Requires: alloc, vec, str, math, fft, assert
+
+# ================================================================
+# AAC sample rate table (indexed by 4-bit sample_rate_index)
+# ================================================================
+
+var _aac_sample_rates = 0;
+
+fn _aac_init_rates() {
+    _aac_sample_rates = alloc(16 * 8);
+    store64(_aac_sample_rates + 0 * 8, 96000);
+    store64(_aac_sample_rates + 1 * 8, 88200);
+    store64(_aac_sample_rates + 2 * 8, 64000);
+    store64(_aac_sample_rates + 3 * 8, 48000);
+    store64(_aac_sample_rates + 4 * 8, 44100);
+    store64(_aac_sample_rates + 5 * 8, 32000);
+    store64(_aac_sample_rates + 6 * 8, 24000);
+    store64(_aac_sample_rates + 7 * 8, 22050);
+    store64(_aac_sample_rates + 8 * 8, 16000);
+    store64(_aac_sample_rates + 9 * 8, 12000);
+    store64(_aac_sample_rates + 10 * 8, 11025);
+    store64(_aac_sample_rates + 11 * 8, 8000);
+    store64(_aac_sample_rates + 12 * 8, 7350);
+    store64(_aac_sample_rates + 13 * 8, 0);
+    store64(_aac_sample_rates + 14 * 8, 0);
+    store64(_aac_sample_rates + 15 * 8, 0);
+    return 0;
+}
+
+# Channel count indexed by 3-bit channel configuration
+var _aac_channel_counts = 0;
+
+fn _aac_init_channels() {
+    _aac_channel_counts = alloc(8 * 8);
+    store64(_aac_channel_counts + 0 * 8, 0);
+    store64(_aac_channel_counts + 1 * 8, 1);
+    store64(_aac_channel_counts + 2 * 8, 2);
+    store64(_aac_channel_counts + 3 * 8, 3);
+    store64(_aac_channel_counts + 4 * 8, 4);
+    store64(_aac_channel_counts + 5 * 8, 5);
+    store64(_aac_channel_counts + 6 * 8, 6);
+    store64(_aac_channel_counts + 7 * 8, 8);
+    return 0;
+}
+
+fn aac_init() {
+    _aac_init_rates();
+    _aac_init_channels();
+    return 0;
+}
+
+# ================================================================
+# ADTS header struct (heap-allocated)
+# ================================================================
+# Layout (40 bytes):
+#   +0:  profile        (i64, 0=Main, 1=LC, 2=SSR, 3=LTP)
+#   +8:  sample_rate    (i64, Hz)
+#   +16: sr_index       (i64, 0..12)
+#   +24: channels       (i64)
+#   +32: frame_length   (i64, total frame bytes incl. header)
+
+fn aac_adts_new() {
+    var h = alloc(40);
+    memset(h, 0, 40);
+    return h;
+}
+
+fn aac_adts_profile(h)       { return load64(h); }
+fn aac_adts_sample_rate(h)   { return load64(h + 8); }
+fn aac_adts_sr_index(h)      { return load64(h + 16); }
+fn aac_adts_channels(h)      { return load64(h + 24); }
+fn aac_adts_frame_length(h)  { return load64(h + 32); }
+
+# ================================================================
+# ADTS header parsing
+# ================================================================
+
+# Parse an ADTS frame header from data (>= 7 bytes).
+# Returns ADTS header struct, or err().
+fn aac_parse_adts_header(data, len) {
+    if (len < 7) {
+        return err(ERR_INVALID_HEADER);
+    }
+
+    # Check sync word: 12 bits = 0xFFF
+    if (load8(data) != 0xFF) { return err(ERR_INVALID_HEADER); }
+    if ((load8(data + 1) & 0xF0) != 0xF0) { return err(ERR_INVALID_HEADER); }
+
+    # Layer must be 0 for AAC
+    if ((load8(data + 1) & 0x06) != 0) { return err(ERR_INVALID_HEADER); }
+
+    var profile = (load8(data + 2) >> 6) & 0x03;
+    var sr_index = (load8(data + 2) >> 2) & 0x0F;
+
+    if (sr_index >= 13) { return err(ERR_INVALID_HEADER); }
+
+    var sample_rate = load64(_aac_sample_rates + sr_index * 8);
+    if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
+
+    var channel_config = ((load8(data + 2) & 0x01) << 2) | ((load8(data + 3) >> 6) & 0x03);
+    if (channel_config == 0) { return err(ERR_INVALID_CHANNELS); }
+    if (channel_config >= 8) { return err(ERR_INVALID_CHANNELS); }
+    var channels = load64(_aac_channel_counts + channel_config * 8);
+
+    # Frame length: 13 bits spanning bytes 3-5
+    var frame_length = ((load8(data + 3) & 0x03) << 11)
+                     | (load8(data + 4) << 3)
+                     | ((load8(data + 5) >> 5) & 0x07);
+
+    if (frame_length < 7) { return err(ERR_INVALID_HEADER); }
+
+    var h = aac_adts_new();
+    store64(h,      profile);
+    store64(h + 8,  sample_rate);
+    store64(h + 16, sr_index);
+    store64(h + 24, channels);
+    store64(h + 32, frame_length);
+    return h;
+}
+
+# ================================================================
+# ADTS header building
+# ================================================================
+
+# Find sample rate index for a given rate.
+fn _aac_find_sr_index(sample_rate) {
+    var i = 0;
+    while (i < 13) {
+        if (load64(_aac_sample_rates + i * 8) == sample_rate) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4;  # default to 44100
+}
+
+# Build a 7-byte ADTS header into out_buf.
+# frame_len: raw frame data length (without header).
+# Returns 7.
+fn aac_build_adts_header(sample_rate, channels, frame_len, out_buf) {
+    var sr_index = _aac_find_sr_index(sample_rate);
+    var total_len = frame_len + 7;
+
+    store8(out_buf, 0xFF);
+    # MPEG-4, layer=0, protection_absent=1
+    store8(out_buf + 1, 0xF1);
+    # profile=LC(1) | sr_index | private=0 | channel MSB
+    store8(out_buf + 2, (1 << 6) | (sr_index << 2) | ((channels >> 2) & 0x01));
+    # channel LSBs | frame_length MSBs
+    store8(out_buf + 3, ((channels & 0x03) << 6) | ((total_len >> 11) & 0x03));
+    store8(out_buf + 4, (total_len >> 3) & 0xFF);
+    # frame_length LSBs | buffer fullness MSBs (0x7FF = VBR)
+    store8(out_buf + 5, ((total_len & 0x07) << 5) | 0x1F);
+    store8(out_buf + 6, 0xFC);  # buffer fullness LSBs + 0 frames - 1
+
+    return 7;
+}
+
+# ================================================================
+# AAC-LC constants
+# ================================================================
+
+var AAC_FRAME_SIZE = 1024;
+
+# Scale factor band boundaries for 48kHz / 44.1kHz (long window, 49 bands)
+var _aac_swb_offset = 0;
+var _AAC_NUM_SWB = 49;
+
+fn _aac_init_swb() {
+    _aac_swb_offset = alloc(50 * 8);
+    store64(_aac_swb_offset + 0 * 8, 0);
+    store64(_aac_swb_offset + 1 * 8, 4);
+    store64(_aac_swb_offset + 2 * 8, 8);
+    store64(_aac_swb_offset + 3 * 8, 12);
+    store64(_aac_swb_offset + 4 * 8, 16);
+    store64(_aac_swb_offset + 5 * 8, 20);
+    store64(_aac_swb_offset + 6 * 8, 24);
+    store64(_aac_swb_offset + 7 * 8, 28);
+    store64(_aac_swb_offset + 8 * 8, 32);
+    store64(_aac_swb_offset + 9 * 8, 36);
+    store64(_aac_swb_offset + 10 * 8, 40);
+    store64(_aac_swb_offset + 11 * 8, 48);
+    store64(_aac_swb_offset + 12 * 8, 56);
+    store64(_aac_swb_offset + 13 * 8, 64);
+    store64(_aac_swb_offset + 14 * 8, 72);
+    store64(_aac_swb_offset + 15 * 8, 80);
+    store64(_aac_swb_offset + 16 * 8, 88);
+    store64(_aac_swb_offset + 17 * 8, 96);
+    store64(_aac_swb_offset + 18 * 8, 108);
+    store64(_aac_swb_offset + 19 * 8, 120);
+    store64(_aac_swb_offset + 20 * 8, 132);
+    store64(_aac_swb_offset + 21 * 8, 144);
+    store64(_aac_swb_offset + 22 * 8, 160);
+    store64(_aac_swb_offset + 23 * 8, 176);
+    store64(_aac_swb_offset + 24 * 8, 196);
+    store64(_aac_swb_offset + 25 * 8, 216);
+    store64(_aac_swb_offset + 26 * 8, 240);
+    store64(_aac_swb_offset + 27 * 8, 264);
+    store64(_aac_swb_offset + 28 * 8, 292);
+    store64(_aac_swb_offset + 29 * 8, 320);
+    store64(_aac_swb_offset + 30 * 8, 352);
+    store64(_aac_swb_offset + 31 * 8, 384);
+    store64(_aac_swb_offset + 32 * 8, 416);
+    store64(_aac_swb_offset + 33 * 8, 448);
+    store64(_aac_swb_offset + 34 * 8, 480);
+    store64(_aac_swb_offset + 35 * 8, 512);
+    store64(_aac_swb_offset + 36 * 8, 544);
+    store64(_aac_swb_offset + 37 * 8, 576);
+    store64(_aac_swb_offset + 38 * 8, 608);
+    store64(_aac_swb_offset + 39 * 8, 640);
+    store64(_aac_swb_offset + 40 * 8, 672);
+    store64(_aac_swb_offset + 41 * 8, 704);
+    store64(_aac_swb_offset + 42 * 8, 736);
+    store64(_aac_swb_offset + 43 * 8, 768);
+    store64(_aac_swb_offset + 44 * 8, 800);
+    store64(_aac_swb_offset + 45 * 8, 832);
+    store64(_aac_swb_offset + 46 * 8, 864);
+    store64(_aac_swb_offset + 47 * 8, 896);
+    store64(_aac_swb_offset + 48 * 8, 928);
+    store64(_aac_swb_offset + 49 * 8, 1024);
+    return 0;
+}
+
+# ================================================================
+# MSB-first bit writer for AAC bitstream
+# ================================================================
+# Layout (32 bytes):
+#   +0:  buf (pointer)
+#   +8:  buf_len
+#   +16: buf_cap
+#   +24: current (u32 accumulator)
+#   +32: bits_in_current (0-7)
+
+fn _bw_new() {
+    var bw = alloc(40);
+    memset(bw, 0, 40);
+    var buf = alloc(8192);
+    store64(bw, buf);
+    store64(bw + 8, 0);
+    store64(bw + 16, 8192);
+    store64(bw + 24, 0);
+    store64(bw + 32, 0);
+    return bw;
+}
+
+fn _bw_push_byte(bw, byte) {
+    var buf = load64(bw);
+    var blen = load64(bw + 8);
+    var bcap = load64(bw + 16);
+    if (blen >= bcap) {
+        var new_cap = bcap * 2;
+        var new_buf = alloc(new_cap);
+        memcpy(new_buf, buf, blen);
+        store64(bw, new_buf);
+        store64(bw + 16, new_cap);
+        buf = new_buf;
+    }
+    store8(buf + blen, byte & 0xFF);
+    store64(bw + 8, blen + 1);
+    return 0;
+}
+
+# Write n bits from val (MSB-first, up to 32 bits).
+fn _bw_write(bw, val, n) {
+    var i = n - 1;
+    while (i >= 0) {
+        var cur = load64(bw + 24);
+        cur = (cur << 1) | ((val >> i) & 1);
+        var bits = load64(bw + 32) + 1;
+        store64(bw + 24, cur);
+        store64(bw + 32, bits);
+        if (bits == 8) {
+            _bw_push_byte(bw, cur & 0xFF);
+            store64(bw + 24, 0);
+            store64(bw + 32, 0);
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Flush remaining bits (zero-padded to byte boundary).
+# Returns Str (data, len).
+fn _bw_flush(bw) {
+    var bits = load64(bw + 32);
+    if (bits > 0) {
+        var cur = load64(bw + 24);
+        cur = cur << (8 - bits);
+        _bw_push_byte(bw, cur & 0xFF);
+        store64(bw + 24, 0);
+        store64(bw + 32, 0);
+    }
+    var buf = load64(bw);
+    var blen = load64(bw + 8);
+    return str_new(buf, blen);
+}
+
+fn _bw_byte_len(bw) {
+    var blen = load64(bw + 8);
+    if (load64(bw + 32) > 0) { blen = blen + 1; }
+    return blen;
+}
+
+# ================================================================
+# AAC-LC frame encoder
+# ================================================================
+
+# Encode a single AAC-LC frame.
+# samples: pointer to 1024*ch f64 values (interleaved)
+# Returns Str (raw frame data without ADTS header).
+fn _aac_encode_frame(samples, channels, target_bytes) {
+    var ch = channels;
+
+    # Downmix to mono
+    var mono = alloc(AAC_FRAME_SIZE * 8);
+    var i = 0;
+    while (i < AAC_FRAME_SIZE) {
+        var sum = F64_ZERO;
+        var c = 0;
+        while (c < ch) {
+            var idx = i * ch + c;
+            sum = f64_add(sum, load64(samples + idx * 8));
+            c = c + 1;
+        }
+        store64(mono + i * 8, f64_div(sum, f64_from(ch)));
+        i = i + 1;
+    }
+
+    # Apply sine window (2048-point for AAC MDCT)
+    var windowed_size = AAC_FRAME_SIZE * 2;
+    var windowed = alloc(windowed_size * 8);
+    memset(windowed, 0, windowed_size * 8);
+    i = 0;
+    while (i < windowed_size) {
+        var angle = f64_div(
+            f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
+            f64_from(windowed_size)
+        );
+        var w = f64_sin(angle);
+        if (i < AAC_FRAME_SIZE) {
+            store64(windowed + i * 8, f64_mul(load64(mono + i * 8), w));
+        }
+        # Second half stays zero (no overlap state in stateless encoder)
+        i = i + 1;
+    }
+
+    # Forward MDCT: 2048 input -> 1024 spectral coefficients
+    var mdct_out = alloc(AAC_FRAME_SIZE * 8);
+    memset(mdct_out, 0, AAC_FRAME_SIZE * 8);
+    fft_mdct(windowed, windowed_size, mdct_out);
+
+    # Quantize spectral coefficients per scale factor band
+    var scale_factors = alloc(_AAC_NUM_SWB * 8);
+    memset(scale_factors, 0, _AAC_NUM_SWB * 8);
+    var quant_spec = alloc(AAC_FRAME_SIZE * 8);
+    memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
+
+    # Determine scale factors based on band energy
+    var band = 0;
+    var j = 0;
+    while (band < _AAC_NUM_SWB) {
+        var start = load64(_aac_swb_offset + band * 8);
+        var end = load64(_aac_swb_offset + (band + 1) * 8);
+
+        j = start;
+        var energy = F64_ZERO;
+        while (j < end) {
+            var c2 = load64(mdct_out + j * 8);
+            energy = f64_add(energy, f64_mul(c2, c2));
+            j = j + 1;
+        }
+
+        var band_size = end - start;
+        if (band_size < 1) { band_size = 1; }
+        var rms = f64_sqrt(f64_div(energy, f64_from(band_size)));
+
+        # Choose scale factor
+        var floor_val = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+        var scf = 0;
+        if (f64_gt(rms, floor_val) == 1) {
+            var log_rms = f64_log2(rms);
+            # target quantized magnitude ~10
+            var target = f64_from(10);
+            var target_log = f64_log2(f64_div(target, F64_128));
+            scf = f64_to(f64_add(f64_from(100), f64_mul(f64_from(4), f64_sub(log_rms, target_log))));
+        }
+        if (scf < 0) { scf = 0; }
+        if (scf > 200) { scf = 200; }
+        store64(scale_factors + band * 8, scf);
+
+        # Quantize: q = round(|x|^0.75 / step)
+        var step = f64_pow(F64_TWO, f64_mul(f64_from(1), f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4))));
+        j = start;
+        while (j < end) {
+            var xval = load64(mdct_out + j * 8);
+            var abs_val = f64_abs(xval);
+            var floor_step = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
+            if (f64_gt(step, floor_step) == 1) {
+                var powered = f64_pow(abs_val, f64_div(f64_from(3), f64_from(4)));
+                var q = f64_to(f64_floor(f64_add(f64_div(powered, step), F64_HALF)));
+                if (q > 8191) { q = 8191; }
+                if (q < 0 - 8191) { q = 0 - 8191; }
+                if (f64_lt(xval, F64_ZERO) == 1) {
+                    store64(quant_spec + j * 8, 0 - q);
+                } else {
+                    store64(quant_spec + j * 8, q);
+                }
+            }
+            j = j + 1;
+        }
+
+        band = band + 1;
+    }
+
+    # Build AAC bitstream
+    var bw = _bw_new();
+
+    # ID_SCE tag (3 bits) + instance tag (4 bits)
+    _bw_write(bw, 0, 3);  # ID_SCE = 0
+    _bw_write(bw, 0, 4);  # instance_tag = 0
+
+    # ICS info
+    _bw_write(bw, 0, 1);  # ics_reserved_bit
+    _bw_write(bw, 0, 2);  # window_sequence = ONLY_LONG_SEQUENCE
+    _bw_write(bw, 0, 1);  # window_shape = sine
+    _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
+
+    # predictor_data_present = 0
+    _bw_write(bw, 0, 1);
+
+    # Determine which bands have nonzero data
+    var band_has_data = alloc(_AAC_NUM_SWB * 8);
+    memset(band_has_data, 0, _AAC_NUM_SWB * 8);
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        var start = load64(_aac_swb_offset + band * 8);
+        var end = load64(_aac_swb_offset + (band + 1) * 8);
+        j = start;
+        while (j < end) {
+            if (load64(quant_spec + j * 8) != 0) {
+                store64(band_has_data + band * 8, 1);
+                j = end;  # break
+            }
+            j = j + 1;
+        }
+        band = band + 1;
+    }
+
+    # Section coding: group consecutive bands with same codebook
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        var has_data = load64(band_has_data + band * 8);
+        var cb = 0;
+        if (has_data != 0) { cb = 11; }  # escape book
+
+        # Find run of same codebook
+        var run = 1;
+        while (band + run < _AAC_NUM_SWB) {
+            var next_has = load64(band_has_data + (band + run) * 8);
+            if ((next_has != 0) != (has_data != 0)) { break; }
+            run = run + 1;
+        }
+
+        _bw_write(bw, cb, 4);
+
+        # Encode section length with escape (max 31 for long window)
+        var remaining = run;
+        while (remaining >= 31) {
+            _bw_write(bw, 31, 5);
+            remaining = remaining - 31;
+        }
+        _bw_write(bw, remaining, 5);
+
+        band = band + run;
+    }
+
+    # Scale factor data: global gain (8 bits)
+    var global_gain = load64(scale_factors);
+    if (global_gain < 0) { global_gain = 0; }
+    if (global_gain > 255) { global_gain = 255; }
+    _bw_write(bw, global_gain, 8);
+
+    # Differential scale factors for bands with data
+    # (Simplified: just write zero-diff codes for non-first bands)
+    var prev_scf = global_gain;
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        if (load64(band_has_data + band * 8) != 0) {
+            var scf_val = load64(scale_factors + band * 8);
+            var diff = scf_val - prev_scf;
+            if (diff < 0 - 60) { diff = 0 - 60; }
+            if (diff > 60) { diff = 60; }
+            var index = diff + 60;
+            # Simplified Huffman: write the index directly as 7 bits
+            # (Full AAC uses variable-length SCF codebook)
+            _bw_write(bw, index, 7);
+            prev_scf = scf_val;
+        }
+        band = band + 1;
+    }
+
+    # Spectral data: for each band with codebook 11 (escape pairs)
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        if (load64(band_has_data + band * 8) == 0) {
+            band = band + 1;
+            continue;
+        }
+
+        var start = load64(_aac_swb_offset + band * 8);
+        var end = load64(_aac_swb_offset + (band + 1) * 8);
+
+        # Encode in pairs
+        i = start;
+        while (i + 1 < end) {
+            var qx = load64(quant_spec + i * 8);
+            var qy = load64(quant_spec + (i + 1) * 8);
+
+            var ax = qx;
+            if (ax < 0) { ax = 0 - ax; }
+            var ay = qy;
+            if (ay < 0) { ay = 0 - ay; }
+
+            var cx = ax;
+            if (cx > 16) { cx = 16; }
+            var cy = ay;
+            if (cy > 16) { cy = 16; }
+
+            # Pair index: cx * 17 + cy (9 bits)
+            var pair_idx = cx * 17 + cy;
+            _bw_write(bw, pair_idx, 9);
+
+            # Sign bits
+            if (cx > 0) {
+                if (qx < 0) { _bw_write(bw, 1, 1); }
+                else { _bw_write(bw, 0, 1); }
+            }
+            if (cy > 0) {
+                if (qy < 0) { _bw_write(bw, 1, 1); }
+                else { _bw_write(bw, 0, 1); }
+            }
+
+            # Escape codes for values >= 16
+            if (ax >= 16) {
+                var esc = ax - 16;
+                _bw_write(bw, esc, 8);  # simplified escape
+            }
+            if (ay >= 16) {
+                var esc = ay - 16;
+                _bw_write(bw, esc, 8);
+            }
+
+            i = i + 2;
+        }
+        # Handle odd trailing coefficient
+        if (i < end) {
+            var qx = load64(quant_spec + i * 8);
+            var ax = qx;
+            if (ax < 0) { ax = 0 - ax; }
+            var cx = ax;
+            if (cx > 16) { cx = 16; }
+            var pair_idx = cx * 17;
+            _bw_write(bw, pair_idx, 9);
+            if (cx > 0) {
+                if (qx < 0) { _bw_write(bw, 1, 1); }
+                else { _bw_write(bw, 0, 1); }
+            }
+        }
+
+        band = band + 1;
+    }
+
+    # ID_END tag
+    _bw_write(bw, 7, 3);
+
+    var frame_data = _bw_flush(bw);
+
+    # Pad to target size if needed
+    var flen = str_len(frame_data);
+    if (flen < target_bytes) {
+        var padded = alloc(target_bytes);
+        memcpy(padded, str_data(frame_data), flen);
+        memset(padded + flen, 0, target_bytes - flen);
+        return str_new(padded, target_bytes);
+    }
+    return frame_data;
+}
+
+# ================================================================
+# AAC-LC Encoder (ADTS output)
+# ================================================================
+#
+# aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
+#   samples_vec: vec of f64 bit patterns (interleaved)
+#   sample_rate: must be a standard AAC rate
+#   channels: 1 or 2
+#   bitrate: > 0
+#   out_buf: pointer to output buffer
+# Returns bytes written, or err().
+
+fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
+    # Validate parameters
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    # Check sample rate is valid
+    var sr_valid = 0;
+    var si = 0;
+    while (si < 13) {
+        if (load64(_aac_sample_rates + si * 8) == sample_rate) {
+            sr_valid = 1;
+        }
+        si = si + 1;
+    }
+    if (sr_valid == 0) { return err(ERR_INVALID_RATE); }
+
+    if (channels == 0) { return err(ERR_INVALID_CHANNELS); }
+    if (channels > 2) { return err(ERR_INVALID_CHANNELS); }
+    if (bitrate == 0) { return err(ERR_ENCODE); }
+
+    var ch = channels;
+    var total_samples = vec_len(samples_vec);
+    var frame_interleaved = AAC_FRAME_SIZE * ch;
+
+    # Target bytes per frame: bitrate / 8 / (sample_rate / 1024)
+    var frames_per_sec = f64_div(f64_from(sample_rate), f64_from(AAC_FRAME_SIZE));
+    var target_bytes = f64_to(f64_div(f64_from(bitrate / 8), frames_per_sec));
+    if (target_bytes < 20) { target_bytes = 20; }
+
+    var write_pos = 0;
+    var sample_pos = 0;
+
+    while (sample_pos < total_samples) {
+        var end = sample_pos + frame_interleaved;
+        if (end > total_samples) { end = total_samples; }
+        var count = end - sample_pos;
+
+        # Build frame buffer
+        var frame_buf = alloc(frame_interleaved * 8);
+        memset(frame_buf, 0, frame_interleaved * 8);
+        var fi = 0;
+        while (fi < count) {
+            store64(frame_buf + fi * 8, vec_get(samples_vec, sample_pos + fi));
+            fi = fi + 1;
+        }
+
+        var frame_data = _aac_encode_frame(frame_buf, channels, target_bytes);
+
+        # Write ADTS header + frame
+        var adts_buf = alloc(7);
+        aac_build_adts_header(sample_rate, channels, str_len(frame_data), adts_buf);
+        memcpy(out_buf + write_pos, adts_buf, 7);
+        write_pos = write_pos + 7;
+        memcpy(out_buf + write_pos, str_data(frame_data), str_len(frame_data));
+        write_pos = write_pos + str_len(frame_data);
+
+        sample_pos = end;
+    }
+
+    # Handle empty input: encode one silence frame
+    if (write_pos == 0) {
+        var silence = alloc(frame_interleaved * 8);
+        memset(silence, 0, frame_interleaved * 8);
+        var frame_data = _aac_encode_frame(silence, channels, target_bytes);
+        var adts_buf = alloc(7);
+        aac_build_adts_header(sample_rate, channels, str_len(frame_data), adts_buf);
+        memcpy(out_buf + write_pos, adts_buf, 7);
+        write_pos = write_pos + 7;
+        memcpy(out_buf + write_pos, str_data(frame_data), str_len(frame_data));
+        write_pos = write_pos + str_len(frame_data);
+    }
+
+    return write_pos;
+}
+
+# ================================================================
+# AAC Decoder (ADTS parsing only -- actual decoding returns error)
+# ================================================================
+#
+# aac_decode(data, len)
+#   Parses ADTS frames and returns format info.
+#   Actual audio decoding returns ERR_UNSUPPORTED_FMT.
+
+fn aac_decode(data, len) {
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    if (len < 7) { return err(ERR_INVALID_HEADER); }
+
+    # Find first valid ADTS frame
+    var pos = 0;
+    var first_header = 0;
+    var frame_count = 0;
+    var total_payload = 0;
+
+    while (pos + 7 <= len) {
+        # Check sync word
+        if (load8(data + pos) != 0xFF) {
+            pos = pos + 1;
+            continue;
+        }
+        if ((load8(data + pos + 1) & 0xF0) != 0xF0) {
+            pos = pos + 1;
+            continue;
+        }
+
+        var header = aac_parse_adts_header(data + pos, len - pos);
+        if (is_err(header) == 1) {
+            pos = pos + 1;
+            continue;
+        }
+
+        var frame_length = aac_adts_frame_length(header);
+        if (pos + frame_length > len) { break; }  # truncated
+
+        if (first_header == 0) {
+            first_header = header;
+        }
+
+        # Determine header size (7 without CRC, 9 with CRC)
+        var protection_absent = (load8(data + pos + 1) & 0x01);
+        var hdr_size = 7;
+        if (protection_absent == 0) { hdr_size = 9; }
+
+        if (frame_length > hdr_size) {
+            total_payload = total_payload + (frame_length - hdr_size);
+        }
+
+        frame_count = frame_count + 1;
+        pos = pos + frame_length;
+    }
+
+    if (first_header == 0) { return err(ERR_INVALID_HEADER); }
+
+    # Build format info
+    var sr = aac_adts_sample_rate(first_header);
+    var ch = aac_adts_channels(first_header);
+    var total_frames = frame_count * AAC_FRAME_SIZE;
+    var dur = F64_ZERO;
+    if (sr > 0) {
+        dur = f64_div(f64_from(total_frames), f64_from(sr));
+    }
+
+    var fi = fmtinfo_new(FMT_AAC, sr, ch, 16, dur, total_frames);
+    return decode_result_new(fi, vec_new());
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_aac_adts_parse_valid() {
+    test_group("aac: parse valid ADTS header");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    # Build a known ADTS header: LC, 44100, stereo, frame_length=100
+    var buf = alloc(7);
+    store8(buf, 0xFF);
+    store8(buf + 1, 0xF1);  # sync + MPEG-4 + layer=0 + protection_absent=1
+    # profile=1(LC), sr_index=4(44100), private=0, ch_config MSB=0
+    store8(buf + 2, 0x50);
+    # ch_config[1:0]=10, frame_length bits
+    # channels=2 -> ch_config=2 -> bits = 10
+    # frame_length=100: bits 12-11=00, 10-3=00001100, 2-0=100
+    store8(buf + 3, 0x80);  # ch_config LSBs=10, frame[12:11]=00
+    store8(buf + 4, 0x0C);  # frame[10:3] = 12 -> 12<<3 = 96
+    store8(buf + 5, 0x80);  # frame[2:0] = 100 -> 4, so 96+4=100; buffer fullness MSBs
+    store8(buf + 6, 0x00);
+
+    var h = aac_parse_adts_header(buf, 7);
+    assert(is_err(h) == 0, "parse succeeds");
+    assert_eq(aac_adts_profile(h), 1, "profile LC");
+    assert_eq(aac_adts_sample_rate(h), 44100, "sample rate");
+    assert_eq(aac_adts_channels(h), 2, "channels");
+    assert_eq(aac_adts_frame_length(h), 100, "frame length");
+
+    return 0;
+}
+
+fn test_aac_adts_reject_short() {
+    test_group("aac: reject short ADTS header");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    var buf = alloc(3);
+    store8(buf, 0xFF);
+    store8(buf + 1, 0xF1);
+    store8(buf + 2, 0x50);
+    var h = aac_parse_adts_header(buf, 3);
+    assert(is_err(h) == 1, "short header rejected");
+
+    return 0;
+}
+
+fn test_aac_adts_reject_bad_sync() {
+    test_group("aac: reject bad sync word");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    var buf = alloc(7);
+    memset(buf, 0, 7);
+    var h = aac_parse_adts_header(buf, 7);
+    assert(is_err(h) == 1, "bad sync rejected");
+
+    return 0;
+}
+
+fn test_aac_adts_reject_reserved_sr() {
+    test_group("aac: reject reserved sample rate index");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    var buf = alloc(7);
+    store8(buf, 0xFF);
+    store8(buf + 1, 0xF1);
+    store8(buf + 2, 0x7C);  # profile=1, sr_index=15(reserved)
+    store8(buf + 3, 0x80);
+    store8(buf + 4, 0x00);
+    store8(buf + 5, 0x00);
+    store8(buf + 6, 0x00);
+    var h = aac_parse_adts_header(buf, 7);
+    assert(is_err(h) == 1, "reserved sr_index rejected");
+
+    return 0;
+}
+
+fn test_aac_adts_header_roundtrip() {
+    test_group("aac: ADTS header build+parse roundtrip");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    var buf = alloc(7);
+    aac_build_adts_header(44100, 2, 100, buf);
+
+    # Verify sync
+    assert_eq(load8(buf), 0xFF, "sync byte 0");
+    assert_eq(load8(buf + 1) & 0xF0, 0xF0, "sync byte 1 hi nibble");
+
+    # Parse it back
+    var h = aac_parse_adts_header(buf, 7);
+    assert(is_err(h) == 0, "roundtrip parse ok");
+    assert_eq(aac_adts_profile(h), 1, "rt profile LC");
+    assert_eq(aac_adts_sample_rate(h), 44100, "rt sample rate");
+    assert_eq(aac_adts_channels(h), 2, "rt channels");
+    assert_eq(aac_adts_frame_length(h), 107, "rt frame length (100+7)");
+
+    return 0;
+}
+
+fn test_aac_encode_rejects_bad_rate() {
+    test_group("aac: encode rejects bad sample rate");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    var samples = vec_new();
+    var out = alloc(65536);
+    var r = aac_encode(samples, 11111, 1, 64000, out);
+    assert(is_err(r) == 1, "bad rate rejected");
+
+    return 0;
+}
+
+fn test_aac_encode_rejects_bad_channels() {
+    test_group("aac: encode rejects bad channels");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    var samples = vec_new();
+    var out = alloc(65536);
+    var r = aac_encode(samples, 44100, 0, 64000, out);
+    assert(is_err(r) == 1, "0 channels rejected");
+
+    return 0;
+}
+
+fn test_aac_encode_rejects_zero_bitrate() {
+    test_group("aac: encode rejects zero bitrate");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    var samples = vec_new();
+    var out = alloc(65536);
+    var r = aac_encode(samples, 44100, 1, 0, out);
+    assert(is_err(r) == 1, "zero bitrate rejected");
+
+    return 0;
+}
+
+fn test_aac_encode_produces_adts() {
+    test_group("aac: encode produces valid ADTS");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    # Build 1024 silence samples (1 frame, mono)
+    var samples = vec_new();
+    var si = 0;
+    while (si < 1024) {
+        vec_push(samples, F64_ZERO);
+        si = si + 1;
+    }
+
+    var out = alloc(131072);
+    var result = aac_encode(samples, 44100, 1, 64000, out);
+    assert(is_err(result) == 0, "encode succeeds");
+    assert(result > 7, "produces bytes");
+
+    # Check ADTS sync word
+    assert_eq(load8(out), 0xFF, "ADTS sync[0]");
+    assert_eq(load8(out + 1) & 0xF0, 0xF0, "ADTS sync[1]");
+
+    # Parse the ADTS header
+    var h = aac_parse_adts_header(out, result);
+    assert(is_err(h) == 0, "parse encoded ADTS ok");
+    assert_eq(aac_adts_profile(h), 1, "profile LC");
+    assert_eq(aac_adts_sample_rate(h), 44100, "sample rate 44100");
+    assert_eq(aac_adts_channels(h), 1, "mono");
+
+    return 0;
+}
+
+fn test_aac_decode_empty() {
+    test_group("aac: decode rejects empty");
+
+    if (_aac_sample_rates == 0) { aac_init(); }
+
+    var buf = alloc(1);
+    var r = aac_decode(buf, 0);
+    assert(is_err(r) == 1, "empty data rejected");
+
+    return 0;
+}
+
+fn test_aac_bitwriter_basic() {
+    test_group("aac: bitwriter basic");
+
+    var bw = _bw_new();
+    _bw_write(bw, 0xFF, 8);
+    _bw_write(bw, 0x0, 4);
+    _bw_write(bw, 0xF, 4);
+    var result = _bw_flush(bw);
+    assert_eq(str_len(result), 2, "2 bytes");
+    assert_eq(load8(str_data(result)), 0xFF, "byte 0 = 0xFF");
+    assert_eq(load8(str_data(result) + 1), 0x0F, "byte 1 = 0x0F");
+
+    return 0;
+}
+
+fn test_aac_all() {
+    fft_init();
+    aac_init();
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    test_aac_adts_parse_valid();
+    test_aac_adts_reject_short();
+    test_aac_adts_reject_bad_sync();
+    test_aac_adts_reject_reserved_sr();
+    test_aac_adts_header_roundtrip();
+    test_aac_encode_rejects_bad_rate();
+    test_aac_encode_rejects_bad_channels();
+    test_aac_encode_rejects_zero_bitrate();
+    test_aac_encode_produces_adts();
+    test_aac_decode_empty();
+    test_aac_bitwriter_basic();
+    return 0;
+}

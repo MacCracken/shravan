@@ -1,0 +1,609 @@
+# ================================================================
+# tag.cyr — audio metadata tag reader (ID3v2 + Vorbis Comment)
+# ================================================================
+#
+# Reads ID3v2.3/v2.4 text frames and Vorbis Comment fields.
+# All string fields are stored as Str pointers (via str_new) or 0 for None.
+#
+# Requires: alloc, vec, str, string, assert helpers from main.cyr
+
+# ================================================================
+# AudioMetadata struct (heap-allocated)
+# ================================================================
+# Layout (56 bytes):
+#   +0:  title         (Str pointer or 0)
+#   +8:  artist        (Str pointer or 0)
+#   +16: album         (Str pointer or 0)
+#   +24: track_number  (Str pointer or 0)
+#   +32: year          (Str pointer or 0)
+#   +40: genre         (Str pointer or 0)
+#   +48: comment       (Str pointer or 0)
+
+fn tag_meta_new() {
+    var m = alloc(56);
+    memset(m, 0, 56);
+    return m;
+}
+
+fn tag_meta_title(m)        { return load64(m); }
+fn tag_meta_artist(m)       { return load64(m + 8); }
+fn tag_meta_album(m)        { return load64(m + 16); }
+fn tag_meta_track_number(m) { return load64(m + 24); }
+fn tag_meta_year(m)         { return load64(m + 32); }
+fn tag_meta_genre(m)        { return load64(m + 40); }
+fn tag_meta_comment(m)      { return load64(m + 48); }
+
+fn tag_meta_set_title(m, s)        { store64(m, s); return 0; }
+fn tag_meta_set_artist(m, s)       { store64(m + 8, s); return 0; }
+fn tag_meta_set_album(m, s)        { store64(m + 16, s); return 0; }
+fn tag_meta_set_track_number(m, s) { store64(m + 24, s); return 0; }
+fn tag_meta_set_year(m, s)         { store64(m + 32, s); return 0; }
+fn tag_meta_set_genre(m, s)        { store64(m + 40, s); return 0; }
+fn tag_meta_set_comment(m, s)      { store64(m + 48, s); return 0; }
+
+# ================================================================
+# Syncsafe integer (named tag_syncsafe to avoid mp3 collision)
+# ================================================================
+
+fn tag_syncsafe(data, off) {
+    return ((load8(data + off) & 0x7F) << 21)
+         | ((load8(data + off + 1) & 0x7F) << 14)
+         | ((load8(data + off + 2) & 0x7F) << 7)
+         | (load8(data + off + 3) & 0x7F);
+}
+
+# ================================================================
+# Internal helpers
+# ================================================================
+
+# Extract text from an ID3v2 text frame body.
+# First byte is encoding: 0/3 = Latin-1/UTF-8, 1/2 = UTF-16 (skip).
+# Returns Str pointer or 0 if empty/unsupported.
+fn _tag_extract_text(frame_data, frame_len) {
+    if (frame_len < 2) { return 0; }
+    var encoding = load8(frame_data);
+    var text_start = frame_data + 1;
+    var text_len = frame_len - 1;
+
+    # Only handle encoding 0 (Latin-1) and 3 (UTF-8)
+    if (encoding != 0) {
+        if (encoding != 3) {
+            return 0;  # Skip UTF-16 for now
+        }
+    }
+
+    # Strip trailing null bytes
+    while (text_len > 0) {
+        if (load8(text_start + text_len - 1) != 0) { break; }
+        text_len = text_len - 1;
+    }
+
+    if (text_len == 0) { return 0; }
+
+    # Copy to a fresh buffer
+    var buf = alloc(text_len + 1);
+    memcpy(buf, text_start, text_len);
+    store8(buf + text_len, 0);
+    return str_new(buf, text_len);
+}
+
+# Check if 4 bytes at ptr match a 4-char tag
+fn _tag_id_eq(ptr, c0, c1, c2, c3) {
+    if (load8(ptr) != c0) { return 0; }
+    if (load8(ptr + 1) != c1) { return 0; }
+    if (load8(ptr + 2) != c2) { return 0; }
+    if (load8(ptr + 3) != c3) { return 0; }
+    return 1;
+}
+
+# Assign a text Str to the right metadata field based on frame ID
+fn _tag_assign_text(meta, id_ptr, text) {
+    if (text == 0) { return 0; }
+
+    # TIT2 = 0x54 0x49 0x54 0x32
+    if (_tag_id_eq(id_ptr, 0x54, 0x49, 0x54, 0x32) == 1) {
+        tag_meta_set_title(meta, text);
+        return 0;
+    }
+    # TPE1 = 0x54 0x50 0x45 0x31
+    if (_tag_id_eq(id_ptr, 0x54, 0x50, 0x45, 0x31) == 1) {
+        tag_meta_set_artist(meta, text);
+        return 0;
+    }
+    # TALB = 0x54 0x41 0x4C 0x42
+    if (_tag_id_eq(id_ptr, 0x54, 0x41, 0x4C, 0x42) == 1) {
+        tag_meta_set_album(meta, text);
+        return 0;
+    }
+    # TRCK = 0x54 0x52 0x43 0x4B
+    if (_tag_id_eq(id_ptr, 0x54, 0x52, 0x43, 0x4B) == 1) {
+        tag_meta_set_track_number(meta, text);
+        return 0;
+    }
+    # TDRC = 0x54 0x44 0x52 0x43
+    if (_tag_id_eq(id_ptr, 0x54, 0x44, 0x52, 0x43) == 1) {
+        tag_meta_set_year(meta, text);
+        return 0;
+    }
+    # TYER = 0x54 0x59 0x45 0x52
+    if (_tag_id_eq(id_ptr, 0x54, 0x59, 0x45, 0x52) == 1) {
+        tag_meta_set_year(meta, text);
+        return 0;
+    }
+    # TCON = 0x54 0x43 0x4F 0x4E
+    if (_tag_id_eq(id_ptr, 0x54, 0x43, 0x4F, 0x4E) == 1) {
+        tag_meta_set_genre(meta, text);
+        return 0;
+    }
+    return 0;
+}
+
+# ================================================================
+# ID3v2 reader
+# ================================================================
+
+fn tag_read_id3v2(data, len) {
+    if (len < 10) { return err(ERR_INVALID_HEADER); }
+
+    # Check "ID3" magic
+    if (load8(data) != 0x49)     { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 1) != 0x44) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 2) != 0x33) { return err(ERR_INVALID_HEADER); }
+
+    var major_version = load8(data + 3);
+    # var revision = load8(data + 4);
+    # var flags = load8(data + 5);
+
+    var tag_size = tag_syncsafe(data, 6);
+    if (len < 10 + tag_size) { return err(ERR_END_OF_STREAM); }
+
+    var meta = tag_meta_new();
+    var tag_data = data + 10;
+
+    # ID3v2.3 / v2.4 frames: 4-byte ID + 4-byte size + 2-byte flags
+    var pos = 0;
+    while (pos + 10 <= tag_size) {
+        var id_ptr = tag_data + pos;
+
+        # Check for padding (all zeros)
+        if (load8(id_ptr) == 0) {
+            if (load8(id_ptr + 1) == 0) {
+                if (load8(id_ptr + 2) == 0) {
+                    if (load8(id_ptr + 3) == 0) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        var frame_size = 0;
+        if (major_version == 4) {
+            # v2.4: syncsafe frame size
+            frame_size = tag_syncsafe(tag_data, pos + 4);
+        } else {
+            # v2.3: big-endian u32
+            frame_size = read_u32_be(tag_data, pos + 4);
+        }
+
+        # Skip flags (2 bytes)
+        pos = pos + 10;
+
+        if (frame_size == 0) { break; }
+        if (pos + frame_size > tag_size) { break; }
+
+        var frame_data = tag_data + pos;
+
+        # Handle COMM (comment) frames specially
+        # COMM = 0x43 0x4F 0x4D 0x4D
+        if (_tag_id_eq(id_ptr, 0x43, 0x4F, 0x4D, 0x4D) == 1) {
+            # Comment: encoding + 3-byte language + text
+            if (frame_size > 4) {
+                var comm_text = _tag_extract_text(frame_data + 3, frame_size - 3);
+                if (comm_text != 0) {
+                    tag_meta_set_comment(meta, comm_text);
+                }
+            }
+        } else {
+            # Standard text frame
+            var text = _tag_extract_text(frame_data, frame_size);
+            _tag_assign_text(meta, id_ptr, text);
+        }
+
+        pos = pos + frame_size;
+    }
+
+    return meta;
+}
+
+# ================================================================
+# Vorbis Comment reader
+# ================================================================
+
+# Convert a byte to uppercase ASCII (a-z -> A-Z)
+fn _tag_to_upper(c) {
+    if (c >= 97) {
+        if (c <= 122) {
+            return c - 32;
+        }
+    }
+    return c;
+}
+
+# Case-insensitive field name comparison against uppercase target
+fn _tag_field_eq(field_ptr, field_len, target) {
+    var tlen = strlen(target);
+    if (field_len != tlen) { return 0; }
+    var i = 0;
+    while (i < field_len) {
+        var c = _tag_to_upper(load8(field_ptr + i));
+        if (c != load8(target + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn tag_read_vorbis(data, len) {
+    if (len < 4) { return err(ERR_END_OF_STREAM); }
+
+    var pos = 0;
+
+    # Vendor string length (LE u32)
+    var vendor_len = read_u32_le(data, pos);
+    pos = pos + 4;
+    if (pos + vendor_len > len) { return err(ERR_END_OF_STREAM); }
+    pos = pos + vendor_len;  # skip vendor string
+
+    # Comment count
+    if (pos + 4 > len) { return err(ERR_END_OF_STREAM); }
+    var comment_count = read_u32_le(data, pos);
+    pos = pos + 4;
+
+    var meta = tag_meta_new();
+
+    var ci = 0;
+    while (ci < comment_count) {
+        if (pos + 4 > len) { break; }
+        var comment_len = read_u32_le(data, pos);
+        pos = pos + 4;
+        if (pos + comment_len > len) { break; }
+
+        var comment_ptr = data + pos;
+        pos = pos + comment_len;
+
+        # Find '=' separator
+        var eq_pos = memchr(comment_ptr, 61, comment_len);  # 61 = '='
+        if (eq_pos >= 0) {
+            var field_ptr = comment_ptr;
+            var field_len = eq_pos;
+            var value_ptr = comment_ptr + eq_pos + 1;
+            var value_len = comment_len - eq_pos - 1;
+
+            if (value_len > 0) {
+                # Copy value to new buffer
+                var vbuf = alloc(value_len + 1);
+                memcpy(vbuf, value_ptr, value_len);
+                store8(vbuf + value_len, 0);
+                var val_str = str_new(vbuf, value_len);
+
+                if (_tag_field_eq(field_ptr, field_len, "TITLE") == 1) {
+                    tag_meta_set_title(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "ARTIST") == 1) {
+                    tag_meta_set_artist(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "ALBUM") == 1) {
+                    tag_meta_set_album(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "TRACKNUMBER") == 1) {
+                    tag_meta_set_track_number(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "DATE") == 1) {
+                    tag_meta_set_year(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "GENRE") == 1) {
+                    tag_meta_set_genre(meta, val_str);
+                }
+                if (_tag_field_eq(field_ptr, field_len, "COMMENT") == 1) {
+                    tag_meta_set_comment(meta, val_str);
+                }
+            }
+        }
+
+        ci = ci + 1;
+    }
+
+    return meta;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+# Helper: build an ID3v2.3 tag with text frames
+# frames: vec of { id_ptr (4 bytes), value_cstr }
+fn _tag_build_id3v2(frame_ids, frame_vals, num_frames) {
+    # First pass: compute total frame data size
+    var total_frame_data = 0;
+    var fi = 0;
+    while (fi < num_frames) {
+        var val = vec_get(frame_vals, fi);
+        var vlen = str_len(val);
+        total_frame_data = total_frame_data + 10 + 1 + vlen;  # 10 header + 1 encoding + value
+        fi = fi + 1;
+    }
+
+    var tag_size = total_frame_data;
+    var total_size = 10 + tag_size;
+    var out = alloc(total_size);
+    memset(out, 0, total_size);
+
+    # ID3 header
+    store8(out, 0x49);     # 'I'
+    store8(out + 1, 0x44); # 'D'
+    store8(out + 2, 0x33); # '3'
+    store8(out + 3, 3);    # version 2.3
+    store8(out + 4, 0);    # revision
+    store8(out + 5, 0);    # flags
+
+    # Syncsafe tag size
+    store8(out + 6, (tag_size >> 21) & 0x7F);
+    store8(out + 7, (tag_size >> 14) & 0x7F);
+    store8(out + 8, (tag_size >> 7) & 0x7F);
+    store8(out + 9, tag_size & 0x7F);
+
+    # Write frames
+    var pos = 10;
+    fi = 0;
+    while (fi < num_frames) {
+        var id = vec_get(frame_ids, fi);
+        var val = vec_get(frame_vals, fi);
+        var vlen = str_len(val);
+        var frame_size = 1 + vlen;  # encoding byte + text
+
+        # Frame ID (4 bytes)
+        memcpy(out + pos, str_data(id), 4);
+        pos = pos + 4;
+
+        # Frame size (big-endian u32)
+        write_u32_be(out, pos, frame_size);
+        pos = pos + 4;
+
+        # Flags (2 bytes, zero)
+        pos = pos + 2;
+
+        # Encoding byte: 3 = UTF-8
+        store8(out + pos, 3);
+        pos = pos + 1;
+
+        # Value
+        memcpy(out + pos, str_data(val), vlen);
+        pos = pos + vlen;
+
+        fi = fi + 1;
+    }
+
+    return str_new(out, total_size);
+}
+
+# Helper: build Vorbis Comment block
+fn _tag_build_vorbis(vendor, comments, num_comments) {
+    # Calculate total size
+    var vendor_len = str_len(vendor);
+    var total = 4 + vendor_len + 4;
+
+    var ci = 0;
+    while (ci < num_comments) {
+        var c = vec_get(comments, ci);
+        total = total + 4 + str_len(c);
+        ci = ci + 1;
+    }
+
+    var out = alloc(total);
+    var pos = 0;
+
+    # Vendor string
+    write_u32_le(out, pos, vendor_len);
+    pos = pos + 4;
+    memcpy(out + pos, str_data(vendor), vendor_len);
+    pos = pos + vendor_len;
+
+    # Comment count
+    write_u32_le(out, pos, num_comments);
+    pos = pos + 4;
+
+    # Comments
+    ci = 0;
+    while (ci < num_comments) {
+        var c = vec_get(comments, ci);
+        var clen = str_len(c);
+        write_u32_le(out, pos, clen);
+        pos = pos + 4;
+        memcpy(out + pos, str_data(c), clen);
+        pos = pos + clen;
+        ci = ci + 1;
+    }
+
+    return str_new(out, total);
+}
+
+fn test_tag_id3v2_parse() {
+    test_group("tag: ID3v2 parse text frames");
+
+    var ids = vec_new();
+    var vals = vec_new();
+
+    # Helper to make 4-byte ID strings
+    var id_tit2 = alloc(5); memcpy(id_tit2, "TIT2", 4); store8(id_tit2+4, 0);
+    var id_tpe1 = alloc(5); memcpy(id_tpe1, "TPE1", 4); store8(id_tpe1+4, 0);
+    var id_talb = alloc(5); memcpy(id_talb, "TALB", 4); store8(id_talb+4, 0);
+    var id_trck = alloc(5); memcpy(id_trck, "TRCK", 4); store8(id_trck+4, 0);
+    var id_tyer = alloc(5); memcpy(id_tyer, "TYER", 4); store8(id_tyer+4, 0);
+    var id_tcon = alloc(5); memcpy(id_tcon, "TCON", 4); store8(id_tcon+4, 0);
+
+    vec_push(ids, str_new(id_tit2, 4)); vec_push(vals, str_from("Test Song"));
+    vec_push(ids, str_new(id_tpe1, 4)); vec_push(vals, str_from("Test Artist"));
+    vec_push(ids, str_new(id_talb, 4)); vec_push(vals, str_from("Test Album"));
+    vec_push(ids, str_new(id_trck, 4)); vec_push(vals, str_from("5"));
+    vec_push(ids, str_new(id_tyer, 4)); vec_push(vals, str_from("2025"));
+    vec_push(ids, str_new(id_tcon, 4)); vec_push(vals, str_from("Rock"));
+
+    var tag_str = _tag_build_id3v2(ids, vals, 6);
+    var meta = tag_read_id3v2(str_data(tag_str), str_len(tag_str));
+    assert(is_ok(meta) == 1, "id3v2 parse ok");
+
+    var title = tag_meta_title(meta);
+    assert_neq(title, 0, "has title");
+    assert(memeq(str_data(title), "Test Song", 9) == 1, "title = Test Song");
+    assert_eq(str_len(title), 9, "title len 9");
+
+    var artist = tag_meta_artist(meta);
+    assert_neq(artist, 0, "has artist");
+    assert(memeq(str_data(artist), "Test Artist", 11) == 1, "artist = Test Artist");
+
+    var album = tag_meta_album(meta);
+    assert_neq(album, 0, "has album");
+    assert(memeq(str_data(album), "Test Album", 10) == 1, "album = Test Album");
+
+    var track = tag_meta_track_number(meta);
+    assert_neq(track, 0, "has track");
+    assert(memeq(str_data(track), "5", 1) == 1, "track = 5");
+
+    var year = tag_meta_year(meta);
+    assert_neq(year, 0, "has year");
+    assert(memeq(str_data(year), "2025", 4) == 1, "year = 2025");
+
+    var genre = tag_meta_genre(meta);
+    assert_neq(genre, 0, "has genre");
+    assert(memeq(str_data(genre), "Rock", 4) == 1, "genre = Rock");
+
+    return 0;
+}
+
+fn test_tag_id3v2_reject_non_id3() {
+    test_group("tag: reject non-ID3 data");
+
+    var data = alloc(14);
+    memcpy(data, "RIFF data here", 14);
+    var result = tag_read_id3v2(data, 14);
+    assert(is_err(result) == 1, "non-ID3 rejected");
+
+    return 0;
+}
+
+fn test_tag_id3v2_reject_short() {
+    test_group("tag: reject short ID3 data");
+
+    var data = alloc(3);
+    memcpy(data, "ID3", 3);
+    var result = tag_read_id3v2(data, 3);
+    assert(is_err(result) == 1, "short ID3 rejected");
+
+    return 0;
+}
+
+fn test_tag_vorbis_comment_parse() {
+    test_group("tag: Vorbis comment parse");
+
+    var vendor = str_from("shravan 0.1.0");
+    var comments = vec_new();
+    vec_push(comments, str_from("TITLE=Test Track"));
+    vec_push(comments, str_from("ARTIST=Test Musician"));
+    vec_push(comments, str_from("ALBUM=Test Record"));
+    vec_push(comments, str_from("TRACKNUMBER=3"));
+    vec_push(comments, str_from("DATE=2025"));
+    vec_push(comments, str_from("GENRE=Electronic"));
+    vec_push(comments, str_from("COMMENT=A test comment"));
+
+    var vorbis_str = _tag_build_vorbis(vendor, comments, 7);
+    var meta = tag_read_vorbis(str_data(vorbis_str), str_len(vorbis_str));
+    assert(is_ok(meta) == 1, "vorbis parse ok");
+
+    var title = tag_meta_title(meta);
+    assert_neq(title, 0, "vorbis has title");
+    assert(memeq(str_data(title), "Test Track", 10) == 1, "vorbis title");
+
+    var artist = tag_meta_artist(meta);
+    assert_neq(artist, 0, "vorbis has artist");
+    assert(memeq(str_data(artist), "Test Musician", 13) == 1, "vorbis artist");
+
+    var album = tag_meta_album(meta);
+    assert_neq(album, 0, "vorbis has album");
+    assert(memeq(str_data(album), "Test Record", 11) == 1, "vorbis album");
+
+    var track = tag_meta_track_number(meta);
+    assert_neq(track, 0, "vorbis has track");
+    assert(memeq(str_data(track), "3", 1) == 1, "vorbis track");
+
+    var year = tag_meta_year(meta);
+    assert_neq(year, 0, "vorbis has year");
+    assert(memeq(str_data(year), "2025", 4) == 1, "vorbis year");
+
+    var genre = tag_meta_genre(meta);
+    assert_neq(genre, 0, "vorbis has genre");
+    assert(memeq(str_data(genre), "Electronic", 10) == 1, "vorbis genre");
+
+    var comment = tag_meta_comment(meta);
+    assert_neq(comment, 0, "vorbis has comment");
+    assert(memeq(str_data(comment), "A test comment", 14) == 1, "vorbis comment");
+
+    return 0;
+}
+
+fn test_tag_vorbis_case_insensitive() {
+    test_group("tag: Vorbis case-insensitive fields");
+
+    var vendor = str_from("test");
+    var comments = vec_new();
+    vec_push(comments, str_from("title=Lower Case"));
+    vec_push(comments, str_from("Artist=Mixed Case"));
+
+    var vorbis_str = _tag_build_vorbis(vendor, comments, 2);
+    var meta = tag_read_vorbis(str_data(vorbis_str), str_len(vorbis_str));
+    assert(is_ok(meta) == 1, "case insensitive parse ok");
+
+    var title = tag_meta_title(meta);
+    assert_neq(title, 0, "lowercase title found");
+    assert(memeq(str_data(title), "Lower Case", 10) == 1, "lowercase title value");
+
+    var artist = tag_meta_artist(meta);
+    assert_neq(artist, 0, "mixed case artist found");
+    assert(memeq(str_data(artist), "Mixed Case", 10) == 1, "mixed case artist value");
+
+    return 0;
+}
+
+fn test_tag_vorbis_reject_short() {
+    test_group("tag: Vorbis reject short data");
+
+    var empty = alloc(1);
+    store8(empty, 0);
+    var r1 = tag_read_vorbis(empty, 0);
+    assert(is_err(r1) == 1, "empty rejected");
+
+    var short = alloc(2);
+    store8(short, 0); store8(short+1, 1);
+    var r2 = tag_read_vorbis(short, 2);
+    assert(is_err(r2) == 1, "2 bytes rejected");
+
+    return 0;
+}
+
+fn test_tag_syncsafe_decode() {
+    test_group("tag: syncsafe decode");
+
+    var buf = alloc(4);
+
+    # [0x00, 0x00, 0x02, 0x01] -> 257
+    store8(buf, 0x00); store8(buf+1, 0x00); store8(buf+2, 0x02); store8(buf+3, 0x01);
+    assert_eq(tag_syncsafe(buf, 0), 257, "tag syncsafe 257");
+
+    # [0x00, 0x00, 0x00, 0x00] -> 0
+    store8(buf, 0x00); store8(buf+1, 0x00); store8(buf+2, 0x00); store8(buf+3, 0x00);
+    assert_eq(tag_syncsafe(buf, 0), 0, "tag syncsafe 0");
+
+    # [0x7F, 0x7F, 0x7F, 0x7F] -> 0x0FFFFFFF = 268435455
+    store8(buf, 0x7F); store8(buf+1, 0x7F); store8(buf+2, 0x7F); store8(buf+3, 0x7F);
+    assert_eq(tag_syncsafe(buf, 0), 268435455, "tag syncsafe max");
+
+    return 0;
+}

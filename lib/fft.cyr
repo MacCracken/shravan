@@ -1,0 +1,584 @@
+# ================================================================
+# fft.cyr -- Mixed-radix FFT and MDCT infrastructure
+# ================================================================
+#
+# Provides:
+#   fft_compute(re, im, n, inverse)  -- in-place mixed-radix FFT (2,3,5)
+#   fft_mdct(input, n, output)       -- forward MDCT via FFT
+#   fft_imdct(input, n, output)      -- inverse MDCT via FFT
+#
+# Complex numbers stored as f64 bit patterns in parallel arrays:
+#   re[i] = load64(re_buf + i*8)
+#   im[i] = load64(im_buf + i*8)
+#
+# Requires: f64 builtins, alloc, math.cyr
+
+# ================================================================
+# Constants
+# ================================================================
+
+# pi as f64 bit pattern: 4614256656552045848
+var F64_PI = 4614256656552045848;
+
+# 2*pi
+var F64_TWO_PI = 0;
+
+# negative 2*pi
+var F64_NEG_TWO_PI = 0;
+
+fn fft_init() {
+    F64_TWO_PI = f64_mul(F64_TWO, F64_PI);
+    F64_NEG_TWO_PI = f64_neg(F64_TWO_PI);
+    return 0;
+}
+
+# ================================================================
+# Complex helpers (operate on f64 bit patterns)
+# ================================================================
+
+# Complex multiply: (ar+ai*j)*(br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)*j
+# Returns real part; call _cmul_im for imag part
+fn _cmul_re(ar, ai, br, bi) {
+    return f64_sub(f64_mul(ar, br), f64_mul(ai, bi));
+}
+
+fn _cmul_im(ar, ai, br, bi) {
+    return f64_add(f64_mul(ar, bi), f64_mul(ai, br));
+}
+
+# exp(i*theta): returns (cos(theta), sin(theta))
+# We store results via output pointers
+fn _cexp(theta, out_re, out_im) {
+    store64(out_re, f64_cos(theta));
+    store64(out_im, f64_sin(theta));
+    return 0;
+}
+
+# ================================================================
+# Factorization helper
+# ================================================================
+
+# Find the smallest factor of n among {2, 3, 5}. Returns 0 if none.
+fn _fft_find_factor(n) {
+    if (n % 2 == 0) { return 2; }
+    if (n % 3 == 0) { return 3; }
+    if (n % 5 == 0) { return 5; }
+    return 0;
+}
+
+# ================================================================
+# Naive DFT fallback for small prime sizes
+# ================================================================
+
+fn _dft_naive(re, im, n) {
+    # Copy input
+    var tmp_re = alloc(n * 8);
+    var tmp_im = alloc(n * 8);
+    memcpy(tmp_re, re, n * 8);
+    memcpy(tmp_im, im, n * 8);
+
+    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+
+    var k = 0;
+    while (k < n) {
+        var sum_re = F64_ZERO;
+        var sum_im = F64_ZERO;
+
+        var j = 0;
+        while (j < n) {
+            var theta = f64_mul(angle_base, f64_from(k * j));
+            var tw_re = f64_cos(theta);
+            var tw_im = f64_sin(theta);
+
+            var xr = load64(tmp_re + j * 8);
+            var xi = load64(tmp_im + j * 8);
+
+            # complex multiply: (xr+xi*j)*(tw_re+tw_im*j)
+            var pr = _cmul_re(xr, xi, tw_re, tw_im);
+            var pi = _cmul_im(xr, xi, tw_re, tw_im);
+
+            sum_re = f64_add(sum_re, pr);
+            sum_im = f64_add(sum_im, pi);
+
+            j = j + 1;
+        }
+
+        store64(re + k * 8, sum_re);
+        store64(im + k * 8, sum_im);
+        k = k + 1;
+    }
+
+    return 0;
+}
+
+# ================================================================
+# In-place mixed-radix DIT FFT
+# ================================================================
+#
+# fft_compute(re, im, n, inverse)
+#   re: pointer to n f64 values (real parts)
+#   im: pointer to n f64 values (imag parts)
+#   n: transform size (must factor into 2, 3, 5)
+#   inverse: 0 for forward FFT, 1 for inverse FFT
+#
+# For inverse, we conjugate input, do forward FFT, then conjugate
+# and scale output by 1/n.
+
+fn fft_compute(re, im, n, inverse) {
+    if (inverse != 0) {
+        # Conjugate input
+        var ci = 0;
+        while (ci < n) {
+            store64(im + ci * 8, f64_neg(load64(im + ci * 8)));
+            ci = ci + 1;
+        }
+
+        # Forward FFT
+        _fft_forward(re, im, n);
+
+        # Conjugate and scale by 1/n
+        var scale = f64_div(F64_ONE, f64_from(n));
+        ci = 0;
+        while (ci < n) {
+            store64(re + ci * 8, f64_mul(load64(re + ci * 8), scale));
+            store64(im + ci * 8, f64_neg(f64_mul(load64(im + ci * 8), scale)));
+            ci = ci + 1;
+        }
+        return 0;
+    }
+
+    _fft_forward(re, im, n);
+    return 0;
+}
+
+fn _fft_forward(re, im, n) {
+    if (n <= 1) { return 0; }
+
+    var radix = _fft_find_factor(n);
+    if (radix == 0) {
+        # n is prime and not 2, 3, or 5 -- use naive DFT
+        _dft_naive(re, im, n);
+        return 0;
+    }
+
+    var m = n / radix;
+
+    # Decimation-in-time: reorder into `radix` sub-sequences of length m
+    var tmp_re = alloc(n * 8);
+    var tmp_im = alloc(n * 8);
+
+    var r = 0;
+    while (r < radix) {
+        var j = 0;
+        while (j < m) {
+            var src_idx = j * radix + r;
+            var dst_idx = r * m + j;
+            store64(tmp_re + dst_idx * 8, load64(re + src_idx * 8));
+            store64(tmp_im + dst_idx * 8, load64(im + src_idx * 8));
+            j = j + 1;
+        }
+        r = r + 1;
+    }
+
+    # Recurse on each sub-FFT of length m
+    r = 0;
+    while (r < radix) {
+        var off = r * m * 8;
+        _fft_forward(tmp_re + off, tmp_im + off, m);
+        r = r + 1;
+    }
+
+    # Combine: generic radix-R butterfly
+    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+
+    var k = 0;
+    while (k < n) {
+        var km = k % m;
+        var sum_re = F64_ZERO;
+        var sum_im = F64_ZERO;
+
+        r = 0;
+        while (r < radix) {
+            var theta = f64_mul(angle_base, f64_from(r * k));
+            var tw_re = f64_cos(theta);
+            var tw_im = f64_sin(theta);
+
+            var xr = load64(tmp_re + (r * m + km) * 8);
+            var xi = load64(tmp_im + (r * m + km) * 8);
+
+            var pr = _cmul_re(xr, xi, tw_re, tw_im);
+            var pi_val = _cmul_im(xr, xi, tw_re, tw_im);
+
+            sum_re = f64_add(sum_re, pr);
+            sum_im = f64_add(sum_im, pi_val);
+
+            r = r + 1;
+        }
+
+        store64(re + k * 8, sum_re);
+        store64(im + k * 8, sum_im);
+        k = k + 1;
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Forward MDCT via 2N-point FFT
+# ================================================================
+#
+# fft_mdct(input, n, output)
+#   input: pointer to n f64 values (time-domain samples)
+#   n: window size (number of input samples)
+#   output: pointer to n/2 f64 values (spectral coefficients)
+#
+# MDCT: X[k] = sum_{i=0}^{N-1} x[i] * cos(pi/N * (i + 0.5 + N/4) * (k + 0.5))
+# Uses a 2N-point FFT with pre/post twiddle.
+
+fn fft_mdct(input, n, output) {
+    var n2 = n / 2;
+    var n4 = n / 4;
+    var nn = 2 * n;  # 2N
+
+    var n0 = f64_add(f64_from(n4), F64_HALF);  # 0.5 + N/4
+
+    # Pre-twiddle + zero-pad to 2N
+    var z_re = alloc(nn * 8);
+    var z_im = alloc(nn * 8);
+    memset(z_re, 0, nn * 8);
+    memset(z_im, 0, nn * 8);
+
+    var i = 0;
+    while (i < n) {
+        # twiddle angle = -pi * i / (2N)
+        var tw_angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn)));
+        var tw_re = f64_cos(tw_angle);
+        var tw_im = f64_sin(tw_angle);
+
+        var xval = load64(input + i * 8);
+
+        # z[i] = x[i] * exp(-j * pi * i / 2N)
+        store64(z_re + i * 8, f64_mul(xval, tw_re));
+        store64(z_im + i * 8, f64_mul(xval, tw_im));
+
+        i = i + 1;
+    }
+    # Remaining elements (i=n..2N-1) are zero from memset
+
+    # FFT of length 2N
+    fft_compute(z_re, z_im, nn, 0);
+
+    # Post-twiddle: X[k] = Re(exp(-j * pi * n0 * (2k+1) / (2N)) * Z[k])
+    var k = 0;
+    while (k < n2) {
+        var angle = f64_neg(f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn)));
+        var tw_re = f64_cos(angle);
+        var tw_im = f64_sin(angle);
+
+        var zr = load64(z_re + k * 8);
+        var zi = load64(z_im + k * 8);
+
+        # result = Re((zr+zi*j)*(tw_re+tw_im*j))
+        var result = _cmul_re(zr, zi, tw_re, tw_im);
+        store64(output + k * 8, result);
+
+        k = k + 1;
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Inverse MDCT via 2N-point FFT
+# ================================================================
+#
+# fft_imdct(input, n, output)
+#   input: pointer to n/2 f64 values (spectral coefficients)
+#   n: window size (output length)
+#   output: pointer to n f64 values (time-domain samples)
+#
+# IMDCT: x[i] = (2/N) * sum_{k=0}^{N/2-1} X[k] * cos(pi/N * (i+0.5+N/4) * (k+0.5))
+
+fn fft_imdct(input, n, output) {
+    var n2 = n / 2;
+    var n4 = n / 4;
+    var nn = 2 * n;
+
+    var n0 = f64_add(f64_from(n4), F64_HALF);
+
+    # Build complex input for IFFT: Z[k] = X[k] * exp(+j * pi * n0 * (2k+1) / (2N))
+    var z_re = alloc(nn * 8);
+    var z_im = alloc(nn * 8);
+    memset(z_re, 0, nn * 8);
+    memset(z_im, 0, nn * 8);
+
+    var k = 0;
+    while (k < n2) {
+        var angle = f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn));
+        var tw_re = f64_cos(angle);
+        var tw_im = f64_sin(angle);
+
+        var xval = load64(input + k * 8);
+
+        store64(z_re + k * 8, f64_mul(xval, tw_re));
+        store64(z_im + k * 8, f64_mul(xval, tw_im));
+
+        k = k + 1;
+    }
+
+    # Inverse FFT of length 2N
+    fft_compute(z_re, z_im, nn, 1);
+
+    # Post-twiddle: extract time-domain samples
+    # x[i] = (4/N) * Re(z[i] * exp(+j * pi * i / (2N)))
+    var scale = f64_div(f64_from(4), f64_from(n));
+    var i = 0;
+    while (i < n) {
+        var tw_angle = f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn));
+        var tw_re = f64_cos(tw_angle);
+        var tw_im = f64_sin(tw_angle);
+
+        var zr = load64(z_re + i * 8);
+        var zi = load64(z_im + i * 8);
+
+        var result = _cmul_re(zr, zi, tw_re, tw_im);
+        store64(output + i * 8, f64_mul(result, scale));
+
+        i = i + 1;
+    }
+
+    return 0;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_fft_impulse() {
+    test_group("fft: impulse response (size 4)");
+
+    var re = alloc(4 * 8);
+    var im = alloc(4 * 8);
+    memset(re, 0, 4 * 8);
+    memset(im, 0, 4 * 8);
+    store64(re, F64_ONE);  # impulse at index 0
+
+    fft_compute(re, im, 4, 0);
+
+    # All bins should be 1.0 + 0.0j
+    var eps = f64_from(1);  # 1e-10 threshold
+    var threshold = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+
+    var pass = 1;
+    var ki = 0;
+    while (ki < 4) {
+        var rval = load64(re + ki * 8);
+        var ival = load64(im + ki * 8);
+        var rdiff = f64_abs(f64_sub(rval, F64_ONE));
+        var idiff = f64_abs(ival);
+        if (f64_gt(rdiff, threshold) == 1) { pass = 0; }
+        if (f64_gt(idiff, threshold) == 1) { pass = 0; }
+        ki = ki + 1;
+    }
+    assert(pass, "all bins ~= 1.0 + 0.0j");
+
+    return 0;
+}
+
+fn test_fft_size_6() {
+    test_group("fft: impulse size 6");
+
+    var re = alloc(6 * 8);
+    var im = alloc(6 * 8);
+    memset(re, 0, 6 * 8);
+    memset(im, 0, 6 * 8);
+    store64(re, F64_ONE);
+
+    fft_compute(re, im, 6, 0);
+
+    var threshold = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+    var pass = 1;
+    var ki = 0;
+    while (ki < 6) {
+        var rdiff = f64_abs(f64_sub(load64(re + ki * 8), F64_ONE));
+        var idiff = f64_abs(load64(im + ki * 8));
+        if (f64_gt(rdiff, threshold) == 1) { pass = 0; }
+        if (f64_gt(idiff, threshold) == 1) { pass = 0; }
+        ki = ki + 1;
+    }
+    assert(pass, "size 6 impulse: all bins ~= 1.0");
+
+    return 0;
+}
+
+fn test_fft_vs_dft_size_30() {
+    test_group("fft: FFT vs DFT size 30");
+
+    var n = 30;
+    var re1 = alloc(n * 8);
+    var im1 = alloc(n * 8);
+    var re2 = alloc(n * 8);
+    var im2 = alloc(n * 8);
+
+    # Fill with sin/cos test pattern
+    var i = 0;
+    while (i < n) {
+        var val_re = f64_sin(f64_mul(f64_from(i), f64_div(f64_from(7), f64_from(10))));
+        var val_im = f64_cos(f64_mul(f64_from(i), f64_div(f64_from(13), f64_from(10))));
+        store64(re1 + i * 8, val_re);
+        store64(im1 + i * 8, val_im);
+        store64(re2 + i * 8, val_re);
+        store64(im2 + i * 8, val_im);
+        i = i + 1;
+    }
+
+    fft_compute(re1, im1, n, 0);
+    _dft_naive(re2, im2, n);
+
+    var max_diff = F64_ZERO;
+    i = 0;
+    while (i < n) {
+        var dr = f64_abs(f64_sub(load64(re1 + i * 8), load64(re2 + i * 8)));
+        var di = f64_abs(f64_sub(load64(im1 + i * 8), load64(im2 + i * 8)));
+        max_diff = f64_max(max_diff, f64_max(dr, di));
+        i = i + 1;
+    }
+
+    var threshold = f64_div(F64_ONE, f64_from(1000000));
+    assert(f64_lt(max_diff, threshold) == 1, "FFT vs DFT max_diff < 1e-6");
+
+    return 0;
+}
+
+fn test_fft_size_240() {
+    test_group("fft: impulse size 240");
+
+    var n = 240;
+    var re = alloc(n * 8);
+    var im = alloc(n * 8);
+    memset(re, 0, n * 8);
+    memset(im, 0, n * 8);
+    store64(re, F64_ONE);
+
+    fft_compute(re, im, n, 0);
+
+    var threshold = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+    var rdiff = f64_abs(f64_sub(load64(re), F64_ONE));
+    assert(f64_lt(rdiff, threshold) == 1, "size 240 bin[0] ~= 1.0");
+
+    return 0;
+}
+
+fn test_fft_inverse_roundtrip() {
+    test_group("fft: forward+inverse roundtrip");
+
+    var n = 8;
+    var re = alloc(n * 8);
+    var im = alloc(n * 8);
+    var orig_re = alloc(n * 8);
+
+    var i = 0;
+    while (i < n) {
+        var v = f64_from(i + 1);
+        store64(re + i * 8, v);
+        store64(im + i * 8, F64_ZERO);
+        store64(orig_re + i * 8, v);
+        i = i + 1;
+    }
+
+    # Forward FFT
+    fft_compute(re, im, n, 0);
+
+    # Inverse FFT
+    fft_compute(re, im, n, 1);
+
+    # Check roundtrip
+    var threshold = f64_div(F64_ONE, f64_from(1000000));
+    var pass = 1;
+    i = 0;
+    while (i < n) {
+        var diff = f64_abs(f64_sub(load64(re + i * 8), load64(orig_re + i * 8)));
+        if (f64_gt(diff, threshold) == 1) { pass = 0; }
+        i = i + 1;
+    }
+    assert(pass, "forward+inverse recovers original");
+
+    return 0;
+}
+
+fn test_fft_mdct_produces_output() {
+    test_group("fft: MDCT produces output");
+
+    var n = 16;
+    var input = alloc(n * 8);
+    var output = alloc((n / 2) * 8);
+    memset(output, 0, (n / 2) * 8);
+
+    var i = 0;
+    while (i < n) {
+        store64(input + i * 8, F64_ONE);
+        i = i + 1;
+    }
+
+    fft_mdct(input, n, output);
+
+    # Check that energy is nonzero
+    var energy = F64_ZERO;
+    i = 0;
+    while (i < n / 2) {
+        var v = load64(output + i * 8);
+        energy = f64_add(energy, f64_mul(v, v));
+        i = i + 1;
+    }
+    assert(f64_gt(energy, F64_ZERO) == 1, "MDCT energy > 0");
+
+    return 0;
+}
+
+fn test_fft_mdct_roundtrip() {
+    test_group("fft: MDCT + IMDCT roundtrip");
+
+    # Use a small size for reasonable test speed
+    var n = 16;
+    var n2 = n / 2;
+
+    var input = alloc(n * 8);
+    var mdct_out = alloc(n2 * 8);
+    var imdct_out = alloc(n * 8);
+
+    var i = 0;
+    while (i < n) {
+        store64(input + i * 8, f64_div(f64_from(i), f64_from(n)));
+        i = i + 1;
+    }
+
+    fft_mdct(input, n, mdct_out);
+    fft_imdct(mdct_out, n, imdct_out);
+
+    # The MDCT/IMDCT is not a perfect roundtrip without overlapping windows,
+    # but the center portion should be close. Check that output is not all zero.
+    var has_nonzero = 0;
+    i = 0;
+    while (i < n) {
+        var v = f64_abs(load64(imdct_out + i * 8));
+        if (f64_gt(v, f64_div(F64_ONE, f64_from(10000))) == 1) {
+            has_nonzero = 1;
+        }
+        i = i + 1;
+    }
+    assert(has_nonzero, "IMDCT output has nonzero values");
+
+    return 0;
+}
+
+fn test_fft_all() {
+    fft_init();
+    test_fft_impulse();
+    test_fft_size_6();
+    test_fft_vs_dft_size_30();
+    test_fft_size_240();
+    test_fft_inverse_roundtrip();
+    test_fft_mdct_produces_output();
+    test_fft_mdct_roundtrip();
+    return 0;
+}

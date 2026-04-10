@@ -1,0 +1,860 @@
+# ================================================================
+# opus.cyr -- Opus header parsing and CELT-mode encoding (Ogg container)
+# ================================================================
+#
+# Provides:
+#   opus_parse_head(data, len)             -- parse OpusHead packet
+#   opus_serialize_head(channels, pre_skip, sample_rate, out_buf) -- serialize OpusHead
+#   opus_serialize_tags(out_buf)           -- serialize minimal OpusTags
+#   opus_range_enc_init()                  -- create range encoder state
+#   opus_range_enc_encode(rc, fl, fh, total) -- encode symbol
+#   opus_range_enc_flush(rc)               -- finalize, returns (ptr, len) via Str
+#   opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
+#   opus_decode_from_packets(packets_vec, ogg_data, ogg_len)
+#
+# Requires: alloc, vec, str, math, ogg, fft, assert
+
+# ================================================================
+# OpusHead struct (heap-allocated)
+# ================================================================
+# Layout (56 bytes):
+#   +0:  version              (i64)
+#   +8:  channel_count        (i64)
+#   +16: pre_skip             (i64)
+#   +24: input_sample_rate    (i64)
+#   +32: output_gain          (i64, signed)
+#   +40: channel_mapping_family (i64)
+
+fn opus_head_new() {
+    var h = alloc(48);
+    memset(h, 0, 48);
+    return h;
+}
+
+fn opus_head_version(h)        { return load64(h); }
+fn opus_head_channels(h)       { return load64(h + 8); }
+fn opus_head_pre_skip(h)       { return load64(h + 16); }
+fn opus_head_sample_rate(h)    { return load64(h + 24); }
+fn opus_head_output_gain(h)    { return load64(h + 32); }
+fn opus_head_mapping(h)        { return load64(h + 40); }
+
+# ================================================================
+# OpusHead parsing
+# ================================================================
+
+# Parse an OpusHead identification packet.
+# data: pointer to raw bytes, len: byte count.
+# Returns heap-allocated OpusHead struct, or err().
+fn opus_parse_head(data, len) {
+    if (len < 19) { return err(ERR_INVALID_HEADER); }
+
+    # Check "OpusHead" magic (8 bytes)
+    if (load8(data)     != 0x4F) { return err(ERR_INVALID_HEADER); }  # 'O'
+    if (load8(data + 1) != 0x70) { return err(ERR_INVALID_HEADER); }  # 'p'
+    if (load8(data + 2) != 0x75) { return err(ERR_INVALID_HEADER); }  # 'u'
+    if (load8(data + 3) != 0x73) { return err(ERR_INVALID_HEADER); }  # 's'
+    if (load8(data + 4) != 0x48) { return err(ERR_INVALID_HEADER); }  # 'H'
+    if (load8(data + 5) != 0x65) { return err(ERR_INVALID_HEADER); }  # 'e'
+    if (load8(data + 6) != 0x61) { return err(ERR_INVALID_HEADER); }  # 'a'
+    if (load8(data + 7) != 0x64) { return err(ERR_INVALID_HEADER); }  # 'd'
+
+    var version = load8(data + 8);
+    var channel_count = load8(data + 9);
+    var pre_skip = read_u16_le(data, 10);
+    var input_sample_rate = read_u32_le(data, 12);
+    # output_gain is signed i16 LE
+    var output_gain_raw = read_u16_le(data, 16);
+    var output_gain = output_gain_raw;
+    if (output_gain >= 32768) {
+        output_gain = output_gain - 65536;
+    }
+    var channel_mapping_family = load8(data + 18);
+
+    if (channel_count == 0) { return err(ERR_INVALID_CHANNELS); }
+
+    var h = opus_head_new();
+    store64(h,      version);
+    store64(h + 8,  channel_count);
+    store64(h + 16, pre_skip);
+    store64(h + 24, input_sample_rate);
+    store64(h + 32, output_gain);
+    store64(h + 40, channel_mapping_family);
+    return h;
+}
+
+# ================================================================
+# OpusHead serialization (19 bytes)
+# ================================================================
+
+# Serialize OpusHead into out_buf (must be >= 19 bytes).
+# Returns 19 (bytes written).
+fn opus_serialize_head(channels, pre_skip, sample_rate, out_buf) {
+    # "OpusHead" magic
+    store8(out_buf,     0x4F);
+    store8(out_buf + 1, 0x70);
+    store8(out_buf + 2, 0x75);
+    store8(out_buf + 3, 0x73);
+    store8(out_buf + 4, 0x48);
+    store8(out_buf + 5, 0x65);
+    store8(out_buf + 6, 0x61);
+    store8(out_buf + 7, 0x64);
+
+    store8(out_buf + 8, 1);         # version
+    store8(out_buf + 9, channels);
+    write_u16_le(out_buf, 10, pre_skip);
+    write_u32_le(out_buf, 12, sample_rate);
+    write_u16_le(out_buf, 16, 0);   # output gain = 0
+    store8(out_buf + 18, 0);        # channel mapping family 0
+
+    return 19;
+}
+
+# ================================================================
+# OpusTags serialization
+# ================================================================
+
+# Serialize minimal OpusTags into out_buf (must be >= 23 bytes).
+# Returns bytes written.
+fn opus_serialize_tags(out_buf) {
+    # "OpusTags" magic
+    store8(out_buf,     0x4F);
+    store8(out_buf + 1, 0x70);
+    store8(out_buf + 2, 0x75);
+    store8(out_buf + 3, 0x73);
+    store8(out_buf + 4, 0x54);
+    store8(out_buf + 5, 0x61);
+    store8(out_buf + 6, 0x67);
+    store8(out_buf + 7, 0x73);
+
+    # Vendor string: "shravan" (7 bytes)
+    write_u32_le(out_buf, 8, 7);
+    store8(out_buf + 12, 0x73);  # s
+    store8(out_buf + 13, 0x68);  # h
+    store8(out_buf + 14, 0x72);  # r
+    store8(out_buf + 15, 0x61);  # a
+    store8(out_buf + 16, 0x76);  # v
+    store8(out_buf + 17, 0x61);  # a
+    store8(out_buf + 18, 0x6E);  # n
+
+    # User comment list length = 0
+    write_u32_le(out_buf, 19, 0);
+
+    return 23;
+}
+
+# ================================================================
+# Range encoder (RFC 6716 Section 4.1)
+# ================================================================
+# State layout (48 bytes):
+#   +0:  buf (pointer to output bytes)
+#   +8:  buf_len (current length)
+#   +16: buf_cap (capacity)
+#   +24: low (u32)
+#   +32: range (u32)
+#   +40: carry_count (u32)
+#   +48: cache (i32, -1 initially)
+#   +56: bits_used (u32)
+
+fn opus_range_enc_init() {
+    var rc = alloc(64);
+    memset(rc, 0, 64);
+    var buf = alloc(4096);
+    store64(rc,      buf);
+    store64(rc + 8,  0);
+    store64(rc + 16, 4096);
+    store64(rc + 24, 0);            # low
+    store64(rc + 32, 0x80000000);   # range
+    store64(rc + 40, 0);            # carry_count
+    store64(rc + 48, 0 - 1);       # cache = -1
+    store64(rc + 56, 0);            # bits_used
+    return rc;
+}
+
+fn _rc_push_byte(rc, byte) {
+    var buf = load64(rc);
+    var blen = load64(rc + 8);
+    var bcap = load64(rc + 16);
+    if (blen >= bcap) {
+        var new_cap = bcap * 2;
+        var new_buf = alloc(new_cap);
+        memcpy(new_buf, buf, blen);
+        store64(rc, new_buf);
+        store64(rc + 16, new_cap);
+        buf = new_buf;
+    }
+    store8(buf + blen, byte & 0xFF);
+    store64(rc + 8, blen + 1);
+    return 0;
+}
+
+fn _rc_carry_out(rc) {
+    var low = load64(rc + 24);
+    var carry = (low >> 23) & 0xFFFFFFFF;
+    var cache = load64(rc + 48);
+    var carry_count = load64(rc + 40);
+
+    if ((carry & 0xFF) != 0xFF) {
+        if (cache >= 0) {
+            _rc_push_byte(rc, (cache + ((carry >> 8) & 0xFFFFFFFF)) & 0xFF);
+        }
+        var ci = 0;
+        while (ci < carry_count) {
+            _rc_push_byte(rc, (((carry >> 8) & 0xFFFFFFFF) + 0xFF) & 0xFF);
+            ci = ci + 1;
+        }
+        store64(rc + 40, 0);
+        store64(rc + 48, carry & 0xFF);
+    } else {
+        store64(rc + 40, carry_count + 1);
+    }
+    store64(rc + 24, low & 0x007FFFFF);
+    return 0;
+}
+
+fn _rc_normalize(rc) {
+    var range = load64(rc + 32);
+    while (range <= 0x00800000) {
+        _rc_carry_out(rc);
+        var low = load64(rc + 24);
+        store64(rc + 24, (low << 8) & 0xFFFFFFFF);
+        range = (range << 8) & 0xFFFFFFFF;
+        store64(rc + 32, range);
+        store64(rc + 56, load64(rc + 56) + 8);
+    }
+    return 0;
+}
+
+# Encode a symbol with probability [fl, fh) out of total.
+fn opus_range_enc_encode(rc, fl, fh, total) {
+    if (total == 0) { return 0; }
+    var range = load64(rc + 32);
+    var low = load64(rc + 24);
+    var r = range / total;
+    var new_low = (low + r * fl) & 0xFFFFFFFF;
+    if (fh < total) {
+        store64(rc + 32, (r * (fh - fl)) & 0xFFFFFFFF);
+    } else {
+        store64(rc + 32, (range - r * fl) & 0xFFFFFFFF);
+    }
+    store64(rc + 24, new_low);
+    _rc_normalize(rc);
+    return 0;
+}
+
+# Encode a single bit (equal probability).
+fn opus_range_enc_bit(rc, val) {
+    if (val != 0) {
+        opus_range_enc_encode(rc, 1, 2, 2);
+    } else {
+        opus_range_enc_encode(rc, 0, 1, 2);
+    }
+    return 0;
+}
+
+# Encode a value uniformly in [0, total).
+fn opus_range_enc_uint(rc, val, total) {
+    if (total <= 1) { return 0; }
+    opus_range_enc_encode(rc, val, val + 1, total);
+    return 0;
+}
+
+# Get approximate bytes used so far.
+fn opus_range_enc_bytes_used(rc) {
+    return load64(rc + 8) + 1 + load64(rc + 40);
+}
+
+# Finalize and return Str (data, len).
+fn opus_range_enc_flush(rc) {
+    var cache = load64(rc + 48);
+    var low = load64(rc + 24);
+    var carry_count = load64(rc + 40);
+
+    if (cache >= 0) {
+        var carry = (low >> 23) & 0xFFFFFFFF;
+        _rc_push_byte(rc, (cache + carry) & 0xFF);
+        var ci = 0;
+        while (ci < carry_count) {
+            _rc_push_byte(rc, (carry + 0xFF - 1) & 0xFF);
+            ci = ci + 1;
+        }
+    }
+
+    # Flush final bytes from low
+    var range = load64(rc + 32);
+    var nbits = 1;
+    if (range > 0) {
+        # Count bits needed: 32 - leading_zeros(range), min 1
+        var tmp = range;
+        var lz = 0;
+        while (tmp < 0x80000000) {
+            if (tmp == 0) { break; }
+            tmp = tmp << 1;
+            lz = lz + 1;
+        }
+        nbits = 32 - lz;
+        if (nbits < 1) { nbits = 1; }
+    }
+    var nbytes = (nbits + 7) / 8;
+    var shift = nbytes * 8 - 8;
+    var val = low >> (23 - nbits);
+
+    var bi = 0;
+    while (bi < nbytes) {
+        _rc_push_byte(rc, (val >> shift) & 0xFF);
+        val = val << 8;
+        bi = bi + 1;
+    }
+
+    var buf = load64(rc);
+    var blen = load64(rc + 8);
+    return str_new(buf, blen);
+}
+
+# ================================================================
+# CELT band structure (Bark-scale at 48 kHz, 20ms)
+# ================================================================
+
+# 21 bands, boundaries in MDCT bin indices (960 samples -> 480 bins)
+var _celt_band_edges = 0;
+var _CELT_NUM_BANDS = 21;
+
+fn _opus_init_bands() {
+    _celt_band_edges = alloc(22 * 8);
+    store64(_celt_band_edges + 0 * 8, 0);
+    store64(_celt_band_edges + 1 * 8, 1);
+    store64(_celt_band_edges + 2 * 8, 2);
+    store64(_celt_band_edges + 3 * 8, 3);
+    store64(_celt_band_edges + 4 * 8, 4);
+    store64(_celt_band_edges + 5 * 8, 5);
+    store64(_celt_band_edges + 6 * 8, 6);
+    store64(_celt_band_edges + 7 * 8, 7);
+    store64(_celt_band_edges + 8 * 8, 8);
+    store64(_celt_band_edges + 9 * 8, 10);
+    store64(_celt_band_edges + 10 * 8, 12);
+    store64(_celt_band_edges + 11 * 8, 14);
+    store64(_celt_band_edges + 12 * 8, 17);
+    store64(_celt_band_edges + 13 * 8, 21);
+    store64(_celt_band_edges + 14 * 8, 26);
+    store64(_celt_band_edges + 15 * 8, 32);
+    store64(_celt_band_edges + 16 * 8, 40);
+    store64(_celt_band_edges + 17 * 8, 50);
+    store64(_celt_band_edges + 18 * 8, 62);
+    store64(_celt_band_edges + 19 * 8, 78);
+    store64(_celt_band_edges + 20 * 8, 100);
+    store64(_celt_band_edges + 21 * 8, 480);
+    return 0;
+}
+
+# ================================================================
+# CELT frame encoder helpers
+# ================================================================
+
+# Apply sine window to frame (f64 array, n samples)
+fn _opus_sine_window(frame, n) {
+    var i = 0;
+    while (i < n) {
+        # w = sin(pi/n * (i + 0.5))
+        var angle = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)), f64_from(n));
+        var w = f64_sin(angle);
+        var s = load64(frame + i * 8);
+        store64(frame + i * 8, f64_mul(s, w));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Compute log2 energy per CELT band from MDCT coefficients.
+# mdct: pointer to n2 f64 values, energies: pointer to 21 f64 values.
+fn _opus_compute_band_energies(mdct, n2, energies) {
+    var band = 0;
+    while (band < _CELT_NUM_BANDS) {
+        var start = load64(_celt_band_edges + band * 8);
+        var end = load64(_celt_band_edges + (band + 1) * 8);
+        if (end > n2) { end = n2; }
+
+        var sum = F64_ZERO;
+        var j = start;
+        while (j < end) {
+            var c = load64(mdct + j * 8);
+            sum = f64_add(sum, f64_mul(c, c));
+            j = j + 1;
+        }
+
+        var band_size = end - start;
+        if (band_size < 1) { band_size = 1; }
+        # log2(sum / band_size), with floor to avoid log(0)
+        var avg = f64_div(sum, f64_from(band_size));
+        var floor_val = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+        avg = f64_max(avg, floor_val);
+        store64(energies + band * 8, f64_log2(avg));
+
+        band = band + 1;
+    }
+    return 0;
+}
+
+# Quantize band energies to integer values.
+# energies: 21 f64 values, quant: 21 i64 values.
+fn _opus_quantize_energies(energies, quant) {
+    var i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var e = load64(energies + i * 8);
+        # Quantize to 1/2 dB steps: round(e * 2)
+        var q = f64_to(f64_floor(f64_add(f64_mul(e, F64_TWO), F64_HALF)));
+        store64(quant + i * 8, q);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Encode band energies via range coder (Laplace-like delta coding).
+fn _opus_encode_band_energies(rc, quant) {
+    var prev = 0;
+    var i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var q = load64(quant + i * 8);
+        var diff = q - prev;
+        if (diff < 0 - 64) { diff = 0 - 64; }
+        if (diff > 63) { diff = 63; }
+        var val = diff + 64;
+        opus_range_enc_uint(rc, val, 128);
+        prev = q;
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Encode spectral shape (simplified PVQ: just encode signs).
+fn _opus_encode_spectral_shape(rc, mdct, n2, target_bytes) {
+    var band = 0;
+    while (band < _CELT_NUM_BANDS) {
+        var start = load64(_celt_band_edges + band * 8);
+        var end = load64(_celt_band_edges + (band + 1) * 8);
+        if (end > n2) { end = n2; }
+
+        if (opus_range_enc_bytes_used(rc) >= target_bytes) { break; }
+
+        var j = start;
+        while (j < end) {
+            if (opus_range_enc_bytes_used(rc) >= target_bytes) { break; }
+            var c = load64(mdct + j * 8);
+            var is_pos = 1;
+            if (f64_lt(c, F64_ZERO) == 1) { is_pos = 0; }
+            opus_range_enc_bit(rc, is_pos);
+            j = j + 1;
+        }
+        band = band + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# CELT frame size
+# ================================================================
+
+var OPUS_FRAME_SIZE = 960;        # 20ms at 48 kHz
+var OPUS_ENCODER_PRE_SKIP = 312;  # 3.75ms at 48 kHz (RFC 7845)
+
+# ================================================================
+# Encode a single CELT frame
+# ================================================================
+# samples: pointer to frame_size f64 values (mono downmix)
+# target_bytes: target packet size
+# Returns Str (data, len).
+
+fn _opus_encode_celt_frame(samples, frame_size, channels, target_bytes) {
+    var ch = channels;
+    var n2 = frame_size / 2;
+
+    # Mix to mono if stereo
+    var mono = alloc(frame_size * 8);
+    var i = 0;
+    while (i < frame_size) {
+        var sum = F64_ZERO;
+        var c = 0;
+        while (c < ch) {
+            var idx = i * ch + c;
+            sum = f64_add(sum, load64(samples + idx * 8));
+            c = c + 1;
+        }
+        store64(mono + i * 8, f64_div(sum, f64_from(ch)));
+        i = i + 1;
+    }
+
+    # Apply sine window
+    _opus_sine_window(mono, frame_size);
+
+    # Forward MDCT
+    var mdct = alloc(n2 * 8);
+    memset(mdct, 0, n2 * 8);
+    fft_mdct(mono, frame_size, mdct);
+
+    # Compute and quantize band energies
+    var energies = alloc(_CELT_NUM_BANDS * 8);
+    _opus_compute_band_energies(mdct, n2, energies);
+
+    var quant = alloc(_CELT_NUM_BANDS * 8);
+    _opus_quantize_energies(energies, quant);
+
+    # Build Opus packet with range coder
+    var rc = opus_range_enc_init();
+
+    # Encode band energies
+    _opus_encode_band_energies(rc, quant);
+
+    # Encode spectral shape with remaining bits
+    _opus_encode_spectral_shape(rc, mdct, n2, target_bytes - 1);
+
+    # Finalize range coder
+    var coded = opus_range_enc_flush(rc);
+
+    # Build packet: TOC byte + coded data
+    var coded_len = str_len(coded);
+    var total_len = 1 + coded_len;
+    var packet = alloc(total_len);
+
+    # TOC byte: config=30 (CELT-only FB 20ms), s=0, c=0
+    store8(packet, 30 << 3);
+
+    # Copy coded data
+    memcpy(packet + 1, str_data(coded), coded_len);
+
+    # Pad or truncate to target size
+    if (total_len < target_bytes) {
+        var padded = alloc(target_bytes);
+        memcpy(padded, packet, total_len);
+        memset(padded + total_len, 0, target_bytes - total_len);
+        return str_new(padded, target_bytes);
+    }
+    if (total_len > target_bytes) {
+        return str_new(packet, target_bytes);
+    }
+    return str_new(packet, total_len);
+}
+
+# ================================================================
+# Opus encoder (Ogg container output)
+# ================================================================
+#
+# opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
+#   samples_vec: vec of f64 bit patterns (interleaved)
+#   sample_rate: must be 48000
+#   channels: 1 or 2
+#   bitrate: 32000..256000
+#   out_buf: pointer to output buffer (must be large enough)
+# Returns bytes written, or err().
+
+fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
+    # Validate parameters
+    if (sample_rate != 48000) { return err(ERR_INVALID_RATE); }
+    if (channels < 1) { return err(ERR_INVALID_CHANNELS); }
+    if (channels > 2) { return err(ERR_INVALID_CHANNELS); }
+    if (bitrate < 32000) { return err(ERR_ENCODE); }
+    if (bitrate > 256000) { return err(ERR_ENCODE); }
+
+    # Initialize band edges if needed
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+
+    var ch = channels;
+    var total_samples = vec_len(samples_vec);
+    var frame_interleaved = OPUS_FRAME_SIZE * ch;
+
+    # Bytes per CELT frame: bitrate / 8 / 50 (20ms = 50 frames/sec)
+    var bytes_per_frame = bitrate / 8 / 50;
+    if (bytes_per_frame < 10) { bytes_per_frame = 10; }
+
+    # Generate header packets
+    var head_buf = alloc(19);
+    opus_serialize_head(channels, OPUS_ENCODER_PRE_SKIP, sample_rate, head_buf);
+    var head_str = str_new(head_buf, 19);
+
+    var tags_buf = alloc(23);
+    opus_serialize_tags(tags_buf);
+    var tags_str = str_new(tags_buf, 23);
+
+    # Encode audio frames
+    var audio_packets = vec_new();
+    var granule_positions = vec_new();
+    var sample_pos = 0;
+    var granule = OPUS_ENCODER_PRE_SKIP;
+
+    while (sample_pos < total_samples) {
+        var end = sample_pos + frame_interleaved;
+        if (end > total_samples) { end = total_samples; }
+        var count = end - sample_pos;
+
+        # Build frame buffer (padded to full frame)
+        var frame_buf = alloc(frame_interleaved * 8);
+        memset(frame_buf, 0, frame_interleaved * 8);
+        var fi = 0;
+        while (fi < count) {
+            store64(frame_buf + fi * 8, vec_get(samples_vec, sample_pos + fi));
+            fi = fi + 1;
+        }
+
+        var pkt = _opus_encode_celt_frame(frame_buf, OPUS_FRAME_SIZE, channels, bytes_per_frame);
+        vec_push(audio_packets, pkt);
+
+        var actual_samples = count / ch;
+        granule = granule + actual_samples;
+        vec_push(granule_positions, granule);
+
+        sample_pos = end;
+    }
+
+    # Handle empty input: encode one frame of silence
+    if (vec_len(audio_packets) == 0) {
+        var silence = alloc(frame_interleaved * 8);
+        memset(silence, 0, frame_interleaved * 8);
+        var pkt = _opus_encode_celt_frame(silence, OPUS_FRAME_SIZE, channels, bytes_per_frame);
+        vec_push(audio_packets, pkt);
+        vec_push(granule_positions, granule);
+    }
+
+    # Serial number: "Shra" = 0x53687261
+    var serial = 0x53687261;
+
+    # Assemble Ogg bitstream into out_buf
+    var write_pos = 0;
+
+    # Page 0: BOS + OpusHead
+    var page0 = ogg_build_page(OGG_FLAG_BOS, 0, serial, 0, head_buf, 19);
+    memcpy(out_buf + write_pos, str_data(page0), str_len(page0));
+    write_pos = write_pos + str_len(page0);
+
+    # Page 1: OpusTags
+    var page1 = ogg_build_page(0, 0, serial, 1, tags_buf, 23);
+    memcpy(out_buf + write_pos, str_data(page1), str_len(page1));
+    write_pos = write_pos + str_len(page1);
+
+    # Audio pages (2+)
+    var num_audio = vec_len(audio_packets);
+    var ai = 0;
+    while (ai < num_audio) {
+        var pkt = vec_get(audio_packets, ai);
+        var gran = vec_get(granule_positions, ai);
+        var flags = 0;
+        if (ai == num_audio - 1) {
+            flags = OGG_FLAG_EOS;
+        }
+        var page = ogg_build_page(flags, gran, serial, ai + 2, str_data(pkt), str_len(pkt));
+        memcpy(out_buf + write_pos, str_data(page), str_len(page));
+        write_pos = write_pos + str_len(page);
+
+        ai = ai + 1;
+    }
+
+    return write_pos;
+}
+
+# ================================================================
+# Opus decode stub
+# ================================================================
+
+fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
+    return err(ERR_UNSUPPORTED_FMT);
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_opus_head_parse_valid() {
+    test_group("opus: parse valid OpusHead");
+
+    var buf = alloc(19);
+    opus_serialize_head(2, 312, 48000, buf);
+
+    var h = opus_parse_head(buf, 19);
+    assert(is_err(h) == 0, "parse succeeds");
+    assert_eq(opus_head_version(h), 1, "version");
+    assert_eq(opus_head_channels(h), 2, "channels");
+    assert_eq(opus_head_pre_skip(h), 312, "pre_skip");
+    assert_eq(opus_head_sample_rate(h), 48000, "sample_rate");
+    assert_eq(opus_head_output_gain(h), 0, "output_gain");
+    assert_eq(opus_head_mapping(h), 0, "mapping_family");
+
+    return 0;
+}
+
+fn test_opus_head_reject_wrong_magic() {
+    test_group("opus: reject wrong magic");
+
+    var buf = alloc(19);
+    opus_serialize_head(2, 312, 48000, buf);
+    # Corrupt magic
+    store8(buf, 0x00);
+    var h = opus_parse_head(buf, 19);
+    assert(is_err(h) == 1, "wrong magic rejected");
+
+    return 0;
+}
+
+fn test_opus_head_reject_short() {
+    test_group("opus: reject short data");
+
+    var buf = alloc(10);
+    memcpy(buf, "OpusHead12", 10);
+    var h = opus_parse_head(buf, 10);
+    assert(is_err(h) == 1, "short data rejected");
+
+    return 0;
+}
+
+fn test_opus_head_reject_zero_channels() {
+    test_group("opus: reject zero channels");
+
+    var buf = alloc(19);
+    opus_serialize_head(0, 312, 48000, buf);
+    # Channel byte is at offset 9, already 0
+    var h = opus_parse_head(buf, 19);
+    assert(is_err(h) == 1, "zero channels rejected");
+
+    return 0;
+}
+
+fn test_opus_head_roundtrip() {
+    test_group("opus: serialize+parse roundtrip");
+
+    var buf = alloc(19);
+    opus_serialize_head(1, 200, 44100, buf);
+    var h = opus_parse_head(buf, 19);
+    assert(is_err(h) == 0, "roundtrip parse ok");
+    assert_eq(opus_head_channels(h), 1, "rt channels");
+    assert_eq(opus_head_pre_skip(h), 200, "rt pre_skip");
+    assert_eq(opus_head_sample_rate(h), 44100, "rt sample_rate");
+
+    return 0;
+}
+
+fn test_opus_tags_parseable() {
+    test_group("opus: tags serialization");
+
+    var buf = alloc(23);
+    var len = opus_serialize_tags(buf);
+    assert_eq(len, 23, "tags length");
+
+    # Check magic "OpusTags"
+    assert_eq(load8(buf), 0x4F, "O");
+    assert_eq(load8(buf + 1), 0x70, "p");
+    assert_eq(load8(buf + 7), 0x73, "s");
+
+    return 0;
+}
+
+fn test_opus_encode_rejects_bad_rate() {
+    test_group("opus: encode rejects wrong sample rate");
+
+    var samples = vec_new();
+    var out = alloc(65536);
+    var result = opus_encode(samples, 44100, 1, 64000, out);
+    assert(is_err(result) == 1, "wrong rate rejected");
+
+    return 0;
+}
+
+fn test_opus_encode_rejects_bad_channels() {
+    test_group("opus: encode rejects bad channels");
+
+    var samples = vec_new();
+    var out = alloc(65536);
+
+    var r1 = opus_encode(samples, 48000, 0, 64000, out);
+    assert(is_err(r1) == 1, "0 channels rejected");
+
+    var r2 = opus_encode(samples, 48000, 3, 64000, out);
+    assert(is_err(r2) == 1, "3 channels rejected");
+
+    return 0;
+}
+
+fn test_opus_encode_rejects_bad_bitrate() {
+    test_group("opus: encode rejects bad bitrate");
+
+    var samples = vec_new();
+    var out = alloc(65536);
+
+    var r1 = opus_encode(samples, 48000, 1, 1000, out);
+    assert(is_err(r1) == 1, "low bitrate rejected");
+
+    var r2 = opus_encode(samples, 48000, 1, 500000, out);
+    assert(is_err(r2) == 1, "high bitrate rejected");
+
+    return 0;
+}
+
+fn test_opus_range_encoder_basic() {
+    test_group("opus: range encoder basic");
+
+    var rc = opus_range_enc_init();
+    opus_range_enc_bit(rc, 1);
+    opus_range_enc_bit(rc, 0);
+    opus_range_enc_uint(rc, 3, 8);
+    var result = opus_range_enc_flush(rc);
+    assert(str_len(result) > 0, "range encoder produces output");
+
+    return 0;
+}
+
+fn test_opus_encode_produces_ogg() {
+    test_group("opus: encode produces valid Ogg");
+
+    # Initialize deps
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+
+    # Build 960 silence samples (1 frame, mono)
+    var samples = vec_new();
+    var si = 0;
+    while (si < 960) {
+        vec_push(samples, F64_ZERO);
+        si = si + 1;
+    }
+
+    var out = alloc(131072);
+    var result = opus_encode(samples, 48000, 1, 64000, out);
+    assert(is_err(result) == 0, "encode succeeds");
+    assert(result > 0, "produces bytes");
+
+    # Check OggS magic
+    assert_eq(load8(out), 0x4F, "OggS[0]='O'");
+    assert_eq(load8(out + 1), 0x67, "OggS[1]='g'");
+    assert_eq(load8(out + 2), 0x67, "OggS[2]='g'");
+    assert_eq(load8(out + 3), 0x53, "OggS[3]='S'");
+
+    # Extract packets and verify OpusHead
+    var packets = ogg_extract_packets(out, result);
+    assert(is_err(packets) == 0, "extract packets ok");
+    assert(vec_len(packets) >= 3, "at least 3 packets");
+
+    # First packet should be OpusHead (19 bytes)
+    var p0 = vec_get(packets, 0);
+    var head = opus_parse_head(str_data(p0), str_len(p0));
+    assert(is_err(head) == 0, "parse head from ogg ok");
+    assert_eq(opus_head_channels(head), 1, "mono");
+    assert_eq(opus_head_sample_rate(head), 48000, "48kHz");
+
+    # Second packet should start with "OpusTags"
+    var p1 = vec_get(packets, 1);
+    assert_eq(load8(str_data(p1)), 0x4F, "tags[0]='O'");
+    assert_eq(load8(str_data(p1) + 7), 0x73, "tags[7]='s'");
+
+    return 0;
+}
+
+fn test_opus_all() {
+    fft_init();
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+
+    test_opus_head_parse_valid();
+    test_opus_head_reject_wrong_magic();
+    test_opus_head_reject_short();
+    test_opus_head_reject_zero_channels();
+    test_opus_head_roundtrip();
+    test_opus_tags_parseable();
+    test_opus_encode_rejects_bad_rate();
+    test_opus_encode_rejects_bad_channels();
+    test_opus_encode_rejects_bad_bitrate();
+    test_opus_range_encoder_basic();
+    test_opus_encode_produces_ogg();
+    return 0;
+}
