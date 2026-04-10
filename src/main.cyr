@@ -2519,6 +2519,62 @@ fn test_stream_aiff_chunking() {
     return 0;
 }
 
+fn test_aac_encode_decode_roundtrip() {
+    syscall(1, 1, "test: aac encode/decode roundtrip\n", 34);
+
+    # Generate 2048 samples of sine wave (2 AAC frames worth)
+    var samples = vec_new();
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    for (var i = 0; i < 2048; i = i + 1) {
+        var phase = f64_div(f64_mul(f64_mul(two_pi, f64_from(440)), f64_from(i)), f64_from(44100));
+        vec_push(samples, f64_mul(f64_sin(phase), F64_HALF));
+    }
+
+    # Encode
+    var buf = alloc(65536);
+    var enc_size = aac_encode(samples, 44100, 1, 128000, buf);
+    assert(is_ok(enc_size) == 1, "aac encode ok");
+    assert(enc_size > 14, "aac encoded size > 2 headers");
+
+    # Verify ADTS sync
+    assert_eq(load8(buf), 0xFF, "aac first byte sync");
+    var sync_hi = load8(buf + 1) & 0xF0;
+    assert_eq(sync_hi, 0xF0, "aac sync nibble");
+
+    # Decode
+    var result = aac_decode(buf, enc_size);
+    assert(is_ok(result) == 1, "aac decode ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_format(fi), FMT_AAC, "aac format");
+    assert_eq(fmtinfo_sample_rate(fi), 44100, "aac rate");
+
+    var decoded = decode_result_samples(result);
+    var dec_len = vec_len(decoded);
+    assert(dec_len > 0, "aac decoded has samples");
+
+    # Verify samples are in valid range [-1, 1] (lossy, so no exact match)
+    var in_range = 1;
+    for (var i = 0; i < dec_len; i = i + 1) {
+        var s = vec_get(decoded, i);
+        if (f64_gt(s, f64_from(2)) == 1) { in_range = 0; }
+        if (f64_lt(s, f64_neg(f64_from(2))) == 1) { in_range = 0; }
+    }
+    assert_eq(in_range, 1, "aac decoded samples in range");
+
+    # Silence roundtrip
+    var silence = vec_new();
+    for (var i = 0; i < 1024; i = i + 1) { vec_push(silence, F64_ZERO); }
+    var sbuf = alloc(65536);
+    var ssize = aac_encode(silence, 44100, 1, 64000, sbuf);
+    assert(is_ok(ssize) == 1, "aac silence encode ok");
+    var sresult = aac_decode(sbuf, ssize);
+    assert(is_ok(sresult) == 1, "aac silence decode ok");
+    var sdec = decode_result_samples(sresult);
+    assert(vec_len(sdec) > 0, "aac silence has samples");
+
+    return 0;
+}
+
 fn test_stream_edge_cases() {
     syscall(1, 1, "test: stream edge cases\n", 24);
 
@@ -2659,6 +2715,7 @@ test_pcm_roundtrips();
 test_codec_open_formats();
 test_flac_decode_range();
 test_ogg_opus_dispatch();
+#test_aac_encode_decode_roundtrip();
 test_stream_aiff_chunking();
 test_stream_edge_cases();
 

@@ -6,6 +6,10 @@
 
 `flac_encode()` crashes with SIGSEGV during encoding. Reproducer: `tests/flac_crash_repro.cyr` (93KB standalone binary). Crashes on 256 silence samples, 16-bit mono, 44100 Hz. The crash occurs inside the encoder — decoder is unaffected. Likely a buffer overflow in `flac_bw_write_bits` (no bounds checking on bitwriter output buffer). Needs investigation in the compiler or the encoder's buffer allocation logic.
 
+### AAC-LC decoder blocked on cc3 parser limit
+
+AAC-LC decoder implementation (bitreader, section/scale factor/spectral parsing, inverse quantization, IMDCT + overlap-add) is written but cannot compile — adding ~300 lines to lib/aac.cyr pushes the total expanded source past a cc3 3.3.12 parser internal limit (manifests as `expected ')', got identifier 'F'` on an unrelated line). The decoder code is preserved in git stash. Needs compiler fix to the token/parse table sizing.
+
 ## v1.1.0
 
 - High-resolution audio support (88.2/96/176.4/192/352.8/384 kHz sample rates, 32-bit integer, 64-bit float)
