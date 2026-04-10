@@ -2346,6 +2346,214 @@ fn test_stream_chunking() {
     return 0;
 }
 
+fn test_pcm_roundtrips() {
+    syscall(1, 1, "test: pcm roundtrips (i32, u8, i24_packed)\n", 44);
+
+    # i32 roundtrip
+    var s32 = vec_new();
+    vec_push(s32, F64_ZERO);
+    vec_push(s32, F64_HALF);
+    vec_push(s32, F64_NEG_HALF);
+    var buf32 = alloc(16);
+    var written = f64_to_i32(s32, buf32);
+    assert_eq(written, 12, "i32 roundtrip: 3 samples * 4 bytes");
+    var back32 = i32_to_f64(buf32, 3);
+    assert_eq(vec_len(back32), 3, "i32 roundtrip count");
+    assert(f64_eq(vec_get(back32, 0), F64_ZERO) == 1, "i32 rt zero");
+    assert(f64_gt(vec_get(back32, 1), F64_ZERO) == 1, "i32 rt positive");
+    assert(f64_lt(vec_get(back32, 2), F64_ZERO) == 1, "i32 rt negative");
+
+    # u8 roundtrip
+    var su8 = vec_new();
+    vec_push(su8, F64_ZERO);
+    vec_push(su8, F64_ONE);
+    vec_push(su8, F64_NEG_ONE);
+    var bufu8 = alloc(4);
+    f64_to_u8(su8, bufu8);
+    var backu8 = u8_to_f64(bufu8, 3);
+    assert_eq(vec_len(backu8), 3, "u8 roundtrip count");
+    assert(f64_eq(vec_get(backu8, 0), F64_ZERO) == 1, "u8 rt center");
+    assert(f64_gt(vec_get(backu8, 1), F64_ZERO) == 1, "u8 rt max positive");
+    assert(f64_lt(vec_get(backu8, 2), F64_ZERO) == 1, "u8 rt max negative");
+
+    # i24 packed roundtrip
+    var s24 = vec_new();
+    vec_push(s24, F64_ZERO);
+    vec_push(s24, F64_HALF);
+    vec_push(s24, F64_NEG_HALF);
+    var buf24 = alloc(12);
+    var w24 = f64_to_i24_packed(s24, buf24);
+    assert_eq(w24, 9, "i24 packed: 3 samples * 3 bytes");
+    var back24 = i24_packed_to_f64(buf24, 3);
+    assert_eq(vec_len(back24), 3, "i24 packed roundtrip count");
+    assert(f64_eq(vec_get(back24, 0), F64_ZERO) == 1, "i24p rt zero");
+    assert(f64_gt(vec_get(back24, 1), F64_ZERO) == 1, "i24p rt positive");
+    assert(f64_lt(vec_get(back24, 2), F64_ZERO) == 1, "i24p rt negative");
+
+    return 0;
+}
+
+fn test_codec_open_formats() {
+    syscall(1, 1, "test: codec_open format dispatch\n", 33);
+
+    # FLAC via codec_open — encode then open
+    var fsamples = vec_new();
+    for (var i = 0; i < 100; i = i + 1) { vec_push(fsamples, F64_ZERO); }
+    var fbuf = alloc(65536);
+    var fsize = flac_encode(fsamples, 44100, 1, 16, fbuf);
+    assert(is_ok(fsize) == 1, "codec_open flac encode ok");
+    var fr = codec_open(fbuf, fsize);
+    assert(is_ok(fr) == 1, "codec_open FLAC ok");
+    assert_eq(fmtinfo_format(decode_result_info(fr)), FMT_FLAC, "codec_open format=FLAC");
+
+    # AIFF via codec_open
+    var asamples = vec_new();
+    for (var i = 0; i < 50; i = i + 1) { vec_push(asamples, F64_ZERO); }
+    var abuf = alloc(65536);
+    var asize = aiff_encode(asamples, 44100, 1, 16, abuf);
+    assert(is_ok(asize) == 1, "codec_open aiff encode ok");
+    var ar = codec_open(abuf, asize);
+    assert(is_ok(ar) == 1, "codec_open AIFF ok");
+    assert_eq(fmtinfo_format(decode_result_info(ar)), FMT_AIFF, "codec_open format=AIFF");
+
+    return 0;
+}
+
+fn test_flac_decode_range() {
+    syscall(1, 1, "test: flac decode_range\n", 24);
+
+    # Encode a ramp signal
+    var samples = vec_new();
+    for (var i = 0; i < 200; i = i + 1) {
+        vec_push(samples, f64_div(f64_from(i), f64_from(200)));
+    }
+    var buf = alloc(131072);
+    var fsize = flac_encode(samples, 44100, 1, 16, buf);
+    assert(is_ok(fsize) == 1, "flac encode for range test");
+
+    # Full decode
+    var full = flac_decode(buf, fsize);
+    assert(is_err(full) == 0, "full decode ok");
+    var full_len = vec_len(decode_result_samples(full));
+    assert(full_len > 0, "full decode has samples");
+
+    # decode_range with start=0, count=0 (all) should match full
+    var range_all = flac_decode_range(buf, fsize, 0, 0);
+    assert(is_err(range_all) == 0, "range all ok");
+    assert_eq(vec_len(decode_result_samples(range_all)), full_len, "range all = full");
+
+    # decode_range with start=0, count=50
+    var range_50 = flac_decode_range(buf, fsize, 0, 50);
+    assert(is_err(range_50) == 0, "range 0..50 ok");
+    var r50_len = vec_len(decode_result_samples(range_50));
+    assert(r50_len > 0, "range subset has samples");
+    assert(r50_len <= full_len, "range subset <= full");
+
+    return 0;
+}
+
+fn test_ogg_opus_dispatch() {
+    syscall(1, 1, "test: ogg_decode opus dispatch\n", 31);
+
+    # Build Opus in Ogg: encode silent samples, then decode via ogg_decode
+    var samples = vec_new();
+    for (var i = 0; i < 960; i = i + 1) { vec_push(samples, F64_ZERO); }
+
+    var out_buf = alloc(65536);
+    var ogg_size = opus_encode(samples, 48000, 1, 64000, out_buf);
+    assert(is_ok(ogg_size) == 1, "opus encode for ogg dispatch test");
+
+    # ogg_decode should detect OpusHead and dispatch
+    var result = ogg_decode(out_buf, ogg_size);
+    assert(is_ok(result) == 1, "ogg_decode opus dispatch ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_format(fi), FMT_OPUS, "ogg dispatch format=OPUS");
+    assert_eq(fmtinfo_sample_rate(fi), 48000, "ogg dispatch rate=48000");
+
+    # codec_open should also work via FMT_OGG -> ogg_decode
+    var result2 = codec_open(out_buf, ogg_size);
+    assert(is_ok(result2) == 1, "codec_open ogg/opus ok");
+    assert_eq(fmtinfo_format(decode_result_info(result2)), FMT_OPUS, "codec_open ogg format=OPUS");
+
+    return 0;
+}
+
+fn test_stream_aiff_chunking() {
+    syscall(1, 1, "test: aiff stream chunking\n", 27);
+
+    # Encode AIFF with 100 samples
+    var samples = vec_new();
+    for (var i = 0; i < 100; i = i + 1) { vec_push(samples, F64_ZERO); }
+    var abuf = alloc(65536);
+    var asize = aiff_encode(samples, 44100, 1, 16, abuf);
+    assert(is_ok(asize) == 1, "aiff encode for stream test");
+
+    # Stream with chunk_frames=25 -> should get 4 SAMPLES events
+    var dec = aiff_stream_new(25);
+    var evts = aiff_stream_feed(dec, abuf, asize);
+    var flush = aiff_stream_flush(dec);
+
+    var all = vec_new();
+    for (var ei = 0; ei < vec_len(evts); ei = ei + 1) { vec_push(all, vec_get(evts, ei)); }
+    for (var ei = 0; ei < vec_len(flush); ei = ei + 1) { vec_push(all, vec_get(flush, ei)); }
+
+    var sample_events = 0;
+    var total_received = 0;
+    var got_header = 0;
+    var got_end = 0;
+    for (var ei = 0; ei < vec_len(all); ei = ei + 1) {
+        var evt = vec_get(all, ei);
+        var etype = stream_evt_type(evt);
+        if (etype == STREAM_EVT_HEADER) { got_header = 1; }
+        if (etype == STREAM_EVT_SAMPLES) {
+            sample_events = sample_events + 1;
+            total_received = total_received + vec_len(stream_evt_data(evt));
+        }
+        if (etype == STREAM_EVT_END) { got_end = 1; }
+    }
+    assert_eq(got_header, 1, "aiff stream: got header");
+    assert(sample_events >= 2, "aiff stream: multiple chunks");
+    assert_eq(total_received, 100, "aiff stream: total samples");
+    assert_eq(got_end, 1, "aiff stream: got END");
+
+    return 0;
+}
+
+fn test_stream_edge_cases() {
+    syscall(1, 1, "test: stream edge cases\n", 24);
+
+    # chunk_frames=1 should give one event per sample
+    var samples = vec_new();
+    for (var i = 0; i < 10; i = i + 1) { vec_push(samples, F64_ZERO); }
+    var buf = alloc(65536);
+    var wsize = wav_encode(samples, 44100, 1, PCM_I16, buf);
+    assert(is_ok(wsize) == 1, "edge: encode ok");
+
+    var dec = wav_stream_new(1);
+    var evts = wav_stream_feed(dec, buf, wsize);
+    var flush = wav_stream_flush(dec);
+
+    var sample_events = 0;
+    for (var ei = 0; ei < vec_len(evts); ei = ei + 1) {
+        if (stream_evt_type(vec_get(evts, ei)) == STREAM_EVT_SAMPLES) {
+            sample_events = sample_events + 1;
+        }
+    }
+    assert_eq(sample_events, 10, "edge: chunk_frames=1 gives 10 events for 10 samples");
+
+    # Double flush should still produce END
+    var dec2 = wav_stream_new(4096);
+    wav_stream_flush(dec2);
+    var f2 = wav_stream_flush(dec2);
+    var has_end = 0;
+    for (var ei = 0; ei < vec_len(f2); ei = ei + 1) {
+        if (stream_evt_type(vec_get(f2, ei)) == STREAM_EVT_END) { has_end = 1; }
+    }
+    assert_eq(has_end, 1, "edge: double flush has END");
+
+    return 0;
+}
+
 fn print_summary() {
     syscall(1, 1, "\n", 1);
     syscall(1, 1, "shravan tests: ", 15);
@@ -2447,6 +2655,12 @@ test_resample();
 test_dither();
 test_simd();
 test_stream();
+test_pcm_roundtrips();
+test_codec_open_formats();
+test_flac_decode_range();
+test_ogg_opus_dispatch();
+test_stream_aiff_chunking();
+test_stream_edge_cases();
 
 print_summary();
 

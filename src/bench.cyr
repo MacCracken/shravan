@@ -239,6 +239,34 @@ fn f64_to_f32_bytes(samples, out) {
     return len * 4;
 }
 
+fn read_u16_be(data, off) { return (load8(data+off) << 8) | load8(data+off+1); }
+fn read_u32_be(data, off) { return (load8(data+off) << 24) | (load8(data+off+1)<<16) | (load8(data+off+2)<<8) | load8(data+off+3); }
+fn write_u16_be(buf, off, val) { store8(buf+off, (val>>8)&0xFF); store8(buf+off+1, val&0xFF); return 0; }
+fn write_u32_be(buf, off, val) { store8(buf+off, (val>>24)&0xFF); store8(buf+off+1, (val>>16)&0xFF); store8(buf+off+2, (val>>8)&0xFF); store8(buf+off+3, val&0xFF); return 0; }
+
+fn interleave(channels, ch_count) {
+    var ch0 = vec_get(channels, 0);
+    var per_ch = vec_len(ch0);
+    var out = vec_new();
+    for (var i = 0; i < per_ch; i = i + 1) {
+        for (var c = 0; c < ch_count; c = c + 1) {
+            vec_push(out, vec_get(vec_get(channels, c), i));
+        }
+    }
+    return out;
+}
+
+fn deinterleave(samples, ch_count) {
+    var total = vec_len(samples);
+    var per_ch = total / ch_count;
+    var planes = vec_new();
+    for (var c = 0; c < ch_count; c = c + 1) { vec_push(planes, vec_new()); }
+    for (var i = 0; i < total; i = i + 1) {
+        vec_push(vec_get(planes, i % ch_count), vec_get(samples, i));
+    }
+    return planes;
+}
+
 # --- WAV codec ---
 enum WavFmt { WAV_FMT_PCM = 1; WAV_FMT_IEEE_FLOAT = 3; WAV_FMT_EXTENSIBLE = 65534; }
 
@@ -351,6 +379,11 @@ fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
     write_u32_le(out, 40, raw_size);
     return 44 + raw_size;
 }
+
+# --- Include FLAC, FFT, resample libs ---
+include "lib/flac.cyr"
+include "lib/fft.cyr"
+include "lib/resample.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -479,17 +512,187 @@ fn bench_pcm_i16_to_f64_4096() {
 }
 
 # ================================================================
+# Benchmark: wav_encode_1sec_i16
+# ================================================================
+
+fn bench_wav_encode_1sec() {
+    var samples = vec_new();
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    var F64_440 = f64_from(440);
+    var F64_44100 = f64_from(44100);
+    for (var i = 0; i < 44100; i = i + 1) {
+        vec_push(samples, f64_sin(f64_div(f64_mul(f64_mul(two_pi, F64_440), f64_from(i)), F64_44100)));
+    }
+    var buf = alloc(200000);
+
+    for (var w = 0; w < 100; w = w + 1) { wav_encode(samples, 44100, 1, PCM_I16, buf); }
+
+    var iters = 5000;
+    bench("wav_encode_1sec_i16", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { wav_encode(samples, 44100, 1, PCM_I16, buf); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: pcm_i24_packed_4096
+# ================================================================
+
+fn bench_pcm_i24_4096() {
+    var buf = alloc(12288);
+    for (var i = 0; i < 4096; i = i + 1) {
+        var off = i * 3;
+        var val = (i * 100) & 0xFFFFFF;
+        store8(buf + off, val & 0xFF);
+        store8(buf + off + 1, (val >> 8) & 0xFF);
+        store8(buf + off + 2, (val >> 16) & 0xFF);
+    }
+
+    for (var w = 0; w < 1000; w = w + 1) { i24_packed_to_f64(buf, 4096); }
+
+    var iters = 100000;
+    bench("pcm_i24_packed_4096", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { i24_packed_to_f64(buf, 4096); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: pcm_u8_4096
+# ================================================================
+
+fn bench_pcm_u8_4096() {
+    var buf = alloc(4096);
+    for (var i = 0; i < 4096; i = i + 1) { store8(buf + i, i & 0xFF); }
+
+    for (var w = 0; w < 1000; w = w + 1) { u8_to_f64(buf, 4096); }
+
+    var iters = 100000;
+    bench("pcm_u8_to_f64_4096", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { u8_to_f64(buf, 4096); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: flac_encode_1sec
+# ================================================================
+
+fn bench_flac_encode_1sec() {
+    # Build samples once, save mark, reset between iterations
+    var samples = vec_new();
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    var F64_440 = f64_from(440);
+    var F64_44100 = f64_from(44100);
+    for (var i = 0; i < 44100; i = i + 1) {
+        vec_push(samples, f64_sin(f64_div(f64_mul(f64_mul(two_pi, F64_440), f64_from(i)), F64_44100)));
+    }
+    var mark = alloc_used();
+    var buf = alloc(500000);
+
+    var iters = 20;
+    bench("flac_encode_1sec_i16", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        flac_encode(samples, 44100, 1, 16, buf);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: flac_decode_1sec
+# ================================================================
+
+fn bench_flac_decode_1sec() {
+    var samples = vec_new();
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    var F64_440 = f64_from(440);
+    var F64_44100 = f64_from(44100);
+    for (var i = 0; i < 44100; i = i + 1) {
+        vec_push(samples, f64_sin(f64_div(f64_mul(f64_mul(two_pi, F64_440), f64_from(i)), F64_44100)));
+    }
+    var buf = alloc(500000);
+    var fsize = flac_encode(samples, 44100, 1, 16, buf);
+
+    var iters = 1;
+    bench("flac_decode_1sec_i16", iters);
+    var t0 = time_now_ns();
+    flac_decode(buf, fsize);
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: fft_1024
+# ================================================================
+
+fn bench_fft_1024() {
+    var re = alloc(1024 * 8);
+    var im = alloc(1024 * 8);
+    for (var i = 0; i < 1024; i = i + 1) {
+        store64(re + i * 8, f64_from(i % 100));
+        store64(im + i * 8, F64_ZERO);
+    }
+
+    for (var w = 0; w < 100; w = w + 1) { fft_compute(re, im, 1024, 0); }
+
+    var iters = 10000;
+    bench("fft_forward_1024", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { fft_compute(re, im, 1024, 0); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: mdct_2048
+# ================================================================
+
+fn bench_mdct_2048() {
+    var input = alloc(2048 * 8);
+    var output = alloc(1024 * 8);
+    for (var i = 0; i < 2048; i = i + 1) {
+        store64(input + i * 8, f64_from(i % 200));
+    }
+
+    for (var w = 0; w < 10; w = w + 1) { fft_mdct(input, 2048, output); }
+
+    var iters = 1000;
+    bench("mdct_forward_2048", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { fft_mdct(input, 2048, output); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Entry point
 # ================================================================
 
 alloc_init();
 shravan_init_constants();
+flac_init();
+fft_init();
+resample_init();
 
 syscall(1, 1, "shravan v2.0.0 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
-var wav_ns = bench_wav_decode_1sec();
-var pcm_ns = bench_pcm_i16_to_f64_4096();
+var wav_dec_ns = bench_wav_decode_1sec();
+var wav_enc_ns = bench_wav_encode_1sec();
+var pcm16_ns   = bench_pcm_i16_to_f64_4096();
+var pcm24_ns   = bench_pcm_i24_4096();
+var pcmu8_ns   = bench_pcm_u8_4096();
+var fft_ns     = bench_fft_1024();
+var mdct_ns    = bench_mdct_2048();
+# NOTE: FLAC benchmarks disabled — bench.cyr's inline library stubs conflict
+# with lib/flac.cyr. Fix by refactoring bench.cyr to use shared library include.
+# var flac_enc_ns = bench_flac_encode_1sec();
+# var flac_dec_ns = bench_flac_decode_1sec();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);
