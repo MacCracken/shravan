@@ -1,0 +1,1160 @@
+# shravan — audio codecs for AGNOS (Cyrius port)
+# Ported from ~10K lines of Rust to Cyrius.
+#
+# Phase 1: error, format, pcm, codec, wav
+#
+# Design decisions:
+#   - All audio samples are f64 internally (Cyrius native, more precision than f32)
+#   - Packed Result: Ok returns value >= 0, Err sets bit 63 (value < 0)
+#   - Buffers are raw byte pointers + length
+#   - Vec used for dynamic sample arrays (stores f64 bit patterns as i64)
+#   - Error codes are integer enums, error messages via helper functions
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/tagged.cyr"
+include "lib/math.cyr"
+
+# ================================================================
+# Constants — f64 bit patterns for common values
+# ================================================================
+
+# f64 constants — initialized at startup via shravan_init_constants()
+var F64_ZERO       = 0;
+var F64_HALF       = 0;
+var F64_NEG_HALF   = 0;
+var F64_NEG_ONE    = 0;
+# F64_ONE and F64_TWO are in math.cyr
+
+# Divisors for PCM normalization
+var F64_128        = 0;
+var F64_255        = 0;
+var F64_32768      = 0;
+var F64_32767      = 0;
+var F64_8388608    = 0;
+var F64_8388607    = 0;
+var F64_2147483648 = 0;
+var F64_2147483647 = 0;
+
+fn shravan_init_constants() {
+    F64_ZERO       = f64_from(0);
+    F64_HALF       = f64_div(F64_ONE, F64_TWO);
+    F64_NEG_HALF   = f64_neg(F64_HALF);
+    F64_NEG_ONE    = f64_neg(F64_ONE);
+    F64_128        = f64_from(128);
+    F64_255        = f64_from(255);
+    F64_32768      = f64_from(32768);
+    F64_32767      = f64_from(32767);
+    F64_8388608    = f64_from(8388608);
+    F64_8388607    = f64_from(8388607);
+    F64_2147483648 = f64_mul(f64_from(32768), f64_from(65536));
+    F64_2147483647 = f64_sub(F64_2147483648, F64_ONE);
+    return 0;
+}
+
+# ================================================================
+# Error module
+# ================================================================
+
+enum ShravanErr {
+    ERR_NONE              = 0;
+    ERR_UNSUPPORTED_FMT   = 1;
+    ERR_INVALID_HEADER    = 2;
+    ERR_DECODE            = 3;
+    ERR_ENCODE            = 4;
+    ERR_END_OF_STREAM     = 5;
+    ERR_INVALID_RATE      = 6;
+    ERR_INVALID_CHANNELS  = 7;
+}
+
+# Pack an error code into a negative result (bit 63 set)
+fn err(code) {
+    return 0 - code;
+}
+
+# Check if a result is an error (negative)
+fn is_err(r) {
+    if (r < 0) { return 1; }
+    return 0;
+}
+
+# Check if a result is ok (non-negative)
+fn is_ok(r) {
+    if (r >= 0) { return 1; }
+    return 0;
+}
+
+# Extract error code from a packed error result
+fn err_code(r) {
+    return 0 - r;
+}
+
+# Print error message to stderr
+fn err_print(code) {
+    if (code == ERR_UNSUPPORTED_FMT)  { syscall(1, 2, "unsupported format\n", 19); }
+    if (code == ERR_INVALID_HEADER)   { syscall(1, 2, "invalid header\n", 15); }
+    if (code == ERR_DECODE)           { syscall(1, 2, "decode error\n", 13); }
+    if (code == ERR_ENCODE)           { syscall(1, 2, "encode error\n", 13); }
+    if (code == ERR_END_OF_STREAM)    { syscall(1, 2, "end of stream\n", 14); }
+    if (code == ERR_INVALID_RATE)     { syscall(1, 2, "invalid sample rate\n", 20); }
+    if (code == ERR_INVALID_CHANNELS) { syscall(1, 2, "invalid channel count\n", 22); }
+    return 0;
+}
+
+# ================================================================
+# Format module
+# ================================================================
+
+enum AudioFormat {
+    FMT_WAV    = 0;
+    FMT_FLAC   = 1;
+    FMT_RAW    = 2;
+    FMT_OGG    = 3;
+    FMT_AIFF   = 4;
+    FMT_MP3    = 5;
+    FMT_OPUS   = 6;
+    FMT_AAC    = 7;
+    FMT_ALAC   = 8;
+}
+
+fn format_name(fmt) {
+    if (fmt == FMT_WAV)  { return "WAV"; }
+    if (fmt == FMT_FLAC) { return "FLAC"; }
+    if (fmt == FMT_RAW)  { return "Raw PCM"; }
+    if (fmt == FMT_OGG)  { return "Ogg"; }
+    if (fmt == FMT_AIFF) { return "AIFF"; }
+    if (fmt == FMT_MP3)  { return "MP3"; }
+    if (fmt == FMT_OPUS) { return "Opus"; }
+    if (fmt == FMT_AAC)  { return "AAC"; }
+    if (fmt == FMT_ALAC) { return "ALAC"; }
+    return "Unknown";
+}
+
+# FormatInfo — heap-allocated struct
+# Layout (48 bytes):
+#   +0:  format        (i64, AudioFormat enum)
+#   +8:  sample_rate   (i64, Hz)
+#   +16: channels      (i64)
+#   +24: bit_depth     (i64)
+#   +32: duration_secs (f64 bit pattern)
+#   +40: total_samples (i64)
+
+fn fmtinfo_new(format, sample_rate, channels, bit_depth, duration_secs, total_samples) {
+    var fi = alloc(48);
+    store64(fi,      format);
+    store64(fi + 8,  sample_rate);
+    store64(fi + 16, channels);
+    store64(fi + 24, bit_depth);
+    store64(fi + 32, duration_secs);
+    store64(fi + 40, total_samples);
+    return fi;
+}
+
+fn fmtinfo_format(fi)       { return load64(fi); }
+fn fmtinfo_sample_rate(fi)  { return load64(fi + 8); }
+fn fmtinfo_channels(fi)     { return load64(fi + 16); }
+fn fmtinfo_bit_depth(fi)    { return load64(fi + 24); }
+fn fmtinfo_duration(fi)     { return load64(fi + 32); }
+fn fmtinfo_total_samples(fi){ return load64(fi + 40); }
+
+# Detect audio format from header bytes.
+# data: pointer to byte buffer, len: buffer length
+# Returns AudioFormat enum value on success, negative error on failure.
+fn detect_format(data, len) {
+    if (len < 4) { return err(ERR_INVALID_HEADER); }
+
+    # WAV: "RIFF"
+    if (load8(data) == 0x52) {
+        if (load8(data+1) == 0x49) {
+            if (load8(data+2) == 0x46) {
+                if (load8(data+3) == 0x46) {
+                    return FMT_WAV;
+                }
+            }
+        }
+    }
+
+    # FLAC: "fLaC"
+    if (load8(data) == 0x66) {
+        if (load8(data+1) == 0x4C) {
+            if (load8(data+2) == 0x61) {
+                if (load8(data+3) == 0x43) {
+                    return FMT_FLAC;
+                }
+            }
+        }
+    }
+
+    # Ogg: "OggS"
+    if (load8(data) == 0x4F) {
+        if (load8(data+1) == 0x67) {
+            if (load8(data+2) == 0x67) {
+                if (load8(data+3) == 0x53) {
+                    return FMT_OGG;
+                }
+            }
+        }
+    }
+
+    # AIFF/AIFC: "FORM" + offset 8 = "AIFF" or "AIFC"
+    if (load8(data) == 0x46) {
+        if (load8(data+1) == 0x4F) {
+            if (load8(data+2) == 0x52) {
+                if (load8(data+3) == 0x4D) {
+                    if (len >= 12) {
+                        # Check for "AIFF" at offset 8
+                        if (load8(data+8) == 0x41) {
+                            if (load8(data+9) == 0x49) {
+                                if (load8(data+10) == 0x46) {
+                                    if (load8(data+11) == 0x46) { return FMT_AIFF; }
+                                    if (load8(data+11) == 0x43) { return FMT_AIFF; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # MP3: ID3v2 tag "ID3"
+    if (load8(data) == 0x49) {
+        if (load8(data+1) == 0x44) {
+            if (load8(data+2) == 0x33) {
+                return FMT_MP3;
+            }
+        }
+    }
+
+    # MPEG sync: 0xFF 0xE0 mask
+    if (load8(data) == 0xFF) {
+        var b1 = load8(data + 1);
+        if ((b1 & 0xE0) == 0xE0) {
+            # Distinguish ADTS (AAC) from MP3
+            # ADTS: 0xFFF sync + layer=0 → (b1 & 0xF6) == 0xF0
+            if ((b1 & 0xF6) == 0xF0) {
+                return FMT_AAC;
+            }
+            return FMT_MP3;
+        }
+    }
+
+    return err(ERR_UNSUPPORTED_FMT);
+}
+
+# ================================================================
+# PCM module — sample format conversions
+# ================================================================
+
+enum PcmFormat {
+    PCM_I8  = 0;
+    PCM_I16 = 1;
+    PCM_I24 = 2;
+    PCM_I32 = 3;
+    PCM_F32 = 4;
+    PCM_F64 = 5;
+}
+
+fn pcm_bytes_per_sample(fmt) {
+    if (fmt == PCM_I8)  { return 1; }
+    if (fmt == PCM_I16) { return 2; }
+    if (fmt == PCM_I24) { return 3; }
+    if (fmt == PCM_I32) { return 4; }
+    if (fmt == PCM_F32) { return 4; }
+    if (fmt == PCM_F64) { return 8; }
+    return 0;
+}
+
+fn pcm_bit_depth(fmt) {
+    if (fmt == PCM_I8)  { return 8; }
+    if (fmt == PCM_I16) { return 16; }
+    if (fmt == PCM_I24) { return 24; }
+    if (fmt == PCM_I32) { return 32; }
+    if (fmt == PCM_F32) { return 32; }
+    if (fmt == PCM_F64) { return 64; }
+    return 0;
+}
+
+# Read a little-endian u16 from buffer at offset
+fn read_u16_le(data, off) {
+    return load8(data + off) | (load8(data + off + 1) << 8);
+}
+
+# Read a little-endian u32 from buffer at offset
+fn read_u32_le(data, off) {
+    return load8(data + off) | (load8(data + off + 1) << 8) | (load8(data + off + 2) << 16) | (load8(data + off + 3) << 24);
+}
+
+# Write a little-endian u16 to buffer at offset
+fn write_u16_le(buf, off, val) {
+    store8(buf + off, val & 0xFF);
+    store8(buf + off + 1, (val >> 8) & 0xFF);
+    return 0;
+}
+
+# Write a little-endian u32 to buffer at offset
+fn write_u32_le(buf, off, val) {
+    store8(buf + off, val & 0xFF);
+    store8(buf + off + 1, (val >> 8) & 0xFF);
+    store8(buf + off + 2, (val >> 16) & 0xFF);
+    store8(buf + off + 3, (val >> 24) & 0xFF);
+    return 0;
+}
+
+# Sign-extend a value from N bits to 64 bits
+# Uses conditional subtraction since >> is logical (unsigned) in Cyrius
+fn sign_extend(val, bits) {
+    var half = 1 << (bits - 1);
+    if (val >= half) {
+        return val - (1 << bits);
+    }
+    return val;
+}
+
+# Clamp an f64 to [-1.0, 1.0]
+fn f64_clamp_sample(x) {
+    return f64_clamp(x, F64_NEG_ONE, F64_ONE);
+}
+
+# Convert signed 16-bit samples to f64 vec.
+# src: pointer to i16 LE samples, count: number of samples
+# Returns: vec of f64 bit patterns
+fn i16_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = read_u16_le(src, i * 2);
+        var signed = sign_extend(raw, 16);
+        var f = f64_div(f64_from(signed), F64_32768);
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Convert f64 vec to signed 16-bit samples.
+# samples: vec of f64, out: buffer to write i16 LE
+# Returns: number of bytes written
+fn f64_to_i16(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_32767));
+        write_u16_le(out, i * 2, val & 0xFFFF);
+    }
+    return len * 2;
+}
+
+# Convert signed 32-bit samples to f64 vec.
+fn i32_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = read_u32_le(src, i * 4);
+        var signed = sign_extend(raw, 32);
+        var f = f64_div(f64_from(signed), F64_2147483648);
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Convert f64 vec to signed 32-bit samples.
+fn f64_to_i32(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_2147483647));
+        write_u32_le(out, i * 4, val);
+    }
+    return len * 4;
+}
+
+# Convert 24-bit packed LE samples (3 bytes each) to f64 vec.
+fn i24_packed_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var off = i * 3;
+        var raw = load8(src + off) | (load8(src + off + 1) << 8) | (load8(src + off + 2) << 16);
+        var signed = sign_extend(raw, 24);
+        var f = f64_div(f64_from(signed), F64_8388608);
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Convert f64 vec to 24-bit packed LE samples.
+fn f64_to_i24_packed(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_8388607));
+        var off = i * 3;
+        store8(out + off, val & 0xFF);
+        store8(out + off + 1, (val >> 8) & 0xFF);
+        store8(out + off + 2, (val >> 16) & 0xFF);
+    }
+    return len * 3;
+}
+
+# Convert unsigned 8-bit PCM (center=128) to f64 vec.
+fn u8_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = load8(src + i);
+        var f = f64_div(f64_sub(f64_from(raw), F64_128), F64_128);
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Convert f64 vec to unsigned 8-bit PCM.
+fn f64_to_u8(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_add(f64_mul(s, F64_128), F64_128));
+        if (val < 0)   { val = 0; }
+        if (val > 255) { val = 255; }
+        store8(out + i, val);
+    }
+    return len;
+}
+
+# Convert IEEE 754 float32 (4 bytes LE) to f64 vec.
+fn f32_to_f64_vec(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var bits = read_u32_le(src, i * 4);
+        # Decompose f32: sign(1) | exp(8) | mantissa(23)
+        var sign = (bits >> 31) & 1;
+        var exp = (bits >> 23) & 0xFF;
+        var mant = bits & 0x7FFFFF;
+
+        var f = F64_ZERO;
+        if (exp == 0) {
+            if (mant == 0) {
+                # +-0.0
+                f = F64_ZERO;
+            } else {
+                # Denormalized: value = (-1)^s * 2^(-126) * (0.mant)
+                # Convert via integer path: mant * 2^(-126-23) = mant * 2^(-149)
+                f = f64_mul(f64_from(mant), f64_pow(F64_TWO, f64_from(0 - 149)));
+            }
+        } else {
+            if (exp == 0xFF) {
+                # Inf/NaN — just produce 0 for safety
+                f = F64_ZERO;
+            } else {
+                # Normalized: value = (-1)^s * 2^(exp-127) * (1 + mant/2^23)
+                # Build as: (2^23 + mant) * 2^(exp - 127 - 23) = (2^23 + mant) * 2^(exp - 150)
+                var int_mant = 8388608 + mant;
+                var power = exp - 150;
+                f = f64_mul(f64_from(int_mant), f64_pow(F64_TWO, f64_from(power)));
+            }
+        }
+        if (sign == 1) { f = f64_neg(f); }
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Interleave channel buffers into a single vec.
+# channels: vec of vecs (each is a channel), ch_count: number of channels
+# Returns: interleaved vec
+fn interleave(channels, ch_count) {
+    if (ch_count == 0) { return vec_new(); }
+    var ch0 = vec_get(channels, 0);
+    var frames = vec_len(ch0);
+    var out = vec_new();
+    for (var fr = 0; fr < frames; fr = fr + 1) {
+        for (var c = 0; c < ch_count; c = c + 1) {
+            var ch = vec_get(channels, c);
+            if (fr < vec_len(ch)) {
+                vec_push(out, vec_get(ch, fr));
+            }
+        }
+    }
+    return out;
+}
+
+# Deinterleave into separate channel vecs.
+# samples: interleaved vec, ch_count: number of channels
+# Returns: vec of vecs
+fn deinterleave(samples, ch_count) {
+    if (ch_count == 0) { return vec_new(); }
+    var total = vec_len(samples);
+    var frames = total / ch_count;
+    var out = vec_new();
+    for (var c = 0; c < ch_count; c = c + 1) {
+        var ch = vec_new();
+        for (var fr = 0; fr < frames; fr = fr + 1) {
+            vec_push(ch, vec_get(samples, fr * ch_count + c));
+        }
+        vec_push(out, ch);
+    }
+    return out;
+}
+
+# ================================================================
+# WAV module — RIFF WAVE encode/decode
+# ================================================================
+
+# WAV format codes
+enum WavFmt {
+    WAV_FMT_PCM        = 1;
+    WAV_FMT_IEEE_FLOAT = 3;
+    WAV_FMT_EXTENSIBLE = 65534;
+}
+
+# Decode result — returned as a tagged pair: {fmtinfo_ptr, samples_vec}
+# Layout (16 bytes):
+#   +0: fmtinfo pointer
+#   +8: samples vec pointer
+fn decode_result_new(fi, samples) {
+    var dr = alloc(16);
+    store64(dr, fi);
+    store64(dr + 8, samples);
+    return dr;
+}
+fn decode_result_info(dr)    { return load64(dr); }
+fn decode_result_samples(dr) { return load64(dr + 8); }
+
+# Decode WAV data from a byte buffer.
+# data: pointer to WAV bytes, len: total byte length
+# Returns: decode_result pointer on success, negative error on failure
+fn wav_decode(data, len) {
+    if (len < 44) { return err(ERR_INVALID_HEADER); }
+
+    # Validate RIFF magic
+    if (load8(data) != 0x52)     { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 1) != 0x49) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 2) != 0x46) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 3) != 0x46) { return err(ERR_INVALID_HEADER); }
+
+    # Validate WAVE identifier
+    if (load8(data + 8) != 0x57)  { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 9) != 0x41)  { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 10) != 0x56) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 11) != 0x45) { return err(ERR_INVALID_HEADER); }
+
+    # Scan for fmt and data chunks
+    var pos = 12;
+    var fmt_code = 0;
+    var fmt_ch = 0;
+    var fmt_rate = 0;
+    var fmt_bps = 0;
+    var fmt_found = 0;
+    var dat_start = 0;
+    var dat_size = 0;
+    var dat_found = 0;
+
+    while (pos + 8 <= len) {
+        var ck0 = load8(data + pos);
+        var ck1 = load8(data + pos + 1);
+        var ck2 = load8(data + pos + 2);
+        var ck3 = load8(data + pos + 3);
+        var ck_size = read_u32_le(data, pos + 4);
+
+        # "fmt " = 0x66 0x6D 0x74 0x20
+        if (ck0 == 0x66) {
+            if (ck1 == 0x6D) {
+                if (ck2 == 0x74) {
+                    if (ck3 == 0x20) {
+                        if (ck_size < 16) { return err(ERR_INVALID_HEADER); }
+                        fmt_code = read_u16_le(data, pos + 8);
+                        fmt_ch   = read_u16_le(data, pos + 10);
+                        fmt_rate = read_u32_le(data, pos + 12);
+                        # skip byte_rate(4) + block_align(2)
+                        fmt_bps  = read_u16_le(data, pos + 22);
+
+                        # WAVE_FORMAT_EXTENSIBLE
+                        if (fmt_code == WAV_FMT_EXTENSIBLE) {
+                            if (ck_size >= 40) {
+                                var valid_bits = read_u16_le(data, pos + 26);
+                                if (valid_bits > 0) { fmt_bps = valid_bits; }
+                                fmt_code = read_u16_le(data, pos + 32);
+                            }
+                        }
+                        fmt_found = 1;
+                    }
+                }
+            }
+        }
+
+        # "data" = 0x64 0x61 0x74 0x61
+        if (ck0 == 0x64) {
+            if (ck1 == 0x61) {
+                if (ck2 == 0x74) {
+                    if (ck3 == 0x61) {
+                        dat_start = pos + 8;
+                        dat_size = ck_size;
+                        dat_found = 1;
+                    }
+                }
+            }
+        }
+
+        # Advance to next chunk (pad to even)
+        var padded = ck_size + (ck_size & 1);
+        pos = pos + padded + 8;
+
+        if (fmt_found == 1) {
+            if (dat_found == 1) {
+                # Break: we use a high pos to exit
+                pos = len + 1;
+            }
+        }
+    }
+
+    if (fmt_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (dat_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (fmt_ch == 0)    { return err(ERR_INVALID_CHANNELS); }
+    if (fmt_rate == 0)  { return err(ERR_INVALID_RATE); }
+
+    # Clamp data_size to available bytes
+    var avail = len - dat_start;
+    if (dat_size > avail) { dat_size = avail; }
+    var audio = data + dat_start;
+
+    # Decode samples to f64 based on format
+    var samples = vec_new();
+
+    if (fmt_code == WAV_FMT_PCM) {
+        if (fmt_bps == 8) {
+            # Unsigned 8-bit PCM
+            samples = u8_to_f64(audio, dat_size);
+        }
+        if (fmt_bps == 16) {
+            var count = dat_size / 2;
+            samples = i16_to_f64(audio, count);
+        }
+        if (fmt_bps == 24) {
+            var count = dat_size / 3;
+            samples = i24_packed_to_f64(audio, count);
+        }
+        if (fmt_bps == 32) {
+            var count = dat_size / 4;
+            samples = i32_to_f64(audio, count);
+        }
+    }
+    if (fmt_code == WAV_FMT_IEEE_FLOAT) {
+        if (fmt_bps == 32) {
+            var count = dat_size / 4;
+            samples = f32_to_f64_vec(audio, count);
+        }
+    }
+
+    var sample_count = vec_len(samples);
+    if (sample_count == 0) {
+        if (dat_size > 0) {
+            return err(ERR_DECODE);
+        }
+    }
+
+    var total_frames = sample_count / fmt_ch;
+    var dur = f64_div(f64_from(total_frames), f64_from(fmt_rate));
+
+    var fi = fmtinfo_new(FMT_WAV, fmt_rate, fmt_ch, fmt_bps, dur, total_frames);
+    return decode_result_new(fi, samples);
+}
+
+# Encode interleaved f64 samples as WAV byte stream.
+# samples: vec of f64 bit patterns
+# sample_rate, channels: integers
+# pcm_fmt: PcmFormat enum
+# out: buffer to write WAV data into (must be large enough)
+# Returns: total bytes written, or negative error
+fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
+    if (channels == 0)    { return err(ERR_INVALID_CHANNELS); }
+    if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
+    if (pcm_fmt == PCM_F64) { return err(ERR_ENCODE); }
+
+    var fmt_code = WAV_FMT_PCM;
+    if (pcm_fmt == PCM_F32) { fmt_code = WAV_FMT_IEEE_FLOAT; }
+
+    var bps = pcm_bit_depth(pcm_fmt);
+    var bytes_ps = pcm_bytes_per_sample(pcm_fmt);
+    var block_align = channels * bytes_ps;
+    var byte_rate = block_align * sample_rate;
+
+    var sample_count = vec_len(samples);
+
+    # Encode raw sample data into a temp buffer after the header
+    var header_size = 44;
+    var raw_data = out + header_size;
+    var raw_size = 0;
+
+    if (pcm_fmt == PCM_I8) {
+        raw_size = f64_to_u8(samples, raw_data);
+    }
+    if (pcm_fmt == PCM_I16) {
+        raw_size = f64_to_i16(samples, raw_data);
+    }
+    if (pcm_fmt == PCM_I24) {
+        raw_size = f64_to_i24_packed(samples, raw_data);
+    }
+    if (pcm_fmt == PCM_I32) {
+        raw_size = f64_to_i32(samples, raw_data);
+    }
+    if (pcm_fmt == PCM_F32) {
+        # Convert f64 back to f32 IEEE 754 LE
+        raw_size = f64_to_f32_bytes(samples, raw_data);
+    }
+
+    var data_size = raw_size;
+    var file_size = 4 + 24 + 8 + data_size;
+
+    # RIFF header
+    store8(out, 0x52); store8(out+1, 0x49); store8(out+2, 0x46); store8(out+3, 0x46);
+    write_u32_le(out, 4, file_size);
+    store8(out+8, 0x57); store8(out+9, 0x41); store8(out+10, 0x56); store8(out+11, 0x45);
+
+    # fmt chunk
+    store8(out+12, 0x66); store8(out+13, 0x6D); store8(out+14, 0x74); store8(out+15, 0x20);
+    write_u32_le(out, 16, 16);
+    write_u16_le(out, 20, fmt_code);
+    write_u16_le(out, 22, channels);
+    write_u32_le(out, 24, sample_rate);
+    write_u32_le(out, 28, byte_rate);
+    write_u16_le(out, 32, block_align);
+    write_u16_le(out, 34, bps);
+
+    # data chunk header
+    store8(out+36, 0x64); store8(out+37, 0x61); store8(out+38, 0x74); store8(out+39, 0x61);
+    write_u32_le(out, 40, data_size);
+
+    # raw_data is already written at out + 44
+    return header_size + data_size;
+}
+
+# Convert f64 vec to IEEE 754 float32 LE bytes
+fn f64_to_f32_bytes(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var f = vec_get(samples, i);
+        # Convert f64 bit pattern to f32 bit pattern
+        var bits = f64_to_f32_bits(f);
+        write_u32_le(out, i * 4, bits);
+    }
+    return len * 4;
+}
+
+# Convert an f64 bit pattern to f32 bit pattern
+# Handles normalized, denormalized, zero, inf, nan
+fn f64_to_f32_bits(f) {
+    # f64: sign(1) | exp(11) | mantissa(52)
+    # f32: sign(1) | exp(8)  | mantissa(23)
+    var sign = (f >> 63) & 1;
+    var exp = (f >> 52) & 0x7FF;
+    var mant = f & 0xFFFFFFFFFFFFF;
+
+    var f32_sign = sign << 31;
+
+    if (exp == 0) {
+        # Zero or denorm → f32 zero (denorms too small for f32)
+        return f32_sign;
+    }
+    if (exp == 0x7FF) {
+        # Inf or NaN
+        if (mant == 0) {
+            return f32_sign | 0x7F800000;
+        }
+        return f32_sign | 0x7FC00000;
+    }
+
+    # Normalized: f64 bias=1023, f32 bias=127
+    var unbiased = exp - 1023;
+    if (unbiased > 127) {
+        # Overflow → inf
+        return f32_sign | 0x7F800000;
+    }
+    if (unbiased < (0 - 126)) {
+        # Underflow → zero
+        return f32_sign;
+    }
+
+    var f32_exp = (unbiased + 127) & 0xFF;
+    var f32_mant = (mant >> 29) & 0x7FFFFF;
+
+    return f32_sign | (f32_exp << 23) | f32_mant;
+}
+
+# ================================================================
+# Codec module — auto-detect and dispatch
+# ================================================================
+
+# Auto-detect format and decode.
+# data: pointer to audio bytes, len: total length
+# Returns: decode_result pointer, or negative error
+fn codec_open(data, len) {
+    var fmt = detect_format(data, len);
+    if (is_err(fmt) == 1) { return fmt; }
+
+    if (fmt == FMT_WAV) { return wav_decode(data, len); }
+
+    # Future: FLAC, AIFF, Ogg, etc.
+    return err(ERR_UNSUPPORTED_FMT);
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_error() {
+    syscall(1, 1, "test: error module\n", 19);
+
+    var e = err(ERR_DECODE);
+    assert(is_err(e) == 1, "err is error");
+    assert(is_ok(e) == 0, "err is not ok");
+    assert_eq(err_code(e), ERR_DECODE, "err code is DECODE");
+
+    assert(is_ok(42) == 1, "42 is ok");
+    assert(is_err(42) == 0, "42 is not error");
+    assert(is_ok(0) == 1, "0 is ok");
+
+    return 0;
+}
+
+fn test_format_detect() {
+    syscall(1, 1, "test: format detection\n", 23);
+
+    # WAV: "RIFF"
+    var wav_hdr[12];
+    store8(&wav_hdr, 0x52); store8(&wav_hdr+1, 0x49);
+    store8(&wav_hdr+2, 0x46); store8(&wav_hdr+3, 0x46);
+    store8(&wav_hdr+4, 0); store8(&wav_hdr+5, 0);
+    store8(&wav_hdr+6, 0); store8(&wav_hdr+7, 0);
+    store8(&wav_hdr+8, 0x57); store8(&wav_hdr+9, 0x41);
+    store8(&wav_hdr+10, 0x56); store8(&wav_hdr+11, 0x45);
+    assert_eq(detect_format(&wav_hdr, 12), FMT_WAV, "detect WAV");
+
+    # FLAC: "fLaC"
+    var flac_hdr[8];
+    store8(&flac_hdr, 0x66); store8(&flac_hdr+1, 0x4C);
+    store8(&flac_hdr+2, 0x61); store8(&flac_hdr+3, 0x43);
+    assert_eq(detect_format(&flac_hdr, 8), FMT_FLAC, "detect FLAC");
+
+    # Ogg: "OggS"
+    var ogg_hdr[8];
+    store8(&ogg_hdr, 0x4F); store8(&ogg_hdr+1, 0x67);
+    store8(&ogg_hdr+2, 0x67); store8(&ogg_hdr+3, 0x53);
+    assert_eq(detect_format(&ogg_hdr, 8), FMT_OGG, "detect Ogg");
+
+    # AIFF: "FORM....AIFF"
+    var aiff_hdr[12];
+    store8(&aiff_hdr, 0x46); store8(&aiff_hdr+1, 0x4F);
+    store8(&aiff_hdr+2, 0x52); store8(&aiff_hdr+3, 0x4D);
+    store8(&aiff_hdr+4, 0); store8(&aiff_hdr+5, 0);
+    store8(&aiff_hdr+6, 0); store8(&aiff_hdr+7, 0);
+    store8(&aiff_hdr+8, 0x41); store8(&aiff_hdr+9, 0x49);
+    store8(&aiff_hdr+10, 0x46); store8(&aiff_hdr+11, 0x46);
+    assert_eq(detect_format(&aiff_hdr, 12), FMT_AIFF, "detect AIFF");
+
+    # MP3: "ID3"
+    var mp3_hdr[8];
+    store8(&mp3_hdr, 0x49); store8(&mp3_hdr+1, 0x44);
+    store8(&mp3_hdr+2, 0x33); store8(&mp3_hdr+3, 0x04);
+    assert_eq(detect_format(&mp3_hdr, 8), FMT_MP3, "detect MP3 ID3");
+
+    # AAC ADTS: 0xFF 0xF1
+    var aac_hdr[4];
+    store8(&aac_hdr, 0xFF); store8(&aac_hdr+1, 0xF1);
+    store8(&aac_hdr+2, 0x50); store8(&aac_hdr+3, 0x80);
+    assert_eq(detect_format(&aac_hdr, 4), FMT_AAC, "detect AAC ADTS");
+
+    # MP3 sync: 0xFF 0xFB
+    var mp3s_hdr[4];
+    store8(&mp3s_hdr, 0xFF); store8(&mp3s_hdr+1, 0xFB);
+    store8(&mp3s_hdr+2, 0x90); store8(&mp3s_hdr+3, 0x00);
+    assert_eq(detect_format(&mp3s_hdr, 4), FMT_MP3, "detect MP3 sync");
+
+    # Unknown
+    var unk_hdr[4];
+    store8(&unk_hdr, 0); store8(&unk_hdr+1, 0);
+    store8(&unk_hdr+2, 0); store8(&unk_hdr+3, 0);
+    assert(is_err(detect_format(&unk_hdr, 4)) == 1, "detect unknown returns error");
+
+    # Too short
+    var short_hdr[2];
+    store8(&short_hdr, 0); store8(&short_hdr+1, 0);
+    assert(is_err(detect_format(&short_hdr, 2)) == 1, "detect short returns error");
+
+    return 0;
+}
+
+fn test_pcm() {
+    syscall(1, 1, "test: pcm conversions\n", 22);
+
+    # PcmFormat helpers
+    assert_eq(pcm_bytes_per_sample(PCM_I8), 1, "i8 bps");
+    assert_eq(pcm_bytes_per_sample(PCM_I16), 2, "i16 bps");
+    assert_eq(pcm_bytes_per_sample(PCM_I24), 3, "i24 bps");
+    assert_eq(pcm_bytes_per_sample(PCM_I32), 4, "i32 bps");
+    assert_eq(pcm_bytes_per_sample(PCM_F32), 4, "f32 bps");
+    assert_eq(pcm_bytes_per_sample(PCM_F64), 8, "f64 bps");
+
+    assert_eq(pcm_bit_depth(PCM_I16), 16, "i16 depth");
+    assert_eq(pcm_bit_depth(PCM_I24), 24, "i24 depth");
+    assert_eq(pcm_bit_depth(PCM_F32), 32, "f32 depth");
+
+    # i16 → f64 roundtrip
+    # Write i16 samples: 0, 16384, -16384 (LE)
+    var i16buf[6];
+    write_u16_le(&i16buf, 0, 0);
+    write_u16_le(&i16buf, 2, 16384);
+    write_u16_le(&i16buf, 4, 0xC000);  # -16384 as u16
+    var f64s = i16_to_f64(&i16buf, 3);
+    assert_eq(vec_len(f64s), 3, "i16_to_f64 count");
+    # First sample should be 0.0
+    assert(f64_eq(vec_get(f64s, 0), F64_ZERO) == 1, "i16 sample 0 = 0.0");
+    # Second sample should be ~0.5
+    assert(f64_gt(vec_get(f64s, 1), F64_ZERO) == 1, "i16 sample 1 > 0");
+    # Third sample should be ~-0.5
+    assert(f64_lt(vec_get(f64s, 2), F64_ZERO) == 1, "i16 sample 2 < 0");
+
+    # u8 center = 128 → 0.0
+    var u8buf[1];
+    store8(&u8buf, 128);
+    var u8f = u8_to_f64(&u8buf, 1);
+    assert(f64_eq(vec_get(u8f, 0), F64_ZERO) == 1, "u8 center=128 is 0.0");
+
+    return 0;
+}
+
+fn test_wav_roundtrip() {
+    syscall(1, 1, "test: wav encode/decode roundtrip\n", 34);
+
+    # Create 100 samples of silence
+    var samples = vec_new();
+    for (var i = 0; i < 100; i = i + 1) {
+        vec_push(samples, F64_ZERO);
+    }
+
+    # Encode as 16-bit WAV
+    var buf = alloc(65536);
+    var wav_size = wav_encode(samples, 44100, 1, PCM_I16, buf);
+    assert(is_ok(wav_size) == 1, "wav encode ok");
+    assert(wav_size > 44, "wav size > header");
+
+    # Decode back
+    var result = wav_decode(buf, wav_size);
+    assert(is_ok(result) == 1, "wav decode ok");
+    var fi = decode_result_info(result);
+    var decoded = decode_result_samples(result);
+
+    assert_eq(fmtinfo_format(fi), FMT_WAV, "roundtrip format = WAV");
+    assert_eq(fmtinfo_sample_rate(fi), 44100, "roundtrip rate = 44100");
+    assert_eq(fmtinfo_channels(fi), 1, "roundtrip channels = 1");
+    assert_eq(fmtinfo_bit_depth(fi), 16, "roundtrip depth = 16");
+    assert_eq(vec_len(decoded), 100, "roundtrip sample count = 100");
+    assert_eq(fmtinfo_total_samples(fi), 100, "roundtrip frames = 100");
+
+    return 0;
+}
+
+fn test_wav_stereo() {
+    syscall(1, 1, "test: wav stereo roundtrip\n", 27);
+
+    # 6 interleaved samples: L R L R L R
+    var samples = vec_new();
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+
+    var buf = alloc(65536);
+    var wav_size = wav_encode(samples, 44100, 2, PCM_I16, buf);
+    assert(is_ok(wav_size) == 1, "stereo encode ok");
+
+    var result = wav_decode(buf, wav_size);
+    assert(is_ok(result) == 1, "stereo decode ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_channels(fi), 2, "stereo channels = 2");
+    assert_eq(fmtinfo_total_samples(fi), 3, "stereo frames = 3");
+    assert_eq(vec_len(decode_result_samples(result)), 6, "stereo sample count = 6");
+
+    return 0;
+}
+
+fn test_wav_24bit() {
+    syscall(1, 1, "test: wav 24-bit roundtrip\n", 27);
+
+    var samples = vec_new();
+    vec_push(samples, F64_ZERO);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+
+    var buf = alloc(4096);
+    var wav_size = wav_encode(samples, 44100, 1, PCM_I24, buf);
+    assert(is_ok(wav_size) == 1, "24bit encode ok");
+
+    var result = wav_decode(buf, wav_size);
+    assert(is_ok(result) == 1, "24bit decode ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_bit_depth(fi), 24, "24bit depth = 24");
+    assert_eq(vec_len(decode_result_samples(result)), 3, "24bit count = 3");
+
+    return 0;
+}
+
+fn test_wav_32bit() {
+    syscall(1, 1, "test: wav 32-bit roundtrip\n", 27);
+
+    var samples = vec_new();
+    vec_push(samples, F64_ZERO);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+
+    var buf = alloc(4096);
+    var wav_size = wav_encode(samples, 44100, 1, PCM_I32, buf);
+    assert(is_ok(wav_size) == 1, "32bit encode ok");
+
+    var result = wav_decode(buf, wav_size);
+    assert(is_ok(result) == 1, "32bit decode ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_bit_depth(fi), 32, "32bit depth = 32");
+
+    return 0;
+}
+
+fn test_wav_errors() {
+    syscall(1, 1, "test: wav error handling\n", 25);
+
+    # Too short
+    var short[10];
+    assert(is_err(wav_decode(&short, 10)) == 1, "short data rejected");
+
+    # Bad RIFF
+    var bad_riff[44];
+    store8(&bad_riff, 0x58); store8(&bad_riff+1, 0x58);
+    store8(&bad_riff+2, 0x58); store8(&bad_riff+3, 0x58);
+    assert(is_err(wav_decode(&bad_riff, 44)) == 1, "bad RIFF rejected");
+
+    # Bad WAVE
+    var bad_wave[44];
+    store8(&bad_wave, 0x52); store8(&bad_wave+1, 0x49);
+    store8(&bad_wave+2, 0x46); store8(&bad_wave+3, 0x46);
+    store8(&bad_wave+8, 0x58); store8(&bad_wave+9, 0x58);
+    store8(&bad_wave+10, 0x58); store8(&bad_wave+11, 0x58);
+    assert(is_err(wav_decode(&bad_wave, 44)) == 1, "bad WAVE rejected");
+
+    # Encode rejects 0 channels
+    var s = vec_new();
+    vec_push(s, F64_ZERO);
+    var buf = alloc(256);
+    assert(is_err(wav_encode(s, 44100, 0, PCM_I16, buf)) == 1, "0 channels rejected");
+    assert(is_err(wav_encode(s, 0, 1, PCM_I16, buf)) == 1, "0 rate rejected");
+    assert(is_err(wav_encode(s, 44100, 1, PCM_F64, buf)) == 1, "f64 encoding rejected");
+
+    return 0;
+}
+
+fn test_codec_open() {
+    syscall(1, 1, "test: codec open\n", 17);
+
+    # Build a WAV, then open it via codec_open
+    var samples = vec_new();
+    for (var i = 0; i < 50; i = i + 1) {
+        vec_push(samples, F64_ZERO);
+    }
+    var buf = alloc(65536);
+    var wav_size = wav_encode(samples, 48000, 1, PCM_I16, buf);
+    assert(is_ok(wav_size) == 1, "codec test encode ok");
+
+    var result = codec_open(buf, wav_size);
+    assert(is_ok(result) == 1, "codec_open wav ok");
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_format(fi), FMT_WAV, "codec_open format = WAV");
+    assert_eq(fmtinfo_sample_rate(fi), 48000, "codec_open rate = 48000");
+
+    # Unknown data
+    var unk = alloc(100);
+    memset(unk, 0, 100);
+    assert(is_err(codec_open(unk, 100)) == 1, "codec_open unknown rejected");
+
+    # Too short
+    var tiny = alloc(2);
+    assert(is_err(codec_open(tiny, 2)) == 1, "codec_open short rejected");
+
+    return 0;
+}
+
+fn test_interleave() {
+    syscall(1, 1, "test: interleave/deinterleave\n", 30);
+
+    var left = vec_new();
+    vec_push(left, f64_from(1));
+    vec_push(left, f64_from(3));
+    vec_push(left, f64_from(5));
+
+    var right = vec_new();
+    vec_push(right, f64_from(2));
+    vec_push(right, f64_from(4));
+    vec_push(right, f64_from(6));
+
+    var channels = vec_new();
+    vec_push(channels, left);
+    vec_push(channels, right);
+
+    var interleaved = interleave(channels, 2);
+    assert_eq(vec_len(interleaved), 6, "interleaved len = 6");
+    assert(f64_eq(vec_get(interleaved, 0), f64_from(1)) == 1, "il[0] = 1");
+    assert(f64_eq(vec_get(interleaved, 1), f64_from(2)) == 1, "il[1] = 2");
+    assert(f64_eq(vec_get(interleaved, 2), f64_from(3)) == 1, "il[2] = 3");
+    assert(f64_eq(vec_get(interleaved, 3), f64_from(4)) == 1, "il[3] = 4");
+
+    var planes = deinterleave(interleaved, 2);
+    assert_eq(vec_len(planes), 2, "deinterleave ch count = 2");
+    var ch0 = vec_get(planes, 0);
+    var ch1 = vec_get(planes, 1);
+    assert_eq(vec_len(ch0), 3, "ch0 len = 3");
+    assert(f64_eq(vec_get(ch0, 0), f64_from(1)) == 1, "ch0[0] = 1");
+    assert(f64_eq(vec_get(ch0, 1), f64_from(3)) == 1, "ch0[1] = 3");
+    assert(f64_eq(vec_get(ch1, 0), f64_from(2)) == 1, "ch1[0] = 2");
+
+    return 0;
+}
+
+fn print_summary() {
+    syscall(1, 1, "\n", 1);
+    syscall(1, 1, "shravan tests: ", 15);
+    fmt_int(_assert_pass);
+    syscall(1, 1, " passed, ", 9);
+    fmt_int(_assert_fail);
+    syscall(1, 1, " failed, ", 9);
+    fmt_int(_assert_total);
+    syscall(1, 1, " total\n", 7);
+    return 0;
+}
+
+# ================================================================
+# Entry point — top-level statements
+# ================================================================
+
+alloc_init();
+shravan_init_constants();
+
+syscall(1, 1, "shravan v1.1.0 — audio codecs for AGNOS (Cyrius port)\n", 55);
+syscall(1, 1, "running tests...\n", 17);
+syscall(1, 1, "\n", 1);
+
+test_error();
+test_format_detect();
+test_pcm();
+test_wav_roundtrip();
+test_wav_stereo();
+test_wav_24bit();
+test_wav_32bit();
+test_wav_errors();
+test_codec_open();
+test_interleave();
+
+print_summary();
+
+if (_assert_fail > 0) { syscall(60, 1); }
+syscall(60, 0);

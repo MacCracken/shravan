@@ -1,0 +1,10 @@
+[package]
+name = "shravan"
+version = "1.1.0"
+description = "shravan — audio codecs for AGNOS (Cyrius port)"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/shravan"
+
+[build]
+src = "src/main.cyr"
+output = "build/shravan"

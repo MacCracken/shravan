@@ -1,0 +1,495 @@
+# shravan — Cyrius port benchmarks
+# Equivalent to benches/benchmarks.rs from the Rust version.
+# Uses manual timing via clock_gettime (CLOCK_MONOTONIC).
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/math.cyr"
+include "lib/tagged.cyr"
+
+# ================================================================
+# Pull in shravan library code (same as main.cyr minus tests)
+# We include the library portions inline here.
+# ================================================================
+
+# --- f64 constants (initialized below) ---
+var F64_ZERO       = 0;
+var F64_HALF       = 0;
+var F64_NEG_HALF   = 0;
+var F64_NEG_ONE    = 0;
+var F64_128        = 0;
+var F64_255        = 0;
+var F64_32768      = 0;
+var F64_32767      = 0;
+var F64_8388608    = 0;
+var F64_8388607    = 0;
+var F64_2147483648 = 0;
+var F64_2147483647 = 0;
+
+fn shravan_init_constants() {
+    F64_ZERO       = f64_from(0);
+    F64_HALF       = f64_div(F64_ONE, F64_TWO);
+    F64_NEG_HALF   = f64_neg(F64_HALF);
+    F64_NEG_ONE    = f64_neg(F64_ONE);
+    F64_128        = f64_from(128);
+    F64_255        = f64_from(255);
+    F64_32768      = f64_from(32768);
+    F64_32767      = f64_from(32767);
+    F64_8388608    = f64_from(8388608);
+    F64_8388607    = f64_from(8388607);
+    F64_2147483648 = f64_mul(f64_from(32768), f64_from(65536));
+    F64_2147483647 = f64_sub(F64_2147483648, F64_ONE);
+    return 0;
+}
+
+# --- Error codes ---
+enum ShravanErr {
+    ERR_NONE              = 0;
+    ERR_UNSUPPORTED_FMT   = 1;
+    ERR_INVALID_HEADER    = 2;
+    ERR_DECODE            = 3;
+    ERR_ENCODE            = 4;
+    ERR_END_OF_STREAM     = 5;
+    ERR_INVALID_RATE      = 6;
+    ERR_INVALID_CHANNELS  = 7;
+}
+
+fn err(code) { return 0 - code; }
+fn is_err(r) { if (r < 0) { return 1; } return 0; }
+fn is_ok(r)  { if (r >= 0) { return 1; } return 0; }
+
+# --- Format ---
+enum AudioFormat {
+    FMT_WAV = 0; FMT_FLAC = 1; FMT_RAW = 2; FMT_OGG = 3;
+    FMT_AIFF = 4; FMT_MP3 = 5; FMT_OPUS = 6; FMT_AAC = 7; FMT_ALAC = 8;
+}
+
+fn fmtinfo_new(format, sample_rate, channels, bit_depth, duration_secs, total_samples) {
+    var fi = alloc(48);
+    store64(fi, format); store64(fi+8, sample_rate); store64(fi+16, channels);
+    store64(fi+24, bit_depth); store64(fi+32, duration_secs); store64(fi+40, total_samples);
+    return fi;
+}
+fn fmtinfo_format(fi)       { return load64(fi); }
+fn fmtinfo_channels(fi)     { return load64(fi + 16); }
+fn fmtinfo_total_samples(fi){ return load64(fi + 40); }
+
+# --- PCM ---
+enum PcmFormat { PCM_I8 = 0; PCM_I16 = 1; PCM_I24 = 2; PCM_I32 = 3; PCM_F32 = 4; PCM_F64 = 5; }
+
+fn pcm_bytes_per_sample(fmt) {
+    if (fmt == PCM_I8) { return 1; } if (fmt == PCM_I16) { return 2; }
+    if (fmt == PCM_I24) { return 3; } if (fmt == PCM_I32) { return 4; }
+    if (fmt == PCM_F32) { return 4; } if (fmt == PCM_F64) { return 8; }
+    return 0;
+}
+fn pcm_bit_depth(fmt) {
+    if (fmt == PCM_I8) { return 8; } if (fmt == PCM_I16) { return 16; }
+    if (fmt == PCM_I24) { return 24; } if (fmt == PCM_I32) { return 32; }
+    if (fmt == PCM_F32) { return 32; } if (fmt == PCM_F64) { return 64; }
+    return 0;
+}
+
+fn read_u16_le(data, off) { return load8(data+off) | (load8(data+off+1) << 8); }
+fn read_u32_le(data, off) { return load8(data+off) | (load8(data+off+1)<<8) | (load8(data+off+2)<<16) | (load8(data+off+3)<<24); }
+fn write_u16_le(buf, off, val) { store8(buf+off, val & 0xFF); store8(buf+off+1, (val>>8) & 0xFF); return 0; }
+fn write_u32_le(buf, off, val) { store8(buf+off, val & 0xFF); store8(buf+off+1, (val>>8)&0xFF); store8(buf+off+2, (val>>16)&0xFF); store8(buf+off+3, (val>>24)&0xFF); return 0; }
+
+fn sign_extend(val, bits) {
+    var half = 1 << (bits - 1);
+    if (val >= half) { return val - (1 << bits); }
+    return val;
+}
+
+fn f64_clamp_sample(x) { return f64_clamp(x, F64_NEG_ONE, F64_ONE); }
+
+fn i16_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = read_u16_le(src, i * 2);
+        var signed = sign_extend(raw, 16);
+        vec_push(v, f64_div(f64_from(signed), F64_32768));
+    }
+    return v;
+}
+
+fn f64_to_i16(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_32767));
+        write_u16_le(out, i * 2, val & 0xFFFF);
+    }
+    return len * 2;
+}
+
+fn i32_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = read_u32_le(src, i * 4);
+        var signed = sign_extend(raw, 32);
+        vec_push(v, f64_div(f64_from(signed), F64_2147483648));
+    }
+    return v;
+}
+
+fn i24_packed_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var off = i * 3;
+        var raw = load8(src+off) | (load8(src+off+1)<<8) | (load8(src+off+2)<<16);
+        var signed = sign_extend(raw, 24);
+        vec_push(v, f64_div(f64_from(signed), F64_8388608));
+    }
+    return v;
+}
+
+fn u8_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = load8(src + i);
+        vec_push(v, f64_div(f64_sub(f64_from(raw), F64_128), F64_128));
+    }
+    return v;
+}
+
+fn f32_to_f64_vec(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var bits = read_u32_le(src, i * 4);
+        var sign = (bits >> 31) & 1;
+        var exp = (bits >> 23) & 0xFF;
+        var mant = bits & 0x7FFFFF;
+        var f = F64_ZERO;
+        if (exp == 0) {
+            if (mant != 0) {
+                f = f64_mul(f64_from(mant), f64_pow(F64_TWO, f64_from(0 - 149)));
+            }
+        } else {
+            if (exp != 0xFF) {
+                var int_mant = 8388608 + mant;
+                f = f64_mul(f64_from(int_mant), f64_pow(F64_TWO, f64_from(exp - 150)));
+            }
+        }
+        if (sign == 1) { f = f64_neg(f); }
+        vec_push(v, f);
+    }
+    return v;
+}
+
+fn f64_to_u8(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_add(f64_mul(s, F64_128), F64_128));
+        if (val < 0) { val = 0; } if (val > 255) { val = 255; }
+        store8(out + i, val);
+    }
+    return len;
+}
+
+fn f64_to_i24_packed(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_8388607));
+        var off = i * 3;
+        store8(out+off, val & 0xFF); store8(out+off+1, (val>>8)&0xFF); store8(out+off+2, (val>>16)&0xFF);
+    }
+    return len * 3;
+}
+
+fn f64_to_i32(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_2147483647));
+        write_u32_le(out, i * 4, val);
+    }
+    return len * 4;
+}
+
+fn f64_to_f32_bits(f) {
+    var sign = (f >> 63) & 1;
+    var exp = (f >> 52) & 0x7FF;
+    var mant = f & 0xFFFFFFFFFFFFF;
+    var f32_sign = sign << 31;
+    if (exp == 0) { return f32_sign; }
+    if (exp == 0x7FF) {
+        if (mant == 0) { return f32_sign | 0x7F800000; }
+        return f32_sign | 0x7FC00000;
+    }
+    var unbiased = exp - 1023;
+    if (unbiased > 127) { return f32_sign | 0x7F800000; }
+    if (unbiased < (0 - 126)) { return f32_sign; }
+    var f32_exp = (unbiased + 127) & 0xFF;
+    var f32_mant = (mant >> 29) & 0x7FFFFF;
+    return f32_sign | (f32_exp << 23) | f32_mant;
+}
+
+fn f64_to_f32_bytes(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        write_u32_le(out, i * 4, f64_to_f32_bits(vec_get(samples, i)));
+    }
+    return len * 4;
+}
+
+# --- WAV codec ---
+enum WavFmt { WAV_FMT_PCM = 1; WAV_FMT_IEEE_FLOAT = 3; WAV_FMT_EXTENSIBLE = 65534; }
+
+fn decode_result_new(fi, samples) {
+    var dr = alloc(16); store64(dr, fi); store64(dr+8, samples); return dr;
+}
+fn decode_result_info(dr) { return load64(dr); }
+fn decode_result_samples(dr) { return load64(dr + 8); }
+
+fn wav_decode(data, len) {
+    if (len < 44) { return err(ERR_INVALID_HEADER); }
+    if (load8(data)!=0x52)   { return err(ERR_INVALID_HEADER); }
+    if (load8(data+1)!=0x49) { return err(ERR_INVALID_HEADER); }
+    if (load8(data+2)!=0x46) { return err(ERR_INVALID_HEADER); }
+    if (load8(data+3)!=0x46) { return err(ERR_INVALID_HEADER); }
+    if (load8(data+8)!=0x57)  { return err(ERR_INVALID_HEADER); }
+    if (load8(data+9)!=0x41)  { return err(ERR_INVALID_HEADER); }
+    if (load8(data+10)!=0x56) { return err(ERR_INVALID_HEADER); }
+    if (load8(data+11)!=0x45) { return err(ERR_INVALID_HEADER); }
+
+    var pos = 12;
+    var fmt_code = 0; var fmt_ch = 0; var fmt_rate = 0; var fmt_bps = 0; var fmt_found = 0;
+    var dat_start = 0; var dat_size = 0; var dat_found = 0;
+
+    while (pos + 8 <= len) {
+        var ck0 = load8(data+pos); var ck1 = load8(data+pos+1);
+        var ck2 = load8(data+pos+2); var ck3 = load8(data+pos+3);
+        var ck_size = read_u32_le(data, pos + 4);
+
+        if (ck0==0x66) { if (ck1==0x6D) { if (ck2==0x74) { if (ck3==0x20) {
+            if (ck_size < 16) { return err(ERR_INVALID_HEADER); }
+            fmt_code = read_u16_le(data, pos+8);
+            fmt_ch   = read_u16_le(data, pos+10);
+            fmt_rate = read_u32_le(data, pos+12);
+            fmt_bps  = read_u16_le(data, pos+22);
+            if (fmt_code == WAV_FMT_EXTENSIBLE) {
+                if (ck_size >= 40) {
+                    var vb = read_u16_le(data, pos+26);
+                    if (vb > 0) { fmt_bps = vb; }
+                    fmt_code = read_u16_le(data, pos+32);
+                }
+            }
+            fmt_found = 1;
+        }}}}
+        if (ck0==0x64) { if (ck1==0x61) { if (ck2==0x74) { if (ck3==0x61) {
+            dat_start = pos + 8; dat_size = ck_size; dat_found = 1;
+        }}}}
+
+        pos = pos + (ck_size + (ck_size & 1)) + 8;
+        if (fmt_found == 1) { if (dat_found == 1) { pos = len + 1; } }
+    }
+
+    if (fmt_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (dat_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (fmt_ch == 0)    { return err(ERR_INVALID_CHANNELS); }
+    if (fmt_rate == 0)  { return err(ERR_INVALID_RATE); }
+
+    var avail = len - dat_start;
+    if (dat_size > avail) { dat_size = avail; }
+    var audio = data + dat_start;
+    var samples = vec_new();
+
+    if (fmt_code == WAV_FMT_PCM) {
+        if (fmt_bps == 8)  { samples = u8_to_f64(audio, dat_size); }
+        if (fmt_bps == 16) { samples = i16_to_f64(audio, dat_size / 2); }
+        if (fmt_bps == 24) { samples = i24_packed_to_f64(audio, dat_size / 3); }
+        if (fmt_bps == 32) { samples = i32_to_f64(audio, dat_size / 4); }
+    }
+    if (fmt_code == WAV_FMT_IEEE_FLOAT) {
+        if (fmt_bps == 32) { samples = f32_to_f64_vec(audio, dat_size / 4); }
+    }
+
+    var sc = vec_len(samples);
+    if (sc == 0) { if (dat_size > 0) { return err(ERR_DECODE); } }
+    var tf = sc / fmt_ch;
+    var dur = f64_div(f64_from(tf), f64_from(fmt_rate));
+    return decode_result_new(fmtinfo_new(FMT_WAV, fmt_rate, fmt_ch, fmt_bps, dur, tf), samples);
+}
+
+fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
+    if (channels == 0)    { return err(ERR_INVALID_CHANNELS); }
+    if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
+    if (pcm_fmt == PCM_F64) { return err(ERR_ENCODE); }
+
+    var fmt_code = WAV_FMT_PCM;
+    if (pcm_fmt == PCM_F32) { fmt_code = WAV_FMT_IEEE_FLOAT; }
+    var bps = pcm_bit_depth(pcm_fmt);
+    var bytes_ps = pcm_bytes_per_sample(pcm_fmt);
+    var block_align = channels * bytes_ps;
+    var byte_rate = block_align * sample_rate;
+    var raw_data = out + 44;
+    var raw_size = 0;
+
+    if (pcm_fmt == PCM_I8)  { raw_size = f64_to_u8(samples, raw_data); }
+    if (pcm_fmt == PCM_I16) { raw_size = f64_to_i16(samples, raw_data); }
+    if (pcm_fmt == PCM_I24) { raw_size = f64_to_i24_packed(samples, raw_data); }
+    if (pcm_fmt == PCM_I32) { raw_size = f64_to_i32(samples, raw_data); }
+    if (pcm_fmt == PCM_F32) { raw_size = f64_to_f32_bytes(samples, raw_data); }
+
+    var file_size = 4 + 24 + 8 + raw_size;
+    store8(out,0x52); store8(out+1,0x49); store8(out+2,0x46); store8(out+3,0x46);
+    write_u32_le(out, 4, file_size);
+    store8(out+8,0x57); store8(out+9,0x41); store8(out+10,0x56); store8(out+11,0x45);
+    store8(out+12,0x66); store8(out+13,0x6D); store8(out+14,0x74); store8(out+15,0x20);
+    write_u32_le(out, 16, 16);
+    write_u16_le(out, 20, fmt_code); write_u16_le(out, 22, channels);
+    write_u32_le(out, 24, sample_rate); write_u32_le(out, 28, byte_rate);
+    write_u16_le(out, 32, block_align); write_u16_le(out, 34, bps);
+    store8(out+36,0x64); store8(out+37,0x61); store8(out+38,0x74); store8(out+39,0x61);
+    write_u32_le(out, 40, raw_size);
+    return 44 + raw_size;
+}
+
+# ================================================================
+# Timing helpers — clock_gettime(CLOCK_MONOTONIC)
+# ================================================================
+
+# clock_gettime: syscall 228 on x86_64
+# struct timespec { tv_sec: i64, tv_nsec: i64 } = 16 bytes
+fn time_now_ns() {
+    var ts = alloc(16);
+    syscall(228, 1, ts);
+    var sec = load64(ts);
+    var nsec = load64(ts + 8);
+    return sec * 1000000000 + nsec;
+}
+
+# Run a function N times and report timing
+fn bench(name, iters) {
+    syscall(1, 1, name, strlen(name));
+    syscall(1, 1, " (", 2);
+    fmt_int(iters);
+    syscall(1, 1, " iters): ", 9);
+    return 0;
+}
+
+fn bench_report(elapsed_ns, iters) {
+    # Per-iteration time
+    var per_iter = elapsed_ns / iters;
+    if (per_iter >= 1000000) {
+        # ms
+        var ms = per_iter / 1000000;
+        var us_frac = (per_iter % 1000000) / 1000;
+        fmt_int(ms);
+        syscall(1, 1, ".", 1);
+        if (us_frac < 100) { syscall(1, 1, "0", 1); }
+        if (us_frac < 10) { syscall(1, 1, "0", 1); }
+        fmt_int(us_frac);
+        syscall(1, 1, " ms/iter\n", 9);
+    } else {
+        if (per_iter >= 1000) {
+            # us
+            var us = per_iter / 1000;
+            var ns_frac = per_iter % 1000;
+            fmt_int(us);
+            syscall(1, 1, ".", 1);
+            if (ns_frac < 100) { syscall(1, 1, "0", 1); }
+            if (ns_frac < 10) { syscall(1, 1, "0", 1); }
+            fmt_int(ns_frac);
+            syscall(1, 1, " us/iter\n", 9);
+        } else {
+            fmt_int(per_iter);
+            syscall(1, 1, " ns/iter\n", 9);
+        }
+    }
+    return per_iter;
+}
+
+# ================================================================
+# Benchmark: wav_decode_1sec_i16
+# Equivalent to Rust: wav_decode_1sec
+# ================================================================
+
+fn bench_wav_decode_1sec() {
+    # Generate 1 second mono 44100 Hz sine wave
+    var samples = vec_new();
+    var F64_44100 = f64_from(44100);
+    var F64_440 = f64_from(440);
+    var F64_PI2 = f64_mul(F64_TWO, f64_from(3));  # approx 2*pi via f64_sin
+    # 2*PI ≈ 6.283185307
+    # We'll use f64_sin(2*pi*440*i/44100)
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    # two_pi ≈ 6.28318... close enough: 2 * 3.14159 = 6.28318
+
+    for (var i = 0; i < 44100; i = i + 1) {
+        var phase = f64_div(f64_mul(f64_mul(two_pi, F64_440), f64_from(i)), F64_44100);
+        var s = f64_sin(phase);
+        vec_push(samples, s);
+    }
+
+    # Encode as i16 WAV
+    var wav_buf = alloc(200000);
+    var wav_size = wav_encode(samples, 44100, 1, PCM_I16, wav_buf);
+
+    # Warm up
+    for (var w = 0; w < 100; w = w + 1) {
+        wav_decode(wav_buf, wav_size);
+    }
+
+    # Benchmark
+    var iters = 10000;
+    bench("wav_decode_1sec_i16", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        wav_decode(wav_buf, wav_size);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: pcm_i16_to_f32_4096
+# Equivalent to Rust: pcm_i16_to_f32_4096
+# ================================================================
+
+fn bench_pcm_i16_to_f64_4096() {
+    # Create 4096 i16 samples in a buffer
+    var buf = alloc(8192);
+    for (var i = 0; i < 4096; i = i + 1) {
+        var val = (i % 65536) - 32768;
+        write_u16_le(buf, i * 2, val & 0xFFFF);
+    }
+
+    # Warm up
+    for (var w = 0; w < 1000; w = w + 1) {
+        i16_to_f64(buf, 4096);
+    }
+
+    # Benchmark
+    var iters = 100000;
+    bench("pcm_i16_to_f64_4096", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        i16_to_f64(buf, 4096);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Entry point
+# ================================================================
+
+alloc_init();
+shravan_init_constants();
+
+syscall(1, 1, "shravan v1.1.0 benchmarks (Cyrius port)\n", 41);
+syscall(1, 1, "========================================\n\n", 42);
+
+var wav_ns = bench_wav_decode_1sec();
+var pcm_ns = bench_pcm_i16_to_f64_4096();
+
+syscall(1, 1, "\ndone.\n", 7);
+syscall(60, 0);
