@@ -143,6 +143,23 @@ fn opus_serialize_tags(out_buf) {
 }
 
 # ================================================================
+# OpusTags parsing
+# ================================================================
+
+fn opus_parse_tags(data, len) {
+    if (len < 8) { return err(ERR_INVALID_HEADER); }
+    if (load8(data)     != 0x4F) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 1) != 0x70) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 2) != 0x75) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 3) != 0x73) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 4) != 0x54) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 5) != 0x61) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 6) != 0x67) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 7) != 0x73) { return err(ERR_INVALID_HEADER); }
+    return tag_read_vorbis(data + 8, len - 8);
+}
+
+# ================================================================
 # Range encoder (RFC 6716 Section 4.1)
 # ================================================================
 # State layout (48 bytes):
@@ -648,11 +665,71 @@ fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
 }
 
 # ================================================================
-# Opus decode stub
+# Opus decoder — header parsing + duration estimation
 # ================================================================
 
+fn _opus_find_last_granule(data, len) {
+    if (len < 27) { return 0 - 1; }
+    var pos = len - 27;
+    while (pos >= 0) {
+        if (load8(data + pos) == 0x4F) {
+            if (load8(data + pos + 1) == 0x67) {
+                if (load8(data + pos + 2) == 0x67) {
+                    if (load8(data + pos + 3) == 0x53) {
+                        if (load8(data + pos + 4) == 0) {
+                            if (pos + 14 <= len) {
+                                var granule = load8(data + pos + 6);
+                                granule = granule | (load8(data + pos + 7) << 8);
+                                granule = granule | (load8(data + pos + 8) << 16);
+                                granule = granule | (load8(data + pos + 9) << 24);
+                                granule = granule | (load8(data + pos + 10) << 32);
+                                granule = granule | (load8(data + pos + 11) << 40);
+                                granule = granule | (load8(data + pos + 12) << 48);
+                                granule = granule | (load8(data + pos + 13) << 56);
+                                return granule;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (pos == 0) { return 0 - 1; }
+        pos = pos - 1;
+    }
+    return 0 - 1;
+}
+
 fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
-    return err(ERR_UNSUPPORTED_FMT);
+    if (vec_len(packets_vec) == 0) { return err(ERR_END_OF_STREAM); }
+
+    var pkt0 = vec_get(packets_vec, 0);
+    var pkt0_data = str_data(pkt0);
+    var pkt0_len = str_len(pkt0);
+    var head = opus_parse_head(pkt0_data, pkt0_len);
+    if (is_err(head) == 1) { return head; }
+
+    if (vec_len(packets_vec) >= 2) {
+        var pkt1 = vec_get(packets_vec, 1);
+        opus_parse_tags(str_data(pkt1), str_len(pkt1));
+    }
+
+    var duration_secs = F64_ZERO;
+    var total_samples = 0;
+    var F64_48000 = f64_from(48000);
+    var granule = _opus_find_last_granule(ogg_data, ogg_len);
+    if (granule > 0) {
+        var pre_skip = opus_head_pre_skip(head);
+        var effective = granule - pre_skip;
+        if (effective > 0) {
+            duration_secs = f64_div(f64_from(effective), F64_48000);
+            total_samples = effective;
+        }
+    }
+
+    var channels = opus_head_channels(head);
+    var fi = fmtinfo_new(FMT_OPUS, 48000, channels, 16, duration_secs, total_samples);
+    var samples = vec_new();
+    return decode_result_new(fi, samples);
 }
 
 # ================================================================

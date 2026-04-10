@@ -399,6 +399,33 @@ fn f64_to_i24_packed(samples, out) {
     return len * 3;
 }
 
+# Convert signed 24-bit integers (stored as i64, lower 24 bits) to f64 vec.
+# src: pointer to i64 values, count: number of samples
+# Returns: vec of f64 bit patterns
+fn i24_to_f64(src, count) {
+    var v = vec_new();
+    for (var i = 0; i < count; i = i + 1) {
+        var raw = load64(src + i * 8) & 0xFFFFFF;
+        var signed = sign_extend(raw, 24);
+        var f = f64_div(f64_from(signed), F64_8388608);
+        vec_push(v, f);
+    }
+    return v;
+}
+
+# Convert f64 vec to signed 24-bit integers (stored as i64).
+# samples: vec of f64, out: pointer to i64 buffer
+# Returns: number of samples written
+fn f64_to_i24(samples, out) {
+    var len = vec_len(samples);
+    for (var i = 0; i < len; i = i + 1) {
+        var s = f64_clamp_sample(vec_get(samples, i));
+        var val = f64_to(f64_mul(s, F64_8388607));
+        store64(out + i * 8, val & 0xFFFFFF);
+    }
+    return len;
+}
+
 # Convert unsigned 8-bit PCM (center=128) to f64 vec.
 fn u8_to_f64(src, count) {
     var v = vec_new();
@@ -1637,6 +1664,8 @@ fn codec_open(data, len) {
     if (fmt == FMT_OGG)  { return ogg_decode(data, len); }
     if (fmt == FMT_MP3)  { return mp3_decode(data, len); }
     if (fmt == FMT_AAC)  { return aac_decode(data, len); }
+    if (fmt == FMT_ALAC) { return alac_decode(data, len); }
+    if (fmt == FMT_OPUS) { return ogg_decode(data, len); }
 
     return err(ERR_UNSUPPORTED_FMT);
 }
@@ -2168,6 +2197,155 @@ fn test_alac_verbatim_frame() {
     return 0;
 }
 
+# ================================================================
+# Tests for ported functionality
+# ================================================================
+
+fn test_i24_unpacked() {
+    syscall(1, 1, "test: i24 unpacked conversions\n", 31);
+
+    var src = alloc(24);
+    store64(src, 0);
+    store64(src + 8, 0x7FFFFF);
+    store64(src + 16, 0x800000);
+    var f64s = i24_to_f64(src, 3);
+    assert_eq(vec_len(f64s), 3, "i24_to_f64 count");
+    assert(f64_eq(vec_get(f64s, 0), F64_ZERO) == 1, "i24 zero = 0.0");
+    assert(f64_gt(vec_get(f64s, 1), F64_ZERO) == 1, "i24 max > 0");
+    assert(f64_lt(vec_get(f64s, 2), F64_ZERO) == 1, "i24 min < 0");
+
+    var samples = vec_new();
+    vec_push(samples, F64_ZERO);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+    var out = alloc(24);
+    var count = f64_to_i24(samples, out);
+    assert_eq(count, 3, "f64_to_i24 count");
+    assert_eq(load64(out), 0, "f64_to_i24 zero");
+    assert(load64(out + 8) > 0, "f64_to_i24 positive");
+
+    return 0;
+}
+
+fn test_opus_parse_tags() {
+    syscall(1, 1, "test: opus parse tags\n", 22);
+
+    var buf = alloc(64);
+    var len = opus_serialize_tags(buf);
+    assert(len > 8, "serialize_tags len > 8");
+
+    var meta = opus_parse_tags(buf, len);
+    assert(is_err(meta) == 0, "parse_tags succeeds");
+    assert(is_err(opus_parse_tags(buf, 4)) == 1, "parse_tags rejects short");
+
+    var bad = alloc(16);
+    memset(bad, 0x41, 16);
+    assert(is_err(opus_parse_tags(bad, 16)) == 1, "parse_tags rejects bad magic");
+
+    return 0;
+}
+
+fn test_opus_decode_from_packets() {
+    syscall(1, 1, "test: opus decode from packets\n", 31);
+
+    var head_buf = alloc(19);
+    opus_serialize_head(2, 312, 48000, head_buf);
+    var tags_buf = alloc(32);
+    var tags_len = opus_serialize_tags(tags_buf);
+
+    var packets = vec_new();
+    vec_push(packets, str_new(head_buf, 19));
+    vec_push(packets, str_new(tags_buf, tags_len));
+
+    # Build minimal Ogg data with granule=48312 for duration estimation
+    var ogg_page = alloc(64);
+    store8(ogg_page, 0x4F); store8(ogg_page + 1, 0x67);
+    store8(ogg_page + 2, 0x67); store8(ogg_page + 3, 0x53);
+    store8(ogg_page + 4, 0);
+    store8(ogg_page + 5, 4);
+    var granule = 48312;
+    store8(ogg_page + 6, granule & 0xFF);
+    store8(ogg_page + 7, (granule >> 8) & 0xFF);
+    store8(ogg_page + 8, (granule >> 16) & 0xFF);
+    store8(ogg_page + 9, (granule >> 24) & 0xFF);
+    store8(ogg_page + 10, 0); store8(ogg_page + 11, 0);
+    store8(ogg_page + 12, 0); store8(ogg_page + 13, 0);
+
+    var result = opus_decode_from_packets(packets, ogg_page, 64);
+    assert(is_err(result) == 0, "opus decode succeeds");
+
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_format(fi), FMT_OPUS, "opus format");
+    assert_eq(fmtinfo_sample_rate(fi), 48000, "opus rate");
+    assert_eq(fmtinfo_channels(fi), 2, "opus channels");
+    assert(f64_gt(fmtinfo_duration(fi), F64_ZERO) == 1, "opus duration > 0");
+    assert_eq(fmtinfo_total_samples(fi), 48000, "opus total_samples");
+
+    var empty = vec_new();
+    assert(is_err(opus_decode_from_packets(empty, ogg_page, 64)) == 1, "opus empty rejected");
+
+    return 0;
+}
+
+fn test_stream_chunking() {
+    syscall(1, 1, "test: stream chunk_size\n", 24);
+
+    var n_samples = 200;
+    var wav_len = 44 + n_samples * 2;
+    var wav_data = alloc(wav_len);
+
+    store8(wav_data, 0x52); store8(wav_data+1, 0x49);
+    store8(wav_data+2, 0x46); store8(wav_data+3, 0x46);
+    write_u32_le(wav_data, 4, wav_len - 8);
+    store8(wav_data+8, 0x57); store8(wav_data+9, 0x41);
+    store8(wav_data+10, 0x56); store8(wav_data+11, 0x45);
+
+    store8(wav_data+12, 0x66); store8(wav_data+13, 0x6D);
+    store8(wav_data+14, 0x74); store8(wav_data+15, 0x20);
+    write_u32_le(wav_data, 16, 16);
+    write_u16_le(wav_data, 20, 1);
+    write_u16_le(wav_data, 22, 1);
+    write_u32_le(wav_data, 24, 44100);
+    write_u32_le(wav_data, 28, 88200);
+    write_u16_le(wav_data, 32, 2);
+    write_u16_le(wav_data, 34, 16);
+
+    store8(wav_data+36, 0x64); store8(wav_data+37, 0x61);
+    store8(wav_data+38, 0x74); store8(wav_data+39, 0x61);
+    write_u32_le(wav_data, 40, n_samples * 2);
+
+    for (var si = 0; si < n_samples; si = si + 1) {
+        write_u16_le(wav_data, 44 + si * 2, (si * 100) & 0xFFFF);
+    }
+
+    var dec = wav_stream_new(50);
+    var evts = wav_stream_feed(dec, wav_data, wav_len);
+    var flush_evts = wav_stream_flush(dec);
+
+    var all = vec_new();
+    for (var ei = 0; ei < vec_len(evts); ei = ei + 1) {
+        vec_push(all, vec_get(evts, ei));
+    }
+    for (var ei = 0; ei < vec_len(flush_evts); ei = ei + 1) {
+        vec_push(all, vec_get(flush_evts, ei));
+    }
+
+    var sample_events = 0;
+    var total_samples_received = 0;
+    for (var ei = 0; ei < vec_len(all); ei = ei + 1) {
+        var evt = vec_get(all, ei);
+        if (stream_evt_type(evt) == STREAM_EVT_SAMPLES) {
+            sample_events = sample_events + 1;
+            total_samples_received = total_samples_received + vec_len(stream_evt_data(evt));
+        }
+    }
+
+    assert(sample_events >= 2, "chunked: multiple SAMPLES events");
+    assert_eq(total_samples_received, n_samples, "chunked: total correct");
+
+    return 0;
+}
+
 fn print_summary() {
     syscall(1, 1, "\n", 1);
     syscall(1, 1, "shravan tests: ", 15);
@@ -2212,6 +2390,10 @@ test_aiff_errors();
 test_alac_config();
 test_alac_bitreader();
 test_alac_verbatim_frame();
+test_i24_unpacked();
+test_opus_parse_tags();
+test_opus_decode_from_packets();
+test_stream_chunking();
 test_flac_crc();
 test_flac_bitwriter();
 test_flac_zigzag();

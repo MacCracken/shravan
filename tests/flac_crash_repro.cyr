@@ -1,0 +1,142 @@
+# Minimal reproducer: FLAC encode/decode segfault
+# cc3 3.3.10 — shravan FLAC roundtrip crashes
+#
+# Build: cyrius build tests/flac_crash_repro.cyr build/flac_crash_repro
+# Run:   ./build/flac_crash_repro
+# Expected: prints "PASS" and exits 0
+# Actual:   SIGSEGV (exit 139) during or after flac_encode
+
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/args.cyr"
+include "lib/assert.cyr"
+include "lib/tagged.cyr"
+include "lib/math.cyr"
+
+# Minimal error/format/pcm stubs needed by flac.cyr
+var F64_ZERO = 0;
+var F64_ONE  = 0;
+var F64_TWO  = 0;
+var F64_NEG_ONE = 0;
+var F64_32768 = 0;
+
+enum ShravanErr {
+    ERR_NONE = 0;
+    ERR_UNSUPPORTED_FMT = 1;
+    ERR_INVALID_HEADER = 2;
+    ERR_DECODE = 3;
+    ERR_ENCODE = 4;
+    ERR_END_OF_STREAM = 5;
+    ERR_INVALID_RATE = 6;
+    ERR_INVALID_CHANNELS = 7;
+}
+
+fn err(code) { return 0 - (1 << 63) - code; }
+fn is_err(r) { if (r < 0) { return 1; } return 0; }
+fn is_ok(r)  { if (r >= 0) { return 1; } return 0; }
+fn err_code(r) { return (0 - r) - (1 << 63); }
+
+enum AudioFormat {
+    FMT_WAV = 0;
+    FMT_AIFF = 1;
+    FMT_MP3 = 2;
+    FMT_FLAC = 3;
+}
+
+fn fmtinfo_new(format, sample_rate, channels, bit_depth, duration_secs, total_samples) {
+    var fi = alloc(48);
+    store64(fi, format);
+    store64(fi + 8, sample_rate);
+    store64(fi + 16, channels);
+    store64(fi + 24, bit_depth);
+    store64(fi + 32, duration_secs);
+    store64(fi + 40, total_samples);
+    return fi;
+}
+fn fmtinfo_format(fi)       { return load64(fi); }
+fn fmtinfo_sample_rate(fi)  { return load64(fi + 8); }
+fn fmtinfo_channels(fi)     { return load64(fi + 16); }
+fn fmtinfo_bit_depth(fi)    { return load64(fi + 24); }
+
+fn decode_result_new(fi, samples) {
+    var dr = alloc(16);
+    store64(dr, fi);
+    store64(dr + 8, samples);
+    return dr;
+}
+fn decode_result_info(dr)    { return load64(dr); }
+fn decode_result_samples(dr) { return load64(dr + 8); }
+
+fn read_u16_le(data, off) {
+    return load8(data + off) | (load8(data + off + 1) << 8);
+}
+fn read_u32_le(data, off) {
+    return load8(data + off) | (load8(data + off + 1) << 8) | (load8(data + off + 2) << 16) | (load8(data + off + 3) << 24);
+}
+fn write_u16_le(buf, off, val) {
+    store8(buf + off, val & 0xFF);
+    store8(buf + off + 1, (val >> 8) & 0xFF);
+    return 0;
+}
+fn write_u32_le(buf, off, val) {
+    store8(buf + off, val & 0xFF);
+    store8(buf + off + 1, (val >> 8) & 0xFF);
+    store8(buf + off + 2, (val >> 16) & 0xFF);
+    store8(buf + off + 3, (val >> 24) & 0xFF);
+    return 0;
+}
+
+fn sign_extend(val, bits) {
+    var half = 1 << (bits - 1);
+    if (val >= half) { return val - (1 << bits); }
+    return val;
+}
+
+fn f64_clamp_sample(x) {
+    return f64_clamp(x, F64_NEG_ONE, F64_ONE);
+}
+
+include "lib/flac.cyr"
+
+# ---- entry point ----
+alloc_init();
+F64_ZERO = f64_from(0);
+F64_ONE  = f64_from(1);
+F64_TWO  = f64_from(2);
+F64_NEG_ONE = f64_neg(F64_ONE);
+F64_32768 = f64_from(32768);
+flac_init();
+
+syscall(1, 1, "flac crash reproducer — cc3 3.3.10\n", 37);
+
+# Encode 256 silence samples as 16-bit mono FLAC
+var num_samples = 256;
+var samples = vec_new();
+var i = 0;
+while (i < num_samples) {
+    vec_push(samples, F64_ZERO);
+    i = i + 1;
+}
+
+var out_buf = alloc(num_samples * 8 + 4096);
+syscall(1, 1, "encoding...\n", 12);
+var bytes_written = flac_encode(samples, 44100, 1, 16, out_buf);
+
+if (is_err(bytes_written) == 1) {
+    syscall(1, 1, "FAIL: encode returned error\n", 28);
+    syscall(60, 1);
+}
+syscall(1, 1, "encode ok, decoding...\n", 23);
+
+var result = flac_decode(out_buf, bytes_written);
+if (is_err(result) == 1) {
+    syscall(1, 1, "FAIL: decode returned error\n", 28);
+    syscall(60, 1);
+}
+
+syscall(1, 1, "PASS\n", 5);
+syscall(60, 0);

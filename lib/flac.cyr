@@ -166,7 +166,7 @@ fn flac_br_set_pos(br, pos) {
 # STREAMINFO parsing
 # ================================================================
 
-# STREAMINFO struct layout (56 bytes):
+# STREAMINFO struct layout (64 bytes):
 #   +0:  min_block_size  (i64)
 #   +8:  max_block_size  (i64)
 #   +16: sample_rate     (i64)
@@ -174,6 +174,7 @@ fn flac_br_set_pos(br, pos) {
 #   +32: bits_per_sample (i64)
 #   +40: total_samples   (i64)
 #   +48: audio_start     (i64) — byte offset where frames begin
+#   +56: seek_table      (vec pointer) — vec of SeekPoint structs (24 bytes each)
 
 fn flac_parse_streaminfo(data, offset) {
     var d = data + offset;
@@ -190,7 +191,7 @@ fn flac_parse_streaminfo(data, offset) {
     var ts_lo = (load8(d + 14) << 24) | (load8(d + 15) << 16) | (load8(d + 16) << 8) | load8(d + 17);
     var total_samples = ts_hi | ts_lo;
 
-    var si = alloc(56);
+    var si = alloc(64);
     store64(si,      min_bs);
     store64(si + 8,  max_bs);
     store64(si + 16, sr);
@@ -198,13 +199,25 @@ fn flac_parse_streaminfo(data, offset) {
     store64(si + 32, bps);
     store64(si + 40, total_samples);
     store64(si + 48, 0);
+    store64(si + 56, 0);
     return si;
 }
 
-# Parse metadata blocks, return STREAMINFO struct with audio_start filled in
+fn _flac_read_u64_be(data, off) {
+    var v = load8(data + off) << 56;
+    v = v | (load8(data + off + 1) << 48);
+    v = v | (load8(data + off + 2) << 40);
+    v = v | (load8(data + off + 3) << 32);
+    v = v | (load8(data + off + 4) << 24);
+    v = v | (load8(data + off + 5) << 16);
+    v = v | (load8(data + off + 6) << 8);
+    v = v | load8(data + off + 7);
+    return v;
+}
+
+# Parse metadata blocks, return STREAMINFO struct with audio_start and seek_table
 fn flac_parse_metadata(data, len) {
     if (len < 8) { return err(ERR_INVALID_HEADER); }
-    # Check "fLaC" magic
     if (load8(data) != 0x66) { return err(ERR_INVALID_HEADER); }
     if (load8(data + 1) != 0x4C) { return err(ERR_INVALID_HEADER); }
     if (load8(data + 2) != 0x61) { return err(ERR_INVALID_HEADER); }
@@ -212,6 +225,7 @@ fn flac_parse_metadata(data, len) {
 
     var pos = 4;
     var si = 0;
+    var seek_table = vec_new();
     var done = 0;
 
     while (done == 0) {
@@ -223,9 +237,26 @@ fn flac_parse_metadata(data, len) {
         pos = pos + 4;
 
         if (block_type == 0) {
-            # STREAMINFO
             if (pos + 34 > len) { return err(ERR_INVALID_HEADER); }
             si = flac_parse_streaminfo(data, pos);
+        }
+        if (block_type == 3) {
+            var num_points = block_size / 18;
+            var sp_pos = pos;
+            for (var i = 0; i < num_points; i = i + 1) {
+                if (sp_pos + 18 > len) { break; }
+                var sample_number = _flac_read_u64_be(data, sp_pos);
+                if (sample_number != (0 - 1)) {
+                    var byte_offset = _flac_read_u64_be(data, sp_pos + 8);
+                    var num_samples = (load8(data + sp_pos + 16) << 8) | load8(data + sp_pos + 17);
+                    var sp = alloc(24);
+                    store64(sp, sample_number);
+                    store64(sp + 8, byte_offset);
+                    store64(sp + 16, num_samples);
+                    vec_push(seek_table, sp);
+                }
+                sp_pos = sp_pos + 18;
+            }
         }
 
         pos = pos + block_size;
@@ -234,6 +265,7 @@ fn flac_parse_metadata(data, len) {
 
     if (si == 0) { return err(ERR_INVALID_HEADER); }
     store64(si + 48, pos);
+    store64(si + 56, seek_table);
     return si;
 }
 
@@ -779,6 +811,190 @@ fn flac_decode(data, len) {
 }
 
 # ================================================================
+# Range decoder — decode a sample range with SEEKTABLE seeking
+# ================================================================
+
+fn flac_decode_range(data, len, start_sample, num_samples) {
+    var si = flac_parse_metadata(data, len);
+    if (is_err(si) == 1) { return si; }
+
+    var si_rate = load64(si + 16);
+    var si_ch   = load64(si + 24);
+    var si_bps  = load64(si + 32);
+    var audio_start = load64(si + 48);
+    var seek_table  = load64(si + 56);
+
+    if (si_rate == 0) { return err(ERR_INVALID_RATE); }
+
+    var end_sample = 0;
+    var has_end = 0;
+    if (num_samples > 0) {
+        end_sample = start_sample + num_samples;
+        has_end = 1;
+    }
+
+    var start_byte = audio_start;
+    if (start_sample > 0) {
+        if (seek_table != 0) {
+            var st_len = vec_len(seek_table);
+            var i = 0;
+            while (i < st_len) {
+                var sp = vec_get(seek_table, i);
+                var sp_sample = load64(sp);
+                if (sp_sample <= start_sample) {
+                    start_byte = audio_start + load64(sp + 8);
+                } else {
+                    i = st_len;
+                }
+                i = i + 1;
+            }
+        }
+    }
+
+    var all_samples = vec_new();
+    var br = bitreader_new(data, len);
+    flac_br_set_pos(br, start_byte);
+
+    var current_sample = 0;
+    var sample_pos_known = 0;
+    if (start_sample == 0) { sample_pos_known = 1; }
+
+    var done = 0;
+    while (done == 0) {
+        var sync_pos = flac_find_sync(br, data, len);
+        if (is_err(sync_pos) == 1) { done = 1; }
+
+        if (done == 0) {
+            var frame_start = sync_pos;
+            var sync_byte2 = load8(data + sync_pos + 1);
+            var blocking_strategy = sync_byte2 & 1;
+
+            var bs_code = bitreader_read(br, 4);
+            if (is_err(bs_code) == 1) { return bs_code; }
+            var sr_code = bitreader_read(br, 4);
+            if (is_err(sr_code) == 1) { return sr_code; }
+            var ch_assign = bitreader_read(br, 4);
+            if (is_err(ch_assign) == 1) { return ch_assign; }
+            var ss_code = bitreader_read(br, 3);
+            if (is_err(ss_code) == 1) { return ss_code; }
+            var _reserved = bitreader_read(br, 1);
+            if (is_err(_reserved) == 1) { return _reserved; }
+
+            var frame_or_sample = flac_br_read_utf8_u64(br);
+            if (is_err(frame_or_sample) == 1) { return frame_or_sample; }
+
+            var block_size = flac_decode_block_size(bs_code, br);
+            if (is_err(block_size) == 1) { return block_size; }
+            var _frame_sr = flac_decode_sample_rate(sr_code, br, si_rate);
+            if (is_err(_frame_sr) == 1) { return _frame_sr; }
+            var frame_bps = flac_decode_bps(ss_code, si_bps);
+            if (is_err(frame_bps) == 1) { return frame_bps; }
+
+            flac_br_align(br);
+            var crc8_pos = flac_br_byte_pos(br);
+            var expected_crc8 = bitreader_read(br, 8);
+            if (is_err(expected_crc8) == 1) { return expected_crc8; }
+            var computed_crc8 = flac_crc8(data + frame_start, crc8_pos - frame_start);
+            if (computed_crc8 != expected_crc8) { return err(ERR_DECODE); }
+
+            if (sample_pos_known == 0) {
+                if (blocking_strategy == 0) {
+                    current_sample = frame_or_sample * block_size;
+                } else {
+                    current_sample = frame_or_sample;
+                }
+                sample_pos_known = 1;
+            }
+
+            var frame_end_sample = current_sample + block_size;
+
+            if (has_end == 1) {
+                if (current_sample >= end_sample) { done = 1; }
+            }
+
+            if (done == 0) {
+                var ch_count = 0;
+                var decor = FLAC_DECOR_INDEPENDENT;
+                if (ch_assign < FLAC_CH_LEFT_SIDE) {
+                    ch_count = ch_assign + 1;
+                } else {
+                    ch_count = 2;
+                    if (ch_assign == FLAC_CH_LEFT_SIDE) { decor = FLAC_DECOR_LEFT_SIDE; }
+                    if (ch_assign == FLAC_CH_RIGHT_SIDE) { decor = FLAC_DECOR_RIGHT_SIDE; }
+                    if (ch_assign == FLAC_CH_MID_SIDE) { decor = FLAC_DECOR_MID_SIDE; }
+                    if (ch_assign > FLAC_CH_MID_SIDE) { return err(ERR_DECODE); }
+                }
+
+                var ch_bufs = alloc(ch_count * 8);
+                var ch = 0;
+                while (ch < ch_count) {
+                    var eff_bps = frame_bps;
+                    if (decor == FLAC_DECOR_LEFT_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+                    if (decor == FLAC_DECOR_RIGHT_SIDE) { if (ch == 0) { eff_bps = frame_bps + 1; } }
+                    if (decor == FLAC_DECOR_MID_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+
+                    var sf_buf = flac_decode_subframe(br, block_size, eff_bps);
+                    if (is_err(sf_buf) == 1) { return sf_buf; }
+                    store64(ch_bufs + ch * 8, sf_buf);
+                    ch = ch + 1;
+                }
+
+                if (ch_count == 2) {
+                    flac_apply_decorrelation(load64(ch_bufs), load64(ch_bufs + 8), block_size, decor);
+                }
+
+                var scale_div = f64_from(1 << (frame_bps - 1));
+                var scale = f64_div(F64_ONE, scale_div);
+
+                var skip_start = 0;
+                if (current_sample < start_sample) {
+                    skip_start = start_sample - current_sample;
+                }
+                var take_end = block_size;
+                if (has_end == 1) {
+                    if (frame_end_sample > end_sample) {
+                        take_end = end_sample - current_sample;
+                    }
+                }
+                if (take_end > block_size) { take_end = block_size; }
+
+                var si2 = skip_start;
+                while (si2 < take_end) {
+                    var c = 0;
+                    while (c < ch_count) {
+                        var ch_buf = load64(ch_bufs + c * 8);
+                        var ival = load64(ch_buf + si2 * 8);
+                        var fval = f64_mul(f64_from(ival), scale);
+                        vec_push(all_samples, fval);
+                        c = c + 1;
+                    }
+                    si2 = si2 + 1;
+                }
+
+                flac_br_align(br);
+                var crc16_end = flac_br_byte_pos(br);
+                if (crc16_end + 2 <= len) {
+                    var expected_crc16 = bitreader_read(br, 16);
+                    if (is_err(expected_crc16) == 1) { return expected_crc16; }
+                    var computed_crc16 = flac_crc16(data + frame_start, crc16_end - frame_start);
+                    if (computed_crc16 != expected_crc16) { return err(ERR_DECODE); }
+                }
+
+                current_sample = frame_end_sample;
+            }
+        }
+    }
+
+    var total_interleaved = vec_len(all_samples);
+    var total_frames = 0;
+    if (si_ch > 0) { total_frames = total_interleaved / si_ch; }
+    var dur = f64_div(f64_from(total_frames), f64_from(si_rate));
+
+    var fi = fmtinfo_new(FMT_FLAC, si_rate, si_ch, si_bps, dur, total_frames);
+    return decode_result_new(fi, all_samples);
+}
+
+# ================================================================
 # BitWriter (MSB-first) for encoder
 # ================================================================
 # Layout (32 bytes):
@@ -803,6 +1019,7 @@ fn flac_bw_write_bits(bw, value, n) {
     var remaining = n;
     var val = value;
     var buf = load64(bw);
+    var cap = load64(bw + 8);
     var blen = load64(bw + 16);
     var cur = load64(bw + 24);
     var bpos = load64(bw + 32);
@@ -816,6 +1033,16 @@ fn flac_bw_write_bits(bw, value, n) {
         remaining = remaining - to_write;
         bpos = bpos + to_write;
         if (bpos >= 8) {
+            # Grow buffer if at capacity
+            if (blen >= cap) {
+                var new_cap = cap * 2;
+                var new_buf = alloc(new_cap);
+                memcpy(new_buf, buf, cap);
+                buf = new_buf;
+                cap = new_cap;
+                store64(bw, buf);
+                store64(bw + 8, cap);
+            }
             store8(buf + blen, cur);
             blen = blen + 1;
             cur = 0;

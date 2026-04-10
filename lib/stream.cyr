@@ -48,13 +48,16 @@ var _WAV_ST_DECODED   = 1;
 var _WAV_ST_DONE      = 2;
 
 fn wav_stream_new(chunk_frames) {
-    var dec = alloc(32);
+    var dec = alloc(40);
     store64(dec, _WAV_ST_BUFFERING);
     var init_cap = 4096;
     var buf = alloc(init_cap);
     store64(dec + 8, buf);
     store64(dec + 16, 0);
     store64(dec + 24, init_cap);
+    var cf = chunk_frames;
+    if (cf <= 0) { cf = 4096; }
+    store64(dec + 32, cf);
     return dec;
 }
 
@@ -86,9 +89,29 @@ fn _wav_stream_try_decode(dec, events) {
     var fi = decode_result_info(result);
     var samples = decode_result_samples(result);
     vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
-    if (vec_len(samples) > 0) {
-        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+
+    var total = vec_len(samples);
+    if (total > 0) {
+        var chunk_frames = load64(dec + 32);
+        var channels = fmtinfo_channels(fi);
+        if (channels < 1) { channels = 1; }
+        var chunk_size = chunk_frames * channels;
+        var pos = 0;
+        while (pos < total) {
+            var remain = total - pos;
+            var take = chunk_size;
+            if (take > remain) { take = remain; }
+            var chunk = vec_new();
+            var j = 0;
+            while (j < take) {
+                vec_push(chunk, vec_get(samples, pos + j));
+                j = j + 1;
+            }
+            vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, chunk));
+            pos = pos + take;
+        }
     }
+
     store64(dec, _WAV_ST_DECODED);
     return 1;
 }
@@ -223,13 +246,16 @@ var _AIFF_ST_DECODED   = 1;
 var _AIFF_ST_DONE      = 2;
 
 fn aiff_stream_new(chunk_frames) {
-    var dec = alloc(32);
+    var dec = alloc(40);
     store64(dec, _AIFF_ST_BUFFERING);
     var init_cap = 4096;
     var buf = alloc(init_cap);
     store64(dec + 8,  buf);
     store64(dec + 16, 0);
     store64(dec + 24, init_cap);
+    var cf = chunk_frames;
+    if (cf <= 0) { cf = 4096; }
+    store64(dec + 32, cf);
     return dec;
 }
 
@@ -261,9 +287,29 @@ fn _aiff_stream_try_decode(dec, events) {
     var fi = decode_result_info(result);
     var samples = decode_result_samples(result);
     vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
-    if (vec_len(samples) > 0) {
-        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+
+    var total = vec_len(samples);
+    if (total > 0) {
+        var chunk_frames = load64(dec + 32);
+        var channels = fmtinfo_channels(fi);
+        if (channels < 1) { channels = 1; }
+        var chunk_size = chunk_frames * channels;
+        var pos = 0;
+        while (pos < total) {
+            var remain = total - pos;
+            var take = chunk_size;
+            if (take > remain) { take = remain; }
+            var chunk = vec_new();
+            var j = 0;
+            while (j < take) {
+                vec_push(chunk, vec_get(samples, pos + j));
+                j = j + 1;
+            }
+            vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, chunk));
+            pos = pos + take;
+        }
     }
+
     store64(dec, _AIFF_ST_DECODED);
     return 1;
 }

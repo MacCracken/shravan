@@ -424,7 +424,7 @@ fn ogg_mux_packets(packets, granules, serial, num_packets) {
 }
 
 # ================================================================
-# ogg_decode — extract packets, return error for now (Opus later)
+# ogg_decode — extract packets and dispatch to codec
 # ================================================================
 
 fn ogg_decode(data, len) {
@@ -432,7 +432,30 @@ fn ogg_decode(data, len) {
     if (is_err(packets) == 1) { return packets; }
     if (vec_len(packets) == 0) { return err(ERR_END_OF_STREAM); }
 
-    # TODO: check first packet for OpusHead and delegate
+    # Check first packet for OpusHead and delegate
+    var pkt0 = vec_get(packets, 0);
+    var pkt0_data = str_data(pkt0);
+    var pkt0_len = str_len(pkt0);
+    if (pkt0_len >= 8) {
+        if (load8(pkt0_data) == 0x4F) {
+            if (load8(pkt0_data + 1) == 0x70) {
+                if (load8(pkt0_data + 2) == 0x75) {
+                    if (load8(pkt0_data + 3) == 0x73) {
+                        if (load8(pkt0_data + 4) == 0x48) {
+                            if (load8(pkt0_data + 5) == 0x65) {
+                                if (load8(pkt0_data + 6) == 0x61) {
+                                    if (load8(pkt0_data + 7) == 0x64) {
+                                        return opus_decode_from_packets(packets, data, len);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return err(ERR_UNSUPPORTED_FMT);
 }
 
