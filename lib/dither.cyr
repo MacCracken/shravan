@@ -1,0 +1,222 @@
+# ================================================================
+# dither.cyr -- Dithering for bit-depth reduction
+# ================================================================
+#
+# Provides:
+#   _dither_xorshift(state_ptr)     -- Xorshift32 PRNG (reads/writes state)
+#   dither_tpdf(samples_vec, target_bits) -- TPDF dithering
+#   dither_noise_shaped(samples_vec, target_bits) -- first-order error feedback
+#
+# All samples are f64 bit patterns in vecs.
+# Requires: f64 builtins, math.cyr, vec.cyr, alloc.cyr
+
+# ================================================================
+# Xorshift32 PRNG
+# ================================================================
+#
+# state_ptr: pointer to an 8-byte slot holding the u32 state
+# Returns the new state value (also written to *state_ptr)
+# The state is treated as a 32-bit unsigned value via masking.
+
+fn _dither_xorshift(state_ptr) {
+    var s = load64(state_ptr) & 0xFFFFFFFF;
+    s = (s ^ (s << 13)) & 0xFFFFFFFF;
+    s = (s ^ (s >> 17)) & 0xFFFFFFFF;
+    s = (s ^ (s << 5)) & 0xFFFFFFFF;
+    store64(state_ptr, s);
+    return s;
+}
+
+# ================================================================
+# Internal: compute quantization step for target bits
+# ================================================================
+# quant_step = 1.0 / (1 << (bits - 1))
+# bits is clamped to [1, 32]
+
+fn _dither_quant_step(target_bits) {
+    var bits = target_bits;
+    if (bits < 1) { bits = 1; }
+    if (bits > 32) { bits = 32; }
+    var divisor = 1 << (bits - 1);
+    return f64_div(F64_ONE, f64_from(divisor));
+}
+
+# ================================================================
+# Internal: generate one TPDF random value in [-1, 1]
+# ================================================================
+# Converts xorshift state to f64 in [-1, 1]:
+#   (state / 0xFFFFFFFF) * 2.0 - 1.0
+
+var _DITHER_U32_MAX_F64 = 0;
+
+fn dither_init() {
+    _DITHER_U32_MAX_F64 = f64_from(0xFFFFFFFF);
+    return 0;
+}
+
+fn _dither_uniform(state_ptr) {
+    var s = _dither_xorshift(state_ptr);
+    var normalized = f64_div(f64_from(s), _DITHER_U32_MAX_F64);
+    return f64_sub(f64_mul(F64_TWO, normalized), F64_ONE);
+}
+
+# ================================================================
+# TPDF dithering
+# ================================================================
+#
+# dither_tpdf(samples_vec, target_bits)
+#   samples_vec: vec of f64 samples (normalized, typically [-1, 1])
+#   target_bits: target bit depth (1..32, e.g. 16 for i16)
+# Returns: new vec of dithered f64 samples
+#
+# TPDF noise = (r1 + r2) * 0.5 * quant_step
+
+fn dither_tpdf(samples_vec, target_bits) {
+    var n = vec_len(samples_vec);
+    var out = vec_new();
+    var quant_step = _dither_quant_step(target_bits);
+
+    # Allocate state on heap
+    var state_ptr = alloc(8);
+    store64(state_ptr, 0x12345678);
+
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(samples_vec, i);
+
+        # Two uniform random values summed -> triangular distribution
+        var r1 = _dither_uniform(state_ptr);
+        var r2 = _dither_uniform(state_ptr);
+        var dither = f64_mul(f64_mul(f64_add(r1, r2), F64_HALF), quant_step);
+        var result = f64_add(s, dither);
+        vec_push(out, result);
+
+        i = i + 1;
+    }
+
+    return out;
+}
+
+# ================================================================
+# Noise-shaped dithering (first-order error feedback)
+# ================================================================
+#
+# dither_noise_shaped(samples_vec, target_bits)
+#   Applies TPDF dither plus first-order error feedback for lower
+#   perceived noise. Quantizes to the target bit depth.
+# Returns: new vec of dithered + quantized f64 samples
+
+fn dither_noise_shaped(samples_vec, target_bits) {
+    var n = vec_len(samples_vec);
+    var out = vec_new();
+    var quant_step = _dither_quant_step(target_bits);
+
+    # Allocate state on heap
+    var state_ptr = alloc(8);
+    store64(state_ptr, 0x12345678);
+
+    var error = F64_ZERO;
+
+    var i = 0;
+    while (i < n) {
+        var s = vec_get(samples_vec, i);
+
+        # Add error feedback from previous sample
+        var shaped = f64_sub(s, error);
+
+        # Generate TPDF noise
+        var r1 = _dither_uniform(state_ptr);
+        var r2 = _dither_uniform(state_ptr);
+        var dither = f64_mul(f64_mul(f64_add(r1, r2), F64_HALF), quant_step);
+        var dithered = f64_add(shaped, dither);
+
+        # Quantize to target bit depth: round(dithered / quant_step) * quant_step
+        var quantized = f64_mul(f64_round(f64_div(dithered, quant_step)), quant_step);
+
+        # Track error for next sample
+        error = f64_sub(quantized, shaped);
+
+        vec_push(out, quantized);
+        i = i + 1;
+    }
+
+    return out;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_dither() {
+    test_group("dither");
+
+    dither_init();
+
+    # --- TPDF preserves length ---
+    var v1 = vec_new();
+    var i = 0;
+    while (i < 1024) {
+        vec_push(v1, F64_HALF);
+        i = i + 1;
+    }
+    var t1 = dither_tpdf(v1, 16);
+    assert_eq(vec_len(t1), 1024, "tpdf preserves length");
+
+    # --- TPDF noise is small (for 16-bit, max diff < 0.001) ---
+    var v2 = vec_new();
+    i = 0;
+    while (i < 4096) {
+        vec_push(v2, F64_HALF);
+        i = i + 1;
+    }
+    var t2 = dither_tpdf(v2, 16);
+    var max_diff = F64_ZERO;
+    i = 0;
+    var f_threshold = f64_div(F64_ONE, f64_from(1000));   # 0.001
+    while (i < 4096) {
+        var diff = f64_abs(f64_sub(vec_get(t2, i), F64_HALF));
+        if (f64_gt(diff, max_diff) == 1) {
+            max_diff = diff;
+        }
+        i = i + 1;
+    }
+    assert(f64_lt(max_diff, f_threshold) == 1, "tpdf noise is small (16-bit)");
+
+    # --- noise_shaped preserves length ---
+    var v3 = vec_new();
+    i = 0;
+    while (i < 1024) {
+        vec_push(v3, F64_HALF);
+        i = i + 1;
+    }
+    var ns1 = dither_noise_shaped(v3, 16);
+    assert_eq(vec_len(ns1), 1024, "noise_shaped preserves length");
+
+    # --- noise_shaped noise is small ---
+    var v4 = vec_new();
+    i = 0;
+    while (i < 4096) {
+        vec_push(v4, F64_HALF);
+        i = i + 1;
+    }
+    var ns2 = dither_noise_shaped(v4, 16);
+    var ns_max_diff = F64_ZERO;
+    i = 0;
+    while (i < 4096) {
+        var diff = f64_abs(f64_sub(vec_get(ns2, i), F64_HALF));
+        if (f64_gt(diff, ns_max_diff) == 1) {
+            ns_max_diff = diff;
+        }
+        i = i + 1;
+    }
+    assert(f64_lt(ns_max_diff, f_threshold) == 1, "noise_shaped noise is small (16-bit)");
+
+    # --- empty input ---
+    var empty = vec_new();
+    var te = dither_tpdf(empty, 16);
+    assert_eq(vec_len(te), 0, "tpdf empty input");
+    var nse = dither_noise_shaped(empty, 16);
+    assert_eq(vec_len(nse), 0, "noise_shaped empty input");
+
+    return 0;
+}

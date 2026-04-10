@@ -1616,6 +1616,10 @@ include "lib/tag.cyr"
 include "lib/fft.cyr"
 include "lib/opus.cyr"
 include "lib/aac.cyr"
+include "lib/resample.cyr"
+include "lib/dither.cyr"
+include "lib/simd.cyr"
+include "lib/stream.cyr"
 
 # ================================================================
 # Codec module — auto-detect and dispatch
@@ -2176,6 +2180,7 @@ ogg_init();
 mp3_init();
 fft_init();
 aac_init();
+resample_init();
 
 syscall(1, 1, "shravan v1.1.0 — audio codecs for AGNOS (Cyrius port)\n", 55);
 syscall(1, 1, "running tests...\n", 17);
@@ -2245,6 +2250,10 @@ test_tag_syncsafe_decode();
 test_fft_all();
 test_opus_all();
 test_aac_all();
+test_resample();
+test_dither();
+test_simd();
+test_stream();
 
 print_summary();
 

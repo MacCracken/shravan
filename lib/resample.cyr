@@ -1,0 +1,380 @@
+# ================================================================
+# resample.cyr -- Windowed sinc resampler
+# ================================================================
+#
+# Provides:
+#   windowed_sinc(x, half_width) -- sinc * Blackman-Harris, all f64
+#   resample_mono(samples_vec, source_rate, target_rate, quality)
+#   resample(samples_vec, channels, source_rate, target_rate, quality)
+#
+# Quality levels (half-width in samples):
+#   RESAMPLE_DRAFT = 2
+#   RESAMPLE_GOOD  = 8
+#   RESAMPLE_BEST  = 32
+#
+# All samples stored as f64 bit patterns in vecs.
+# Requires: f64 builtins, math.cyr, vec.cyr, alloc.cyr
+
+# ================================================================
+# Quality enum
+# ================================================================
+
+var RESAMPLE_DRAFT = 2;
+var RESAMPLE_GOOD  = 8;
+var RESAMPLE_BEST  = 32;
+
+# ================================================================
+# Constants (initialized by resample_init)
+# ================================================================
+
+var _RS_PI     = 0;
+var _RS_TWO_PI = 0;
+var _RS_EPS    = 0;    # 1e-10 for near-zero check
+var _RS_W_EPS  = 0;    # 1e-7 for weight sum check
+
+# Blackman-Harris coefficients as f64
+var _RS_BH_A0 = 0;   # 0.35875
+var _RS_BH_A1 = 0;   # 0.48829
+var _RS_BH_A2 = 0;   # 0.14128
+var _RS_BH_A3 = 0;   # 0.01168
+
+fn resample_init() {
+    _RS_PI     = f64_mul(f64_from(4), f64_atan(F64_ONE));
+    _RS_TWO_PI = f64_mul(F64_TWO, _RS_PI);
+
+    # 1e-10 = 1 / 10^10
+    var f10 = f64_from(10);
+    var f10_5 = f64_mul(f10, f64_mul(f10, f64_mul(f10, f64_mul(f10, f10))));
+    _RS_EPS = f64_div(F64_ONE, f64_mul(f10_5, f10_5));
+
+    # 1e-7
+    var f10_3 = f64_mul(f10, f64_mul(f10, f10));
+    var f10_4 = f64_mul(f10_3, f10);
+    _RS_W_EPS = f64_div(F64_ONE, f64_mul(f10_3, f10_4));
+
+    # Blackman-Harris coefficients
+    _RS_BH_A0 = f64_div(f64_from(35875), f64_from(100000));
+    _RS_BH_A1 = f64_div(f64_from(48829), f64_from(100000));
+    _RS_BH_A2 = f64_div(f64_from(14128), f64_from(100000));
+    _RS_BH_A3 = f64_div(f64_from(1168),  f64_from(100000));
+
+    return 0;
+}
+
+# ================================================================
+# Windowed sinc function
+# ================================================================
+#
+# windowed_sinc(x, half_width)
+#   x: f64 distance from center (in samples)
+#   half_width: f64 kernel half-width
+# Returns: f64 sinc(x) * blackman_harris(x)
+
+fn windowed_sinc(x, half_width) {
+    # Near-zero: sinc(0) = 1.0
+    var ax = f64_abs(x);
+    if (f64_lt(ax, _RS_EPS) == 1) {
+        return F64_ONE;
+    }
+
+    # sinc(x) = sin(pi*x) / (pi*x)
+    var pi_x = f64_mul(_RS_PI, x);
+    var sinc = f64_div(f64_sin(pi_x), pi_x);
+
+    # Outside window: return 0
+    if (f64_gt(ax, half_width) == 1) {
+        return F64_ZERO;
+    }
+
+    # Blackman-Harris window
+    # t = (x / half_width + 1) * 0.5   (normalized to [0, 1])
+    var t = f64_mul(f64_add(f64_div(x, half_width), F64_ONE), F64_HALF);
+
+    # w = a0 - a1*cos(2*pi*t) + a2*cos(4*pi*t) - a3*cos(6*pi*t)
+    var tau_t = f64_mul(_RS_TWO_PI, t);
+    var w = f64_sub(_RS_BH_A0, f64_mul(_RS_BH_A1, f64_cos(tau_t)));
+    w = f64_add(w, f64_mul(_RS_BH_A2, f64_cos(f64_mul(F64_TWO, tau_t))));
+    w = f64_sub(w, f64_mul(_RS_BH_A3, f64_cos(f64_mul(f64_from(3), tau_t))));
+
+    return f64_mul(sinc, w);
+}
+
+# ================================================================
+# Mono resampling
+# ================================================================
+#
+# resample_mono(samples_vec, source_rate, target_rate, quality)
+#   samples_vec: vec of f64 bit patterns
+#   source_rate, target_rate: integer Hz
+#   quality: RESAMPLE_DRAFT / RESAMPLE_GOOD / RESAMPLE_BEST
+# Returns: new vec of resampled f64 samples, or negative error
+
+fn resample_mono(samples_vec, source_rate, target_rate, quality) {
+    var frames = vec_len(samples_vec);
+    if (frames == 0) {
+        return vec_new();
+    }
+
+    # ratio = target_rate / source_rate (f64)
+    var f_src = f64_from(source_rate);
+    var f_tgt = f64_from(target_rate);
+    var ratio = f64_div(f_tgt, f_src);
+
+    # new_frames = ceil(frames * ratio)
+    var f_frames = f64_from(frames);
+    var new_frames = f64_to(f64_ceil(f64_mul(f_frames, ratio)));
+
+    var half_width = quality;
+
+    # For downsampling, scale the kernel to avoid aliasing
+    var filter_scale = F64_ONE;
+    var kernel_scale = F64_ONE;
+    if (f64_lt(ratio, F64_ONE) == 1) {
+        filter_scale = ratio;
+        kernel_scale = ratio;
+    }
+
+    var out = vec_new();
+
+    # Pre-size output vec
+    var fi = 0;
+    while (fi < new_frames) {
+        vec_push(out, F64_ZERO);
+        fi = fi + 1;
+    }
+
+    # scaled_half = ceil(half_width / filter_scale) as integer
+    var f_half = f64_from(half_width);
+    var scaled_half = f64_to(f64_ceil(f64_div(f_half, filter_scale)));
+
+    var frame = 0;
+    while (frame < new_frames) {
+        var f_frame = f64_from(frame);
+        var src_pos = f64_div(f_frame, ratio);
+        var src_center = f64_to(f64_floor(src_pos));
+        var frac = f64_sub(src_pos, f64_from(src_center));
+
+        var sum = F64_ZERO;
+        var weight_sum = F64_ZERO;
+
+        var i = 0 - scaled_half;
+        while (i <= scaled_half) {
+            var src_idx = src_center + i;
+            if (src_idx >= 0) {
+                if (src_idx < frames) {
+                    var f_i = f64_from(i);
+                    var x = f64_mul(f64_sub(f_i, frac), kernel_scale);
+                    var f_sh = f64_from(scaled_half);
+                    var w = windowed_sinc(x, f_sh);
+                    var sample = vec_get(samples_vec, src_idx);
+                    sum = f64_add(sum, f64_mul(sample, w));
+                    weight_sum = f64_add(weight_sum, w);
+                }
+            }
+            i = i + 1;
+        }
+
+        if (f64_gt(f64_abs(weight_sum), _RS_W_EPS) == 1) {
+            vec_set(out, frame, f64_div(sum, weight_sum));
+        }
+
+        frame = frame + 1;
+    }
+
+    return out;
+}
+
+# ================================================================
+# Multi-channel resampling
+# ================================================================
+#
+# resample(samples_vec, channels, source_rate, target_rate, quality)
+#   samples_vec: vec of interleaved f64 samples
+#   channels: number of channels (integer)
+#   source_rate, target_rate: integer Hz
+#   quality: RESAMPLE_DRAFT / RESAMPLE_GOOD / RESAMPLE_BEST
+# Returns: new vec of resampled interleaved samples, or negative error
+
+fn resample(samples_vec, channels, source_rate, target_rate, quality) {
+    if (source_rate == 0)  { return err(ERR_INVALID_RATE); }
+    if (target_rate == 0)  { return err(ERR_INVALID_RATE); }
+    if (channels == 0)     { return err(ERR_INVALID_CHANNELS); }
+
+    var total = vec_len(samples_vec);
+    var frames = total / channels;
+
+    # Same rate: return a copy
+    if (target_rate == source_rate) {
+        var copy = vec_new();
+        var ci = 0;
+        while (ci < total) {
+            vec_push(copy, vec_get(samples_vec, ci));
+            ci = ci + 1;
+        }
+        return copy;
+    }
+
+    if (frames == 0) {
+        return vec_new();
+    }
+
+    # Single channel: resample directly
+    if (channels == 1) {
+        return resample_mono(samples_vec, source_rate, target_rate, quality);
+    }
+
+    # Multi-channel: deinterleave, resample each, reinterleave
+
+    # Deinterleave into per-channel vecs
+    # channel_bufs is a vec of vec pointers
+    var channel_bufs = vec_new();
+    var c = 0;
+    while (c < channels) {
+        var cbuf = vec_new();
+        var f = 0;
+        while (f < frames) {
+            vec_push(cbuf, vec_get(samples_vec, f * channels + c));
+            f = f + 1;
+        }
+        vec_push(channel_bufs, cbuf);
+        c = c + 1;
+    }
+
+    # Resample each channel
+    var out_channels = vec_new();
+    c = 0;
+    while (c < channels) {
+        var cbuf = vec_get(channel_bufs, c);
+        var resampled = resample_mono(cbuf, source_rate, target_rate, quality);
+        if (is_err(resampled) == 1) {
+            return resampled;
+        }
+        vec_push(out_channels, resampled);
+        c = c + 1;
+    }
+
+    # Reinterleave
+    var first_ch = vec_get(out_channels, 0);
+    var new_frames = vec_len(first_ch);
+    var out = vec_new();
+    var f = 0;
+    while (f < new_frames) {
+        c = 0;
+        while (c < channels) {
+            var ch_buf = vec_get(out_channels, c);
+            if (f < vec_len(ch_buf)) {
+                vec_push(out, vec_get(ch_buf, f));
+            } else {
+                vec_push(out, F64_ZERO);
+            }
+            c = c + 1;
+        }
+        f = f + 1;
+    }
+
+    return out;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_resample() {
+    test_group("resample");
+
+    resample_init();
+
+    # --- same-rate identity ---
+    var v = vec_new();
+    vec_push(v, f64_from(1));
+    vec_push(v, f64_from(2));
+    vec_push(v, f64_from(3));
+    vec_push(v, f64_from(4));
+    var out = resample(v, 1, 44100, 44100, RESAMPLE_GOOD);
+    assert_eq(vec_len(out), 4, "same-rate preserves length");
+    # Values should be identical
+    assert(f64_eq(vec_get(out, 0), f64_from(1)) == 1, "same-rate sample 0");
+    assert(f64_eq(vec_get(out, 1), f64_from(2)) == 1, "same-rate sample 1");
+    assert(f64_eq(vec_get(out, 2), f64_from(3)) == 1, "same-rate sample 2");
+    assert(f64_eq(vec_get(out, 3), f64_from(4)) == 1, "same-rate sample 3");
+
+    # --- reject zero rate ---
+    var v2 = vec_new();
+    vec_push(v2, F64_ZERO);
+    var r1 = resample(v2, 1, 44100, 0, RESAMPLE_DRAFT);
+    assert(is_err(r1) == 1, "reject zero target rate");
+    var r2 = resample(v2, 1, 0, 48000, RESAMPLE_DRAFT);
+    assert(is_err(r2) == 1, "reject zero source rate");
+
+    # --- reject zero channels ---
+    var r3 = resample(v2, 0, 44100, 48000, RESAMPLE_DRAFT);
+    assert(is_err(r3) == 1, "reject zero channels");
+
+    # --- upsample increases length ---
+    var v3 = vec_new();
+    var ui = 0;
+    while (ui < 1000) {
+        vec_push(v3, F64_ZERO);
+        ui = ui + 1;
+    }
+    var up = resample(v3, 1, 44100, 96000, RESAMPLE_DRAFT);
+    assert(vec_len(up) > 1000, "upsample increases length");
+
+    # --- downsample decreases length ---
+    var v4 = vec_new();
+    var di = 0;
+    while (di < 1000) {
+        vec_push(v4, F64_ZERO);
+        di = di + 1;
+    }
+    var down = resample(v4, 1, 96000, 44100, RESAMPLE_DRAFT);
+    assert(vec_len(down) < 1000, "downsample decreases length");
+
+    # --- roundtrip RMS preservation ---
+    # Generate a 440Hz sine wave at 44100Hz, 4096 samples
+    var sr = 44100;
+    var nframes = 4096;
+    var sine = vec_new();
+    var f_sr = f64_from(sr);
+    var f_440 = f64_from(440);
+    var two_pi = f64_mul(F64_TWO, _RS_PI);
+    var si = 0;
+    while (si < nframes) {
+        var t = f64_div(f64_from(si), f_sr);
+        var phase = f64_mul(two_pi, f64_mul(f_440, t));
+        vec_push(sine, f64_sin(phase));
+        si = si + 1;
+    }
+
+    # Compute original RMS
+    var rms_sum = F64_ZERO;
+    si = 0;
+    while (si < nframes) {
+        var s = vec_get(sine, si);
+        rms_sum = f64_add(rms_sum, f64_mul(s, s));
+        si = si + 1;
+    }
+    var rms_orig = f64_sqrt(f64_div(rms_sum, f64_from(nframes)));
+
+    # Resample up then back down
+    var up2 = resample_mono(sine, 44100, 48000, RESAMPLE_GOOD);
+    var back = resample_mono(up2, 48000, 44100, RESAMPLE_GOOD);
+
+    # Compute roundtrip RMS
+    var back_len = vec_len(back);
+    var rms_sum2 = F64_ZERO;
+    si = 0;
+    while (si < back_len) {
+        var s = vec_get(back, si);
+        rms_sum2 = f64_add(rms_sum2, f64_mul(s, s));
+        si = si + 1;
+    }
+    var rms_back = f64_sqrt(f64_div(rms_sum2, f64_from(back_len)));
+
+    # RMS should be within 10% of original
+    var rms_diff = f64_abs(f64_sub(rms_back, rms_orig));
+    var threshold = f64_mul(rms_orig, f64_div(F64_ONE, f64_from(10)));
+    assert(f64_lt(rms_diff, threshold) == 1, "roundtrip RMS preservation");
+
+    return 0;
+}

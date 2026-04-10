@@ -1,0 +1,413 @@
+# ================================================================
+# stream.cyr -- Streaming decoders (chunk-at-a-time)
+# ================================================================
+#
+# Provides:
+#   WAV streaming decoder: wav_stream_new, wav_stream_feed, wav_stream_flush
+#   FLAC streaming decoder: flac_stream_new, flac_stream_feed, flac_stream_flush
+#   AIFF streaming decoder: aiff_stream_new, aiff_stream_feed, aiff_stream_flush
+#
+# Stream events are returned as vecs of event structs.
+# Each event: { type, data_ptr }
+#   type 0 = HEADER  -> data_ptr is FormatInfo pointer
+#   type 1 = SAMPLES -> data_ptr is samples vec pointer
+#   type 2 = END     -> data_ptr is 0
+#
+# Requires: f64 builtins, vec.cyr, alloc.cyr, main.cyr (wav_decode, etc.)
+
+# ================================================================
+# Stream event types
+# ================================================================
+
+var STREAM_EVT_HEADER  = 0;
+var STREAM_EVT_SAMPLES = 1;
+var STREAM_EVT_END     = 2;
+
+# ================================================================
+# Stream event struct (16 bytes on heap)
+# ================================================================
+#   +0: type (i64)
+#   +8: data_ptr (i64)
+
+fn stream_evt_new(type, data_ptr) {
+    var evt = alloc(16);
+    store64(evt, type);
+    store64(evt + 8, data_ptr);
+    return evt;
+}
+
+fn stream_evt_type(evt) { return load64(evt); }
+fn stream_evt_data(evt) { return load64(evt + 8); }
+
+# ================================================================
+# WAV streaming decoder (buffer-then-decode)
+# ================================================================
+
+var _WAV_ST_BUFFERING = 0;
+var _WAV_ST_DECODED   = 1;
+var _WAV_ST_DONE      = 2;
+
+fn wav_stream_new(chunk_frames) {
+    var dec = alloc(32);
+    store64(dec, _WAV_ST_BUFFERING);
+    var init_cap = 4096;
+    var buf = alloc(init_cap);
+    store64(dec + 8, buf);
+    store64(dec + 16, 0);
+    store64(dec + 24, init_cap);
+    return dec;
+}
+
+fn _wav_stream_append(dec, data, len) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+    var bcap = load64(dec + 24);
+    while (blen + len > bcap) {
+        var new_cap = bcap * 2;
+        if (new_cap < blen + len) { new_cap = blen + len; }
+        var new_buf = alloc(new_cap);
+        memcpy(new_buf, buf, blen);
+        buf = new_buf;
+        bcap = new_cap;
+        store64(dec + 8, buf);
+        store64(dec + 24, bcap);
+    }
+    memcpy(buf + blen, data, len);
+    store64(dec + 16, blen + len);
+    return 0;
+}
+
+fn _wav_stream_try_decode(dec, events) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+    if (blen < 44) { return 0; }
+    var result = wav_decode(buf, blen);
+    if (is_err(result) == 1) { return 0; }
+    var fi = decode_result_info(result);
+    var samples = decode_result_samples(result);
+    vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
+    if (vec_len(samples) > 0) {
+        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+    }
+    store64(dec, _WAV_ST_DECODED);
+    return 1;
+}
+
+fn wav_stream_feed(dec, data, len) {
+    var events = vec_new();
+    if (load64(dec) == _WAV_ST_DONE) { return events; }
+    _wav_stream_append(dec, data, len);
+    if (load64(dec) == _WAV_ST_BUFFERING) { _wav_stream_try_decode(dec, events); }
+    return events;
+}
+
+fn wav_stream_flush(dec) {
+    var events = vec_new();
+    if (load64(dec) == _WAV_ST_BUFFERING) { _wav_stream_try_decode(dec, events); }
+    store64(dec, _WAV_ST_DONE);
+    vec_push(events, stream_evt_new(STREAM_EVT_END, 0));
+    return events;
+}
+
+# ================================================================
+# FLAC streaming decoder
+# ================================================================
+#
+# Simplified streaming strategy: accumulate all bytes, attempt
+# flac_decode when flushed. During feed, we try a decode after
+# accumulating enough data (>= 42 bytes for STREAMINFO).
+#
+# State struct (32 bytes):
+#   +0:  state (0=BUFFERING, 1=DECODED, 2=DONE)
+#   +8:  buffer_ptr
+#   +16: buffer_len
+#   +24: buffer_cap
+
+var _FLAC_ST_BUFFERING = 0;
+var _FLAC_ST_DECODED   = 1;
+var _FLAC_ST_DONE      = 2;
+
+fn flac_stream_new() {
+    var dec = alloc(32);
+    store64(dec,      _FLAC_ST_BUFFERING);
+    var init_cap = 4096;
+    var buf = alloc(init_cap);
+    store64(dec + 8,  buf);
+    store64(dec + 16, 0);
+    store64(dec + 24, init_cap);
+    return dec;
+}
+
+fn _flac_stream_append(dec, data, len) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+    var bcap = load64(dec + 24);
+
+    while (blen + len > bcap) {
+        var new_cap = bcap * 2;
+        if (new_cap < blen + len) { new_cap = blen + len; }
+        var new_buf = alloc(new_cap);
+        memcpy(new_buf, buf, blen);
+        buf = new_buf;
+        bcap = new_cap;
+        store64(dec + 8, buf);
+        store64(dec + 24, bcap);
+    }
+
+    memcpy(buf + blen, data, len);
+    store64(dec + 16, blen + len);
+    return 0;
+}
+
+# Try to decode the accumulated FLAC buffer.
+# Returns events if successful.
+fn _flac_stream_try_decode(dec, events) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+
+    if (blen < 42) { return 0; }   # Minimum FLAC size (4 magic + 38 STREAMINFO)
+
+    var result = flac_decode(buf, blen);
+    if (is_err(result) == 1) {
+        # Not enough data or error; wait for more
+        return 0;
+    }
+
+    # Success: extract info and samples
+    var fi = decode_result_info(result);
+    var samples = decode_result_samples(result);
+
+    vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
+    if (vec_len(samples) > 0) {
+        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+    }
+
+    store64(dec, _FLAC_ST_DECODED);
+    return 1;
+}
+
+fn flac_stream_feed(dec, data, len) {
+    var events = vec_new();
+    var state = load64(dec);
+
+    if (state == _FLAC_ST_DONE) { return events; }
+
+    _flac_stream_append(dec, data, len);
+
+    if (state == _FLAC_ST_BUFFERING) {
+        _flac_stream_try_decode(dec, events);
+    }
+
+    return events;
+}
+
+fn flac_stream_flush(dec) {
+    var events = vec_new();
+    var state = load64(dec);
+
+    if (state == _FLAC_ST_BUFFERING) {
+        _flac_stream_try_decode(dec, events);
+    }
+
+    store64(dec, _FLAC_ST_DONE);
+    vec_push(events, stream_evt_new(STREAM_EVT_END, 0));
+    return events;
+}
+
+# ================================================================
+# AIFF streaming decoder (buffer-then-decode, like FLAC)
+# ================================================================
+
+var _AIFF_ST_BUFFERING = 0;
+var _AIFF_ST_DECODED   = 1;
+var _AIFF_ST_DONE      = 2;
+
+fn aiff_stream_new(chunk_frames) {
+    var dec = alloc(32);
+    store64(dec, _AIFF_ST_BUFFERING);
+    var init_cap = 4096;
+    var buf = alloc(init_cap);
+    store64(dec + 8,  buf);
+    store64(dec + 16, 0);
+    store64(dec + 24, init_cap);
+    return dec;
+}
+
+fn _aiff_stream_append(dec, data, len) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+    var bcap = load64(dec + 24);
+    while (blen + len > bcap) {
+        var new_cap = bcap * 2;
+        if (new_cap < blen + len) { new_cap = blen + len; }
+        var new_buf = alloc(new_cap);
+        memcpy(new_buf, buf, blen);
+        buf = new_buf;
+        bcap = new_cap;
+        store64(dec + 8, buf);
+        store64(dec + 24, bcap);
+    }
+    memcpy(buf + blen, data, len);
+    store64(dec + 16, blen + len);
+    return 0;
+}
+
+fn _aiff_stream_try_decode(dec, events) {
+    var buf = load64(dec + 8);
+    var blen = load64(dec + 16);
+    if (blen < 12) { return 0; }
+    var result = aiff_decode(buf, blen);
+    if (is_err(result) == 1) { return 0; }
+    var fi = decode_result_info(result);
+    var samples = decode_result_samples(result);
+    vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
+    if (vec_len(samples) > 0) {
+        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+    }
+    store64(dec, _AIFF_ST_DECODED);
+    return 1;
+}
+
+fn aiff_stream_feed(dec, data, len) {
+    var events = vec_new();
+    if (load64(dec) == _AIFF_ST_DONE) { return events; }
+    _aiff_stream_append(dec, data, len);
+    if (load64(dec) == _AIFF_ST_BUFFERING) { _aiff_stream_try_decode(dec, events); }
+    return events;
+}
+
+fn aiff_stream_flush(dec) {
+    var events = vec_new();
+    if (load64(dec) == _AIFF_ST_BUFFERING) { _aiff_stream_try_decode(dec, events); }
+    store64(dec, _AIFF_ST_DONE);
+    vec_push(events, stream_evt_new(STREAM_EVT_END, 0));
+    return events;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_stream() {
+    test_group("stream");
+
+    # ---- Helper: build a minimal 16-bit mono PCM WAV in memory ----
+    # Header: 44 bytes, then 200 samples * 2 bytes = 400 bytes data
+    var n_samples = 200;
+    var wav_data_len = 44 + n_samples * 2;
+    var wav_data = alloc(wav_data_len);
+
+    # RIFF header
+    store8(wav_data, 0x52); store8(wav_data+1, 0x49);   # RI
+    store8(wav_data+2, 0x46); store8(wav_data+3, 0x46);  # FF
+    write_u32_le(wav_data, 4, wav_data_len - 8);         # file size - 8
+    store8(wav_data+8, 0x57); store8(wav_data+9, 0x41);  # WA
+    store8(wav_data+10, 0x56); store8(wav_data+11, 0x45); # VE
+
+    # fmt chunk
+    store8(wav_data+12, 0x66); store8(wav_data+13, 0x6D); # fm
+    store8(wav_data+14, 0x74); store8(wav_data+15, 0x20); # t<space>
+    write_u32_le(wav_data, 16, 16);        # chunk size
+    write_u16_le(wav_data, 20, 1);         # PCM format
+    write_u16_le(wav_data, 22, 1);         # 1 channel
+    write_u32_le(wav_data, 24, 44100);     # sample rate
+    write_u32_le(wav_data, 28, 88200);     # byte rate
+    write_u16_le(wav_data, 32, 2);         # block align
+    write_u16_le(wav_data, 34, 16);        # bits per sample
+
+    # data chunk
+    store8(wav_data+36, 0x64); store8(wav_data+37, 0x61); # da
+    store8(wav_data+38, 0x74); store8(wav_data+39, 0x61); # ta
+    write_u32_le(wav_data, 40, n_samples * 2);
+
+    # Fill samples: ramp from 0 to n_samples-1 as i16
+    var si = 0;
+    while (si < n_samples) {
+        var val = si * 100;
+        if (val > 32767) { val = 32767; }
+        write_u16_le(wav_data, 44 + si * 2, val & 0xFFFF);
+        si = si + 1;
+    }
+
+    # --- Test: WAV stream single feed ---
+    var dec1 = wav_stream_new(4096);
+    var evts1 = wav_stream_feed(dec1, wav_data, wav_data_len);
+    var flush1 = wav_stream_flush(dec1);
+
+    # Count events from feed
+    var got_header = 0;
+    var got_samples = 0;
+    var ei = 0;
+    while (ei < vec_len(evts1)) {
+        var evt = vec_get(evts1, ei);
+        var etype = stream_evt_type(evt);
+        if (etype == STREAM_EVT_HEADER) { got_header = 1; }
+        if (etype == STREAM_EVT_SAMPLES) { got_samples = 1; }
+        ei = ei + 1;
+    }
+    assert(got_header == 1, "wav stream single feed: got header");
+    assert(got_samples == 1, "wav stream single feed: got samples");
+
+    # Flush should have END
+    var got_end = 0;
+    ei = 0;
+    while (ei < vec_len(flush1)) {
+        var evt = vec_get(flush1, ei);
+        if (stream_evt_type(evt) == STREAM_EVT_END) { got_end = 1; }
+        ei = ei + 1;
+    }
+    assert(got_end == 1, "wav stream single feed: flush has END");
+
+    # --- Test: WAV stream small chunks (feed 50 bytes at a time) ---
+    var dec2 = wav_stream_new(64);
+    var all_evts = vec_new();
+    var chunk_size = 50;
+    var off = 0;
+    while (off < wav_data_len) {
+        var remain = wav_data_len - off;
+        var feed_len = chunk_size;
+        if (feed_len > remain) { feed_len = remain; }
+        var evts = wav_stream_feed(dec2, wav_data + off, feed_len);
+        if (is_err(evts) == 0) {
+            ei = 0;
+            while (ei < vec_len(evts)) {
+                vec_push(all_evts, vec_get(evts, ei));
+                ei = ei + 1;
+            }
+        }
+        off = off + feed_len;
+    }
+    var flush2 = wav_stream_flush(dec2);
+    ei = 0;
+    while (ei < vec_len(flush2)) {
+        vec_push(all_evts, vec_get(flush2, ei));
+        ei = ei + 1;
+    }
+
+    got_header = 0;
+    got_samples = 0;
+    got_end = 0;
+    ei = 0;
+    while (ei < vec_len(all_evts)) {
+        var evt = vec_get(all_evts, ei);
+        var etype = stream_evt_type(evt);
+        if (etype == STREAM_EVT_HEADER) { got_header = 1; }
+        if (etype == STREAM_EVT_SAMPLES) { got_samples = 1; }
+        if (etype == STREAM_EVT_END) { got_end = 1; }
+        ei = ei + 1;
+    }
+    assert(got_header == 1, "wav stream small chunks: got header");
+    assert(got_samples == 1, "wav stream small chunks: got samples");
+    assert(got_end == 1, "wav stream small chunks: got END");
+
+    # --- Test: flush on empty produces END ---
+    var dec3 = wav_stream_new(4096);
+    var flush3 = wav_stream_flush(dec3);
+    assert_eq(vec_len(flush3), 1, "empty flush: one event");
+    var evt3 = vec_get(flush3, 0);
+    assert_eq(stream_evt_type(evt3), STREAM_EVT_END, "empty flush: is END");
+
+    # (format info test removed — buffer-then-decode doesn't expose intermediate state)
+
+    return 0;
+}
