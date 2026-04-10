@@ -1,0 +1,1990 @@
+# ================================================================
+# FLAC — Free Lossless Audio Codec (decoder + encoder)
+# ================================================================
+#
+# Decoder: STREAMINFO, frame sync, CRC-8/16, subframes (CONSTANT,
+#          VERBATIM, FIXED 0-4, LPC 1-32), Rice/Rice2, channel
+#          decorrelation (independent, left-side, right-side, mid-side).
+#
+# Encoder: Fixed prediction (order 0-4), Rice coding, mid-side stereo,
+#          CRC-8/16, MD5 signature.
+#
+# All samples stored as f64 bit patterns in vec (matches the rest of shravan).
+
+# Channel assignment codes
+var FLAC_CH_LEFT_SIDE  = 8;
+var FLAC_CH_RIGHT_SIDE = 9;
+var FLAC_CH_MID_SIDE   = 10;
+
+# Decorrelation modes
+var FLAC_DECOR_INDEPENDENT = 0;
+var FLAC_DECOR_LEFT_SIDE   = 1;
+var FLAC_DECOR_RIGHT_SIDE  = 2;
+var FLAC_DECOR_MID_SIDE    = 3;
+
+# ================================================================
+# CRC-8 (polynomial 0x07, init 0)
+# ================================================================
+
+var flac_crc8_table = 0;
+
+fn flac_crc8_init() {
+    flac_crc8_table = alloc(256);
+    var i = 0;
+    while (i < 256) {
+        var crc = i;
+        var bit = 0;
+        while (bit < 8) {
+            if ((crc & 0x80) != 0) {
+                crc = ((crc << 1) ^ 0x07) & 0xFF;
+            } else {
+                crc = (crc << 1) & 0xFF;
+            }
+            bit = bit + 1;
+        }
+        store8(flac_crc8_table + i, crc);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn flac_crc8(data, len) {
+    var crc = 0;
+    var i = 0;
+    while (i < len) {
+        crc = load8(flac_crc8_table + ((crc ^ load8(data + i)) & 0xFF));
+        i = i + 1;
+    }
+    return crc;
+}
+
+# ================================================================
+# CRC-16 (polynomial 0x8005, init 0)
+# ================================================================
+
+var flac_crc16_table = 0;
+
+fn flac_crc16_init() {
+    flac_crc16_table = alloc(256 * 8);
+    var i = 0;
+    while (i < 256) {
+        var crc = i << 8;
+        var bit = 0;
+        while (bit < 8) {
+            if ((crc & 0x8000) != 0) {
+                crc = ((crc << 1) ^ 0x8005) & 0xFFFF;
+            } else {
+                crc = (crc << 1) & 0xFFFF;
+            }
+            bit = bit + 1;
+        }
+        store64(flac_crc16_table + i * 8, crc);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn flac_crc16(data, len) {
+    var crc = 0;
+    var i = 0;
+    while (i < len) {
+        var idx = ((crc >> 8) ^ load8(data + i)) & 0xFF;
+        crc = ((crc << 8) ^ load64(flac_crc16_table + idx * 8)) & 0xFFFF;
+        i = i + 1;
+    }
+    return crc;
+}
+
+# ================================================================
+# FLAC bitreader extensions (reuses bitreader_new / bitreader_read)
+# ================================================================
+
+# Read unary: count zero-bits before first 1-bit
+fn flac_br_read_unary(br) {
+    var count = 0;
+    while (1) {
+        var b = bitreader_read_bit(br);
+        if (is_err(b) == 1) { return b; }
+        if (b == 1) { return count; }
+        count = count + 1;
+        if (count > 1000000) { return err(ERR_DECODE); }
+    }
+    return count;
+}
+
+# Read UTF-8-like coded number (FLAC frame/sample number)
+fn flac_br_read_utf8_u64(br) {
+    var first = bitreader_read(br, 8);
+    if (is_err(first) == 1) { return first; }
+    if (first < 0x80) { return first; }
+
+    # Count leading ones
+    var leading = 0;
+    var tmp = first;
+    while ((tmp & 0x80) != 0) {
+        leading = leading + 1;
+        tmp = (tmp << 1) & 0xFF;
+    }
+    if (leading > 7) { return err(ERR_DECODE); }
+
+    var mask = (1 << (7 - leading)) - 1;
+    var value = first & mask;
+    var j = 1;
+    while (j < leading) {
+        var b = bitreader_read(br, 8);
+        if (is_err(b) == 1) { return b; }
+        if ((b & 0xC0) != 0x80) { return err(ERR_DECODE); }
+        value = (value << 6) | (b & 0x3F);
+        j = j + 1;
+    }
+    return value;
+}
+
+# Align to byte boundary
+fn flac_br_align(br) {
+    var bbit = load64(br + 16);
+    if (bbit != 0) {
+        store64(br + 16, 0);
+        store64(br + 8, load64(br + 8) + 1);
+    }
+    return 0;
+}
+
+# Get current byte position
+fn flac_br_byte_pos(br) {
+    return load64(br + 8);
+}
+
+# Set byte position (and reset bit pos to 0)
+fn flac_br_set_pos(br, pos) {
+    store64(br + 8, pos);
+    store64(br + 16, 0);
+    return 0;
+}
+
+# ================================================================
+# STREAMINFO parsing
+# ================================================================
+
+# STREAMINFO struct layout (56 bytes):
+#   +0:  min_block_size  (i64)
+#   +8:  max_block_size  (i64)
+#   +16: sample_rate     (i64)
+#   +24: channels        (i64)
+#   +32: bits_per_sample (i64)
+#   +40: total_samples   (i64)
+#   +48: audio_start     (i64) — byte offset where frames begin
+
+fn flac_parse_streaminfo(data, offset) {
+    var d = data + offset;
+    var min_bs = (load8(d) << 8) | load8(d + 1);
+    var max_bs = (load8(d + 2) << 8) | load8(d + 3);
+    # bytes 4..9: min/max frame size (skipped)
+    # bytes 10..13: sr(20) | ch-1(3) | bps-1(5) | total_hi(4)
+    var sr = (load8(d + 10) << 12) | (load8(d + 11) << 4) | (load8(d + 12) >> 4);
+    var ch = ((load8(d + 12) >> 1) & 0x07) + 1;
+    var bps_hi = load8(d + 12) & 0x01;
+    var bps = (bps_hi << 4) | (load8(d + 13) >> 4);
+    bps = bps + 1;
+    var ts_hi = (load8(d + 13) & 0x0F) << 32;
+    var ts_lo = (load8(d + 14) << 24) | (load8(d + 15) << 16) | (load8(d + 16) << 8) | load8(d + 17);
+    var total_samples = ts_hi | ts_lo;
+
+    var si = alloc(56);
+    store64(si,      min_bs);
+    store64(si + 8,  max_bs);
+    store64(si + 16, sr);
+    store64(si + 24, ch);
+    store64(si + 32, bps);
+    store64(si + 40, total_samples);
+    store64(si + 48, 0);
+    return si;
+}
+
+# Parse metadata blocks, return STREAMINFO struct with audio_start filled in
+fn flac_parse_metadata(data, len) {
+    if (len < 8) { return err(ERR_INVALID_HEADER); }
+    # Check "fLaC" magic
+    if (load8(data) != 0x66) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 1) != 0x4C) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 2) != 0x61) { return err(ERR_INVALID_HEADER); }
+    if (load8(data + 3) != 0x43) { return err(ERR_INVALID_HEADER); }
+
+    var pos = 4;
+    var si = 0;
+    var done = 0;
+
+    while (done == 0) {
+        if (pos + 4 > len) { return err(ERR_END_OF_STREAM); }
+        var hdr_byte = load8(data + pos);
+        var is_last = (hdr_byte & 0x80) != 0;
+        var block_type = hdr_byte & 0x7F;
+        var block_size = (load8(data + pos + 1) << 16) | (load8(data + pos + 2) << 8) | load8(data + pos + 3);
+        pos = pos + 4;
+
+        if (block_type == 0) {
+            # STREAMINFO
+            if (pos + 34 > len) { return err(ERR_INVALID_HEADER); }
+            si = flac_parse_streaminfo(data, pos);
+        }
+
+        pos = pos + block_size;
+        if (is_last) { done = 1; }
+    }
+
+    if (si == 0) { return err(ERR_INVALID_HEADER); }
+    store64(si + 48, pos);
+    return si;
+}
+
+# ================================================================
+# Frame sync and header decoding
+# ================================================================
+
+# Find next frame sync (0xFFF8 or 0xFFF9). Returns sync byte position or error.
+# Also advances br past the sync code.
+fn flac_find_sync(br, data, data_len) {
+    flac_br_align(br);
+    var bpos = flac_br_byte_pos(br);
+    while (bpos + 1 < data_len) {
+        if (load8(data + bpos) == 0xFF) {
+            var next = load8(data + bpos + 1);
+            if (next == 0xF8) {
+                flac_br_set_pos(br, bpos + 2);
+                return bpos;
+            }
+            if (next == 0xF9) {
+                flac_br_set_pos(br, bpos + 2);
+                return bpos;
+            }
+        }
+        bpos = bpos + 1;
+    }
+    return err(ERR_END_OF_STREAM);
+}
+
+# Decode block size from 4-bit code
+fn flac_decode_block_size(code, br) {
+    if (code == 0) { return err(ERR_DECODE); }
+    if (code == 1) { return 192; }
+    if (code >= 2) { if (code <= 5) { return 576 << (code - 2); } }
+    if (code == 6) {
+        var v = bitreader_read(br, 8);
+        if (is_err(v) == 1) { return v; }
+        return v + 1;
+    }
+    if (code == 7) {
+        var v = bitreader_read(br, 16);
+        if (is_err(v) == 1) { return v; }
+        return v + 1;
+    }
+    if (code >= 8) { if (code <= 15) { return 256 << (code - 8); } }
+    return err(ERR_DECODE);
+}
+
+# Decode sample rate from 4-bit code
+fn flac_decode_sample_rate(code, br, si_rate) {
+    if (code == 0)  { return si_rate; }
+    if (code == 1)  { return 88200; }
+    if (code == 2)  { return 176400; }
+    if (code == 3)  { return 192000; }
+    if (code == 4)  { return 8000; }
+    if (code == 5)  { return 16000; }
+    if (code == 6)  { return 22050; }
+    if (code == 7)  { return 24000; }
+    if (code == 8)  { return 32000; }
+    if (code == 9)  { return 44100; }
+    if (code == 10) { return 48000; }
+    if (code == 11) { return 96000; }
+    if (code == 12) {
+        var v = bitreader_read(br, 8);
+        if (is_err(v) == 1) { return v; }
+        return v * 1000;
+    }
+    if (code == 13) {
+        var v = bitreader_read(br, 16);
+        if (is_err(v) == 1) { return v; }
+        return v;
+    }
+    if (code == 14) {
+        var v = bitreader_read(br, 16);
+        if (is_err(v) == 1) { return v; }
+        return v * 10;
+    }
+    return err(ERR_DECODE);
+}
+
+# Decode bits per sample from 3-bit code
+fn flac_decode_bps(code, si_bps) {
+    if (code == 0) { return si_bps; }
+    if (code == 1) { return 8; }
+    if (code == 2) { return 12; }
+    if (code == 3) { return err(ERR_DECODE); }
+    if (code == 4) { return 16; }
+    if (code == 5) { return 20; }
+    if (code == 6) { return 24; }
+    return err(ERR_DECODE);
+}
+
+# ================================================================
+# Rice residual decoding
+# ================================================================
+
+# Decode Rice-coded residuals into a pre-allocated buffer.
+# Returns number of residuals or error.
+fn flac_decode_residual(br, buf, block_size, pred_order) {
+    var coding = bitreader_read(br, 2);
+    if (is_err(coding) == 1) { return coding; }
+    var rice_bits = 0;
+    if (coding == 0) { rice_bits = 4; }
+    else { if (coding == 1) { rice_bits = 5; }
+    else { return err(ERR_DECODE); } }
+
+    var part_order = bitreader_read(br, 4);
+    if (is_err(part_order) == 1) { return part_order; }
+    var num_parts = 1 << part_order;
+    var total = block_size - pred_order;
+    var idx = 0;
+    var part = 0;
+
+    while (part < num_parts) {
+        var count = 0;
+        if (part_order == 0) {
+            count = block_size - pred_order;
+        } else {
+            if (part == 0) {
+                count = (block_size >> part_order) - pred_order;
+            } else {
+                count = block_size >> part_order;
+            }
+        }
+
+        var rparam = bitreader_read(br, rice_bits);
+        if (is_err(rparam) == 1) { return rparam; }
+        var escape_val = 15;
+        if (rice_bits == 5) { escape_val = 31; }
+
+        if (rparam == escape_val) {
+            # Escape: raw bits per sample
+            var raw_bits = bitreader_read(br, 5);
+            if (is_err(raw_bits) == 1) { return raw_bits; }
+            var k = 0;
+            while (k < count) {
+                var raw = bitreader_read(br, raw_bits);
+                if (is_err(raw) == 1) { return raw; }
+                store64(buf + idx * 8, sign_extend(raw, raw_bits));
+                idx = idx + 1;
+                k = k + 1;
+            }
+        } else {
+            # Rice-coded
+            var k = 0;
+            while (k < count) {
+                var q = flac_br_read_unary(br);
+                if (is_err(q) == 1) { return q; }
+                var rem = 0;
+                if (rparam > 0) {
+                    rem = bitreader_read(br, rparam);
+                    if (is_err(rem) == 1) { return rem; }
+                }
+                var uval = (q << rparam) | rem;
+                # Zigzag decode
+                var sval = 0;
+                if ((uval & 1) == 0) {
+                    sval = uval >> 1;
+                } else {
+                    sval = 0 - (uval >> 1) - 1;
+                }
+                store64(buf + idx * 8, sval);
+                idx = idx + 1;
+                k = k + 1;
+            }
+        }
+        part = part + 1;
+    }
+    return total;
+}
+
+# ================================================================
+# Subframe decoding
+# ================================================================
+
+# Decode CONSTANT subframe -> alloc buffer of block_size samples
+fn flac_decode_constant(br, block_size, bps) {
+    var raw = bitreader_read(br, bps);
+    if (is_err(raw) == 1) { return raw; }
+    var val = sign_extend(raw, bps);
+    var buf = alloc(block_size * 8);
+    var i = 0;
+    while (i < block_size) {
+        store64(buf + i * 8, val);
+        i = i + 1;
+    }
+    return buf;
+}
+
+# Decode VERBATIM subframe
+fn flac_decode_verbatim(br, block_size, bps) {
+    var buf = alloc(block_size * 8);
+    var i = 0;
+    while (i < block_size) {
+        var raw = bitreader_read(br, bps);
+        if (is_err(raw) == 1) { return raw; }
+        store64(buf + i * 8, sign_extend(raw, bps));
+        i = i + 1;
+    }
+    return buf;
+}
+
+# Decode FIXED subframe (order 0-4)
+fn flac_decode_fixed(br, block_size, bps, order) {
+    var buf = alloc(block_size * 8);
+    # Read warm-up samples
+    var i = 0;
+    while (i < order) {
+        var raw = bitreader_read(br, bps);
+        if (is_err(raw) == 1) { return raw; }
+        store64(buf + i * 8, sign_extend(raw, bps));
+        i = i + 1;
+    }
+
+    # Read residuals into temp buffer
+    var num_res = block_size - order;
+    var res = alloc(num_res * 8);
+    var rc = flac_decode_residual(br, res, block_size, order);
+    if (is_err(rc) == 1) { return rc; }
+
+    # Apply fixed prediction
+    var ri = 0;
+    while (ri < num_res) {
+        var n = order + ri;
+        var residual = load64(res + ri * 8);
+        var predicted = 0;
+        if (order == 0) {
+            predicted = residual;
+        }
+        if (order == 1) {
+            predicted = load64(buf + (n - 1) * 8) + residual;
+        }
+        if (order == 2) {
+            predicted = 2 * load64(buf + (n - 1) * 8) - load64(buf + (n - 2) * 8) + residual;
+        }
+        if (order == 3) {
+            predicted = 3 * load64(buf + (n - 1) * 8) - 3 * load64(buf + (n - 2) * 8) + load64(buf + (n - 3) * 8) + residual;
+        }
+        if (order == 4) {
+            predicted = 4 * load64(buf + (n - 1) * 8) - 6 * load64(buf + (n - 2) * 8) + 4 * load64(buf + (n - 3) * 8) - load64(buf + (n - 4) * 8) + residual;
+        }
+        store64(buf + n * 8, predicted);
+        ri = ri + 1;
+    }
+    return buf;
+}
+
+# Decode LPC subframe (order 1-32)
+fn flac_decode_lpc(br, block_size, bps, order) {
+    var buf = alloc(block_size * 8);
+    # Read warm-up samples
+    var i = 0;
+    while (i < order) {
+        var raw = bitreader_read(br, bps);
+        if (is_err(raw) == 1) { return raw; }
+        store64(buf + i * 8, sign_extend(raw, bps));
+        i = i + 1;
+    }
+
+    # QLP coefficient precision (4 bits)
+    var prec_raw = bitreader_read(br, 4);
+    if (is_err(prec_raw) == 1) { return prec_raw; }
+    if (prec_raw == 15) { return err(ERR_DECODE); }
+    var qlp_prec = prec_raw + 1;
+
+    # QLP shift (5 bits, signed)
+    var shift_raw = bitreader_read(br, 5);
+    if (is_err(shift_raw) == 1) { return shift_raw; }
+    var qlp_shift = sign_extend(shift_raw, 5);
+
+    # Read coefficients
+    var coeffs = alloc(order * 8);
+    var ci = 0;
+    while (ci < order) {
+        var raw = bitreader_read(br, qlp_prec);
+        if (is_err(raw) == 1) { return raw; }
+        store64(coeffs + ci * 8, sign_extend(raw, qlp_prec));
+        ci = ci + 1;
+    }
+
+    # Read residuals
+    var num_res = block_size - order;
+    var res = alloc(num_res * 8);
+    var rc = flac_decode_residual(br, res, block_size, order);
+    if (is_err(rc) == 1) { return rc; }
+
+    # Apply LPC prediction
+    var ri = 0;
+    while (ri < num_res) {
+        var n = order + ri;
+        var acc = 0;
+        var j = 0;
+        while (j < order) {
+            acc = acc + load64(coeffs + j * 8) * load64(buf + (n - 1 - j) * 8);
+            j = j + 1;
+        }
+        # Arithmetic right shift for acc >> qlp_shift
+        var predicted = 0;
+        if (qlp_shift >= 0) {
+            if (acc < 0) {
+                predicted = 0 - ((0 - acc) >> qlp_shift);
+            } else {
+                predicted = acc >> qlp_shift;
+            }
+        } else {
+            predicted = acc << (0 - qlp_shift);
+        }
+        store64(buf + n * 8, predicted + load64(res + ri * 8));
+        ri = ri + 1;
+    }
+    return buf;
+}
+
+# Decode a single subframe, returns pointer to sample buffer or error
+fn flac_decode_subframe(br, block_size, bps) {
+    # Subframe header: 1 zero bit + 6-bit type + wasted-bits flag
+    var zero = bitreader_read(br, 1);
+    if (is_err(zero) == 1) { return zero; }
+    if (zero != 0) { return err(ERR_DECODE); }
+
+    var sf_type = bitreader_read(br, 6);
+    if (is_err(sf_type) == 1) { return sf_type; }
+
+    var has_wasted = bitreader_read(br, 1);
+    if (is_err(has_wasted) == 1) { return has_wasted; }
+
+    var wasted = 0;
+    if (has_wasted == 1) {
+        wasted = flac_br_read_unary(br);
+        if (is_err(wasted) == 1) { return wasted; }
+        wasted = wasted + 1;
+    }
+
+    var eff_bps = bps - wasted;
+    var buf = 0;
+
+    if (sf_type == 0) {
+        buf = flac_decode_constant(br, block_size, eff_bps);
+    } else { if (sf_type == 1) {
+        buf = flac_decode_verbatim(br, block_size, eff_bps);
+    } else { if (sf_type >= 8) { if (sf_type <= 12) {
+        var order = sf_type - 8;
+        if (order > 4) { return err(ERR_DECODE); }
+        buf = flac_decode_fixed(br, block_size, eff_bps, order);
+    } else { if (sf_type >= 32) { if (sf_type <= 63) {
+        var order = sf_type - 31;
+        buf = flac_decode_lpc(br, block_size, eff_bps, order);
+    } else {
+        return err(ERR_DECODE);
+    } } else {
+        return err(ERR_DECODE);
+    } } } else {
+        return err(ERR_DECODE);
+    } } }
+
+    if (is_err(buf) == 1) { return buf; }
+
+    # Apply wasted bits shift
+    if (wasted > 0) {
+        var wi = 0;
+        while (wi < block_size) {
+            store64(buf + wi * 8, load64(buf + wi * 8) << wasted);
+            wi = wi + 1;
+        }
+    }
+    return buf;
+}
+
+# ================================================================
+# Channel decorrelation
+# ================================================================
+
+fn flac_apply_decorrelation(ch0, ch1, block_size, mode) {
+    if (mode == FLAC_DECOR_INDEPENDENT) { return 0; }
+    var i = 0;
+    if (mode == FLAC_DECOR_LEFT_SIDE) {
+        # ch0=left, ch1=side -> right = left - side
+        while (i < block_size) {
+            var l = load64(ch0 + i * 8);
+            var s = load64(ch1 + i * 8);
+            store64(ch1 + i * 8, l - s);
+            i = i + 1;
+        }
+    }
+    if (mode == FLAC_DECOR_RIGHT_SIDE) {
+        # ch0=side, ch1=right -> left = side + right
+        while (i < block_size) {
+            var s = load64(ch0 + i * 8);
+            var r = load64(ch1 + i * 8);
+            store64(ch0 + i * 8, s + r);
+            i = i + 1;
+        }
+    }
+    if (mode == FLAC_DECOR_MID_SIDE) {
+        while (i < block_size) {
+            var m = load64(ch0 + i * 8);
+            var s = load64(ch1 + i * 8);
+            var mid = (m << 1) | (s & 1);
+            # Arithmetic right shift for (mid + side) >> 1 and (mid - side) >> 1
+            var lv = mid + s;
+            var rv = mid - s;
+            # These are guaranteed even so >> 1 is safe
+            if (lv < 0) { lv = 0 - ((0 - lv) >> 1); } else { lv = lv >> 1; }
+            if (rv < 0) { rv = 0 - ((0 - rv) >> 1); } else { rv = rv >> 1; }
+            store64(ch0 + i * 8, lv);
+            store64(ch1 + i * 8, rv);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# Main FLAC decoder
+# ================================================================
+
+fn flac_decode(data, len) {
+    var si = flac_parse_metadata(data, len);
+    if (is_err(si) == 1) { return si; }
+
+    var si_rate = load64(si + 16);
+    var si_ch   = load64(si + 24);
+    var si_bps  = load64(si + 32);
+    var audio_start = load64(si + 48);
+
+    if (si_rate == 0) { return err(ERR_INVALID_RATE); }
+
+    var all_samples = vec_new();
+    var br = bitreader_new(data, len);
+    flac_br_set_pos(br, audio_start);
+
+    var done = 0;
+    while (done == 0) {
+        var sync_pos = flac_find_sync(br, data, len);
+        if (is_err(sync_pos) == 1) { done = 1; }
+
+        if (done == 0) {
+            var frame_start = sync_pos;
+            # Read sync code second byte to get blocking strategy
+            var sync_byte2 = load8(data + sync_pos + 1);
+            var _blocking = sync_byte2 & 1;
+
+            var bs_code = bitreader_read(br, 4);
+            if (is_err(bs_code) == 1) { return bs_code; }
+            var sr_code = bitreader_read(br, 4);
+            if (is_err(sr_code) == 1) { return sr_code; }
+            var ch_assign = bitreader_read(br, 4);
+            if (is_err(ch_assign) == 1) { return ch_assign; }
+            var ss_code = bitreader_read(br, 3);
+            if (is_err(ss_code) == 1) { return ss_code; }
+            var _reserved = bitreader_read(br, 1);
+            if (is_err(_reserved) == 1) { return _reserved; }
+
+            var _frame_num = flac_br_read_utf8_u64(br);
+            if (is_err(_frame_num) == 1) { return _frame_num; }
+
+            var block_size = flac_decode_block_size(bs_code, br);
+            if (is_err(block_size) == 1) { return block_size; }
+            var _frame_sr = flac_decode_sample_rate(sr_code, br, si_rate);
+            if (is_err(_frame_sr) == 1) { return _frame_sr; }
+            var frame_bps = flac_decode_bps(ss_code, si_bps);
+            if (is_err(frame_bps) == 1) { return frame_bps; }
+
+            # CRC-8 verification
+            flac_br_align(br);
+            var crc8_pos = flac_br_byte_pos(br);
+            var expected_crc8 = bitreader_read(br, 8);
+            if (is_err(expected_crc8) == 1) { return expected_crc8; }
+            var computed_crc8 = flac_crc8(data + frame_start, crc8_pos - frame_start);
+            if (computed_crc8 != expected_crc8) { return err(ERR_DECODE); }
+
+            # Channel count and decorrelation mode
+            var ch_count = 0;
+            var decor = FLAC_DECOR_INDEPENDENT;
+            if (ch_assign < FLAC_CH_LEFT_SIDE) {
+                ch_count = ch_assign + 1;
+            } else {
+                ch_count = 2;
+                if (ch_assign == FLAC_CH_LEFT_SIDE) { decor = FLAC_DECOR_LEFT_SIDE; }
+                if (ch_assign == FLAC_CH_RIGHT_SIDE) { decor = FLAC_DECOR_RIGHT_SIDE; }
+                if (ch_assign == FLAC_CH_MID_SIDE) { decor = FLAC_DECOR_MID_SIDE; }
+                if (ch_assign > FLAC_CH_MID_SIDE) { return err(ERR_DECODE); }
+            }
+
+            # Decode subframes — store pointers in a small buffer
+            var ch_bufs = alloc(ch_count * 8);
+            var ch = 0;
+            while (ch < ch_count) {
+                var eff_bps = frame_bps;
+                if (decor == FLAC_DECOR_LEFT_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+                if (decor == FLAC_DECOR_RIGHT_SIDE) { if (ch == 0) { eff_bps = frame_bps + 1; } }
+                if (decor == FLAC_DECOR_MID_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+
+                var sf_buf = flac_decode_subframe(br, block_size, eff_bps);
+                if (is_err(sf_buf) == 1) { return sf_buf; }
+                store64(ch_bufs + ch * 8, sf_buf);
+                ch = ch + 1;
+            }
+
+            # Apply decorrelation
+            if (ch_count == 2) {
+                flac_apply_decorrelation(load64(ch_bufs), load64(ch_bufs + 8), block_size, decor);
+            }
+
+            # Compute scale: 1.0 / (1 << (bps-1))
+            var scale_div = f64_from(1 << (frame_bps - 1));
+            var scale = f64_div(F64_ONE, scale_div);
+
+            # Interleave and convert to f64
+            var si2 = 0;
+            while (si2 < block_size) {
+                var c = 0;
+                while (c < ch_count) {
+                    var ch_buf = load64(ch_bufs + c * 8);
+                    var ival = load64(ch_buf + si2 * 8);
+                    var fval = f64_mul(f64_from(ival), scale);
+                    vec_push(all_samples, fval);
+                    c = c + 1;
+                }
+                si2 = si2 + 1;
+            }
+
+            # CRC-16 verification
+            flac_br_align(br);
+            var crc16_end = flac_br_byte_pos(br);
+            if (crc16_end + 2 <= len) {
+                var expected_crc16 = bitreader_read(br, 16);
+                if (is_err(expected_crc16) == 1) { return expected_crc16; }
+                var computed_crc16 = flac_crc16(data + frame_start, crc16_end - frame_start);
+                if (computed_crc16 != expected_crc16) { return err(ERR_DECODE); }
+            }
+        }
+    }
+
+    # Build FormatInfo
+    var total_interleaved = vec_len(all_samples);
+    var total_frames = 0;
+    if (si_ch > 0) { total_frames = total_interleaved / si_ch; }
+    var dur = f64_div(f64_from(total_frames), f64_from(si_rate));
+
+    var fi = fmtinfo_new(FMT_FLAC, si_rate, si_ch, si_bps, dur, total_frames);
+    return decode_result_new(fi, all_samples);
+}
+
+# ================================================================
+# BitWriter (MSB-first) for encoder
+# ================================================================
+# Layout (32 bytes):
+#   +0:  buf_ptr    (pointer to output byte buffer)
+#   +8:  buf_cap    (capacity)
+#   +16: buf_len    (current byte count, excluding partial)
+#   +24: cur_byte   (current partial byte)
+#   +32: bit_pos    (bits written in current byte, 0..8)
+
+fn flac_bw_new(cap) {
+    var bw = alloc(40);
+    store64(bw, alloc(cap));
+    store64(bw + 8, cap);
+    store64(bw + 16, 0);
+    store64(bw + 24, 0);
+    store64(bw + 32, 0);
+    return bw;
+}
+
+fn flac_bw_write_bits(bw, value, n) {
+    if (n == 0) { return 0; }
+    var remaining = n;
+    var val = value;
+    var buf = load64(bw);
+    var blen = load64(bw + 16);
+    var cur = load64(bw + 24);
+    var bpos = load64(bw + 32);
+
+    while (remaining > 0) {
+        var avail = 8 - bpos;
+        var to_write = remaining;
+        if (to_write > avail) { to_write = avail; }
+        var bits = (val >> (remaining - to_write)) & ((1 << to_write) - 1);
+        cur = cur | (bits << (avail - to_write));
+        remaining = remaining - to_write;
+        bpos = bpos + to_write;
+        if (bpos >= 8) {
+            store8(buf + blen, cur);
+            blen = blen + 1;
+            cur = 0;
+            bpos = 0;
+        }
+    }
+
+    store64(bw + 16, blen);
+    store64(bw + 24, cur);
+    store64(bw + 32, bpos);
+    return 0;
+}
+
+fn flac_bw_write_bit(bw, b) {
+    return flac_bw_write_bits(bw, b, 1);
+}
+
+fn flac_bw_write_unary(bw, val) {
+    var i = 0;
+    while (i < val) {
+        flac_bw_write_bit(bw, 0);
+        i = i + 1;
+    }
+    flac_bw_write_bit(bw, 1);
+    return 0;
+}
+
+fn flac_bw_align(bw) {
+    var bpos = load64(bw + 32);
+    if (bpos != 0) {
+        var buf = load64(bw);
+        var blen = load64(bw + 16);
+        var cur = load64(bw + 24);
+        store8(buf + blen, cur);
+        store64(bw + 16, blen + 1);
+        store64(bw + 24, 0);
+        store64(bw + 32, 0);
+    }
+    return 0;
+}
+
+fn flac_bw_len(bw) {
+    return load64(bw + 16);
+}
+
+fn flac_bw_buf(bw) {
+    return load64(bw);
+}
+
+# Flush and return length (flushes partial byte)
+fn flac_bw_finish(bw) {
+    flac_bw_align(bw);
+    return flac_bw_len(bw);
+}
+
+# Write UTF-8-like coded frame number
+fn flac_bw_write_utf8_u64(bw, value) {
+    if (value < 0x80) {
+        flac_bw_write_bits(bw, value, 8);
+    } else { if (value < 0x800) {
+        flac_bw_write_bits(bw, 0xC0 | (value >> 6), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } else { if (value < 0x10000) {
+        flac_bw_write_bits(bw, 0xE0 | (value >> 12), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } else { if (value < 0x200000) {
+        flac_bw_write_bits(bw, 0xF0 | (value >> 18), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } else { if (value < 0x4000000) {
+        flac_bw_write_bits(bw, 0xF8 | (value >> 24), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } else { if (value < 0x80000000) {
+        flac_bw_write_bits(bw, 0xFC | (value >> 30), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } else {
+        flac_bw_write_bits(bw, 0xFE, 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 30) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+    } } } } } }
+    return 0;
+}
+
+# ================================================================
+# Encoder helpers
+# ================================================================
+
+# Zigzag encode: signed -> unsigned for Rice coding
+fn flac_zigzag(val) {
+    if (val >= 0) { return val << 1; }
+    return ((0 - val) << 1) - 1;
+}
+
+# Count bits needed: floor(log2(x)) for x > 0, 0 for x == 0
+fn flac_ilog2(x) {
+    if (x == 0) { return 0; }
+    var r = 0;
+    var v = x;
+    while (v > 1) { v = v >> 1; r = r + 1; }
+    return r;
+}
+
+# Optimal Rice parameter for a partition
+# residuals in buf[start..start+count], each an i64 at buf + i*8
+fn flac_optimal_rice(buf, start, count) {
+    if (count == 0) { return 0; }
+    var sum = 0;
+    var i = 0;
+    while (i < count) {
+        sum = sum + flac_zigzag(load64(buf + (start + i) * 8));
+        i = i + 1;
+    }
+    var mean = sum / count;
+    if (mean == 0) { return 0; }
+    var p = flac_ilog2(mean);
+    if (p > 14) { p = 14; }
+    return p;
+}
+
+# Estimate bit cost of Rice-encoding residuals with given param
+fn flac_rice_bit_cost(buf, start, count, param) {
+    var cost = 0;
+    var i = 0;
+    while (i < count) {
+        var u = flac_zigzag(load64(buf + (start + i) * 8));
+        cost = cost + (u >> param) + 1 + param;
+        i = i + 1;
+    }
+    return cost;
+}
+
+# Encode Rice-coded residuals into BitWriter
+fn flac_encode_residual(bw, res_buf, num_res, block_size, order) {
+    # Coding method 0 (RICE, 4-bit params), partition order 0
+    flac_bw_write_bits(bw, 0, 2);
+    flac_bw_write_bits(bw, 0, 4);
+
+    var rice_param = flac_optimal_rice(res_buf, 0, num_res);
+    flac_bw_write_bits(bw, rice_param, 4);
+
+    var i = 0;
+    while (i < num_res) {
+        var uval = flac_zigzag(load64(res_buf + i * 8));
+        var q = uval >> rice_param;
+        var rem = uval & ((1 << rice_param) - 1);
+        flac_bw_write_unary(bw, q);
+        if (rice_param > 0) {
+            flac_bw_write_bits(bw, rem, rice_param);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Compute fixed prediction residuals
+# samples: raw buffer, order: 0-4
+# Writes residuals into res_buf starting at index 0
+fn flac_compute_fixed_residuals(samples, count, order, res_buf) {
+    var i = order;
+    var ri = 0;
+    while (i < count) {
+        var predicted = 0;
+        if (order == 0) { predicted = 0; }
+        if (order == 1) { predicted = load64(samples + (i - 1) * 8); }
+        if (order == 2) { predicted = 2 * load64(samples + (i - 1) * 8) - load64(samples + (i - 2) * 8); }
+        if (order == 3) { predicted = 3 * load64(samples + (i - 1) * 8) - 3 * load64(samples + (i - 2) * 8) + load64(samples + (i - 3) * 8); }
+        if (order == 4) { predicted = 4 * load64(samples + (i - 1) * 8) - 6 * load64(samples + (i - 2) * 8) + 4 * load64(samples + (i - 3) * 8) - load64(samples + (i - 4) * 8); }
+        store64(res_buf + ri * 8, load64(samples + i * 8) - predicted);
+        ri = ri + 1;
+        i = i + 1;
+    }
+    return ri;
+}
+
+# Find best fixed order for a sample buffer. Returns best_order.
+# Writes the cost into cost_ptr (a 1-element buffer).
+fn flac_best_fixed_order(samples, count, bps, cost_ptr) {
+    var best_order = 0;
+    var best_cost = 9999999999;
+    var res_buf = alloc(count * 8);
+
+    var order = 0;
+    while (order <= 4) {
+        if (order <= count) {
+            var nres = flac_compute_fixed_residuals(samples, count, order, res_buf);
+            var param = flac_optimal_rice(res_buf, 0, nres);
+            # Cost: 8 header + order*bps warmup + 6 residual header + rice cost
+            var cost = 8 + bps * order + 6 + flac_rice_bit_cost(res_buf, 0, nres, param);
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_order = order;
+            }
+        }
+        order = order + 1;
+    }
+
+    store64(cost_ptr, best_cost);
+    return best_order;
+}
+
+# Encode a single subframe into BitWriter
+fn flac_encode_subframe(bw, samples, count, bps) {
+    # Verbatim cost: 8 + bps * count
+    var verbatim_cost = 8 + bps * count;
+
+    var cost_ptr = alloc(8);
+    var fixed_order = flac_best_fixed_order(samples, count, bps, cost_ptr);
+    var fixed_cost = load64(cost_ptr);
+
+    if (verbatim_cost <= fixed_cost) {
+        # Verbatim
+        flac_bw_write_bit(bw, 0);
+        flac_bw_write_bits(bw, 1, 6);
+        flac_bw_write_bit(bw, 0);
+        var i = 0;
+        while (i < count) {
+            flac_bw_write_bits(bw, load64(samples + i * 8) & ((1 << bps) - 1), bps);
+            i = i + 1;
+        }
+    } else {
+        # Fixed
+        flac_bw_write_bit(bw, 0);
+        flac_bw_write_bits(bw, 8 + fixed_order, 6);
+        flac_bw_write_bit(bw, 0);
+
+        # Warm-up samples
+        var i = 0;
+        while (i < fixed_order) {
+            flac_bw_write_bits(bw, load64(samples + i * 8) & ((1 << bps) - 1), bps);
+            i = i + 1;
+        }
+
+        # Residuals
+        var nres = count - fixed_order;
+        var res_buf = alloc(nres * 8);
+        flac_compute_fixed_residuals(samples, count, fixed_order, res_buf);
+        flac_encode_residual(bw, res_buf, nres, count, fixed_order);
+    }
+    return 0;
+}
+
+# Mid-side encoding for stereo
+# left, right: raw sample buffers; count: number of samples
+# Writes mid into mid_buf, side into side_buf
+fn flac_apply_mid_side(left, right, count, mid_buf, side_buf) {
+    var i = 0;
+    while (i < count) {
+        var l = load64(left + i * 8);
+        var r = load64(right + i * 8);
+        store64(side_buf + i * 8, l - r);
+        # Arithmetic right shift for (l + r) >> 1
+        var sum = l + r;
+        if (sum < 0) {
+            store64(mid_buf + i * 8, 0 - ((0 - sum) >> 1));
+        } else {
+            store64(mid_buf + i * 8, sum >> 1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Block size -> 4-bit code (returns code; tail_bits and tail_val via pointers)
+fn flac_block_size_code(block_size, tail_bits_ptr, tail_val_ptr) {
+    store64(tail_bits_ptr, 0);
+    store64(tail_val_ptr, 0);
+    if (block_size == 192) { return 1; }
+    if (block_size == 576)  { return 2; }
+    if (block_size == 1152) { return 3; }
+    if (block_size == 2304) { return 4; }
+    if (block_size == 4608) { return 5; }
+    if (block_size == 256)  { return 8; }
+    if (block_size == 512)  { return 9; }
+    if (block_size == 1024) { return 10; }
+    if (block_size == 2048) { return 11; }
+    if (block_size == 4096) { return 12; }
+    if (block_size == 8192) { return 13; }
+    if (block_size == 16384) { return 14; }
+    if (block_size == 32768) { return 15; }
+    if (block_size <= 256) {
+        store64(tail_bits_ptr, 8);
+        store64(tail_val_ptr, block_size - 1);
+        return 6;
+    }
+    store64(tail_bits_ptr, 16);
+    store64(tail_val_ptr, block_size - 1);
+    return 7;
+}
+
+# Sample rate -> 4-bit code
+fn flac_sample_rate_code(rate, tail_bits_ptr, tail_val_ptr) {
+    store64(tail_bits_ptr, 0);
+    store64(tail_val_ptr, 0);
+    if (rate == 88200)  { return 1; }
+    if (rate == 176400) { return 2; }
+    if (rate == 192000) { return 3; }
+    if (rate == 8000)   { return 4; }
+    if (rate == 16000)  { return 5; }
+    if (rate == 22050)  { return 6; }
+    if (rate == 24000)  { return 7; }
+    if (rate == 32000)  { return 8; }
+    if (rate == 44100)  { return 9; }
+    if (rate == 48000)  { return 10; }
+    if (rate == 96000)  { return 11; }
+    if ((rate % 1000) == 0) {
+        if (rate / 1000 <= 255) {
+            store64(tail_bits_ptr, 8);
+            store64(tail_val_ptr, rate / 1000);
+            return 12;
+        }
+    }
+    if (rate <= 65535) {
+        store64(tail_bits_ptr, 16);
+        store64(tail_val_ptr, rate);
+        return 13;
+    }
+    if ((rate % 10) == 0) {
+        if (rate / 10 <= 65535) {
+            store64(tail_bits_ptr, 16);
+            store64(tail_val_ptr, rate / 10);
+            return 14;
+        }
+    }
+    return 0;
+}
+
+# Bits per sample -> 3-bit code
+fn flac_bps_code(bps) {
+    if (bps == 8)  { return 1; }
+    if (bps == 12) { return 2; }
+    if (bps == 16) { return 4; }
+    if (bps == 20) { return 5; }
+    if (bps == 24) { return 6; }
+    return 0;
+}
+
+# ================================================================
+# MD5 computation (RFC 1321)
+# ================================================================
+
+# MD5 S table (64 entries, stored at init)
+var flac_md5_s = 0;
+# MD5 K table (64 entries)
+var flac_md5_k = 0;
+
+fn flac_md5_init() {
+    flac_md5_s = alloc(64 * 8);
+    var s_vals = alloc(64);
+    # Round 1
+    store8(s_vals + 0, 7); store8(s_vals + 1, 12); store8(s_vals + 2, 17); store8(s_vals + 3, 22);
+    store8(s_vals + 4, 7); store8(s_vals + 5, 12); store8(s_vals + 6, 17); store8(s_vals + 7, 22);
+    store8(s_vals + 8, 7); store8(s_vals + 9, 12); store8(s_vals + 10, 17); store8(s_vals + 11, 22);
+    store8(s_vals + 12, 7); store8(s_vals + 13, 12); store8(s_vals + 14, 17); store8(s_vals + 15, 22);
+    # Round 2
+    store8(s_vals + 16, 5); store8(s_vals + 17, 9); store8(s_vals + 18, 14); store8(s_vals + 19, 20);
+    store8(s_vals + 20, 5); store8(s_vals + 21, 9); store8(s_vals + 22, 14); store8(s_vals + 23, 20);
+    store8(s_vals + 24, 5); store8(s_vals + 25, 9); store8(s_vals + 26, 14); store8(s_vals + 27, 20);
+    store8(s_vals + 28, 5); store8(s_vals + 29, 9); store8(s_vals + 30, 14); store8(s_vals + 31, 20);
+    # Round 3
+    store8(s_vals + 32, 4); store8(s_vals + 33, 11); store8(s_vals + 34, 16); store8(s_vals + 35, 23);
+    store8(s_vals + 36, 4); store8(s_vals + 37, 11); store8(s_vals + 38, 16); store8(s_vals + 39, 23);
+    store8(s_vals + 40, 4); store8(s_vals + 41, 11); store8(s_vals + 42, 16); store8(s_vals + 43, 23);
+    store8(s_vals + 44, 4); store8(s_vals + 45, 11); store8(s_vals + 46, 16); store8(s_vals + 47, 23);
+    # Round 4
+    store8(s_vals + 48, 6); store8(s_vals + 49, 10); store8(s_vals + 50, 15); store8(s_vals + 51, 21);
+    store8(s_vals + 52, 6); store8(s_vals + 53, 10); store8(s_vals + 54, 15); store8(s_vals + 55, 21);
+    store8(s_vals + 56, 6); store8(s_vals + 57, 10); store8(s_vals + 58, 15); store8(s_vals + 59, 21);
+    store8(s_vals + 60, 6); store8(s_vals + 61, 10); store8(s_vals + 62, 15); store8(s_vals + 63, 21);
+    var si = 0;
+    while (si < 64) {
+        store64(flac_md5_s + si * 8, load8(s_vals + si));
+        si = si + 1;
+    }
+
+    # K table — pre-computed floor(2^32 * abs(sin(i+1)))
+    flac_md5_k = alloc(64 * 8);
+    store64(flac_md5_k + 0 * 8,  0xd76aa478); store64(flac_md5_k + 1 * 8,  0xe8c7b756);
+    store64(flac_md5_k + 2 * 8,  0x242070db); store64(flac_md5_k + 3 * 8,  0xc1bdceee);
+    store64(flac_md5_k + 4 * 8,  0xf57c0faf); store64(flac_md5_k + 5 * 8,  0x4787c62a);
+    store64(flac_md5_k + 6 * 8,  0xa8304613); store64(flac_md5_k + 7 * 8,  0xfd469501);
+    store64(flac_md5_k + 8 * 8,  0x698098d8); store64(flac_md5_k + 9 * 8,  0x8b44f7af);
+    store64(flac_md5_k + 10 * 8, 0xffff5bb1); store64(flac_md5_k + 11 * 8, 0x895cd7be);
+    store64(flac_md5_k + 12 * 8, 0x6b901122); store64(flac_md5_k + 13 * 8, 0xfd987193);
+    store64(flac_md5_k + 14 * 8, 0xa679438e); store64(flac_md5_k + 15 * 8, 0x49b40821);
+    store64(flac_md5_k + 16 * 8, 0xf61e2562); store64(flac_md5_k + 17 * 8, 0xc040b340);
+    store64(flac_md5_k + 18 * 8, 0x265e5a51); store64(flac_md5_k + 19 * 8, 0xe9b6c7aa);
+    store64(flac_md5_k + 20 * 8, 0xd62f105d); store64(flac_md5_k + 21 * 8, 0x02441453);
+    store64(flac_md5_k + 22 * 8, 0xd8a1e681); store64(flac_md5_k + 23 * 8, 0xe7d3fbc8);
+    store64(flac_md5_k + 24 * 8, 0x21e1cde6); store64(flac_md5_k + 25 * 8, 0xc33707d6);
+    store64(flac_md5_k + 26 * 8, 0xf4d50d87); store64(flac_md5_k + 27 * 8, 0x455a14ed);
+    store64(flac_md5_k + 28 * 8, 0xa9e3e905); store64(flac_md5_k + 29 * 8, 0xfcefa3f8);
+    store64(flac_md5_k + 30 * 8, 0x676f02d9); store64(flac_md5_k + 31 * 8, 0x8d2a4c8a);
+    store64(flac_md5_k + 32 * 8, 0xfffa3942); store64(flac_md5_k + 33 * 8, 0x8771f681);
+    store64(flac_md5_k + 34 * 8, 0x6d9d6122); store64(flac_md5_k + 35 * 8, 0xfde5380c);
+    store64(flac_md5_k + 36 * 8, 0xa4beea44); store64(flac_md5_k + 37 * 8, 0x4bdecfa9);
+    store64(flac_md5_k + 38 * 8, 0xf6bb4b60); store64(flac_md5_k + 39 * 8, 0xbebfbc70);
+    store64(flac_md5_k + 40 * 8, 0x289b7ec6); store64(flac_md5_k + 41 * 8, 0xeaa127fa);
+    store64(flac_md5_k + 42 * 8, 0xd4ef3085); store64(flac_md5_k + 43 * 8, 0x04881d05);
+    store64(flac_md5_k + 44 * 8, 0xd9d4d039); store64(flac_md5_k + 45 * 8, 0xe6db99e5);
+    store64(flac_md5_k + 46 * 8, 0x1fa27cf8); store64(flac_md5_k + 47 * 8, 0xc4ac5665);
+    store64(flac_md5_k + 48 * 8, 0xf4292244); store64(flac_md5_k + 49 * 8, 0x432aff97);
+    store64(flac_md5_k + 50 * 8, 0xab9423a7); store64(flac_md5_k + 51 * 8, 0xfc93a039);
+    store64(flac_md5_k + 52 * 8, 0x655b59c3); store64(flac_md5_k + 53 * 8, 0x8f0ccc92);
+    store64(flac_md5_k + 54 * 8, 0xffeff47d); store64(flac_md5_k + 55 * 8, 0x85845dd1);
+    store64(flac_md5_k + 56 * 8, 0x6fa87e4f); store64(flac_md5_k + 57 * 8, 0xfe2ce6e0);
+    store64(flac_md5_k + 58 * 8, 0xa3014314); store64(flac_md5_k + 59 * 8, 0x4e0811a1);
+    store64(flac_md5_k + 60 * 8, 0xf7537e82); store64(flac_md5_k + 61 * 8, 0xbd3af235);
+    store64(flac_md5_k + 62 * 8, 0x2ad7d2bb); store64(flac_md5_k + 63 * 8, 0xeb86d391);
+    return 0;
+}
+
+# 32-bit unsigned helpers for MD5 (Cyrius is i64, we mask to 32 bits)
+fn u32_add(a, b) { return (a + b) & 0xFFFFFFFF; }
+fn u32_not(a)    { return (a ^ 0xFFFFFFFF) & 0xFFFFFFFF; }
+fn u32_rotl(val, n) {
+    return ((val << n) | (val >> (32 - n))) & 0xFFFFFFFF;
+}
+
+# Compute MD5 digest. data: pointer, dlen: byte length.
+# Returns pointer to 16-byte digest buffer.
+fn flac_md5_compute(data, dlen) {
+    var orig_bits = dlen * 8;
+
+    # Build padded message
+    var pad_len = dlen + 1;
+    while ((pad_len % 64) != 56) { pad_len = pad_len + 1; }
+    pad_len = pad_len + 8;
+    var msg = alloc(pad_len);
+    memcpy(msg, data, dlen);
+    store8(msg + dlen, 0x80);
+    # Zero-fill is handled by alloc
+    # Append original length in bits as 64-bit little-endian
+    store8(msg + pad_len - 8, orig_bits & 0xFF);
+    store8(msg + pad_len - 7, (orig_bits >> 8) & 0xFF);
+    store8(msg + pad_len - 6, (orig_bits >> 16) & 0xFF);
+    store8(msg + pad_len - 5, (orig_bits >> 24) & 0xFF);
+    store8(msg + pad_len - 4, (orig_bits >> 32) & 0xFF);
+    store8(msg + pad_len - 3, (orig_bits >> 40) & 0xFF);
+    store8(msg + pad_len - 2, (orig_bits >> 48) & 0xFF);
+    store8(msg + pad_len - 1, (orig_bits >> 56) & 0xFF);
+
+    var a0 = 0x67452301;
+    var b0 = 0xefcdab89;
+    var c0 = 0x98badcfe;
+    var d0 = 0x10325476;
+
+    var m_buf = alloc(16 * 8);
+    var chunk_off = 0;
+    while (chunk_off < pad_len) {
+        # Parse 16 u32 words (little-endian)
+        var wi = 0;
+        while (wi < 16) {
+            var off = chunk_off + wi * 4;
+            var w = load8(msg + off) | (load8(msg + off + 1) << 8) | (load8(msg + off + 2) << 16) | (load8(msg + off + 3) << 24);
+            store64(m_buf + wi * 8, w);
+            wi = wi + 1;
+        }
+
+        var a = a0;
+        var b = b0;
+        var c = c0;
+        var d = d0;
+
+        var i = 0;
+        while (i < 64) {
+            var f = 0;
+            var g = 0;
+            if (i < 16) {
+                f = (b & c) | (u32_not(b) & d);
+                g = i;
+            } else { if (i < 32) {
+                f = (d & b) | (u32_not(d) & c);
+                g = (5 * i + 1) % 16;
+            } else { if (i < 48) {
+                f = b ^ c ^ d;
+                g = (3 * i + 5) % 16;
+            } else {
+                f = c ^ (b | u32_not(d));
+                g = (7 * i) % 16;
+            } } }
+            f = f & 0xFFFFFFFF;
+
+            var temp = d;
+            d = c;
+            c = b;
+            var inner = u32_add(u32_add(a, f), u32_add(load64(flac_md5_k + i * 8), load64(m_buf + g * 8)));
+            b = u32_add(b, u32_rotl(inner, load64(flac_md5_s + i * 8)));
+            a = temp;
+            i = i + 1;
+        }
+
+        a0 = u32_add(a0, a);
+        b0 = u32_add(b0, b);
+        c0 = u32_add(c0, c);
+        d0 = u32_add(d0, d);
+
+        chunk_off = chunk_off + 64;
+    }
+
+    # Output 16-byte digest (little-endian)
+    var result = alloc(16);
+    store8(result + 0, a0 & 0xFF);
+    store8(result + 1, (a0 >> 8) & 0xFF);
+    store8(result + 2, (a0 >> 16) & 0xFF);
+    store8(result + 3, (a0 >> 24) & 0xFF);
+    store8(result + 4, b0 & 0xFF);
+    store8(result + 5, (b0 >> 8) & 0xFF);
+    store8(result + 6, (b0 >> 16) & 0xFF);
+    store8(result + 7, (b0 >> 24) & 0xFF);
+    store8(result + 8, c0 & 0xFF);
+    store8(result + 9, (c0 >> 8) & 0xFF);
+    store8(result + 10, (c0 >> 16) & 0xFF);
+    store8(result + 11, (c0 >> 24) & 0xFF);
+    store8(result + 12, d0 & 0xFF);
+    store8(result + 13, (d0 >> 8) & 0xFF);
+    store8(result + 14, (d0 >> 16) & 0xFF);
+    store8(result + 15, (d0 >> 24) & 0xFF);
+    return result;
+}
+
+# ================================================================
+# Encode a single FLAC frame
+# ================================================================
+
+# Encode one frame into out_buf at out_pos. Returns bytes written.
+# ch_bufs: array of channel buffer pointers (alloc'd, each count samples)
+# channels, bps, sample_rate, frame_number, this_block_size: integers
+fn flac_encode_frame(out_buf, out_pos, ch_bufs, channels, bps, sample_rate, frame_number, this_block_size) {
+    var frame_start = out_pos;
+
+    # Build header with BitWriter
+    var hdr = flac_bw_new(64);
+    # Sync: 0xFFF8 = 14 bits 0x3FFE + reserved 0 + blocking_strategy 0
+    flac_bw_write_bits(hdr, 0x3FFE, 14);
+    flac_bw_write_bit(hdr, 0);
+    flac_bw_write_bit(hdr, 0);
+
+    var bs_tb = alloc(8);
+    var bs_tv = alloc(8);
+    var bs_code = flac_block_size_code(this_block_size, bs_tb, bs_tv);
+    flac_bw_write_bits(hdr, bs_code, 4);
+
+    var sr_tb = alloc(8);
+    var sr_tv = alloc(8);
+    var sr_code = flac_sample_rate_code(sample_rate, sr_tb, sr_tv);
+    flac_bw_write_bits(hdr, sr_code, 4);
+
+    # Channel assignment
+    var use_ms = 0;
+    if (channels == 2) { use_ms = 1; }
+    var ch_assign = channels - 1;
+    if (use_ms == 1) { ch_assign = FLAC_CH_MID_SIDE; }
+    flac_bw_write_bits(hdr, ch_assign, 4);
+
+    flac_bw_write_bits(hdr, flac_bps_code(bps), 3);
+    flac_bw_write_bit(hdr, 0);
+
+    flac_bw_write_utf8_u64(hdr, frame_number);
+
+    # Block size tail
+    var bs_tail_bits = load64(bs_tb);
+    if (bs_tail_bits > 0) {
+        flac_bw_write_bits(hdr, load64(bs_tv), bs_tail_bits);
+    }
+    # Sample rate tail
+    var sr_tail_bits = load64(sr_tb);
+    if (sr_tail_bits > 0) {
+        flac_bw_write_bits(hdr, load64(sr_tv), sr_tail_bits);
+    }
+
+    flac_bw_align(hdr);
+    var hdr_len = flac_bw_len(hdr);
+    var hdr_buf = flac_bw_buf(hdr);
+
+    # Compute CRC-8 over header bytes
+    var crc8 = flac_crc8(hdr_buf, hdr_len);
+
+    # Copy header to output
+    memcpy(out_buf + out_pos, hdr_buf, hdr_len);
+    out_pos = out_pos + hdr_len;
+    store8(out_buf + out_pos, crc8);
+    out_pos = out_pos + 1;
+
+    # Encode subframes
+    var sf_bw = flac_bw_new(this_block_size * channels * 4 + 256);
+
+    if (use_ms == 1) {
+        var left = load64(ch_bufs);
+        var right = load64(ch_bufs + 8);
+        var mid_buf = alloc(this_block_size * 8);
+        var side_buf = alloc(this_block_size * 8);
+        flac_apply_mid_side(left, right, this_block_size, mid_buf, side_buf);
+        flac_encode_subframe(sf_bw, mid_buf, this_block_size, bps);
+        flac_encode_subframe(sf_bw, side_buf, this_block_size, bps + 1);
+    } else {
+        var ch = 0;
+        while (ch < channels) {
+            flac_encode_subframe(sf_bw, load64(ch_bufs + ch * 8), this_block_size, bps);
+            ch = ch + 1;
+        }
+    }
+
+    flac_bw_align(sf_bw);
+    var sf_len = flac_bw_len(sf_bw);
+    var sf_buf = flac_bw_buf(sf_bw);
+    memcpy(out_buf + out_pos, sf_buf, sf_len);
+    out_pos = out_pos + sf_len;
+
+    # CRC-16 over entire frame (from frame_start to current pos)
+    var crc16 = flac_crc16(out_buf + frame_start, out_pos - frame_start);
+    store8(out_buf + out_pos, (crc16 >> 8) & 0xFF);
+    store8(out_buf + out_pos + 1, crc16 & 0xFF);
+    out_pos = out_pos + 2;
+
+    return out_pos - frame_start;
+}
+
+# ================================================================
+# Main FLAC encoder
+# ================================================================
+
+fn flac_encode(samples_vec, sample_rate, channels, bits_per_sample, out_buf) {
+    if (channels == 0) { return err(ERR_INVALID_CHANNELS); }
+    if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
+    if (bits_per_sample == 0) { return err(ERR_ENCODE); }
+    if (bits_per_sample > 32) { return err(ERR_ENCODE); }
+
+    var ch = channels;
+    var total_interleaved = vec_len(samples_vec);
+    var total_frames = total_interleaved / ch;
+    var bps = bits_per_sample;
+
+    # Scale factor: (1 << (bps-1)) - 1
+    var scale_max = (1 << (bps - 1)) - 1;
+    var f64_scale = f64_from(scale_max);
+
+    # Convert f64 samples -> i64 at target bit depth, deinterleave
+    var ch_bufs = alloc(ch * 8);
+    var c = 0;
+    while (c < ch) {
+        store64(ch_bufs + c * 8, alloc(total_frames * 8));
+        c = c + 1;
+    }
+
+    var fi = 0;
+    while (fi < total_frames) {
+        c = 0;
+        while (c < ch) {
+            var fval = vec_get(samples_vec, fi * ch + c);
+            var clamped = f64_clamp(fval, F64_NEG_ONE, F64_ONE);
+            var ival = f64_to(f64_mul(clamped, f64_scale));
+            var cb = load64(ch_bufs + c * 8);
+            store64(cb + fi * 8, ival);
+            c = c + 1;
+        }
+        fi = fi + 1;
+    }
+
+    # Compute MD5 over raw samples (little-endian bytes)
+    var bytes_per_samp = bps >> 3;
+    if ((bps & 7) != 0) { bytes_per_samp = bytes_per_samp + 1; }
+    var md5_data_len = total_interleaved * bytes_per_samp;
+    var md5_data = alloc(md5_data_len + 1);
+    var md5_pos = 0;
+    fi = 0;
+    while (fi < total_frames) {
+        c = 0;
+        while (c < ch) {
+            var cb = load64(ch_bufs + c * 8);
+            var s = load64(cb + fi * 8);
+            var b = 0;
+            while (b < bytes_per_samp) {
+                # Arithmetic right shift safe: just extracting bytes
+                var byte_val = 0;
+                if (b == 0) { byte_val = s & 0xFF; }
+                if (b == 1) { byte_val = (s >> 8) & 0xFF; }
+                if (b == 2) { byte_val = (s >> 16) & 0xFF; }
+                if (b == 3) { byte_val = (s >> 24) & 0xFF; }
+                store8(md5_data + md5_pos, byte_val);
+                md5_pos = md5_pos + 1;
+                b = b + 1;
+            }
+            c = c + 1;
+        }
+        fi = fi + 1;
+    }
+    var md5 = flac_md5_compute(md5_data, md5_data_len);
+
+    # Write output
+    var pos = 0;
+
+    # fLaC magic
+    store8(out_buf + pos, 0x66); pos = pos + 1;
+    store8(out_buf + pos, 0x4C); pos = pos + 1;
+    store8(out_buf + pos, 0x61); pos = pos + 1;
+    store8(out_buf + pos, 0x43); pos = pos + 1;
+
+    # STREAMINFO metadata block: is_last=1, type=0, size=34
+    store8(out_buf + pos, 0x80); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 34); pos = pos + 1;
+
+    var block_size = 4096;
+    var actual_bs = block_size;
+    if (total_frames < actual_bs) { actual_bs = total_frames; }
+    if (actual_bs < 1) { actual_bs = 1; }
+
+    # min/max block size (16-bit BE each)
+    store8(out_buf + pos, (actual_bs >> 8) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, actual_bs & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, (actual_bs >> 8) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, actual_bs & 0xFF); pos = pos + 1;
+
+    # min/max frame size (3 bytes each, placeholder)
+    var frame_size_offset = pos;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+    store8(out_buf + pos, 0); pos = pos + 1;
+
+    # sr(20) | ch-1(3) | bps-1(5) | total_samples(36)
+    var sr = sample_rate;
+    var ch_m1 = channels - 1;
+    var bps_m1 = bps - 1;
+    store8(out_buf + pos, (sr >> 12) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, (sr >> 4) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, ((sr & 0x0F) << 4) | ((ch_m1 & 0x07) << 1) | ((bps_m1 >> 4) & 0x01)); pos = pos + 1;
+    store8(out_buf + pos, ((bps_m1 & 0x0F) << 4) | ((total_frames >> 32) & 0x0F)); pos = pos + 1;
+    store8(out_buf + pos, (total_frames >> 24) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, (total_frames >> 16) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, (total_frames >> 8) & 0xFF); pos = pos + 1;
+    store8(out_buf + pos, total_frames & 0xFF); pos = pos + 1;
+
+    # MD5 (16 bytes)
+    var mi = 0;
+    while (mi < 16) {
+        store8(out_buf + pos, load8(md5 + mi));
+        pos = pos + 1;
+        mi = mi + 1;
+    }
+
+    # Encode frames
+    var min_frame_size = 0x7FFFFFFF;
+    var max_frame_size = 0;
+
+    var num_blocks = total_frames / block_size;
+    if ((total_frames % block_size) != 0) { num_blocks = num_blocks + 1; }
+
+    var bi = 0;
+    while (bi < num_blocks) {
+        var start = bi * block_size;
+        var end = start + block_size;
+        if (end > total_frames) { end = total_frames; }
+        var this_bs = end - start;
+
+        # Build per-channel sub-buffers for this block
+        var block_ch_bufs = alloc(ch * 8);
+        c = 0;
+        while (c < ch) {
+            var src = load64(ch_bufs + c * 8);
+            store64(block_ch_bufs + c * 8, src + start * 8);
+            c = c + 1;
+        }
+
+        var frame_bytes = flac_encode_frame(out_buf, pos, block_ch_bufs, channels, bps, sample_rate, bi, this_bs);
+        if (frame_bytes < min_frame_size) { min_frame_size = frame_bytes; }
+        if (frame_bytes > max_frame_size) { max_frame_size = frame_bytes; }
+        pos = pos + frame_bytes;
+        bi = bi + 1;
+    }
+
+    # Backfill min/max frame sizes
+    if (min_frame_size < 0x7FFFFFFF) {
+        store8(out_buf + frame_size_offset, (min_frame_size >> 16) & 0xFF);
+        store8(out_buf + frame_size_offset + 1, (min_frame_size >> 8) & 0xFF);
+        store8(out_buf + frame_size_offset + 2, min_frame_size & 0xFF);
+        store8(out_buf + frame_size_offset + 3, (max_frame_size >> 16) & 0xFF);
+        store8(out_buf + frame_size_offset + 4, (max_frame_size >> 8) & 0xFF);
+        store8(out_buf + frame_size_offset + 5, max_frame_size & 0xFF);
+    }
+
+    return pos;
+}
+
+# ================================================================
+# FLAC module init (call before any encode/decode)
+# ================================================================
+
+fn flac_init() {
+    flac_crc8_init();
+    flac_crc16_init();
+    flac_md5_init();
+    return 0;
+}
+
+# ================================================================
+# Tests
+# ================================================================
+
+fn test_flac_crc() {
+    syscall(1, 1, "test: flac crc-8/16\n", 20);
+
+    # CRC-8 of empty = 0
+    var empty = alloc(1);
+    assert_eq(flac_crc8(empty, 0), 0, "flac crc8 empty");
+
+    # CRC-8 of single zero = 0
+    store8(empty, 0);
+    assert_eq(flac_crc8(empty, 1), 0, "flac crc8 zero");
+
+    # CRC-8 of "123456789" = 0xF4
+    var test9 = alloc(9);
+    store8(test9, 0x31); store8(test9 + 1, 0x32); store8(test9 + 2, 0x33);
+    store8(test9 + 3, 0x34); store8(test9 + 4, 0x35); store8(test9 + 5, 0x36);
+    store8(test9 + 6, 0x37); store8(test9 + 7, 0x38); store8(test9 + 8, 0x39);
+    assert_eq(flac_crc8(test9, 9), 0xF4, "flac crc8 123456789");
+
+    # CRC-16 of empty = 0
+    assert_eq(flac_crc16(empty, 0), 0, "flac crc16 empty");
+
+    # CRC-16 of single zero = 0
+    assert_eq(flac_crc16(empty, 1), 0, "flac crc16 zero");
+
+    # CRC-16 consistency: non-trivial data should give non-zero
+    var test_data = alloc(10);
+    store8(test_data, 0x68); store8(test_data + 1, 0x65); store8(test_data + 2, 0x6C);
+    store8(test_data + 3, 0x6C); store8(test_data + 4, 0x6F); store8(test_data + 5, 0x20);
+    store8(test_data + 6, 0x46); store8(test_data + 7, 0x4C); store8(test_data + 8, 0x41);
+    store8(test_data + 9, 0x43);
+    var crc_val = flac_crc16(test_data, 10);
+    assert(crc_val != 0, "flac crc16 non-zero for hello FLAC");
+
+    # Corruption changes CRC
+    store8(test_data, load8(test_data) ^ 1);
+    var crc_val2 = flac_crc16(test_data, 10);
+    assert(crc_val != crc_val2, "flac crc16 changes on corruption");
+
+    return 0;
+}
+
+fn test_flac_bitwriter() {
+    syscall(1, 1, "test: flac bitwriter\n", 21);
+
+    # Write two full bytes
+    var bw = flac_bw_new(16);
+    flac_bw_write_bits(bw, 0xFF, 8);
+    flac_bw_write_bits(bw, 0xAB, 8);
+    var blen = flac_bw_finish(bw);
+    assert_eq(blen, 2, "bw two bytes len");
+    var buf = flac_bw_buf(bw);
+    assert_eq(load8(buf), 0xFF, "bw byte 0");
+    assert_eq(load8(buf + 1), 0xAB, "bw byte 1");
+
+    # Write partial nibbles
+    var bw2 = flac_bw_new(16);
+    flac_bw_write_bits(bw2, 0x0A, 4);
+    flac_bw_write_bits(bw2, 0x06, 4);
+    var blen2 = flac_bw_finish(bw2);
+    assert_eq(blen2, 1, "bw nibbles len");
+    assert_eq(load8(flac_bw_buf(bw2)), 0xA6, "bw nibbles val");
+
+    return 0;
+}
+
+fn test_flac_zigzag() {
+    syscall(1, 1, "test: flac zigzag\n", 18);
+    assert_eq(flac_zigzag(0), 0, "zz 0");
+    assert_eq(flac_zigzag(1), 2, "zz 1");
+    assert_eq(flac_zigzag(0 - 1), 1, "zz -1");
+    assert_eq(flac_zigzag(2), 4, "zz 2");
+    assert_eq(flac_zigzag(0 - 2), 3, "zz -2");
+    return 0;
+}
+
+fn test_flac_md5() {
+    syscall(1, 1, "test: flac md5\n", 15);
+
+    # MD5 of empty string = d41d8cd98f00b204e9800998ecf8427e
+    var md5_empty = flac_md5_compute(alloc(1), 0);
+    assert_eq(load8(md5_empty), 0xd4, "md5 empty[0]");
+    assert_eq(load8(md5_empty + 1), 0x1d, "md5 empty[1]");
+    assert_eq(load8(md5_empty + 2), 0x8c, "md5 empty[2]");
+    assert_eq(load8(md5_empty + 3), 0xd9, "md5 empty[3]");
+    assert_eq(load8(md5_empty + 15), 0x7e, "md5 empty[15]");
+
+    # MD5 of "abc" = 900150983cd24fb0d6963f7d28e17f72
+    var abc = alloc(3);
+    store8(abc, 0x61); store8(abc + 1, 0x62); store8(abc + 2, 0x63);
+    var md5_abc = flac_md5_compute(abc, 3);
+    assert_eq(load8(md5_abc), 0x90, "md5 abc[0]");
+    assert_eq(load8(md5_abc + 1), 0x01, "md5 abc[1]");
+    assert_eq(load8(md5_abc + 2), 0x50, "md5 abc[2]");
+    assert_eq(load8(md5_abc + 15), 0x72, "md5 abc[15]");
+
+    return 0;
+}
+
+fn test_flac_utf8_roundtrip() {
+    syscall(1, 1, "test: flac utf8 roundtrip\n", 26);
+
+    var test_vals = alloc(9 * 8);
+    store64(test_vals, 0);
+    store64(test_vals + 8, 1);
+    store64(test_vals + 16, 127);
+    store64(test_vals + 24, 128);
+    store64(test_vals + 32, 255);
+    store64(test_vals + 40, 256);
+    store64(test_vals + 48, 1000);
+    store64(test_vals + 56, 65535);
+    store64(test_vals + 64, 100000);
+
+    var ti = 0;
+    while (ti < 9) {
+        var val = load64(test_vals + ti * 8);
+        var bw = flac_bw_new(16);
+        flac_bw_write_utf8_u64(bw, val);
+        var blen = flac_bw_finish(bw);
+        var buf = flac_bw_buf(bw);
+        var br = bitreader_new(buf, blen);
+        var decoded = flac_br_read_utf8_u64(br);
+        assert_eq(decoded, val, "utf8 roundtrip");
+        ti = ti + 1;
+    }
+    return 0;
+}
+
+fn test_flac_encode_decode_silence() {
+    syscall(1, 1, "test: flac encode/decode silence\n", 33);
+
+    var num_samples = 256;
+    var samples = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        vec_push(samples, F64_ZERO);
+        i = i + 1;
+    }
+
+    var out_buf = alloc(num_samples * 8 + 4096);
+    var bytes_written = flac_encode(samples, 44100, 1, 16, out_buf);
+    assert(is_ok(bytes_written) == 1, "flac silence encode ok");
+    assert(bytes_written > 0, "flac silence bytes > 0");
+
+    # Check magic
+    assert_eq(load8(out_buf), 0x66, "flac magic f");
+    assert_eq(load8(out_buf + 1), 0x4C, "flac magic L");
+    assert_eq(load8(out_buf + 2), 0x61, "flac magic a");
+    assert_eq(load8(out_buf + 3), 0x43, "flac magic C");
+
+    # Decode
+    var result = flac_decode(out_buf, bytes_written);
+    assert(is_ok(result) == 1, "flac silence decode ok");
+
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_format(fi), FMT_FLAC, "flac silence format");
+    assert_eq(fmtinfo_sample_rate(fi), 44100, "flac silence rate");
+    assert_eq(fmtinfo_channels(fi), 1, "flac silence ch");
+    assert_eq(fmtinfo_bit_depth(fi), 16, "flac silence bps");
+
+    var dec_samples = decode_result_samples(result);
+    assert_eq(vec_len(dec_samples), num_samples, "flac silence sample count");
+
+    # All samples should be ~0 (multiply by 32768, check int is 0)
+    var all_zero = 1;
+    i = 0;
+    while (i < vec_len(dec_samples)) {
+        var v = f64_to(f64_mul(vec_get(dec_samples, i), F64_32768));
+        if (v > 1) { all_zero = 0; }
+        if (v < (0 - 1)) { all_zero = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_zero, 1, "flac silence all zero");
+
+    return 0;
+}
+
+fn test_flac_encode_decode_sine() {
+    syscall(1, 1, "test: flac encode/decode sine\n", 30);
+
+    # Generate a sine wave using integer approximation
+    # sin(x) approx via quadratic: 4x(1-x)/1 for x in [0,1] mapped to [0, pi]
+    # We generate 256 samples of a simple pattern instead
+    var num_samples = 256;
+    var samples = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        # Triangular wave: goes from 0 to 1 to 0 to -1 to 0
+        var phase = (i * 4) % num_samples;
+        var quarter = num_samples / 4;
+        var val = 0;
+        if (phase < quarter) {
+            val = f64_div(f64_from(phase), f64_from(quarter));
+        } else { if (phase < quarter * 2) {
+            val = f64_div(f64_from(quarter * 2 - phase), f64_from(quarter));
+        } else { if (phase < quarter * 3) {
+            val = f64_neg(f64_div(f64_from(phase - quarter * 2), f64_from(quarter)));
+        } else {
+            val = f64_neg(f64_div(f64_from(num_samples - phase), f64_from(quarter)));
+        } } }
+        # Scale to 0.9 to avoid clipping edge
+        val = f64_mul(val, f64_div(f64_from(9), f64_from(10)));
+        vec_push(samples, val);
+        i = i + 1;
+    }
+
+    var out_buf = alloc(num_samples * 8 + 8192);
+    var bytes_written = flac_encode(samples, 44100, 1, 16, out_buf);
+    assert(is_ok(bytes_written) == 1, "flac sine encode ok");
+
+    var result = flac_decode(out_buf, bytes_written);
+    assert(is_ok(result) == 1, "flac sine decode ok");
+
+    var dec = decode_result_samples(result);
+    assert_eq(vec_len(dec), num_samples, "flac sine count");
+
+    # Check roundtrip within 16-bit tolerance
+    # Multiply both by 32768, compare integer parts
+    var ok = 1;
+    i = 0;
+    while (i < num_samples) {
+        var orig_scaled = f64_to(f64_mul(vec_get(samples, i), F64_32768));
+        var dec_scaled = f64_to(f64_mul(vec_get(dec, i), F64_32768));
+        var d = orig_scaled - dec_scaled;
+        if (d < 0) { d = 0 - d; }
+        if (d > 2) { ok = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok, 1, "flac sine roundtrip within tolerance");
+
+    return 0;
+}
+
+fn test_flac_encode_decode_stereo() {
+    syscall(1, 1, "test: flac encode/decode stereo\n", 32);
+
+    var num_frames = 128;
+    var samples = vec_new();
+    var i = 0;
+    while (i < num_frames) {
+        # Left: ramp up
+        var left = f64_div(f64_from(i), f64_from(num_frames));
+        left = f64_sub(f64_mul(left, F64_TWO), F64_ONE);
+        left = f64_mul(left, f64_div(f64_from(9), f64_from(10)));
+        # Right: ramp down
+        var right = f64_div(f64_from(num_frames - 1 - i), f64_from(num_frames));
+        right = f64_sub(f64_mul(right, F64_TWO), F64_ONE);
+        right = f64_mul(right, f64_div(f64_from(9), f64_from(10)));
+        vec_push(samples, left);
+        vec_push(samples, right);
+        i = i + 1;
+    }
+
+    var out_buf = alloc(num_frames * 16 + 8192);
+    var bytes_written = flac_encode(samples, 44100, 2, 16, out_buf);
+    assert(is_ok(bytes_written) == 1, "flac stereo encode ok");
+
+    var result = flac_decode(out_buf, bytes_written);
+    assert(is_ok(result) == 1, "flac stereo decode ok");
+
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_channels(fi), 2, "flac stereo channels");
+
+    var dec = decode_result_samples(result);
+    assert_eq(vec_len(dec), num_frames * 2, "flac stereo count");
+
+    return 0;
+}
+
+fn test_flac_encode_decode_8bit() {
+    syscall(1, 1, "test: flac encode/decode 8-bit\n", 31);
+
+    var num_samples = 64;
+    var samples = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        var val = f64_sub(f64_div(f64_from(i), f64_from(32)), F64_ONE);
+        vec_push(samples, val);
+        i = i + 1;
+    }
+
+    var out_buf = alloc(num_samples * 4 + 4096);
+    var bytes_written = flac_encode(samples, 44100, 1, 8, out_buf);
+    assert(is_ok(bytes_written) == 1, "flac 8bit encode ok");
+
+    var result = flac_decode(out_buf, bytes_written);
+    assert(is_ok(result) == 1, "flac 8bit decode ok");
+
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_bit_depth(fi), 8, "flac 8bit depth");
+
+    return 0;
+}
+
+fn test_flac_encode_decode_24bit() {
+    syscall(1, 1, "test: flac encode/decode 24-bit\n", 32);
+
+    var num_samples = 64;
+    var samples = vec_new();
+    var i = 0;
+    while (i < num_samples) {
+        var val = f64_sub(f64_div(f64_from(i), f64_from(32)), F64_ONE);
+        val = f64_mul(val, f64_div(f64_from(9), f64_from(10)));
+        vec_push(samples, val);
+        i = i + 1;
+    }
+
+    var out_buf = alloc(num_samples * 12 + 8192);
+    var bytes_written = flac_encode(samples, 48000, 1, 24, out_buf);
+    assert(is_ok(bytes_written) == 1, "flac 24bit encode ok");
+
+    var result = flac_decode(out_buf, bytes_written);
+    assert(is_ok(result) == 1, "flac 24bit decode ok");
+
+    var fi = decode_result_info(result);
+    assert_eq(fmtinfo_bit_depth(fi), 24, "flac 24bit depth");
+    assert_eq(fmtinfo_sample_rate(fi), 48000, "flac 24bit rate");
+
+    return 0;
+}
+
+fn test_flac_reject_invalid() {
+    syscall(1, 1, "test: flac reject invalid\n", 27);
+
+    # Not FLAC data
+    var bad = alloc(12);
+    store8(bad, 0x52); store8(bad + 1, 0x49); store8(bad + 2, 0x46); store8(bad + 3, 0x46);
+    assert(is_err(flac_decode(bad, 12)) == 1, "flac rejects non-flac");
+
+    # Too short
+    var short = alloc(3);
+    store8(short, 0x66); store8(short + 1, 0x4C); store8(short + 2, 0x61);
+    assert(is_err(flac_decode(short, 3)) == 1, "flac rejects too short");
+
+    # Encoder rejects bad params
+    var empty = vec_new();
+    var tmp = alloc(1024);
+    assert(is_err(flac_encode(empty, 44100, 0, 16, tmp)) == 1, "flac encode 0 ch");
+    assert(is_err(flac_encode(empty, 0, 1, 16, tmp)) == 1, "flac encode 0 rate");
+    assert(is_err(flac_encode(empty, 44100, 1, 0, tmp)) == 1, "flac encode 0 bps");
+    assert(is_err(flac_encode(empty, 44100, 1, 33, tmp)) == 1, "flac encode 33 bps");
+
+    return 0;
+}
+
+fn test_flac_block_size_codes() {
+    syscall(1, 1, "test: flac block size codes\n", 28);
+
+    var tb = alloc(8);
+    var tv = alloc(8);
+    assert_eq(flac_block_size_code(192, tb, tv), 1, "bs 192");
+    assert_eq(flac_block_size_code(4096, tb, tv), 12, "bs 4096");
+    assert_eq(flac_block_size_code(100, tb, tv), 6, "bs 100 -> code 6");
+    assert_eq(load64(tb), 8, "bs 100 tail_bits 8");
+    assert_eq(load64(tv), 99, "bs 100 tail_val 99");
+
+    return 0;
+}
