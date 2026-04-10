@@ -909,7 +909,6 @@ fn i32be_to_f64(src, count) {
 # Decode signed 8-bit AIFF samples (signed, not unsigned like WAV)
 fn i8_to_f64(src, count) {
     var v = vec_new();
-    var F64_127 = f64_from(127);
     for (var i = 0; i < count; i = i + 1) {
         var raw = load8(src + i);
         var signed = sign_extend(raw, 8);
@@ -1764,6 +1763,18 @@ fn test_pcm() {
     var u8f = u8_to_f64(&u8buf, 1);
     assert(f64_eq(vec_get(u8f, 0), F64_ZERO) == 1, "u8 center=128 is 0.0");
 
+    # sign_extend correctness
+    assert_eq(sign_extend(0x7FFF, 16), 32767, "sign_extend 16 positive");
+    assert_eq(sign_extend(0xFFFF, 16), 0 - 1, "sign_extend 16 -1");
+    assert_eq(sign_extend(0x8000, 16), 0 - 32768, "sign_extend 16 min");
+    assert_eq(sign_extend(0x7FFFFF, 24), 8388607, "sign_extend 24 positive");
+    assert_eq(sign_extend(0xFFFFFF, 24), 0 - 1, "sign_extend 24 -1");
+    assert_eq(sign_extend(0x800000, 24), 0 - 8388608, "sign_extend 24 min");
+    assert_eq(sign_extend(0x7F, 8), 127, "sign_extend 8 positive");
+    assert_eq(sign_extend(0xFF, 8), 0 - 1, "sign_extend 8 -1");
+    assert_eq(sign_extend(0x80, 8), 0 - 128, "sign_extend 8 min");
+    assert_eq(sign_extend(42, 32), 42, "sign_extend 32 positive");
+
     return 0;
 }
 
@@ -2182,7 +2193,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v1.1.0 — audio codecs for AGNOS (Cyrius port)\n", 55);
+syscall(1, 1, "shravan v2.0.0 — audio codecs for AGNOS (Cyrius)\n", 50);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

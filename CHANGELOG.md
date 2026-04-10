@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-04-10
+
+Full rewrite from Rust to Cyrius. Zero external dependencies.
+
+### Changed
+
+- **Language**: Rust → Cyrius (self-hosting systems language, zero LLVM/crate dependency)
+- **Sample format**: f32 → f64 internally (native Cyrius SSE2, higher precision)
+- **Error handling**: thiserror enum → packed Result (negative = error, bit 63 set)
+- **Build system**: Cargo → `cyrius build` (211ms full compile, 253KB static ELF)
+- **Architecture**: Library crate → include-based modules (`lib/*.cyr`)
+- Rust implementation archived in `rust-old/`
+
+### Preserved
+
+- All 16 modules ported: error, format, pcm, codec, wav, aiff, alac, flac, ogg, mp3, tag, fft, opus, aac, resample, dither, simd, stream
+- Full encode/decode for WAV, FLAC, AIFF, Opus, AAC
+- Decode-only for ALAC, MP3 (header parsing)
+- Ogg container parsing/muxing, metadata tag reading (ID3v2, Vorbis Comment)
+- Mixed-radix FFT, MDCT/IMDCT, sinc resampler, TPDF + noise-shaped dithering
+- Streaming decoders for WAV, FLAC, AIFF
+- 415 test assertions, all passing
+
+### Performance
+
+- WAV decode 1sec i16: 1.1ms (vs Rust 22.8µs — ~50x, expected without LLVM optimizer)
+- PCM i16→f64 4096: 93µs (vs Rust 429ns — ~217x, scalar vs auto-vectorized)
+- Compile: 211ms (vs Rust 5.1s — 24x faster)
+- Binary: 253KB (vs Rust 1.8MB — 7x smaller)
+
 ## [1.1.0] - 2026-04-02
 
 Four new codecs to eliminate tarang's C FFI audio codec dependencies.

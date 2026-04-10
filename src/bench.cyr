@@ -485,7 +485,7 @@ fn bench_pcm_i16_to_f64_4096() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v1.1.0 benchmarks (Cyrius port)\n", 41);
+syscall(1, 1, "shravan v2.0.0 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_ns = bench_wav_decode_1sec();

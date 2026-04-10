@@ -7,7 +7,7 @@
 - **Language**: Cyrius (ported from Rust)
 - **Type**: Library (include-based)
 - **License**: GPL-3.0
-- **Version**: SemVer 1.1.0
+- **Version**: SemVer 2.0.0
 - **Compiler**: Cyrius 3.3.4+ (cc3)
 
 ## Layout

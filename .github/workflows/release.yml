@@ -4,66 +4,89 @@ on:
     tags: ["*"]
 permissions:
   contents: write
+env:
+  CYRIUS_VERSION: "3.3.4"
 jobs:
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+
   build:
-    name: Build (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+    name: Build Release
     needs: [ci]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            name: linux-amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            name: linux-arm64
-            cross: true
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            name: macos-arm64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - name: Cross deps (arm64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml
-          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
-      - run: cargo build --release --target ${{ matrix.target }}
-  publish:
-    name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [ci, build]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
       - name: Verify version
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          [ "$FILE_VERSION" = "$TAG_VERSION" ] || { echo "VERSION mismatch: file=$FILE_VERSION tag=$TAG_VERSION"; exit 1; }
-      - run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TOML_VERSION=$(grep '^version = ' cyrius.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          TAG="${GITHUB_REF_NAME}"
+          [ "$FILE_VERSION" = "$TAG" ] || { echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
+          [ "$TOML_VERSION" = "$TAG" ] || { echo "cyrius.toml ($TOML_VERSION) != tag ($TAG)"; exit 1; }
+          echo "Version verified: $TAG"
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Build
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/shravan
+          echo "shravan: $(wc -c < build/shravan) bytes"
+
+      - name: Test
+        run: |
+          ./build/shravan 2>&1 | tee /tmp/test-output.txt
+          grep -q "0 failed" /tmp/test-output.txt || { echo "Tests failed"; exit 1; }
+
+      - name: Clean toolchain artifacts
+        run: rm -f cyrius-*.tar.gz
+
+      - name: Archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="shravan-${TAG}/" -o "shravan-${TAG}-src.tar.gz" HEAD
+          sha256sum shravan-*.tar.gz > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            shravan-*.tar.gz
+            SHA256SUMS
+
   release:
     name: Create GitHub Release
+    needs: [build]
     runs-on: ubuntu-latest
-    needs: [ci, build, publish]
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+
+      - name: Extract changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
+
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: "shravan ${{ github.ref_name }}"
+          body_path: /tmp/body.md
+          prerelease: ${{ startsWith(github.ref_name, '0.') }}
+          files: |
+            shravan-*.tar.gz
+            SHA256SUMS
