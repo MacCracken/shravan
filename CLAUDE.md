@@ -10,7 +10,7 @@
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) -- takumi build recipes
-- **Ported from**: Rust (10,265 lines -> 9,958 lines Cyrius). Rust source archived in `rust-old/`, preserved in git history. See `benchmarks-rust-v-cyrius.md`.
+- **Ported from**: Rust (10,265 lines -> 11,780 lines Cyrius). Rust source removed at v2.0.0, preserved at tag `1.1.0` in git history. See `benchmarks-rust-v-cyrius.md`.
 
 ## Architecture
 
@@ -21,7 +21,6 @@ src/main.cyr     -- library + test harness (entry point)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
 lib/             -- codec modules + vendored Cyrius stdlib
 build/           -- compiled binaries (gitignored)
-rust-old/        -- archived Rust implementation (reference only)
 scripts/         -- bench-history.sh, version-bump.sh
 docs/            -- architecture, roadmap
 ```
@@ -127,7 +126,6 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 - Do not add unnecessary dependencies -- keep it lean
 - Do not skip benchmarks before claiming performance improvements
 - Do not commit `build/` directory
-- Do not modify anything in `rust-old/` -- it is archived reference only
 - Do not break backward compatibility without a major version bump
 - Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`)
 

@@ -380,6 +380,44 @@ fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
     return 44 + raw_size;
 }
 
+# --- Bitreader (needed by lib/flac.cyr) ---
+fn bitreader_new(data, len) {
+    var br = alloc(32);
+    store64(br, data);
+    store64(br + 8, 0);
+    store64(br + 16, 0);
+    store64(br + 24, len);
+    return br;
+}
+
+fn bitreader_read(br, bits) {
+    if (bits == 0) { return 0; }
+    var brd = load64(br);
+    var bpos = load64(br + 8);
+    var bbit = load64(br + 16);
+    var dlen = load64(br + 24);
+    var result = 0;
+    var remaining = bits;
+    while (remaining > 0) {
+        if (bpos >= dlen) { return err(ERR_END_OF_STREAM); }
+        var avail = 8 - bbit;
+        var take = remaining;
+        if (take > avail) { take = avail; }
+        var shift = avail - take;
+        var mask = ((1 << take) - 1) << shift;
+        var val = (load8(brd + bpos) & mask) >> shift;
+        result = (result << take) | val;
+        remaining = remaining - take;
+        bbit = bbit + take;
+        if (bbit >= 8) { bbit = 0; bpos = bpos + 1; }
+    }
+    store64(br + 8, bpos);
+    store64(br + 16, bbit);
+    return result;
+}
+
+fn bitreader_read_bit(br) { return bitreader_read(br, 1); }
+
 # --- Include FLAC, FFT, resample libs ---
 include "lib/flac.cyr"
 include "lib/fft.cyr"
@@ -618,10 +656,10 @@ fn bench_flac_decode_1sec() {
     var buf = alloc(500000);
     var fsize = flac_encode(samples, 44100, 1, 16, buf);
 
-    var iters = 1;
+    var iters = 20;
     bench("flac_decode_1sec_i16", iters);
     var t0 = time_now_ns();
-    flac_decode(buf, fsize);
+    for (var it = 0; it < iters; it = it + 1) { flac_decode(buf, fsize); }
     var t1 = time_now_ns();
     return bench_report(t1 - t0, iters);
 }
@@ -689,10 +727,8 @@ var pcm24_ns   = bench_pcm_i24_4096();
 var pcmu8_ns   = bench_pcm_u8_4096();
 var fft_ns     = bench_fft_1024();
 var mdct_ns    = bench_mdct_2048();
-# NOTE: FLAC benchmarks disabled — bench.cyr's inline library stubs conflict
-# with lib/flac.cyr. Fix by refactoring bench.cyr to use shared library include.
-# var flac_enc_ns = bench_flac_encode_1sec();
-# var flac_dec_ns = bench_flac_decode_1sec();
+var flac_enc_ns = bench_flac_encode_1sec();
+var flac_dec_ns = bench_flac_decode_1sec();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);

@@ -8,3 +8,12 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-04-10T20:24:57Z,8cd32b4,main,pcm_u8_to_f64_4096,126777
 2026-04-10T20:24:57Z,8cd32b4,main,fft_forward_1024,2458000
 2026-04-10T20:24:57Z,8cd32b4,main,mdct_forward_2048,12340000
+2026-04-11T14:33:51Z,ee0f3ee,main,wav_decode_1sec_i16,1994000
+2026-04-11T14:33:51Z,ee0f3ee,main,wav_encode_1sec_i16,1306000
+2026-04-11T14:33:51Z,ee0f3ee,main,pcm_i16_to_f64_4096,166136
+2026-04-11T14:33:51Z,ee0f3ee,main,pcm_i24_packed_4096,160562
+2026-04-11T14:33:51Z,ee0f3ee,main,pcm_u8_to_f64_4096,126492
+2026-04-11T14:33:51Z,ee0f3ee,main,fft_forward_1024,2463000
+2026-04-11T14:33:51Z,ee0f3ee,main,mdct_forward_2048,12367000
+2026-04-11T14:33:51Z,ee0f3ee,main,flac_encode_1sec_i16,20720000
+2026-04-11T14:33:51Z,ee0f3ee,main,flac_decode_1sec_i16,7971000

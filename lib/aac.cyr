@@ -684,7 +684,240 @@ fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
 }
 
 # ================================================================
-# AAC Decoder (ADTS parsing only -- actual decoding returns error)
+# MSB-first bit reader for AAC bitstream
+# ================================================================
+
+fn _br_new(data, len) {
+    var br = alloc(24);
+    store64(br, data);
+    store64(br + 8, len * 8);
+    store64(br + 16, 0);
+    return br;
+}
+
+fn _br_read(br, n) {
+    var brd = load64(br);
+    var total = load64(br + 8);
+    var pos = load64(br + 16);
+    if (pos + n > total) { return err(ERR_END_OF_STREAM); }
+    var val = 0;
+    var i = 0;
+    while (i < n) {
+        var byte_idx = (pos + i) / 8;
+        var bit_idx = 7 - ((pos + i) % 8);
+        val = (val << 1) | ((load8(brd + byte_idx) >> bit_idx) & 1);
+        i = i + 1;
+    }
+    store64(br + 16, pos + n);
+    return val;
+}
+
+fn _br_bits_left(br) {
+    return load64(br + 8) - load64(br + 16);
+}
+
+# ================================================================
+# AAC-LC frame decoder
+# ================================================================
+
+fn _aac_parse_ics(br, sect_cb, scale_factors) {
+    var ics_reserved = _br_read(br, 1);
+    if (is_err(ics_reserved) == 1) { return ics_reserved; }
+    var window_seq = _br_read(br, 2);
+    if (is_err(window_seq) == 1) { return window_seq; }
+    var window_shape = _br_read(br, 1);
+    if (is_err(window_shape) == 1) { return window_shape; }
+    var max_sfb = _br_read(br, 6);
+    if (is_err(max_sfb) == 1) { return max_sfb; }
+    var predictor = _br_read(br, 1);
+    if (is_err(predictor) == 1) { return predictor; }
+    if (window_seq != 0) { return err(ERR_DECODE); }
+
+    var band = 0;
+    while (band < max_sfb) {
+        var cb = _br_read(br, 4);
+        if (is_err(cb) == 1) { return cb; }
+        var sect_len = 0;
+        var sect_bits = _br_read(br, 5);
+        if (is_err(sect_bits) == 1) { return sect_bits; }
+        sect_len = sect_bits;
+        while (sect_bits == 31) {
+            sect_bits = _br_read(br, 5);
+            if (is_err(sect_bits) == 1) { return sect_bits; }
+            sect_len = sect_len + sect_bits;
+        }
+        var si = 0;
+        while (si < sect_len) {
+            if (band + si < _AAC_NUM_SWB) {
+                store64(sect_cb + (band + si) * 8, cb);
+            }
+            si = si + 1;
+        }
+        band = band + sect_len;
+    }
+
+    var global_gain = _br_read(br, 8);
+    if (is_err(global_gain) == 1) { return global_gain; }
+    var prev_scf = global_gain;
+    band = 0;
+    while (band < max_sfb) {
+        if (load64(sect_cb + band * 8) != 0) {
+            var idx = _br_read(br, 7);
+            if (is_err(idx) == 1) { return idx; }
+            var diff = idx - 60;
+            var scf = prev_scf + diff;
+            store64(scale_factors + band * 8, scf);
+            prev_scf = scf;
+        }
+        band = band + 1;
+    }
+    return max_sfb;
+}
+
+fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
+    var band = 0;
+    while (band < max_sfb) {
+        var cb = load64(sect_cb + band * 8);
+        if (cb == 0) { band = band + 1; }
+        if (cb != 0) {
+            var bstart = load64(_aac_swb_offset + band * 8);
+            var bend = load64(_aac_swb_offset + (band + 1) * 8);
+            if (bend > AAC_FRAME_SIZE) { bend = AAC_FRAME_SIZE; }
+            var i = bstart;
+            while (i + 1 < bend) {
+                if (_br_bits_left(br) < 9) { i = bend; }
+                if (i + 1 < bend) {
+                    var pair_idx = _br_read(br, 9);
+                    if (is_err(pair_idx) == 1) { i = bend; }
+                    if (is_err(pair_idx) == 0) {
+                        var cx = pair_idx / 17;
+                        var cy = pair_idx % 17;
+                        var qx = cx;
+                        var qy = cy;
+                        if (cx > 0) {
+                            var sx = _br_read(br, 1);
+                            if (is_ok(sx) == 1) { if (sx == 1) { qx = 0 - cx; } }
+                        }
+                        if (cy > 0) {
+                            var sy = _br_read(br, 1);
+                            if (is_ok(sy) == 1) { if (sy == 1) { qy = 0 - cy; } }
+                        }
+                        if (cx == 16) {
+                            var ex = _br_read(br, 8);
+                            if (is_ok(ex) == 1) {
+                                if (qx < 0) { qx = 0 - (16 + ex); }
+                                else { qx = 16 + ex; }
+                            }
+                        }
+                        if (cy == 16) {
+                            var ey = _br_read(br, 8);
+                            if (is_ok(ey) == 1) {
+                                if (qy < 0) { qy = 0 - (16 + ey); }
+                                else { qy = 16 + ey; }
+                            }
+                        }
+                        store64(quant_spec + i * 8, qx);
+                        store64(quant_spec + (i + 1) * 8, qy);
+                        i = i + 2;
+                    }
+                }
+            }
+            band = band + 1;
+        }
+    }
+    return 0;
+}
+
+fn _aac_synth(scale_factors, quant_spec, overlap, out_samples) {
+    var spec = alloc(AAC_FRAME_SIZE * 8);
+    memset(spec, 0, AAC_FRAME_SIZE * 8);
+    var f43 = f64_div(f64_from(4), f64_from(3));
+    var f025 = f64_div(F64_ONE, f64_from(4));
+
+    var band = 0;
+    while (band < _AAC_NUM_SWB) {
+        var bstart = load64(_aac_swb_offset + band * 8);
+        var bend = load64(_aac_swb_offset + (band + 1) * 8);
+        var scf = load64(scale_factors + band * 8);
+        var step = f64_pow(F64_TWO, f64_mul(f025, f64_sub(f64_from(scf), f64_from(100))));
+        var i = bstart;
+        while (i < bend) {
+            var q = load64(quant_spec + i * 8);
+            if (q != 0) {
+                var aq = q;
+                if (aq < 0) { aq = 0 - aq; }
+                var val = f64_mul(f64_pow(f64_from(aq), f43), step);
+                if (q < 0) { val = f64_neg(val); }
+                store64(spec + i * 8, val);
+            }
+            i = i + 1;
+        }
+        band = band + 1;
+    }
+
+    var mdct_out = alloc(2048 * 8);
+    memset(mdct_out, 0, 2048 * 8);
+    fft_imdct(spec, 2048, mdct_out);
+
+    var i = 0;
+    while (i < 2048) {
+        var angle = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)), f64_from(2048));
+        var w = f64_sin(angle);
+        store64(mdct_out + i * 8, f64_mul(load64(mdct_out + i * 8), w));
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < AAC_FRAME_SIZE) {
+        store64(out_samples + i * 8, f64_add(load64(overlap + i * 8), load64(mdct_out + i * 8)));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < AAC_FRAME_SIZE) {
+        store64(overlap + i * 8, load64(mdct_out + (i + AAC_FRAME_SIZE) * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var br = _br_new(fdata, flen);
+
+    var elem_id = _br_read(br, 3);
+    if (is_err(elem_id) == 1) { return elem_id; }
+
+    if (elem_id == 7) {
+        var i = 0;
+        while (i < AAC_FRAME_SIZE) {
+            store64(out_samples + i * 8, load64(overlap + i * 8));
+            store64(overlap + i * 8, F64_ZERO);
+            i = i + 1;
+        }
+        return 0;
+    }
+    if (elem_id != 0) { return err(ERR_DECODE); }
+
+    var instance = _br_read(br, 4);
+    if (is_err(instance) == 1) { return instance; }
+
+    var sect_cb = alloc(_AAC_NUM_SWB * 8);
+    memset(sect_cb, 0, _AAC_NUM_SWB * 8);
+    var scale_factors = alloc(_AAC_NUM_SWB * 8);
+    memset(scale_factors, 0, _AAC_NUM_SWB * 8);
+
+    var max_sfb = _aac_parse_ics(br, sect_cb, scale_factors);
+    if (is_err(max_sfb) == 1) { return max_sfb; }
+
+    var quant_spec = alloc(AAC_FRAME_SIZE * 8);
+    memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
+    _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec);
+
+    return _aac_synth(scale_factors, quant_spec, overlap, out_samples);
+}
+
+# ================================================================
+# AAC-LC Decoder (ADTS input -> audio samples)
 # ================================================================
 #
 # aac_decode(data, len)
@@ -741,17 +974,46 @@ fn aac_decode(data, len) {
 
     if (first_header == 0) { return err(ERR_INVALID_HEADER); }
 
-    # Build format info
     var sr = aac_adts_sample_rate(first_header);
     var ch = aac_adts_channels(first_header);
-    var total_frames = frame_count * AAC_FRAME_SIZE;
-    var dur = F64_ZERO;
-    if (sr > 0) {
-        dur = f64_div(f64_from(total_frames), f64_from(sr));
+
+    # Second pass: decode frames
+    var all_samples = vec_new();
+    var overlap = alloc(AAC_FRAME_SIZE * 8);
+    memset(overlap, 0, AAC_FRAME_SIZE * 8);
+    var frame_buf = alloc(AAC_FRAME_SIZE * 8);
+
+    pos = 0;
+    while (pos + 7 <= len) {
+        if (load8(data + pos) != 0xFF) { pos = pos + 1; continue; }
+        if ((load8(data + pos + 1) & 0xF0) != 0xF0) { pos = pos + 1; continue; }
+        var hdr2 = aac_parse_adts_header(data + pos, len - pos);
+        if (is_err(hdr2) == 1) { pos = pos + 1; continue; }
+        var fl2 = aac_adts_frame_length(hdr2);
+        if (pos + fl2 > len) { break; }
+        var pa2 = (load8(data + pos + 1) & 0x01);
+        var hs2 = 7;
+        if (pa2 == 0) { hs2 = 9; }
+        var plen = fl2 - hs2;
+        if (plen > 0) {
+            var rc = _aac_decode_frame(data + pos + hs2, plen, overlap, frame_buf);
+            if (is_err(rc) == 0) {
+                var i = 0;
+                while (i < AAC_FRAME_SIZE) {
+                    vec_push(all_samples, load64(frame_buf + i * 8));
+                    i = i + 1;
+                }
+            }
+        }
+        pos = pos + fl2;
     }
 
-    var fi = fmtinfo_new(FMT_AAC, sr, ch, 16, dur, total_frames);
-    return decode_result_new(fi, vec_new());
+    var total_decoded = vec_len(all_samples);
+    var dur = F64_ZERO;
+    if (sr > 0) { dur = f64_div(f64_from(total_decoded), f64_from(sr)); }
+
+    var fi = fmtinfo_new(FMT_AAC, sr, ch, 16, dur, total_decoded);
+    return decode_result_new(fi, all_samples);
 }
 
 # ================================================================
