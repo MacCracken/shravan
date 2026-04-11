@@ -1,85 +1,90 @@
 # Development Roadmap
 
-## Bugs
+> **v2.0.0** — Full Cyrius port. 18 modules, 499 tests, 9 benchmarks.
+> AAC-LC decoder from scratch (no symphonia). Rust source removed (tag `1.1.0`).
+> cc3 >= 3.4.3 required.
 
-### FLAC encoder segfault (cc3 3.3.10)
+## Completed (v2.0.0)
 
-`flac_encode()` crashes with SIGSEGV during encoding. Reproducer: `tests/flac_crash_repro.cyr` (93KB standalone binary). Crashes on 256 silence samples, 16-bit mono, 44100 Hz. The crash occurs inside the encoder — decoder is unaffected. Likely a buffer overflow in `flac_bw_write_bits` (no bounds checking on bitwriter output buffer). Needs investigation in the compiler or the encoder's buffer allocation logic.
+- [x] Full Rust -> Cyrius port (10,265 -> 11,780 lines)
+- [x] All codec modules: WAV, AIFF, FLAC, ALAC, Ogg, MP3, Opus, AAC
+- [x] AAC-LC decoder from scratch (bitreader, section/SF parsing, spectral decode, inverse quant, IMDCT, overlap-add)
+- [x] FLAC SEEKTABLE parsing + decode_range() for sample-accurate seeking
+- [x] Opus decode path (OpusHead/OpusTags parsing, granule-based duration, ogg_decode dispatch)
+- [x] codec_open dispatches all 8 formats (WAV, AIFF, FLAC, OGG/Opus, MP3, AAC, ALAC)
+- [x] Stream chunking (WAV/AIFF chunk_frames functional)
+- [x] 499 test assertions, 0 failures
+- [x] Benchmarks: FLAC 5.2x of Rust+LLVM, WAV 42x, compile 16x faster
 
-### AAC-LC decoder blocked on cc3 parser limit
+## v2.1.0 — Quality
 
-AAC-LC decoder implementation (bitreader, section/scale factor/spectral parsing, inverse quantization, IMDCT + overlap-add) is written but cannot compile — adding ~300 lines to lib/aac.cyr pushes the total expanded source past a cc3 3.3.12 parser internal limit (manifests as `expected ')', got identifier 'F'` on an unrelated line). The decoder code is preserved in git stash. Needs compiler fix to the token/parse table sizing.
+### AAC decoder improvements
 
-## v1.1.0
+- Standard Huffman codebooks (11 spectral codebooks) for decoding external AAC files
+- Short window support (8x128 for transients)
+- M/S stereo decoding
+- TNS (Temporal Noise Shaping)
+- MP4/M4A container support (currently ADTS only)
 
-- High-resolution audio support (88.2/96/176.4/192/352.8/384 kHz sample rates, 32-bit integer, 64-bit float)
-- Metadata writing (ID3v2, Vorbis Comment)
-- Waveform analysis utilities
-- Memory-mapped file support (mmap)
-- LPC encoding in FLAC encoder
-- Async runtime adapters (tokio, async-std)
+### AAC encoder improvements
 
-## v1.3.0 — Performance
+- Proper Huffman codebook selection (current uses escape pairs for all bands)
+- Psychoacoustic model (masking thresholds)
+- VBR mode
 
-### Opus encoder (27ms/s → target <10ms/s)
+### Metadata writing
 
-- Specialized radix-2/3/5 FFT butterflies with precomputed twiddle tables (current generic combine is O(R×N) per stage)
-- N/4-point MDCT via proper folding (current uses 2N-point FFT — 4x more work than necessary)
+- ID3v2 tag writing (currently read-only)
+- Vorbis Comment writing (currently read-only)
+
+### Streaming improvements
+
+- True incremental FLAC decode (frame-by-frame with sample offset tracking)
+- decode_file / decode_reader convenience helpers
+
+## v2.2.0 — Performance
+
+### Opus encoder (current ~27ms/s -> target <10ms/s)
+
+- Specialized radix-2/3/5 FFT butterflies with precomputed twiddle tables
+- N/4-point MDCT via proper folding (current uses 2N-point FFT — 4x more work)
 - Cache-friendly memory layout for FFT scratch buffers
 
-### Resampler (3.3ms/4096 samples → target <1ms)
+### Resampler (current ~5ms/4096 samples -> target <1ms)
 
-- Polyphase filter bank structure (avoid recomputing sinc taps per output sample)
-- SIMD inner loop for polyphase convolution (extend existing `weighted_sum`)
+- Polyphase filter bank structure
+- SIMD inner loop for polyphase convolution
 - Pre-tabulated sinc coefficients per quality level
 
-### FLAC encoder (1.35ms/s — already good, compression ratio improvements)
+### FLAC encoder (current ~21ms/s)
 
 - LPC encoding (currently Fixed prediction only — LPC gives 5-15% better compression)
 - Adaptive block sizing based on signal characteristics
 
-## Future
+### PCM conversion (current 166us/4096 -> target <20us)
 
-### Codec gaps — All Done
+- Inline asm SSE2 for i16/f64 hot loops
+- Hand-unrolled 4x processing
 
-tarang C FFI deps eliminated:
-- ~~Opus encode (libopus)~~ — Done: CELT-mode, FFT-based MDCT
-- ~~AAC decode (fdk-aac)~~ — Done: symphonia-codec-aac bridge
-- ~~AAC encode (fdk-aac)~~ — Done: from-scratch AAC-LC, ADTS output
-- ~~ALAC decode (symphonia)~~ — Done: from-scratch, no_std
+## v2.3.0 — Own the stack
 
-### Own the stack — Opus encoder
+### Opus encoder
 
 - SILK mode for speech content
 - Hybrid mode (SILK + CELT)
 - VBR support
 - Stereo coupling (dual-coded stereo instead of mono downmix)
-- ~~FFT-based MDCT~~ Done (2N-point mixed-radix FFT, 430ms→27ms)
 - Full PVQ spectral shape coding (current is sign-only)
 - Transient detection and short-window switching
 
-### Own the stack — AAC encoder
+### High-resolution audio
 
-- Proper Huffman codebook selection (current uses escape pairs for all bands)
-- Short window support for transients
-- VBR mode
-- Psychoacoustic model (masking thresholds)
-- M/S stereo coding
-
-### Own the stack — AAC decoder
-
-- Replace symphonia-codec-aac with native implementation (remove std dependency)
-- MP4/M4A container support (currently ADTS only)
-
-### Other
-
+- 88.2/96/176.4/192/352.8/384 kHz sample rates
+- 32-bit integer, 64-bit float PCM
 - DSD support (DSD64/DSD128/DSD256, DoP)
 
-## v1.0 Criteria — All Met
+## Resolved bugs
 
-- [x] All FLAC subframe types decoded (Constant, Verbatim, Fixed 0-4, LPC 1-32)
-- [x] WAV + FLAC encode/decode tested against reference implementations (ffmpeg)
-- [x] Streaming API stable (StreamDecoder trait, WAV/FLAC/AIFF decoders)
-- [x] Performance within 2x of C reference implementations
-- [x] 85%+ test coverage (90%+ excluding platform-conditional dead code)
-- [ ] Published on crates.io (user handles)
+- ~~FLAC encoder segfault~~ — Fixed in cc3 3.3.11 (compiler codegen issue)
+- ~~AAC decoder blocked on parser limit~~ — Fixed in cc3 3.3.17 (tok_names overflow)
+- ~~tok_names regression in 3.4.x~~ — Fixed in cc3 3.4.3

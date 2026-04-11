@@ -9,7 +9,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 env:
-  CYRIUS_VERSION: "3.3.4"
+  CYRIUS_VERSION: "3.4.3"
 jobs:
   build-and-test:
     name: Build & Test
@@ -66,6 +66,51 @@ jobs:
 
       - name: Run benchmarks
         run: ./build/bench
+
+  check:
+    name: Check & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Format check
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            cyrfmt "$f" > /tmp/fmt_check 2>/dev/null
+            if ! diff -q "$f" /tmp/fmt_check > /dev/null 2>&1; then
+              echo "needs formatting: $(basename $f)"
+              fail=1
+            fi
+          done
+          rm -f /tmp/fmt_check
+          test $fail -eq 0
+        continue-on-error: true
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for dangerous patterns
+        run: |
+          WARN=0
+          if grep -rn 'syscall(59' src/ lib/ 2>/dev/null | grep -v "# "; then
+            echo "WARN: raw execve in shravan modules"; WARN=1
+          fi
+          echo "security scan complete (warnings: $WARN)"
 
   docs:
     name: Documentation

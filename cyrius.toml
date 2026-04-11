@@ -5,6 +5,8 @@ description = "shravan — audio codecs for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/shravan"
 
+cyrius = "3.4.3"
+
 [build]
 src = "src/main.cyr"
 output = "build/shravan"
