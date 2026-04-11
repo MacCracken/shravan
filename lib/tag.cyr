@@ -316,6 +316,167 @@ fn tag_read_vorbis(data, len) {
 }
 
 # ================================================================
+# ID3v2.3 tag writer
+# ================================================================
+
+# Write syncsafe integer (4 bytes, 7 bits per byte)
+fn _tag_write_syncsafe(buf, off, val) {
+    store8(buf + off, (val >> 21) & 0x7F);
+    store8(buf + off + 1, (val >> 14) & 0x7F);
+    store8(buf + off + 2, (val >> 7) & 0x7F);
+    store8(buf + off + 3, val & 0x7F);
+    return 0;
+}
+
+# Write an ID3v2.3 tag from AudioMetadata into out_buf.
+# Returns bytes written, or 0 if no metadata to write.
+fn tag_write_id3v2(meta, out_buf) {
+    # Collect non-null fields: (frame_id, value_str) pairs
+    # ID3v2.3 frame IDs: TIT2, TPE1, TALB, TRCK, TDRC, TCON
+    var field_offsets = alloc(7 * 8);
+    store64(field_offsets + 0 * 8, 0);   # title
+    store64(field_offsets + 1 * 8, 8);   # artist
+    store64(field_offsets + 2 * 8, 16);  # album
+    store64(field_offsets + 3 * 8, 24);  # track_number
+    store64(field_offsets + 4 * 8, 32);  # year
+    store64(field_offsets + 5 * 8, 40);  # genre
+    store64(field_offsets + 6 * 8, 48);  # comment
+
+    var frame_ids = alloc(7 * 8);
+    store64(frame_ids + 0 * 8, 0x54495432);  # TIT2
+    store64(frame_ids + 1 * 8, 0x54504531);  # TPE1
+    store64(frame_ids + 2 * 8, 0x54414C42);  # TALB
+    store64(frame_ids + 3 * 8, 0x5452434B);  # TRCK
+    store64(frame_ids + 4 * 8, 0x54445243);  # TDRC
+    store64(frame_ids + 5 * 8, 0x54434F4E);  # TCON
+    store64(frame_ids + 6 * 8, 0x434F4D4D);  # COMM
+
+    # Compute total frame data
+    var total_frame_data = 0;
+    var num_fields = 0;
+    var fi = 0;
+    while (fi < 7) {
+        var val = load64(meta + load64(field_offsets + fi * 8));
+        if (val != 0) {
+            var vlen = str_len(val);
+            if (vlen > 0) {
+                total_frame_data = total_frame_data + 10 + 1 + vlen;
+                num_fields = num_fields + 1;
+            }
+        }
+        fi = fi + 1;
+    }
+
+    if (num_fields == 0) { return 0; }
+
+    var tag_size = total_frame_data;
+    var total_size = 10 + tag_size;
+
+    # ID3 header
+    store8(out_buf, 0x49); store8(out_buf + 1, 0x44); store8(out_buf + 2, 0x33);
+    store8(out_buf + 3, 3); store8(out_buf + 4, 0); store8(out_buf + 5, 0);
+    _tag_write_syncsafe(out_buf, 6, tag_size);
+
+    # Write frames
+    var pos = 10;
+    fi = 0;
+    while (fi < 7) {
+        var val = load64(meta + load64(field_offsets + fi * 8));
+        if (val != 0) {
+            var vlen = str_len(val);
+            if (vlen > 0) {
+                var fid = load64(frame_ids + fi * 8);
+                store8(out_buf + pos, (fid >> 24) & 0xFF);
+                store8(out_buf + pos + 1, (fid >> 16) & 0xFF);
+                store8(out_buf + pos + 2, (fid >> 8) & 0xFF);
+                store8(out_buf + pos + 3, fid & 0xFF);
+                write_u32_be(out_buf, pos + 4, 1 + vlen);
+                store8(out_buf + pos + 8, 0); store8(out_buf + pos + 9, 0);
+                store8(out_buf + pos + 10, 3);  # encoding = UTF-8
+                memcpy(out_buf + pos + 11, str_data(val), vlen);
+                pos = pos + 11 + vlen;
+            }
+        }
+        fi = fi + 1;
+    }
+
+    return pos;
+}
+
+# ================================================================
+# Vorbis Comment writer
+# ================================================================
+
+# Write a Vorbis Comment block from AudioMetadata into out_buf.
+# Returns bytes written, or 0 if no metadata to write.
+fn tag_write_vorbis(meta, out_buf) {
+    # Vendor string
+    var vendor = "shravan";
+    var vendor_len = 7;
+
+    var pos = 0;
+    write_u32_le(out_buf, pos, vendor_len);
+    pos = pos + 4;
+    memcpy(out_buf + pos, vendor, vendor_len);
+    pos = pos + vendor_len;
+
+    # Count non-null fields
+    var field_names = alloc(7 * 8);
+    store64(field_names + 0 * 8, str_from("TITLE"));
+    store64(field_names + 1 * 8, str_from("ARTIST"));
+    store64(field_names + 2 * 8, str_from("ALBUM"));
+    store64(field_names + 3 * 8, str_from("TRACKNUMBER"));
+    store64(field_names + 4 * 8, str_from("DATE"));
+    store64(field_names + 5 * 8, str_from("GENRE"));
+    store64(field_names + 6 * 8, str_from("COMMENT"));
+
+    var field_offsets = alloc(7 * 8);
+    store64(field_offsets + 0 * 8, 0);
+    store64(field_offsets + 1 * 8, 8);
+    store64(field_offsets + 2 * 8, 16);
+    store64(field_offsets + 3 * 8, 24);
+    store64(field_offsets + 4 * 8, 32);
+    store64(field_offsets + 5 * 8, 40);
+    store64(field_offsets + 6 * 8, 48);
+
+    var comment_count = 0;
+    var fi = 0;
+    while (fi < 7) {
+        var val = load64(meta + load64(field_offsets + fi * 8));
+        if (val != 0) { if (str_len(val) > 0) { comment_count = comment_count + 1; } }
+        fi = fi + 1;
+    }
+
+    write_u32_le(out_buf, pos, comment_count);
+    pos = pos + 4;
+
+    # Write comments: "FIELD=value"
+    fi = 0;
+    while (fi < 7) {
+        var val = load64(meta + load64(field_offsets + fi * 8));
+        if (val != 0) {
+            var vlen = str_len(val);
+            if (vlen > 0) {
+                var fname = load64(field_names + fi * 8);
+                var flen = str_len(fname);
+                var comment_len = flen + 1 + vlen;  # FIELD=value
+                write_u32_le(out_buf, pos, comment_len);
+                pos = pos + 4;
+                memcpy(out_buf + pos, str_data(fname), flen);
+                pos = pos + flen;
+                store8(out_buf + pos, 61);  # '='
+                pos = pos + 1;
+                memcpy(out_buf + pos, str_data(val), vlen);
+                pos = pos + vlen;
+            }
+        }
+        fi = fi + 1;
+    }
+
+    return pos;
+}
+
+# ================================================================
 # Tests
 # ================================================================
 

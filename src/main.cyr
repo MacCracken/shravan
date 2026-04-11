@@ -2585,6 +2585,74 @@ fn test_aac_encode_decode_roundtrip() {
     return 0;
 }
 
+fn test_tag_write_id3v2_roundtrip() {
+    syscall(1, 1, "test: id3v2 write/read roundtrip\n", 33);
+
+    var meta = tag_meta_new();
+    tag_meta_set_title(meta, str_from("Test Song"));
+    tag_meta_set_artist(meta, str_from("Test Artist"));
+    tag_meta_set_album(meta, str_from("Test Album"));
+    tag_meta_set_year(meta, str_from("2026"));
+
+    var buf = alloc(4096);
+    var written = tag_write_id3v2(meta, buf);
+    assert(written > 10, "id3v2 write produced output");
+
+    # Verify header magic
+    assert_eq(load8(buf), 0x49, "id3v2 magic I");
+    assert_eq(load8(buf + 1), 0x44, "id3v2 magic D");
+    assert_eq(load8(buf + 2), 0x33, "id3v2 magic 3");
+
+    # Read back
+    var parsed = tag_read_id3v2(buf, written);
+    assert(is_err(parsed) == 0, "id3v2 read back ok");
+    var t = tag_meta_title(parsed);
+    assert(t != 0, "id3v2 roundtrip title exists");
+    assert(str_eq(t, str_from("Test Song")) == 1, "id3v2 roundtrip title matches");
+
+    var a = tag_meta_artist(parsed);
+    assert(a != 0, "id3v2 roundtrip artist exists");
+    assert(str_eq(a, str_from("Test Artist")) == 1, "id3v2 roundtrip artist matches");
+
+    return 0;
+}
+
+fn test_tag_write_vorbis_roundtrip() {
+    syscall(1, 1, "test: vorbis write/read roundtrip\n", 34);
+
+    var meta = tag_meta_new();
+    tag_meta_set_title(meta, str_from("Vorbis Song"));
+    tag_meta_set_artist(meta, str_from("Vorbis Artist"));
+    tag_meta_set_genre(meta, str_from("Electronic"));
+
+    var buf = alloc(4096);
+    var written = tag_write_vorbis(meta, buf);
+    assert(written > 11, "vorbis write produced output");
+
+    # Read back
+    var parsed = tag_read_vorbis(buf, written);
+    assert(is_err(parsed) == 0, "vorbis read back ok");
+    var t = tag_meta_title(parsed);
+    assert(t != 0, "vorbis roundtrip title exists");
+    assert(str_eq(t, str_from("Vorbis Song")) == 1, "vorbis roundtrip title matches");
+
+    var a = tag_meta_artist(parsed);
+    assert(a != 0, "vorbis roundtrip artist exists");
+    assert(str_eq(a, str_from("Vorbis Artist")) == 1, "vorbis roundtrip artist matches");
+
+    var g = tag_meta_genre(parsed);
+    assert(g != 0, "vorbis roundtrip genre exists");
+    assert(str_eq(g, str_from("Electronic")) == 1, "vorbis roundtrip genre matches");
+
+    # Empty metadata should return 0
+    var empty = tag_meta_new();
+    var empty_buf = alloc(64);
+    var empty_written = tag_write_id3v2(empty, empty_buf);
+    assert_eq(empty_written, 0, "id3v2 empty metadata returns 0");
+
+    return 0;
+}
+
 fn test_stream_edge_cases() {
     syscall(1, 1, "test: stream edge cases\n", 24);
 
@@ -2726,6 +2794,8 @@ test_codec_open_formats();
 test_flac_decode_range();
 test_ogg_opus_dispatch();
 test_aac_encode_decode_roundtrip();
+test_tag_write_id3v2_roundtrip();
+test_tag_write_vorbis_roundtrip();
 test_stream_aiff_chunking();
 test_stream_edge_cases();
 

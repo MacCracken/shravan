@@ -133,30 +133,28 @@ fn wav_stream_flush(dec) {
 }
 
 # ================================================================
-# FLAC streaming decoder
+# FLAC streaming decoder (incremental via flac_decode_range)
 # ================================================================
 #
-# Simplified streaming strategy: accumulate all bytes, attempt
-# flac_decode when flushed. During feed, we try a decode after
-# accumulating enough data (>= 42 bytes for STREAMINFO).
-#
-# State struct (32 bytes):
-#   +0:  state (0=BUFFERING, 1=DECODED, 2=DONE)
+# State struct (48 bytes):
+#   +0:  state (0=BUFFERING, 1=HEADER_PARSED, 2=DONE)
 #   +8:  buffer_ptr
 #   +16: buffer_len
 #   +24: buffer_cap
+#   +32: samples_emitted (total samples decoded so far)
+#   +40: header_info (FormatInfo pointer, 0 until header parsed)
 
-var _FLAC_ST_BUFFERING = 0;
-var _FLAC_ST_DECODED   = 1;
-var _FLAC_ST_DONE      = 2;
+var _FLAC_ST_BUFFERING     = 0;
+var _FLAC_ST_HEADER_PARSED = 1;
+var _FLAC_ST_DONE          = 2;
 
 fn flac_stream_new() {
-    var dec = alloc(32);
-    store64(dec,      _FLAC_ST_BUFFERING);
+    var dec = alloc(48);
+    memset(dec, 0, 48);
+    store64(dec, _FLAC_ST_BUFFERING);
     var init_cap = 4096;
     var buf = alloc(init_cap);
-    store64(dec + 8,  buf);
-    store64(dec + 16, 0);
+    store64(dec + 8, buf);
     store64(dec + 24, init_cap);
     return dec;
 }
@@ -165,7 +163,6 @@ fn _flac_stream_append(dec, data, len) {
     var buf = load64(dec + 8);
     var blen = load64(dec + 16);
     var bcap = load64(dec + 24);
-
     while (blen + len > bcap) {
         var new_cap = bcap * 2;
         if (new_cap < blen + len) { new_cap = blen + len; }
@@ -176,49 +173,56 @@ fn _flac_stream_append(dec, data, len) {
         store64(dec + 8, buf);
         store64(dec + 24, bcap);
     }
-
     memcpy(buf + blen, data, len);
     store64(dec + 16, blen + len);
     return 0;
 }
 
-# Try to decode the accumulated FLAC buffer.
-# Returns events if successful.
 fn _flac_stream_try_decode(dec, events) {
     var buf = load64(dec + 8);
     var blen = load64(dec + 16);
+    var emitted = load64(dec + 32);
 
-    if (blen < 42) { return 0; }   # Minimum FLAC size (4 magic + 38 STREAMINFO)
+    if (blen < 42) { return 0; }
 
-    var result = flac_decode(buf, blen);
-    if (is_err(result) == 1) {
-        # Not enough data or error; wait for more
-        return 0;
-    }
+    # Try to decode a chunk of new samples starting from where we left off
+    # Use a reasonable chunk size (4096 samples per attempt)
+    var chunk = 4096;
+    var result = flac_decode_range(buf, blen, emitted, chunk);
+    if (is_err(result) == 1) { return 0; }
 
-    # Success: extract info and samples
     var fi = decode_result_info(result);
     var samples = decode_result_samples(result);
+    var got = vec_len(samples);
 
-    vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
-    if (vec_len(samples) > 0) {
-        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+    # Emit header on first successful decode
+    if (load64(dec + 40) == 0) {
+        store64(dec + 40, fi);
+        vec_push(events, stream_evt_new(STREAM_EVT_HEADER, fi));
+        store64(dec, _FLAC_ST_HEADER_PARSED);
     }
 
-    store64(dec, _FLAC_ST_DECODED);
-    return 1;
+    if (got > 0) {
+        vec_push(events, stream_evt_new(STREAM_EVT_SAMPLES, samples));
+        var channels = fmtinfo_channels(fi);
+        if (channels < 1) { channels = 1; }
+        store64(dec + 32, emitted + (got / channels));
+    }
+
+    return got;
 }
 
 fn flac_stream_feed(dec, data, len) {
     var events = vec_new();
     var state = load64(dec);
-
     if (state == _FLAC_ST_DONE) { return events; }
 
     _flac_stream_append(dec, data, len);
 
-    if (state == _FLAC_ST_BUFFERING) {
-        _flac_stream_try_decode(dec, events);
+    # Try to decode incrementally
+    var decoded = 1;
+    while (decoded > 0) {
+        decoded = _flac_stream_try_decode(dec, events);
     }
 
     return events;
@@ -228,8 +232,12 @@ fn flac_stream_flush(dec) {
     var events = vec_new();
     var state = load64(dec);
 
-    if (state == _FLAC_ST_BUFFERING) {
-        _flac_stream_try_decode(dec, events);
+    # Final decode attempt for any remaining data
+    if (state != _FLAC_ST_DONE) {
+        var decoded = 1;
+        while (decoded > 0) {
+            decoded = _flac_stream_try_decode(dec, events);
+        }
     }
 
     store64(dec, _FLAC_ST_DONE);
