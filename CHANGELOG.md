@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-04-11
+
+### Added
+
+- **AAC-LC decoder**: from-scratch implementation — bitreader, ICS/section/scale factor parsing, escape-pair spectral decode, inverse quantization (|q|^4/3), IMDCT via fft.cyr, sine window overlap-add. Encode/decode roundtrip verified.
+- **AAC M/S stereo**: CPE (Channel Pair Element) parsing, common window flag, per-band and all-band M/S mask, stereo reconstruction (L=M+S, R=M-S). Stereo roundtrip tested.
+- **AAC scale factor Huffman codebook**: ISO 14496-3 standard codebook (121 entries). Both encoder and decoder now use real Huffman codes instead of simplified 7-bit fixed encoding.
+- **Metadata writing**: `tag_write_id3v2()` and `tag_write_vorbis()` — write/read roundtrip tested for title, artist, album, year, genre fields.
+- **FLAC incremental streaming**: `flac_stream_feed` now decodes frame-by-frame via `flac_decode_range` with sample offset tracking, emitting SAMPLES events incrementally instead of buffering everything.
+- **FLAC SEEKTABLE parsing**: `flac_parse_metadata` now parses SEEKTABLE blocks (type=3) into SeekPoint structs for fast seeking.
+- **FLAC decode_range()**: sample-accurate seeking with SEEKTABLE support.
+- **Opus decode path**: `opus_decode_from_packets` parses OpusHead/OpusTags, scans granule positions for duration. `ogg_decode` dispatches to Opus on OpusHead magic.
+- **Opus parse_tags()**: reads Vorbis Comment metadata from OpusTags packets.
+- **codec_open ALAC/Opus dispatch**: `codec_open` now dispatches all 8 formats including ALAC and Opus.
+- **PCM i24 unpacked conversions**: `i24_to_f64()` and `f64_to_i24()` for unpacked i32-stored 24-bit samples.
+- **Stream chunk_size**: WAV and AIFF streaming decoders now use `chunk_frames` parameter — emit multiple SAMPLES events of controlled size.
+- 21 new test assertions (520 total, 0 failures)
+
+### Changed
+
+- **Compiler requirement**: cc3 >= 3.4.3 (tok_names overflow fix)
+- **Rust source removed**: `rust-old/` deleted, preserved at git tag `1.1.0`
+- **CI workflows**: bumped to Cyrius 3.4.3, added format check, security scan jobs
+- **Benchmarks**: 9 benchmarks (WAV encode/decode, PCM i16/i24/u8, FFT 1024, MDCT 2048, FLAC encode/decode)
+
+### Performance
+
+- FLAC decode 1sec i16: 8.0ms (vs Rust 1.53ms — 5.2x)
+- FLAC encode 1sec i16: 20.7ms (vs Rust 2.77ms — 7.5x)
+- WAV decode 1sec i16: 2.0ms (vs Rust 47µs — 42x)
+- Compile: 420ms full rebuild (vs Rust 6.9s — 16x faster)
+- Binary: 313KB (vs Rust 1.83MB — 6x smaller)
+
 ## [2.0.0] - 2026-04-10
 
 Full rewrite from Rust to Cyrius. Zero external dependencies.
@@ -16,7 +49,7 @@ Full rewrite from Rust to Cyrius. Zero external dependencies.
 - **Error handling**: thiserror enum → packed Result (negative = error, bit 63 set)
 - **Build system**: Cargo → `cyrius build` (211ms full compile, 253KB static ELF)
 - **Architecture**: Library crate → include-based modules (`lib/*.cyr`)
-- Rust implementation archived in `rust-old/`
+- Rust implementation archived in `rust-old/` (removed in v2.1.0, preserved at tag `1.1.0`)
 
 ### Preserved
 
