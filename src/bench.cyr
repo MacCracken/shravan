@@ -505,12 +505,12 @@ fn bench_wav_decode_1sec() {
     var wav_size = wav_encode(samples, 44100, 1, PCM_I16, wav_buf);
 
     # Warm up
-    for (var w = 0; w < 100; w = w + 1) {
+    for (var w = 0; w < 10; w = w + 1) {
         wav_decode(wav_buf, wav_size);
     }
 
     # Benchmark
-    var iters = 10000;
+    var iters = 1000;
     bench("wav_decode_1sec_i16", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) {
@@ -534,12 +534,12 @@ fn bench_pcm_i16_to_f64_4096() {
     }
 
     # Warm up
-    for (var w = 0; w < 1000; w = w + 1) {
+    for (var w = 0; w < 100; w = w + 1) {
         i16_to_f64(buf, 4096);
     }
 
     # Benchmark
-    var iters = 100000;
+    var iters = 10000;
     bench("pcm_i16_to_f64_4096", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) {
@@ -563,9 +563,9 @@ fn bench_wav_encode_1sec() {
     }
     var buf = alloc(200000);
 
-    for (var w = 0; w < 100; w = w + 1) { wav_encode(samples, 44100, 1, PCM_I16, buf); }
+    for (var w = 0; w < 10; w = w + 1) { wav_encode(samples, 44100, 1, PCM_I16, buf); }
 
-    var iters = 5000;
+    var iters = 1000;
     bench("wav_encode_1sec_i16", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) { wav_encode(samples, 44100, 1, PCM_I16, buf); }
@@ -587,9 +587,9 @@ fn bench_pcm_i24_4096() {
         store8(buf + off + 2, (val >> 16) & 0xFF);
     }
 
-    for (var w = 0; w < 1000; w = w + 1) { i24_packed_to_f64(buf, 4096); }
+    for (var w = 0; w < 100; w = w + 1) { i24_packed_to_f64(buf, 4096); }
 
-    var iters = 100000;
+    var iters = 10000;
     bench("pcm_i24_packed_4096", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) { i24_packed_to_f64(buf, 4096); }
@@ -605,9 +605,9 @@ fn bench_pcm_u8_4096() {
     var buf = alloc(4096);
     for (var i = 0; i < 4096; i = i + 1) { store8(buf + i, i & 0xFF); }
 
-    for (var w = 0; w < 1000; w = w + 1) { u8_to_f64(buf, 4096); }
+    for (var w = 0; w < 100; w = w + 1) { u8_to_f64(buf, 4096); }
 
-    var iters = 100000;
+    var iters = 10000;
     bench("pcm_u8_to_f64_4096", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) { u8_to_f64(buf, 4096); }
@@ -676,9 +676,9 @@ fn bench_fft_1024() {
         store64(im + i * 8, F64_ZERO);
     }
 
-    for (var w = 0; w < 100; w = w + 1) { fft_compute(re, im, 1024, 0); }
+    for (var w = 0; w < 10; w = w + 1) { fft_compute(re, im, 1024, 0); }
 
-    var iters = 10000;
+    var iters = 500;
     bench("fft_forward_1024", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) { fft_compute(re, im, 1024, 0); }
@@ -697,9 +697,9 @@ fn bench_mdct_2048() {
         store64(input + i * 8, f64_from(i % 200));
     }
 
-    for (var w = 0; w < 10; w = w + 1) { fft_mdct(input, 2048, output); }
+    for (var w = 0; w < 5; w = w + 1) { fft_mdct(input, 2048, output); }
 
-    var iters = 1000;
+    var iters = 100;
     bench("mdct_forward_2048", iters);
     var t0 = time_now_ns();
     for (var it = 0; it < iters; it = it + 1) { fft_mdct(input, 2048, output); }
