@@ -1,6 +1,6 @@
-# Contributing to garjan
+# Contributing to shravan
 
-Thank you for your interest in contributing to garjan.
+Thank you for your interest in contributing to shravan.
 
 ## Development Workflow
 
@@ -12,48 +12,57 @@ Thank you for your interest in contributing to garjan.
 
 ## Prerequisites
 
-- Rust stable (MSRV 1.89)
-- Components: `rustfmt`, `clippy`
-- Optional: `cargo-audit`, `cargo-deny`
+- Cyrius >= 3.4.3 (`cyrius --version`)
+- Linux x86_64
 
 ## Cleanliness Check
 
 Every change must pass:
 
-```bash
-cargo fmt --check
-cargo clippy --all-features --all-targets -- -D warnings
-cargo test --all-features
-cargo test --no-default-features
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-cargo audit
-cargo deny check
+```sh
+# Build
+cyrius build src/main.cyr build/shravan
+
+# Test (must show "0 failed")
+./build/shravan
+
+# Build benchmarks
+cyrius build src/bench.cyr build/bench
+./build/bench
 ```
 
 ## Code Conventions
 
-- `#[non_exhaustive]` on all public enums
-- `#[must_use]` on all pure functions
-- `#[inline]` on hot-path sample processing functions
-- Serde (`Serialize + Deserialize`) on all public types
-- Zero `unwrap`/`panic` in library code
-- `no_std` compatible — use `alloc` not `std` collections
-- Feature-gate all `naad` usage behind `#[cfg(feature = "naad-backend")]`
-- DC blocking filter on all synthesis outputs
-- `validate_sample_rate` in all constructors, `validate_duration` in all `synthesize` methods
+- All samples are f64 internally (Cyrius native, higher precision than f32)
+- Error handling via packed Result (negative = error)
+- Initialize f64 constants via `f64_from()` at startup (never hardcode bit patterns)
+- `>>` is logical (unsigned) shift -- use conditional subtraction for sign extension
+- Entry point is top-level statements, not `fn main()`
+- Large buffers via `alloc()`, not stack arrays (code buffer limit)
+- Prefix all public functions: `wav_`, `flac_`, `aac_`, `tag_`, etc.
+- Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`)
 
-## Adding a New Synthesizer
+## Adding a New Codec
 
-1. Create `src/my_synth.rs` following the pattern in existing modules
-2. Add shared enums to the appropriate types module (`contact.rs`, `aero.rs`, `creature.rs`)
-3. Register in `lib.rs`: module declaration, prelude export, Send+Sync assertion
-4. Add integration tests: all variants, zero-intensity silence, serde roundtrip
-5. Add a criterion benchmark
-6. Check scope boundaries — does this belong in garjan or a sibling crate?
+1. Create `lib/mycodec.cyr` with encode/decode functions
+2. Add `include "lib/mycodec.cyr"` in `src/main.cyr` before the codec module
+3. Add format detection in `detect_format()` and dispatch in `codec_open()`
+4. Add tests (encode/decode roundtrip, error handling)
+5. Add benchmarks in `src/bench.cyr`
+6. Update CHANGELOG.md and docs/development/roadmap.md
 
-## Scope Boundaries
+## Scope
 
-Before adding new sound categories, check whether the sound belongs in garjan or a sibling crate. See [docs/architecture/adr-003-scope-boundaries.md](docs/architecture/adr-003-scope-boundaries.md).
+shravan is an audio codec library. It handles:
+- Audio format encode/decode (WAV, FLAC, AIFF, Ogg/Opus, AAC, ALAC, MP3)
+- PCM sample format conversion
+- Audio metadata (ID3v2, Vorbis Comment)
+- Signal processing primitives (FFT, MDCT, resampling, dithering)
+
+It does NOT handle:
+- Audio I/O (playback, recording) -- that's dhvani
+- Media containers (MP4, MKV) -- that's tarang
+- Audio effects (reverb, EQ) -- that's dhvani
 
 ## License
 

@@ -2,31 +2,29 @@
 
 ## Scope
 
-garjan is a pure sound synthesis library. It performs no I/O, no network access, and contains no `unsafe` code. All synthesis is deterministic from seeded PRNG state.
+shravan is an audio codec library that decodes untrusted audio data. It processes file headers, bitstreams, and compressed audio from potentially hostile sources. Security is critical.
 
 ## Attack Surface
 
 | Area | Risk | Mitigation |
 |------|------|------------|
-| Sample rate validation | Division by zero, NaN propagation | `validate_sample_rate` rejects ≤0, NaN, Infinity |
-| Duration validation | Allocation panic on infinite duration | `validate_duration` rejects ≤0, NaN, Infinity |
-| Poisson distribution | Near-infinite loop on large rate | Rate clamped to 0–30 in `Rng::poisson` |
-| Modal bank coefficients | Numerical instability if radius ≥ 1 | Radius clamped to [0.0, 0.9999] |
-| DC blocker coefficient | Oscillation at very low sample rates | R clamped to [0.9, 0.9999] |
-| Serde deserialization | Crafted JSON with extreme values | Enum validation via serde derive; parameters clamped on use |
-| Buffer lengths | Mismatched excitation/output buffers | `debug_assert_eq!` in ModalBank; `min()` fallback in release |
-| `alloc::format!` in errors | Allocation in error paths | Only in constructors and `synthesize`, not in `process_block` hot path |
+| Format detection | Magic byte spoofing | `detect_format` validates multiple header fields, not just magic |
+| WAV chunk parsing | Malformed chunk sizes | Bounds checks on all chunk offsets, `dat_size` clamped to available data |
+| FLAC frame parsing | Crafted bitstream overflow | CRC-8/CRC-16 verification on every frame, bitreader bounds checking |
+| FLAC SEEKTABLE | Corrupted seek points | Placeholder entries (0xFFFFFFFFFFFFFFFF) filtered, offset bounds checked |
+| AAC ADTS parsing | Invalid sync/frame length | Sync word + layer validation, frame_length bounds check |
+| AAC Huffman decode | Infinite loop on crafted codes | Max 20-bit codeword limit in `_aac_huff_decode` |
+| AAC spectral data | Out-of-bounds coefficient write | Band boundaries clamped to AAC_FRAME_SIZE |
+| ALAC bitreader | Reads past buffer | `bitreader_read` checks `bpos >= dlen` before every byte read |
+| Ogg CRC-32 | Corrupted page acceptance | CRC-32 computed and verified on every page |
+| ID3v2 tag size | Allocation overflow | Syncsafe integer (max 256MB), frame sizes bounded by tag size |
+| Bump allocator | Memory exhaustion | Grows by 1MB chunks via brk; no individual free |
+| Integer overflow | Large sample counts | All arithmetic uses 64-bit integers |
+
+## Zero External Dependencies
+
+shravan has zero external dependencies. No C libraries, no crate ecosystem, no supply chain attack surface. The entire codebase is auditable in `src/main.cyr` and `lib/*.cyr`.
 
 ## Reporting Vulnerabilities
 
 Report security issues to the repository maintainer via GitHub Security Advisories. Do not file public issues for security vulnerabilities.
-
-## Dependencies
-
-| Dependency | Purpose | Risk |
-|---|---|---|
-| `serde` | Serialization | Widely audited, no unsafe in derive |
-| `thiserror` | Error derive | Proc macro only, no runtime code |
-| `libm` | `no_std` math | Pure Rust, no unsafe |
-| `naad` (optional) | DSP primitives | Filters, noise generators; no I/O |
-| `tracing` (optional) | Structured logging | No I/O; subscriber is caller's responsibility |
