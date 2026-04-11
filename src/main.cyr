@@ -2561,6 +2561,16 @@ fn test_aac_encode_decode_roundtrip() {
     }
     assert_eq(in_range, 1, "aac decoded samples in range");
 
+    # Stereo encode/decode (encoder downmixes to mono internally, but channels=2 in header)
+    var st_samp = vec_new();
+    for (var j = 0; j < 2048; j = j + 1) { vec_push(st_samp, F64_ZERO); }
+    var st_buf = alloc(65536);
+    var st_sz = aac_encode(st_samp, 44100, 2, 128000, st_buf);
+    assert(is_ok(st_sz) == 1, "aac stereo encode ok");
+    var st_res = aac_decode(st_buf, st_sz);
+    assert(is_ok(st_res) == 1, "aac stereo decode ok");
+    assert(vec_len(decode_result_samples(st_res)) > 0, "aac stereo has samples");
+
     # Silence roundtrip
     var silence = vec_new();
     for (var i = 0; i < 1024; i = i + 1) { vec_push(silence, F64_ZERO); }

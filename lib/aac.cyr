@@ -501,9 +501,11 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             if (diff < 0 - 60) { diff = 0 - 60; }
             if (diff > 60) { diff = 60; }
             var index = diff + 60;
-            # Simplified Huffman: write the index directly as 7 bits
-            # (Full AAC uses variable-length SCF codebook)
-            _bw_write(bw, index, 7);
+            # Scale factor Huffman codebook (ISO 14496-3)
+            if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
+            var scf_nbits = load64(_aac_scf_lens + index * 8);
+            var scf_code = load64(_aac_scf_codes + index * 8);
+            _bw_write(bw, scf_code, scf_nbits);
             prev_scf = scf_val;
         }
         band = band + 1;
@@ -717,6 +719,138 @@ fn _br_bits_left(br) {
 }
 
 # ================================================================
+# AAC Huffman codebook tables + decoder
+# ================================================================
+
+# Scale factor codebook: 121 entries (index 0..120, center at 60)
+# Each entry: (code_length, code_value) packed as i64
+# Stored in two arrays: _aac_scf_lens[121], _aac_scf_codes[121]
+var _aac_scf_lens = 0;
+var _aac_scf_codes = 0;
+
+fn _aac_init_scf_codebook() {
+    _aac_scf_lens = alloc(121 * 8);
+    _aac_scf_codes = alloc(121 * 8);
+
+    # Lengths (bits per codeword)
+    var lens = _aac_scf_lens;
+    store64(lens+ 0*8,18); store64(lens+ 1*8,18); store64(lens+ 2*8,18); store64(lens+ 3*8,18);
+    store64(lens+ 4*8,19); store64(lens+ 5*8,19); store64(lens+ 6*8,19); store64(lens+ 7*8,19);
+    store64(lens+ 8*8,19); store64(lens+ 9*8,19); store64(lens+10*8,19); store64(lens+11*8,19);
+    store64(lens+12*8,19); store64(lens+13*8,19); store64(lens+14*8,19); store64(lens+15*8,19);
+    store64(lens+16*8,19); store64(lens+17*8,19); store64(lens+18*8,19); store64(lens+19*8,18);
+    store64(lens+20*8,19); store64(lens+21*8,18); store64(lens+22*8,17); store64(lens+23*8,17);
+    store64(lens+24*8,16); store64(lens+25*8,17); store64(lens+26*8,16); store64(lens+27*8,16);
+    store64(lens+28*8,16); store64(lens+29*8,16); store64(lens+30*8,15); store64(lens+31*8,15);
+    store64(lens+32*8,14); store64(lens+33*8,14); store64(lens+34*8,14); store64(lens+35*8,14);
+    store64(lens+36*8,14); store64(lens+37*8,14); store64(lens+38*8,13); store64(lens+39*8,13);
+    store64(lens+40*8,12); store64(lens+41*8,12); store64(lens+42*8,12); store64(lens+43*8,11);
+    store64(lens+44*8,12); store64(lens+45*8,11); store64(lens+46*8,10); store64(lens+47*8,10);
+    store64(lens+48*8,10); store64(lens+49*8, 9); store64(lens+50*8, 9); store64(lens+51*8, 8);
+    store64(lens+52*8, 8); store64(lens+53*8, 8); store64(lens+54*8, 7); store64(lens+55*8, 6);
+    store64(lens+56*8, 6); store64(lens+57*8, 5); store64(lens+58*8, 4); store64(lens+59*8, 3);
+    store64(lens+60*8, 1); store64(lens+61*8, 4); store64(lens+62*8, 4); store64(lens+63*8, 5);
+    store64(lens+64*8, 6); store64(lens+65*8, 6); store64(lens+66*8, 7); store64(lens+67*8, 7);
+    store64(lens+68*8, 8); store64(lens+69*8, 8); store64(lens+70*8, 9); store64(lens+71*8, 9);
+    store64(lens+72*8,10); store64(lens+73*8,10); store64(lens+74*8,10); store64(lens+75*8,11);
+    store64(lens+76*8,11); store64(lens+77*8,11); store64(lens+78*8,11); store64(lens+79*8,12);
+    store64(lens+80*8,12); store64(lens+81*8,13); store64(lens+82*8,13); store64(lens+83*8,13);
+    store64(lens+84*8,14); store64(lens+85*8,14); store64(lens+86*8,16); store64(lens+87*8,15);
+    store64(lens+88*8,16); store64(lens+89*8,15); store64(lens+90*8,18); store64(lens+91*8,19);
+    store64(lens+92*8,19); store64(lens+93*8,19); store64(lens+94*8,19); store64(lens+95*8,19);
+    store64(lens+96*8,19); store64(lens+97*8,19); store64(lens+98*8,19); store64(lens+99*8,19);
+    store64(lens+100*8,19); store64(lens+101*8,19); store64(lens+102*8,19); store64(lens+103*8,19);
+    store64(lens+104*8,19); store64(lens+105*8,19); store64(lens+106*8,19); store64(lens+107*8,19);
+    store64(lens+108*8,19); store64(lens+109*8,19); store64(lens+110*8,19); store64(lens+111*8,19);
+    store64(lens+112*8,19); store64(lens+113*8,19); store64(lens+114*8,19); store64(lens+115*8,19);
+    store64(lens+116*8,19); store64(lens+117*8,19); store64(lens+118*8,19); store64(lens+119*8,19);
+    store64(lens+120*8,19);
+
+    # Code values
+    var codes = _aac_scf_codes;
+    store64(codes+ 0*8,0x3FFE8); store64(codes+ 1*8,0x3FFE6); store64(codes+ 2*8,0x3FFE7);
+    store64(codes+ 3*8,0x3FFE5); store64(codes+ 4*8,0x7FFF5); store64(codes+ 5*8,0x7FFF1);
+    store64(codes+ 6*8,0x7FFED); store64(codes+ 7*8,0x7FFF6); store64(codes+ 8*8,0x7FFEE);
+    store64(codes+ 9*8,0x7FFEF); store64(codes+10*8,0x7FFF0); store64(codes+11*8,0x7FFFC);
+    store64(codes+12*8,0x7FFFD); store64(codes+13*8,0x7FFFF); store64(codes+14*8,0x7FFFE);
+    store64(codes+15*8,0x7FFF7); store64(codes+16*8,0x7FFF8); store64(codes+17*8,0x7FFFB);
+    store64(codes+18*8,0x7FFF9); store64(codes+19*8,0x3FFE4); store64(codes+20*8,0x7FFFA);
+    store64(codes+21*8,0x3FFE3); store64(codes+22*8,0x1FFEF); store64(codes+23*8,0x1FFF0);
+    store64(codes+24*8,0x0FFF5); store64(codes+25*8,0x1FFEE); store64(codes+26*8,0x0FFF2);
+    store64(codes+27*8,0x0FFF3); store64(codes+28*8,0x0FFF4); store64(codes+29*8,0x0FFF1);
+    store64(codes+30*8,0x07FF6); store64(codes+31*8,0x07FF7); store64(codes+32*8,0x03FF9);
+    store64(codes+33*8,0x03FF5); store64(codes+34*8,0x03FF7); store64(codes+35*8,0x03FF3);
+    store64(codes+36*8,0x03FF6); store64(codes+37*8,0x03FF2); store64(codes+38*8,0x01FF7);
+    store64(codes+39*8,0x01FF5); store64(codes+40*8,0x00FF9); store64(codes+41*8,0x00FF7);
+    store64(codes+42*8,0x00FF6); store64(codes+43*8,0x007F9); store64(codes+44*8,0x00FF4);
+    store64(codes+45*8,0x007F8); store64(codes+46*8,0x003F9); store64(codes+47*8,0x003F7);
+    store64(codes+48*8,0x003F5); store64(codes+49*8,0x001F8); store64(codes+50*8,0x001F7);
+    store64(codes+51*8,0x000FA); store64(codes+52*8,0x000F8); store64(codes+53*8,0x000F6);
+    store64(codes+54*8,0x00079); store64(codes+55*8,0x0003A); store64(codes+56*8,0x00038);
+    store64(codes+57*8,0x0001A); store64(codes+58*8,0x0000B); store64(codes+59*8,0x00004);
+    store64(codes+60*8,0x00000); store64(codes+61*8,0x0000A); store64(codes+62*8,0x0000C);
+    store64(codes+63*8,0x0001B); store64(codes+64*8,0x00039); store64(codes+65*8,0x0003B);
+    store64(codes+66*8,0x00078); store64(codes+67*8,0x0007A); store64(codes+68*8,0x000F7);
+    store64(codes+69*8,0x000F9); store64(codes+70*8,0x001F6); store64(codes+71*8,0x001F9);
+    store64(codes+72*8,0x003F4); store64(codes+73*8,0x003F6); store64(codes+74*8,0x003F8);
+    store64(codes+75*8,0x007F5); store64(codes+76*8,0x007F4); store64(codes+77*8,0x007F6);
+    store64(codes+78*8,0x007F7); store64(codes+79*8,0x00FF5); store64(codes+80*8,0x00FF8);
+    store64(codes+81*8,0x01FF4); store64(codes+82*8,0x01FF6); store64(codes+83*8,0x01FF8);
+    store64(codes+84*8,0x03FF8); store64(codes+85*8,0x03FF4); store64(codes+86*8,0x0FFF0);
+    store64(codes+87*8,0x07FF4); store64(codes+88*8,0x0FFF6); store64(codes+89*8,0x07FF5);
+    store64(codes+90*8,0x3FFE2); store64(codes+91*8,0x7FFD9); store64(codes+92*8,0x7FFDA);
+    store64(codes+93*8,0x7FFDB); store64(codes+94*8,0x7FFDC); store64(codes+95*8,0x7FFDD);
+    store64(codes+96*8,0x7FFDE); store64(codes+97*8,0x7FFD8); store64(codes+98*8,0x7FFD2);
+    store64(codes+99*8,0x7FFD3); store64(codes+100*8,0x7FFD4); store64(codes+101*8,0x7FFD5);
+    store64(codes+102*8,0x7FFD6); store64(codes+103*8,0x7FFF2); store64(codes+104*8,0x7FFDF);
+    store64(codes+105*8,0x7FFE7); store64(codes+106*8,0x7FFE8); store64(codes+107*8,0x7FFE9);
+    store64(codes+108*8,0x7FFEA); store64(codes+109*8,0x7FFEB); store64(codes+110*8,0x7FFE6);
+    store64(codes+111*8,0x7FFE0); store64(codes+112*8,0x7FFE1); store64(codes+113*8,0x7FFE2);
+    store64(codes+114*8,0x7FFE3); store64(codes+115*8,0x7FFE4); store64(codes+116*8,0x7FFE5);
+    store64(codes+117*8,0x7FFD7); store64(codes+118*8,0x7FFEC); store64(codes+119*8,0x7FFF4);
+    store64(codes+120*8,0x7FFF3);
+    return 0;
+}
+
+# Decode one Huffman symbol from bitstream using codebook tables.
+# lens_tbl: pointer to array of code lengths (i64 each)
+# codes_tbl: pointer to array of code values (i64 each)
+# num_entries: number of entries in the codebook
+# br: bitreader
+# Returns: codebook index (0..num_entries-1), or err.
+fn _aac_huff_decode(br, lens_tbl, codes_tbl, num_entries) {
+    # Read bits incrementally, match against codebook
+    var acc = 0;
+    var bits_read = 0;
+
+    while (bits_read < 20) {
+        var bit = _br_read(br, 1);
+        if (is_err(bit) == 1) { return bit; }
+        acc = (acc << 1) | bit;
+        bits_read = bits_read + 1;
+
+        # Search for match at this length
+        var i = 0;
+        while (i < num_entries) {
+            if (load64(lens_tbl + i * 8) == bits_read) {
+                if (load64(codes_tbl + i * 8) == acc) {
+                    return i;
+                }
+            }
+            i = i + 1;
+        }
+    }
+    return err(ERR_DECODE);
+}
+
+# Decode a scale factor value using the Huffman codebook.
+# Returns the codebook index (0..120), which maps to diff = index - 60.
+fn _aac_decode_scf(br) {
+    if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
+    return _aac_huff_decode(br, _aac_scf_lens, _aac_scf_codes, 121);
+}
+
+# ================================================================
 # AAC-LC frame decoder
 # ================================================================
 
@@ -762,7 +896,7 @@ fn _aac_parse_ics(br, sect_cb, scale_factors) {
     band = 0;
     while (band < max_sfb) {
         if (load64(sect_cb + band * 8) != 0) {
-            var idx = _br_read(br, 7);
+            var idx = _aac_decode_scf(br);
             if (is_err(idx) == 1) { return idx; }
             var diff = idx - 60;
             var scf = prev_scf + diff;
@@ -880,6 +1014,10 @@ fn _aac_synth(scale_factors, quant_spec, overlap, out_samples) {
     return 0;
 }
 
+# Decode a single channel element (SCE) or channel pair element (CPE).
+# out_samples: pointer to 1024 * num_channels f64 values (interleaved for CPE)
+# overlap: pointer to 1024 * num_channels f64 overlap buffer
+# Returns number of channels decoded (1 or 2), or err.
 fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
     if (_aac_swb_offset == 0) { _aac_init_swb(); }
     var br = _br_new(fdata, flen);
@@ -887,6 +1025,7 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
     var elem_id = _br_read(br, 3);
     if (is_err(elem_id) == 1) { return elem_id; }
 
+    # ID_END = 7: silence frame
     if (elem_id == 7) {
         var i = 0;
         while (i < AAC_FRAME_SIZE) {
@@ -894,26 +1033,234 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
             store64(overlap + i * 8, F64_ZERO);
             i = i + 1;
         }
-        return 0;
+        return 1;
     }
-    if (elem_id != 0) { return err(ERR_DECODE); }
 
-    var instance = _br_read(br, 4);
-    if (is_err(instance) == 1) { return instance; }
+    # ID_SCE = 0: single channel
+    if (elem_id == 0) {
+        var instance = _br_read(br, 4);
+        if (is_err(instance) == 1) { return instance; }
 
-    var sect_cb = alloc(_AAC_NUM_SWB * 8);
-    memset(sect_cb, 0, _AAC_NUM_SWB * 8);
-    var scale_factors = alloc(_AAC_NUM_SWB * 8);
-    memset(scale_factors, 0, _AAC_NUM_SWB * 8);
+        var sect_cb = alloc(_AAC_NUM_SWB * 8);
+        memset(sect_cb, 0, _AAC_NUM_SWB * 8);
+        var scale_factors = alloc(_AAC_NUM_SWB * 8);
+        memset(scale_factors, 0, _AAC_NUM_SWB * 8);
 
-    var max_sfb = _aac_parse_ics(br, sect_cb, scale_factors);
-    if (is_err(max_sfb) == 1) { return max_sfb; }
+        var max_sfb = _aac_parse_ics(br, sect_cb, scale_factors);
+        if (is_err(max_sfb) == 1) { return max_sfb; }
 
-    var quant_spec = alloc(AAC_FRAME_SIZE * 8);
-    memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
-    _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec);
+        var quant_spec = alloc(AAC_FRAME_SIZE * 8);
+        memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
+        _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec);
 
-    return _aac_synth(scale_factors, quant_spec, overlap, out_samples);
+        var rc = _aac_synth(scale_factors, quant_spec, overlap, out_samples);
+        if (is_err(rc) == 1) { return rc; }
+        return 1;
+    }
+
+    # ID_CPE = 1: channel pair (stereo)
+    if (elem_id == 1) {
+        var instance = _br_read(br, 4);
+        if (is_err(instance) == 1) { return instance; }
+
+        # Common window flag
+        var common_window = _br_read(br, 1);
+        if (is_err(common_window) == 1) { return common_window; }
+
+        var ms_mask_present = 0;
+        var ms_mask = alloc(_AAC_NUM_SWB * 8);
+        memset(ms_mask, 0, _AAC_NUM_SWB * 8);
+        var shared_max_sfb = 0;
+
+        if (common_window == 1) {
+            # Parse shared ICS info (window_seq, shape, max_sfb, predictor)
+            var ics_reserved = _br_read(br, 1);
+            if (is_err(ics_reserved) == 1) { return ics_reserved; }
+            var window_seq = _br_read(br, 2);
+            if (is_err(window_seq) == 1) { return window_seq; }
+            var window_shape = _br_read(br, 1);
+            if (is_err(window_shape) == 1) { return window_shape; }
+            shared_max_sfb = _br_read(br, 6);
+            if (is_err(shared_max_sfb) == 1) { return shared_max_sfb; }
+            var predictor = _br_read(br, 1);
+            if (is_err(predictor) == 1) { return predictor; }
+
+            # M/S mask
+            ms_mask_present = _br_read(br, 2);
+            if (is_err(ms_mask_present) == 1) { return ms_mask_present; }
+            if (ms_mask_present == 1) {
+                # Per-band mask
+                var b = 0;
+                while (b < shared_max_sfb) {
+                    var mb = _br_read(br, 1);
+                    if (is_err(mb) == 1) { return mb; }
+                    store64(ms_mask + b * 8, mb);
+                    b = b + 1;
+                }
+            }
+        }
+
+        # Decode channel 0 (left / mid)
+        var sect_cb0 = alloc(_AAC_NUM_SWB * 8);
+        memset(sect_cb0, 0, _AAC_NUM_SWB * 8);
+        var sf0 = alloc(_AAC_NUM_SWB * 8);
+        memset(sf0, 0, _AAC_NUM_SWB * 8);
+
+        var max_sfb0 = 0;
+        if (common_window == 1) {
+            # Skip ICS info for ch0 (already parsed above)
+            # Parse section + scale factors only
+            # Re-read section data and scale factors with shared max_sfb
+            var band = 0;
+            while (band < shared_max_sfb) {
+                var cb = _br_read(br, 4);
+                if (is_err(cb) == 1) { return cb; }
+                var sect_len = 0;
+                var sect_bits = _br_read(br, 5);
+                if (is_err(sect_bits) == 1) { return sect_bits; }
+                sect_len = sect_bits;
+                while (sect_bits == 31) {
+                    sect_bits = _br_read(br, 5);
+                    if (is_err(sect_bits) == 1) { return sect_bits; }
+                    sect_len = sect_len + sect_bits;
+                }
+                var si = 0;
+                while (si < sect_len) {
+                    if (band + si < _AAC_NUM_SWB) { store64(sect_cb0 + (band + si) * 8, cb); }
+                    si = si + 1;
+                }
+                band = band + sect_len;
+            }
+            var gg0 = _br_read(br, 8);
+            if (is_err(gg0) == 1) { return gg0; }
+            var prev0 = gg0;
+            band = 0;
+            while (band < shared_max_sfb) {
+                if (load64(sect_cb0 + band * 8) != 0) {
+                    var idx = _aac_decode_scf(br);
+                    if (is_err(idx) == 1) { return idx; }
+                    var scf = prev0 + (idx - 60);
+                    store64(sf0 + band * 8, scf);
+                    prev0 = scf;
+                }
+                band = band + 1;
+            }
+            max_sfb0 = shared_max_sfb;
+        } else {
+            max_sfb0 = _aac_parse_ics(br, sect_cb0, sf0);
+            if (is_err(max_sfb0) == 1) { return max_sfb0; }
+        }
+
+        var qs0 = alloc(AAC_FRAME_SIZE * 8);
+        memset(qs0, 0, AAC_FRAME_SIZE * 8);
+        _aac_decode_spectral(br, sect_cb0, max_sfb0, qs0);
+
+        # Decode channel 1 (right / side)
+        var sect_cb1 = alloc(_AAC_NUM_SWB * 8);
+        memset(sect_cb1, 0, _AAC_NUM_SWB * 8);
+        var sf1 = alloc(_AAC_NUM_SWB * 8);
+        memset(sf1, 0, _AAC_NUM_SWB * 8);
+
+        var max_sfb1 = 0;
+        if (common_window == 1) {
+            var band = 0;
+            while (band < shared_max_sfb) {
+                var cb = _br_read(br, 4);
+                if (is_err(cb) == 1) { return cb; }
+                var sect_len = 0;
+                var sect_bits = _br_read(br, 5);
+                if (is_err(sect_bits) == 1) { return sect_bits; }
+                sect_len = sect_bits;
+                while (sect_bits == 31) {
+                    sect_bits = _br_read(br, 5);
+                    if (is_err(sect_bits) == 1) { return sect_bits; }
+                    sect_len = sect_len + sect_bits;
+                }
+                var si = 0;
+                while (si < sect_len) {
+                    if (band + si < _AAC_NUM_SWB) { store64(sect_cb1 + (band + si) * 8, cb); }
+                    si = si + 1;
+                }
+                band = band + sect_len;
+            }
+            var gg1 = _br_read(br, 8);
+            if (is_err(gg1) == 1) { return gg1; }
+            var prev1 = gg1;
+            band = 0;
+            while (band < shared_max_sfb) {
+                if (load64(sect_cb1 + band * 8) != 0) {
+                    var idx = _aac_decode_scf(br);
+                    if (is_err(idx) == 1) { return idx; }
+                    var scf = prev1 + (idx - 60);
+                    store64(sf1 + band * 8, scf);
+                    prev1 = scf;
+                }
+                band = band + 1;
+            }
+            max_sfb1 = shared_max_sfb;
+        } else {
+            max_sfb1 = _aac_parse_ics(br, sect_cb1, sf1);
+            if (is_err(max_sfb1) == 1) { return max_sfb1; }
+        }
+
+        var qs1 = alloc(AAC_FRAME_SIZE * 8);
+        memset(qs1, 0, AAC_FRAME_SIZE * 8);
+        _aac_decode_spectral(br, sect_cb1, max_sfb1, qs1);
+
+        # Inverse quantize both channels
+        var overlap_l = overlap;
+        var overlap_r = overlap + AAC_FRAME_SIZE * 8;
+        var out_l = alloc(AAC_FRAME_SIZE * 8);
+        var out_r = alloc(AAC_FRAME_SIZE * 8);
+
+        _aac_synth(sf0, qs0, overlap_l, out_l);
+        _aac_synth(sf1, qs1, overlap_r, out_r);
+
+        # Apply M/S stereo reconstruction if present
+        if (ms_mask_present == 1) {
+            var band = 0;
+            while (band < shared_max_sfb) {
+                if (load64(ms_mask + band * 8) == 1) {
+                    var bstart = load64(_aac_swb_offset + band * 8);
+                    var bend = load64(_aac_swb_offset + (band + 1) * 8);
+                    if (bend > AAC_FRAME_SIZE) { bend = AAC_FRAME_SIZE; }
+                    var i = bstart;
+                    while (i < bend) {
+                        var m = load64(out_l + i * 8);
+                        var s = load64(out_r + i * 8);
+                        store64(out_l + i * 8, f64_add(m, s));
+                        store64(out_r + i * 8, f64_sub(m, s));
+                        i = i + 1;
+                    }
+                }
+                band = band + 1;
+            }
+        }
+        if (ms_mask_present == 2) {
+            # All bands use M/S
+            var i = 0;
+            while (i < AAC_FRAME_SIZE) {
+                var m = load64(out_l + i * 8);
+                var s = load64(out_r + i * 8);
+                store64(out_l + i * 8, f64_add(m, s));
+                store64(out_r + i * 8, f64_sub(m, s));
+                i = i + 1;
+            }
+        }
+
+        # Interleave L/R into out_samples
+        var i = 0;
+        while (i < AAC_FRAME_SIZE) {
+            store64(out_samples + (i * 2) * 8, load64(out_l + i * 8));
+            store64(out_samples + (i * 2 + 1) * 8, load64(out_r + i * 8));
+            i = i + 1;
+        }
+
+        return 2;
+    }
+
+    # Other element types not supported
+    return err(ERR_DECODE);
 }
 
 # ================================================================
@@ -979,9 +1326,11 @@ fn aac_decode(data, len) {
 
     # Second pass: decode frames
     var all_samples = vec_new();
-    var overlap = alloc(AAC_FRAME_SIZE * 8);
-    memset(overlap, 0, AAC_FRAME_SIZE * 8);
-    var frame_buf = alloc(AAC_FRAME_SIZE * 8);
+    # Overlap buffer: 1024 * max_channels (2 for stereo)
+    var overlap = alloc(AAC_FRAME_SIZE * 2 * 8);
+    memset(overlap, 0, AAC_FRAME_SIZE * 2 * 8);
+    # Frame buffer: 1024 * max_channels interleaved
+    var frame_buf = alloc(AAC_FRAME_SIZE * 2 * 8);
 
     pos = 0;
     while (pos + 7 <= len) {
@@ -997,9 +1346,11 @@ fn aac_decode(data, len) {
         var plen = fl2 - hs2;
         if (plen > 0) {
             var rc = _aac_decode_frame(data + pos + hs2, plen, overlap, frame_buf);
-            if (is_err(rc) == 0) {
+            if (is_ok(rc) == 1) {
+                # rc = number of channels decoded (1 or 2)
+                var frame_samples = AAC_FRAME_SIZE * rc;
                 var i = 0;
-                while (i < AAC_FRAME_SIZE) {
+                while (i < frame_samples) {
                     vec_push(all_samples, load64(frame_buf + i * 8));
                     i = i + 1;
                 }
@@ -1009,10 +1360,11 @@ fn aac_decode(data, len) {
     }
 
     var total_decoded = vec_len(all_samples);
+    var total_frames = total_decoded / ch;
     var dur = F64_ZERO;
-    if (sr > 0) { dur = f64_div(f64_from(total_decoded), f64_from(sr)); }
+    if (sr > 0) { dur = f64_div(f64_from(total_frames), f64_from(sr)); }
 
-    var fi = fmtinfo_new(FMT_AAC, sr, ch, 16, dur, total_decoded);
+    var fi = fmtinfo_new(FMT_AAC, sr, ch, 16, dur, total_frames);
     return decode_result_new(fi, all_samples);
 }
 
