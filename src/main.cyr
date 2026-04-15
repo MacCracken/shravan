@@ -1708,6 +1708,116 @@ fn codec_open(data, len) {
 }
 
 # ================================================================
+# Convenience helpers: decode_file / decode_reader
+# ================================================================
+
+# Decode an audio file from a filesystem path.
+# path: null-terminated C string path
+# Returns: decode_result pointer, or negative error
+fn decode_file(path) {
+    var fd = file_open(path, 0);  # O_RDONLY = 0
+    if (fd < 0) { return err(ERR_DECODE); }
+
+    # Read entire file into buffer
+    var buf_cap = 1048576;  # 1MB initial
+    var buf = alloc(buf_cap);
+    var total = 0;
+
+    var reading = 1;
+    while (reading == 1) {
+        var avail = buf_cap - total;
+        if (avail <= 0) {
+            # Grow buffer (double, cap at 256MB)
+            if (buf_cap >= 268435456) {
+                file_close(fd);
+                return err(ERR_DECODE);
+            }
+            var new_cap = buf_cap * 2;
+            var new_buf = alloc(new_cap);
+            memcpy(new_buf, buf, total);
+            buf = new_buf;
+            buf_cap = new_cap;
+            avail = buf_cap - total;
+        }
+        var n = file_read(fd, buf + total, avail);
+        if (n <= 0) { reading = 0; }
+        else { total = total + n; }
+    }
+
+    file_close(fd);
+
+    if (total == 0) { return err(ERR_DECODE); }
+
+    return codec_open(buf, total);
+}
+
+# Streaming decode: feed chunks of data, receive events.
+# Returns a stream decoder (wav/flac/aiff auto-detected on first feed).
+# chunk_frames: number of frames per SAMPLES event (0 = single-shot)
+fn decode_reader(chunk_frames) {
+    # Auto-detect stream type from first feed via wrapper struct.
+    # Layout (32 bytes):
+    #   +0:  state (0=detecting, 1=wav, 2=flac, 3=aiff)
+    #   +8:  inner stream handle
+    #   +16: chunk_frames
+    #   +24: header buffer pointer
+    var dr = alloc(32);
+    store64(dr, 0);
+    store64(dr + 8, 0);
+    store64(dr + 16, chunk_frames);
+    store64(dr + 24, alloc(4096));
+    return dr;
+}
+
+fn decode_reader_feed(dr, data, len) {
+    var state = load64(dr);
+    var chunk_frames = load64(dr + 16);
+    if (chunk_frames == 0) { chunk_frames = 4096; }
+
+    if (state == 0) {
+        # Detecting: need at least 12 bytes for format magic
+        if (len < 12) { return vec_new(); }
+        var fmt = detect_format(data, len);
+        if (is_err(fmt) == 1) { return vec_new(); }
+
+        if (fmt == FMT_WAV) {
+            var s = wav_stream_new(chunk_frames);
+            store64(dr, 1);
+            store64(dr + 8, s);
+            return wav_stream_feed(s, data, len);
+        }
+        if (fmt == FMT_FLAC) {
+            var s = flac_stream_new(chunk_frames);
+            store64(dr, 2);
+            store64(dr + 8, s);
+            return flac_stream_feed(s, data, len);
+        }
+        if (fmt == FMT_AIFF) {
+            var s = aiff_stream_new(chunk_frames);
+            store64(dr, 3);
+            store64(dr + 8, s);
+            return aiff_stream_feed(s, data, len);
+        }
+        return vec_new();  # unsupported format for streaming
+    }
+
+    var inner = load64(dr + 8);
+    if (state == 1) { return wav_stream_feed(inner, data, len); }
+    if (state == 2) { return flac_stream_feed(inner, data, len); }
+    if (state == 3) { return aiff_stream_feed(inner, data, len); }
+    return vec_new();
+}
+
+fn decode_reader_flush(dr) {
+    var state = load64(dr);
+    var inner = load64(dr + 8);
+    if (state == 1) { return wav_stream_flush(inner); }
+    if (state == 2) { return flac_stream_flush(inner); }
+    if (state == 3) { return aiff_stream_flush(inner); }
+    return vec_new();
+}
+
+# ================================================================
 # Tests
 # ================================================================
 

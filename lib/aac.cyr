@@ -988,11 +988,91 @@ fn _aac_huff_decode_fast(br, sorted_hdr, num_entries) {
     return err(ERR_DECODE);
 }
 
-# Cached sorted tables
+# ================================================================
+# 2-level Huffman lookup table
+# ================================================================
+# Level 1: 256-entry table indexed by first 8 bits.
+#   Entry = (symbol << 8) | length for codes <= 8 bits.
+#   Entry = 0 for codes > 8 bits (fall through to sorted scan).
+# Level 2: sorted scan (existing _aac_huff_decode_fast) for long codes.
+#
+# _aac_huff_build_lut: builds the 256-entry level-1 table.
+# _aac_huff_decode_lut: tries level-1 first, falls back to sorted scan.
+
+fn _aac_huff_build_lut(lens_tbl, codes_tbl, num_entries) {
+    var lut = alloc(256 * 8);
+    memset(lut, 0, 256 * 8);
+
+    var i = 0;
+    while (i < num_entries) {
+        var clen = load64(lens_tbl + i * 8);
+        var code = load64(codes_tbl + i * 8);
+        if (clen > 0) {
+            if (clen <= 8) {
+                # This code fits in 8 bits — fill all entries that match
+                # Left-align code to 8 bits, then fill 2^(8-clen) entries
+                var prefix = code << (8 - clen);
+                var fill = 1 << (8 - clen);
+                var j = 0;
+                while (j < fill) {
+                    var idx = prefix | j;
+                    if (idx < 256) {
+                        # Pack: (symbol << 8) | length
+                        store64(lut + idx * 8, (i << 8) | clen);
+                    }
+                    j = j + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return lut;
+}
+
+fn _aac_huff_decode_lut(br, lut, sorted_hdr, num_entries) {
+    # Peek 8 bits without consuming
+    var saved_bpos = load64(br + 8);
+    var saved_bbit = load64(br + 16);
+
+    var peek = _br_read(br, 8);
+    if (is_err(peek) == 1) {
+        # Not enough bits — restore and fall back to sorted scan
+        store64(br + 8, saved_bpos);
+        store64(br + 16, saved_bbit);
+        return _aac_huff_decode_fast(br, sorted_hdr, num_entries);
+    }
+
+    var entry = load64(lut + (peek & 0xFF) * 8);
+    if (entry != 0) {
+        var clen = entry & 0xFF;
+        var sym = (entry >> 8) & 0xFFFF;
+        # Put back unused bits: we read 8 but only used clen
+        var putback = 8 - clen;
+        # Rewind bitreader by putback bits
+        var bpos = load64(br + 8);
+        var bbit = load64(br + 16);
+        bbit = bbit - putback;
+        while (bbit < 0) { bbit = bbit + 8; bpos = bpos - 1; }
+        store64(br + 8, bpos);
+        store64(br + 16, bbit);
+        return sym;
+    }
+
+    # Level-1 miss — restore bitreader and use sorted scan
+    store64(br + 8, saved_bpos);
+    store64(br + 16, saved_bbit);
+    return _aac_huff_decode_fast(br, sorted_hdr, num_entries);
+}
+
+# Cached tables
 var _aac_scf_sorted = 0;
+var _aac_scf_lut = 0;
 var _aac_hcb5_sorted = 0;
+var _aac_hcb5_lut = 0;
 var _aac_hcb7_sorted = 0;
+var _aac_hcb7_lut = 0;
 var _aac_hcb8_sorted = 0;
+var _aac_hcb8_lut = 0;
 
 # Decode a scale factor value using the Huffman codebook.
 # Returns the codebook index (0..120), which maps to diff = index - 60.
@@ -1000,8 +1080,9 @@ fn _aac_decode_scf(br) {
     if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
     if (_aac_scf_sorted == 0) {
         _aac_scf_sorted = _aac_huff_build_sorted(_aac_scf_lens, _aac_scf_codes, 121);
+        _aac_scf_lut = _aac_huff_build_lut(_aac_scf_lens, _aac_scf_codes, 121);
     }
-    return _aac_huff_decode_fast(br, _aac_scf_sorted, 121);
+    return _aac_huff_decode_lut(br, _aac_scf_lut, _aac_scf_sorted, 121);
 }
 
 # ================================================================
@@ -1016,6 +1097,10 @@ var _aac_hcb7_lens = 0;
 var _aac_hcb7_codes = 0;
 var _aac_hcb8_lens = 0;
 var _aac_hcb8_codes = 0;
+var _aac_hcb9_lens = 0;
+var _aac_hcb9_codes = 0;
+var _aac_hcb10_lens = 0;
+var _aac_hcb10_codes = 0;
 
 fn _aac_init_hcb5() {
     var L = alloc(81 * 8); var C = alloc(81 * 8);
@@ -1101,16 +1186,19 @@ fn _aac_init_spectral_codebooks() {
 fn _aac_decode_spectral_pair(br, cb, out) {
     if (_aac_hcb5_lens == 0) { _aac_init_spectral_codebooks(); }
 
-    # Build sorted tables on first use
+    # Build sorted + LUT tables on first use
     if (_aac_hcb5_sorted == 0) {
         _aac_hcb5_sorted = _aac_huff_build_sorted(_aac_hcb5_lens, _aac_hcb5_codes, 81);
+        _aac_hcb5_lut = _aac_huff_build_lut(_aac_hcb5_lens, _aac_hcb5_codes, 81);
         _aac_hcb7_sorted = _aac_huff_build_sorted(_aac_hcb7_lens, _aac_hcb7_codes, 64);
+        _aac_hcb7_lut = _aac_huff_build_lut(_aac_hcb7_lens, _aac_hcb7_codes, 64);
         _aac_hcb8_sorted = _aac_huff_build_sorted(_aac_hcb8_lens, _aac_hcb8_codes, 64);
+        _aac_hcb8_lut = _aac_huff_build_lut(_aac_hcb8_lens, _aac_hcb8_codes, 64);
     }
 
     # Codebook 5-6: signed pairs, 81 entries, values -4..4
     if (cb == 5) {
-        var idx = _aac_huff_decode_fast(br, _aac_hcb5_sorted, 81);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb5_lut, _aac_hcb5_sorted, 81);
         if (is_err(idx) == 1) { return idx; }
         var x = (idx / 9) - 4;
         var y = (idx % 9) - 4;
@@ -1121,7 +1209,7 @@ fn _aac_decode_spectral_pair(br, cb, out) {
     if (cb == 6) {
         # HCB6 same structure as HCB5 (use HCB5 tables as placeholder if HCB6 not loaded)
         # TODO: load real HCB6 tables
-        var idx = _aac_huff_decode_fast(br, _aac_hcb5_sorted, 81);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb5_lut, _aac_hcb5_sorted, 81);
         if (is_err(idx) == 1) { return idx; }
         var x = (idx / 9) - 4;
         var y = (idx % 9) - 4;
@@ -1132,7 +1220,7 @@ fn _aac_decode_spectral_pair(br, cb, out) {
 
     # Codebook 7-8: unsigned pairs, 64 entries, values 0..7, sign bits separate
     if (cb == 7) {
-        var idx = _aac_huff_decode_fast(br, _aac_hcb7_sorted, 64);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb7_lut, _aac_hcb7_sorted, 64);
         if (is_err(idx) == 1) { return idx; }
         var x = idx / 8;
         var y = idx % 8;
@@ -1149,7 +1237,7 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         return 0;
     }
     if (cb == 8) {
-        var idx = _aac_huff_decode_fast(br, _aac_hcb8_sorted, 64);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb8_lut, _aac_hcb8_sorted, 64);
         if (is_err(idx) == 1) { return idx; }
         var x = idx / 8;
         var y = idx % 8;
@@ -1163,6 +1251,20 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         }
         store64(out, x);
         store64(out + 8, y);
+        return 0;
+    }
+
+    # Codebook 9-10: unsigned pairs, 169 entries (13x13), values 0..12
+    if (cb == 9) {
+        # TODO: HCB9 Huffman table not yet loaded — skip band
+        store64(out, 0);
+        store64(out + 8, 0);
+        return 0;
+    }
+    if (cb == 10) {
+        # TODO: HCB10 Huffman table not yet loaded — skip band
+        store64(out, 0);
+        store64(out + 8, 0);
         return 0;
     }
 
@@ -1259,6 +1361,14 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
             if (bend > AAC_FRAME_SIZE) { bend = AAC_FRAME_SIZE; }
             var i = bstart;
 
+            # Codebooks 1-4: 4-tuple codebooks (skip for now — TODO)
+            if (cb >= 1) {
+                if (cb <= 4) {
+                    # Skip band — codebooks 1-4 not yet implemented
+                    band = band + 1;
+                }
+            }
+
             # Codebooks 5-8: use Huffman table decoder
             if (cb >= 5) {
                 if (cb <= 8) {
@@ -1276,6 +1386,41 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
                     }
                     band = band + 1;
                 }
+            }
+
+            # Codebooks 9-10: unsigned pairs, values 0..12, sign bits separate
+            # Same structure as 7-8 but with 13x13 grid
+            if (cb == 9) {
+                if (cb <= 10) {
+                    while (i + 1 < bend) {
+                        if (_br_bits_left(br) < 2) { i = bend; }
+                        if (i + 1 < bend) {
+                            var rc = _aac_decode_spectral_pair(br, cb, pair_buf);
+                            if (is_err(rc) == 1) { i = bend; }
+                            if (is_err(rc) == 0) {
+                                store64(quant_spec + i * 8, load64(pair_buf));
+                                store64(quant_spec + (i + 1) * 8, load64(pair_buf + 8));
+                                i = i + 2;
+                            }
+                        }
+                    }
+                    band = band + 1;
+                }
+            }
+            if (cb == 10) {
+                while (i + 1 < bend) {
+                    if (_br_bits_left(br) < 2) { i = bend; }
+                    if (i + 1 < bend) {
+                        var rc = _aac_decode_spectral_pair(br, cb, pair_buf);
+                        if (is_err(rc) == 1) { i = bend; }
+                        if (is_err(rc) == 0) {
+                            store64(quant_spec + i * 8, load64(pair_buf));
+                            store64(quant_spec + (i + 1) * 8, load64(pair_buf + 8));
+                            i = i + 2;
+                        }
+                    }
+                }
+                band = band + 1;
             }
 
             # Codebook 11: escape pairs (original inline decoder)

@@ -1,9 +1,8 @@
 # Development Roadmap
 
-> **v2.2.0** — 520 tests, 475KB binary, cc3 >= 4.10.3.
-> Stdlib modernization + performance optimization pass.
-> MDCT 5.45x faster (N/2-point FFT rewrite), PCM 1.3-1.6x (div→mul),
-> polyphase resampler, sorted Huffman decode, sankoch compression dep.
+> **v2.3.0** — 520 tests, 473KB binary, cc3 >= 4.10.3.
+> Security audit complete (21/21 findings fixed, 90K fuzz calls 0 crashes).
+> MDCT 5.45x, PCM 1.3-1.6x, polyphase resampler, sorted Huffman decode.
 
 ## Completed (v2.0.0)
 
@@ -30,7 +29,7 @@
 - [x] General-purpose Huffman decoder (_aac_huff_decode)
 - [x] Correct section length coding for short vs long windows
 
-## Completed (v2.2.0)
+## Completed (v2.2.0 — performance + stdlib modernization)
 
 - [x] Compiler upgrade: cc3 3.4.3 → 4.10.3
 - [x] Stdlib modernization: 12 vendored files removed, resolved via cyrius.toml [deps] stdlib
@@ -44,48 +43,55 @@
 - [x] MDCT N/2-point FFT rewrite: 8.5ms → 1.6ms (5.45x faster)
 - [x] Resample polyphase filter table: 256-phase pre-computed kernel cache
 
-## v2.3.0 — Completeness + Performance + Security Hardening
+## Completed (v2.3.0 — security hardening)
 
-### Security (from 2026-04-15 audit — all resolved)
+- [x] Security audit: 21 findings (7 P0 + 5 P1 + 6 P2 + 3 P3), all fixed
+- [x] P0: WAV/AIFF chunk overflow guards, SSND underflow, extensible OOB, FLAC block_size/metadata bounds, Ogg accumulation overflow cap
+- [x] P1: FLAC unary bound 32768, ALAC INT64_MIN guard, MP3 frame_size guard, AAC frame cap 65536, SEEKTABLE cap 1024
+- [x] P2: Vorbis zero-length guard, MDCT size validation, bitreader parameter validation, `_safe_alloc_mul` helper, tag COMM validation
+- [x] Fuzz harness: `fuzz/fuzz_codecs.cyr` — FLAC, Ogg, MP3, ID3v2 (90K calls, 0 crashes)
+- [x] 3 upstream issues filed for Cyrius 5.0.1 (alloc overflow, vec capacity overflow, allocation size cap)
 
-- [x] SEC-008: FLAC unary decode — bound reduced from 1M to 32768
-- [x] SEC-009: ALAC arithmetic right shift — INT64_MIN guard added
-- [x] SEC-010: MP3 frame_size scanner — `pos + fs > len` guard added
-- [x] SEC-011: AAC frame accumulation — capped at 65536 frames per decode
-- [x] SEC-012: FLAC SEEKTABLE — seek points capped at 1024
-- [x] SEC-013: Vorbis Comment — zero-length skip + count cap at 65536
-- [x] SEC-014: MDCT size validation — `n >= 4 && n % 4 == 0 && n <= 8192`
-- [x] SEC-016: Bitreader — rejects bits < 0 or bits > 64
-- [x] SEC-017: `_safe_alloc_mul(a, b)` overflow-checked allocation (256MB cap)
-- [x] SEC-018: Tag ID3v2 COMM — frame_size > 4 validated (confirmed safe)
-- [x] Fuzzing harness: `fuzz/fuzz_codecs.cyr` — 90K calls, 0 crashes (FLAC, Ogg, MP3, ID3v2)
+---
 
-### AAC gaps (external file compatibility)
+## v2.3.x — Completeness
 
-- Spectral codebooks 1-4 (4-tuple codebooks for low-energy bands)
-- Spectral codebooks 9-10 (unsigned pairs, larger magnitude range)
-- TNS (Temporal Noise Shaping) — IIR filter before IMDCT
-- MP4/M4A container support (currently ADTS only)
-- ~~Huffman decoder optimization~~ (done: sorted codebook decode in v2.2.0; 2-level lookup table future)
+### v2.3.0 — Low-effort items (done)
 
-### AAC encoder improvements
+- [x] Streaming: `decode_file()` (read file + auto-detect + decode) and `decode_reader()` / `decode_reader_feed()` / `decode_reader_flush()` (streaming with auto-detect)
+- [x] AAC: 2-level Huffman lookup table (256-entry level-1, sorted scan fallback for long codes)
+- [x] AAC: codebook 1-4 dispatch (skip bands — tables not yet loaded)
+- [x] AAC: codebook 9-10 dispatch (stub — tables not yet loaded)
 
-- Proper Huffman codebook selection per band (current uses escape pairs for all)
-- Psychoacoustic model (masking thresholds)
-- VBR mode
+### v2.3.1 — AAC spectral codebooks (Huffman table data)
+
+- Spectral codebooks 9-10: ISO 14496-3 Table 4.A.7/4.A.8 (169 entries each, unsigned pairs 0-12). Dispatch wired, tables needed.
+- Spectral codebooks 1-4: ISO 14496-3 Table 4.A.1-4.A.4 (81 entries each, signed 4-tuples). Requires `_aac_decode_spectral_quad()` for 4-value decode.
+
+### v2.3.2 — AAC encoder improvements
+
+- Per-band Huffman codebook selection (current uses escape pairs for all)
 - M/S stereo encoding (current downmixes to mono)
+- VBR mode
 
-### Performance
+### v2.3.3 — TNS (Temporal Noise Shaping)
 
-- ~~MDCT: N/2-point FFT rewrite~~ (done: 5.45x in v2.2.0)
-- ~~Opus FFT: precomputed twiddles~~ (done: per-level twiddle tables in v2.2.0)
-- ~~Resampler: polyphase filter bank~~ (done: 256-phase table in v2.2.0)
+- IIR filter before IMDCT for AAC decoder
+- TNS encoding support
+
+### v2.3.4 — MP4/M4A container
+
+- MP4 box parsing (moov/trak/mdia/stbl)
+- AAC extraction from MP4 container
+- Currently ADTS-only — this enables real-world .m4a files
+
+### v2.3.5 — Performance
+
 - PCM: inline asm SSE2 for i16/f64 hot loops
 - FLAC encoder: LPC encoding (better compression than Fixed prediction)
+- AAC: psychoacoustic model (masking thresholds)
 
-### Streaming
-
-- decode_file / decode_reader convenience helpers
+---
 
 ## v2.4.0 — Own the stack
 
@@ -103,6 +109,8 @@
 - 88.2/96/176.4/192/352.8/384 kHz sample rates
 - 32-bit integer, 64-bit float PCM
 - DSD support (DSD64/DSD128/DSD256, DoP)
+
+---
 
 ## Resolved bugs
 

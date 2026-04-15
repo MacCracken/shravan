@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-04-15
+
+### Added
+
+- **`decode_file(path)`**: Read audio file from disk, auto-detect format, decode. Returns decode_result or error.
+- **`decode_reader()` / `decode_reader_feed()` / `decode_reader_flush()`**: Streaming decoder with format auto-detection on first feed. Dispatches to WAV/FLAC/AIFF stream decoders.
+- **AAC 2-level Huffman lookup**: 256-entry level-1 table for O(1) decode of short codes (<=8 bits), sorted-scan fallback for long codes. Applied to SCF and all spectral codebooks.
+- **AAC codebook 1-4 dispatch**: Band skipping for 4-tuple codebooks (structural framework, tables deferred to v2.3.1).
+- **AAC codebook 9-10 dispatch**: Unsigned pair decode (13x13 grid) wired into spectral decoder (tables deferred to v2.3.1).
+
+### Security
+
+- **Full security audit**: 21 findings (7 P0, 5 P1, 6 P2, 3 P3) — all fixed. Report: `docs/audit/2026-04-15-security-audit.md`.
+- **P1 fixes**: FLAC unary decode bound (1M→32768), ALAC INT64_MIN guard, MP3 frame_size OOB guard, AAC frame count cap (65536), FLAC SEEKTABLE cap (1024).
+- **P2 fixes**: Vorbis Comment zero-length/count cap, MDCT size validation (n>=4, n%4==0, n<=8192), bitreader parameter validation (0..64), `_safe_alloc_mul()` overflow-checked allocator (256MB cap), tag COMM validation.
+- **Fuzzing harness**: `fuzz/fuzz_codecs.cyr` with `fuzz/run.sh` — FLAC metadata, Ogg page parse, MP3 frame scan, ID3v2 tag read, random bytes. 90,000 calls, 0 crashes.
+- **Upstream filed**: 3 Cyrius stdlib issues for v5.0.1 (alloc overflow, vec capacity overflow, allocation size cap).
+- 520 tests, 0 failures
+
 ## [2.2.0] - 2026-04-15
 
 ### Added
