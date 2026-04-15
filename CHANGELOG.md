@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Vec pre-allocation**: `_vec_new_cap(n)` helper allocates vectors with known capacity, eliminating growth during PCM decode.
 - **FFT twiddle pre-computation**: Per-recursion-level twiddle factor tables in `_fft_forward`. MDCT/IMDCT pre/post twiddle tables cached and reused across calls. Eliminates `f64_cos`/`f64_sin` from inner loops.
 - **AAC sorted Huffman decode**: `_aac_huff_decode_fast` uses sorted-by-length codebook tables with skip-ahead, replacing linear scan of all entries per bit. Applied to SCF (121 entries) and spectral codebooks 5-8 (64-81 entries).
+- **MDCT N/2-point FFT**: Rewrote `fft_mdct` and `fft_imdct` to use N/2-point (forward) and N/4-point (inverse) complex FFTs with folding and pre/post rotation, replacing the 2N-point zero-padded approach. 4x reduction in FFT size for AAC/Opus transforms.
+- **Resample polyphase filter table**: Pre-computes 256-phase windowed sinc kernel table, replacing per-sample `f64_sin`/`f64_cos` calls (65 trig calls per sample for BEST quality → 0).
 - **Struct size constants**: `FMTINFO_SIZE`, `DECODE_RESULT_SIZE`, `BITREADER_SIZE` replace magic numbers.
 
 ### Changed
@@ -25,13 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- WAV decode 1sec i16: 1.135ms → 779us (1.46x faster)
-- PCM i16→f64 4096: 93.8us → 71.0us (1.32x faster)
-- PCM i24→f64 4096: 94.8us → 68.0us (1.39x faster)
-- PCM u8→f64 4096: 78.5us → 51.6us (1.52x faster)
-- FFT forward 1024: 1.714ms → 1.559ms (1.10x faster)
-- MDCT forward 2048: 8.534ms → 7.454ms (1.14x faster)
-- Binary: 462KB (from 333KB in v2.1.1 — sankoch compression included)
+- **MDCT forward 2048: 8.534ms → 1.566ms (5.45x faster)** — N/2-point FFT rewrite
+- WAV decode 1sec i16: 1.135ms → 766us (1.48x faster)
+- PCM i16→f64 4096: 93.8us → 70.1us (1.34x faster)
+- PCM i24→f64 4096: 94.8us → 67.3us (1.41x faster)
+- PCM u8→f64 4096: 78.5us → 50.3us (1.56x faster)
+- FFT forward 1024: 1.714ms → 1.528ms (1.12x faster)
+- FLAC encode/decode: stable (not affected by FFT/PCM changes)
+- Binary: 475KB (from 333KB in v2.1.1 — sankoch + polyphase tables)
 - 520 tests, 0 failures
 
 ## [2.1.1] - 2026-04-11

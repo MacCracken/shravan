@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.2.0** — 520 tests, 462KB binary, cc3 >= 4.10.3.
-> Stdlib modernization: vendored stdlib removed, resolved via cyrius.toml deps.
-> Sankoch compression dep (LZ4, DEFLATE, zlib, gzip). Upgraded stdlib with
-> inverse trig, word-at-a-time strlen, rep movsb memcpy, extended str/fmt.
+> **v2.2.0** — 520 tests, 475KB binary, cc3 >= 4.10.3.
+> Stdlib modernization + performance optimization pass.
+> MDCT 5.45x faster (N/2-point FFT rewrite), PCM 1.3-1.6x (div→mul),
+> polyphase resampler, sorted Huffman decode, sankoch compression dep.
 
 ## Completed (v2.0.0)
 
@@ -41,6 +41,8 @@
 - [x] AAC Huffman: sorted codebook decode replacing linear scan
 - [x] WAV chunk parsing: u32 comparison replacing nested byte checks
 - [x] Named struct size constants (FMTINFO_SIZE, DECODE_RESULT_SIZE, BITREADER_SIZE)
+- [x] MDCT N/2-point FFT rewrite: 8.5ms → 1.6ms (5.45x faster)
+- [x] Resample polyphase filter table: 256-phase pre-computed kernel cache
 
 ## v2.3.0 — Completeness + Performance
 
@@ -61,9 +63,9 @@
 
 ### Performance
 
-- MDCT: N/2-point FFT rewrite (current 2N-point — 4x reduction possible)
-- ~~Opus FFT: specialized radix-2/3/5 butterflies with precomputed twiddles~~ (done: per-level twiddle tables in v2.2.0)
-- Resampler: polyphase filter bank (current recomputes sinc taps per sample)
+- ~~MDCT: N/2-point FFT rewrite~~ (done: 5.45x in v2.2.0)
+- ~~Opus FFT: precomputed twiddles~~ (done: per-level twiddle tables in v2.2.0)
+- ~~Resampler: polyphase filter bank~~ (done: 256-phase table in v2.2.0)
 - PCM: inline asm SSE2 for i16/f64 hot loops
 - FLAC encoder: LPC encoding (better compression than Fixed prediction)
 

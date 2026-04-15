@@ -109,6 +109,62 @@ fn windowed_sinc(x, half_width) {
 #   quality: RESAMPLE_DRAFT / RESAMPLE_GOOD / RESAMPLE_BEST
 # Returns: new vec of resampled f64 samples, or negative error
 
+# ================================================================
+# Polyphase filter table cache
+# ================================================================
+# Pre-computes windowed sinc kernels at quantized fractional positions.
+# NUM_PHASES phases (fractional resolution), each with kernel_width taps.
+# Eliminates per-sample trig calls in the inner loop.
+
+var _RS_NUM_PHASES = 256;
+var _RS_PHASE_TBL = 0;       # pointer to phase table data
+var _RS_PHASE_WIDTH = 0;     # kernel width (2*scaled_half + 1)
+var _RS_PHASE_HALF = 0;      # scaled_half used to build table
+var _RS_PHASE_KSCALE = 0;    # kernel_scale used
+var _RS_PHASE_WSUM = 0;      # pointer to per-phase weight sums
+
+fn _rs_build_phase_table(scaled_half, kernel_scale) {
+    if (_RS_PHASE_TBL != 0) {
+        if (_RS_PHASE_HALF == scaled_half) {
+            if (f64_eq(_RS_PHASE_KSCALE, kernel_scale) == 1) {
+                return 0;  # already built for this config
+            }
+        }
+    }
+
+    var width = 2 * scaled_half + 1;
+    var f_sh = f64_from(scaled_half);
+    var np = _RS_NUM_PHASES;
+    var f_np = f64_from(np);
+
+    _RS_PHASE_TBL = alloc(np * width * 8);
+    _RS_PHASE_WSUM = alloc(np * 8);
+    _RS_PHASE_WIDTH = width;
+    _RS_PHASE_HALF = scaled_half;
+    _RS_PHASE_KSCALE = kernel_scale;
+
+    var p = 0;
+    while (p < np) {
+        var frac = f64_div(f64_from(p), f_np);
+        var wsum = F64_ZERO;
+        var base = p * width * 8;
+        var tap = 0;
+        var i = 0 - scaled_half;
+        while (i <= scaled_half) {
+            var f_i = f64_from(i);
+            var x = f64_mul(f64_sub(f_i, frac), kernel_scale);
+            var w = windowed_sinc(x, f_sh);
+            store64(_RS_PHASE_TBL + base + tap * 8, w);
+            wsum = f64_add(wsum, w);
+            tap = tap + 1;
+            i = i + 1;
+        }
+        store64(_RS_PHASE_WSUM + p * 8, wsum);
+        p = p + 1;
+    }
+    return 0;
+}
+
 fn resample_mono(samples_vec, source_rate, target_rate, quality) {
     var frames = vec_len(samples_vec);
     if (frames == 0) {
@@ -147,6 +203,11 @@ fn resample_mono(samples_vec, source_rate, target_rate, quality) {
     var f_half = f64_from(half_width);
     var scaled_half = f64_to(f64_ceil(f64_div(f_half, filter_scale)));
 
+    # Build polyphase table for this configuration
+    _rs_build_phase_table(scaled_half, kernel_scale);
+    var width = _RS_PHASE_WIDTH;
+    var f_np = f64_from(_RS_NUM_PHASES);
+
     var frame = 0;
     while (frame < new_frames) {
         var f_frame = f64_from(frame);
@@ -154,23 +215,28 @@ fn resample_mono(samples_vec, source_rate, target_rate, quality) {
         var src_center = f64_to(f64_floor(src_pos));
         var frac = f64_sub(src_pos, f64_from(src_center));
 
-        var sum = F64_ZERO;
-        var weight_sum = F64_ZERO;
+        # Quantize fractional position to nearest phase
+        var phase = f64_to(f64_mul(frac, f_np));
+        if (phase >= _RS_NUM_PHASES) { phase = _RS_NUM_PHASES - 1; }
+        if (phase < 0) { phase = 0; }
 
+        var phase_base = phase * width * 8;
+        var weight_sum = load64(_RS_PHASE_WSUM + phase * 8);
+        var sum = F64_ZERO;
+
+        # Dot product with pre-computed kernel
+        var tap = 0;
         var i = 0 - scaled_half;
         while (i <= scaled_half) {
             var src_idx = src_center + i;
             if (src_idx >= 0) {
                 if (src_idx < frames) {
-                    var f_i = f64_from(i);
-                    var x = f64_mul(f64_sub(f_i, frac), kernel_scale);
-                    var f_sh = f64_from(scaled_half);
-                    var w = windowed_sinc(x, f_sh);
+                    var w = load64(_RS_PHASE_TBL + phase_base + tap * 8);
                     var sample = vec_get(samples_vec, src_idx);
                     sum = f64_add(sum, f64_mul(sample, w));
-                    weight_sum = f64_add(weight_sum, w);
                 }
             }
+            tap = tap + 1;
             i = i + 1;
         }
 

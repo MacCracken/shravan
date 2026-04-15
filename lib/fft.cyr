@@ -291,31 +291,29 @@ fn _fft_forward(re, im, n) {
 fn fft_mdct(input, n, output) {
     var n2 = n / 2;
     var n4 = n / 4;
-    var nn = 2 * n;  # 2N
 
-    var n0 = f64_add(f64_from(n4), F64_HALF);  # 0.5 + N/4
-
-    # Pre-compute MDCT pre-twiddle table if needed
+    # Pre-compute MDCT twiddle tables if needed (N-point FFT, not 2N)
     if (_mdct_pre_n != n) {
         _mdct_pre_re = alloc(n * 8);
         _mdct_pre_im = alloc(n * 8);
+        # Pre-twiddle: exp(-j*pi*(2i+1)/(4N)) for i=0..N-1
         var i = 0;
         while (i < n) {
-            var tw_angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn)));
-            store64(_mdct_pre_re + i * 8, f64_cos(tw_angle));
-            store64(_mdct_pre_im + i * 8, f64_sin(tw_angle));
+            var angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(2 * i + 1)), f64_mul(f64_from(4), f64_from(n))));
+            store64(_mdct_pre_re + i * 8, f64_cos(angle));
+            store64(_mdct_pre_im + i * 8, f64_sin(angle));
             i = i + 1;
         }
         _mdct_pre_n = n;
     }
 
-    # Pre-compute MDCT post-twiddle table if needed
     if (_mdct_post_n != n) {
         _mdct_post_re = alloc(n2 * 8);
         _mdct_post_im = alloc(n2 * 8);
+        # Post-twiddle: exp(-j*pi*(2k+1)/(4N)) for k=0..N/2-1
         var k = 0;
         while (k < n2) {
-            var angle = f64_neg(f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn)));
+            var angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n))));
             store64(_mdct_post_re + k * 8, f64_cos(angle));
             store64(_mdct_post_im + k * 8, f64_sin(angle));
             k = k + 1;
@@ -323,33 +321,39 @@ fn fft_mdct(input, n, output) {
         _mdct_post_n = n;
     }
 
-    # Pre-twiddle + zero-pad to 2N
-    var z_re = alloc(nn * 8);
-    var z_im = alloc(nn * 8);
-    memset(z_re, 0, nn * 8);
-    memset(z_im, 0, nn * 8);
+    # Step 1: Fold N inputs into N/2 complex values with pre-rotation
+    # z[k] = (x[2k] + j*x[N-1-2k]) * exp(-j*pi*(2k+1)/(4N))
+    var z_re = alloc(n2 * 8);
+    var z_im = alloc(n2 * 8);
 
-    var i = 0;
-    while (i < n) {
-        var tw_re = load64(_mdct_pre_re + i * 8);
-        var tw_im = load64(_mdct_pre_im + i * 8);
-        var xval = load64(input + i * 8);
-        store64(z_re + i * 8, f64_mul(xval, tw_re));
-        store64(z_im + i * 8, f64_mul(xval, tw_im));
-        i = i + 1;
-    }
-
-    # FFT of length 2N
-    fft_compute(z_re, z_im, nn, 0);
-
-    # Post-twiddle: X[k] = Re(exp(-j*pi*n0*(2k+1)/(2N)) * Z[k])
     var k = 0;
     while (k < n2) {
-        var tw_re = load64(_mdct_post_re + k * 8);
-        var tw_im = load64(_mdct_post_im + k * 8);
+        var xr = load64(input + (2 * k) * 8);
+        var xi = load64(input + (n - 1 - 2 * k) * 8);
+        var tw_re = load64(_mdct_pre_re + k * 8);
+        var tw_im = load64(_mdct_pre_im + k * 8);
+        # (xr + j*xi) * (tw_re + j*tw_im)
+        store64(z_re + k * 8, _cmul_re(xr, xi, tw_re, tw_im));
+        store64(z_im + k * 8, _cmul_im(xr, xi, tw_re, tw_im));
+        k = k + 1;
+    }
+
+    # Step 2: N/2-point complex FFT
+    fft_compute(z_re, z_im, n2, 0);
+
+    # Step 3: Post-rotate and extract N/2 real MDCT coefficients
+    # Y[k] = Z[k] * exp(-j*pi*(2k+1)/(4N))
+    # X[2k] = Re(Y[k]), X[N/2-1-2k] = -Im(Y[k])
+    k = 0;
+    while (k < n4) {
         var zr = load64(z_re + k * 8);
         var zi = load64(z_im + k * 8);
-        store64(output + k * 8, _cmul_re(zr, zi, tw_re, tw_im));
+        var tw_re = load64(_mdct_post_re + k * 8);
+        var tw_im = load64(_mdct_post_im + k * 8);
+        var yr = _cmul_re(zr, zi, tw_re, tw_im);
+        var yi = _cmul_im(zr, zi, tw_re, tw_im);
+        store64(output + (2 * k) * 8, yr);
+        store64(output + (n2 - 1 - 2 * k) * 8, f64_neg(yi));
         k = k + 1;
     }
 
@@ -370,17 +374,15 @@ fn fft_mdct(input, n, output) {
 fn fft_imdct(input, n, output) {
     var n2 = n / 2;
     var n4 = n / 4;
-    var nn = 2 * n;
 
-    var n0 = f64_add(f64_from(n4), F64_HALF);
-
-    # Pre-compute IMDCT pre-twiddle table if needed
+    # Pre-compute IMDCT twiddle tables if needed
     if (_imdct_pre_n != n) {
         _imdct_pre_re = alloc(n2 * 8);
         _imdct_pre_im = alloc(n2 * 8);
+        # Pre-twiddle: exp(+j*pi*(2k+1)/(4N)) for k=0..N/2-1
         var k = 0;
         while (k < n2) {
-            var angle = f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn));
+            var angle = f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n)));
             store64(_imdct_pre_re + k * 8, f64_cos(angle));
             store64(_imdct_pre_im + k * 8, f64_sin(angle));
             k = k + 1;
@@ -388,49 +390,68 @@ fn fft_imdct(input, n, output) {
         _imdct_pre_n = n;
     }
 
-    # Pre-compute IMDCT post-twiddle table if needed
     if (_imdct_post_n != n) {
-        _imdct_post_re = alloc(n * 8);
-        _imdct_post_im = alloc(n * 8);
-        var i = 0;
-        while (i < n) {
-            var tw_angle = f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn));
-            store64(_imdct_post_re + i * 8, f64_cos(tw_angle));
-            store64(_imdct_post_im + i * 8, f64_sin(tw_angle));
-            i = i + 1;
+        _imdct_post_re = alloc(n2 * 8);
+        _imdct_post_im = alloc(n2 * 8);
+        # Post-twiddle: exp(+j*pi*(2k+1)/(4N)) for k=0..N/2-1
+        var k = 0;
+        while (k < n2) {
+            var angle = f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n)));
+            store64(_imdct_post_re + k * 8, f64_cos(angle));
+            store64(_imdct_post_im + k * 8, f64_sin(angle));
+            k = k + 1;
         }
         _imdct_post_n = n;
     }
 
-    # Build complex input for IFFT: Z[k] = X[k] * exp(+j*pi*n0*(2k+1)/(2N))
-    var z_re = alloc(nn * 8);
-    var z_im = alloc(nn * 8);
-    memset(z_re, 0, nn * 8);
-    memset(z_im, 0, nn * 8);
+    # Step 1: Pre-rotate N/2 spectral coefficients into N/4 complex values
+    # Pair up: z[k] = (X[2k] - j*X[N/2-1-2k]) * exp(+j*pi*(2k+1)/(4N))
+    var z_re = alloc(n4 * 8);
+    var z_im = alloc(n4 * 8);
 
     var k = 0;
-    while (k < n2) {
+    while (k < n4) {
+        var xr = load64(input + (2 * k) * 8);
+        var xi = f64_neg(load64(input + (n2 - 1 - 2 * k) * 8));
         var tw_re = load64(_imdct_pre_re + k * 8);
         var tw_im = load64(_imdct_pre_im + k * 8);
-        var xval = load64(input + k * 8);
-        store64(z_re + k * 8, f64_mul(xval, tw_re));
-        store64(z_im + k * 8, f64_mul(xval, tw_im));
+        store64(z_re + k * 8, _cmul_re(xr, xi, tw_re, tw_im));
+        store64(z_im + k * 8, _cmul_im(xr, xi, tw_re, tw_im));
         k = k + 1;
     }
 
-    # Inverse FFT of length 2N
-    fft_compute(z_re, z_im, nn, 1);
+    # Step 2: N/4-point inverse complex FFT
+    fft_compute(z_re, z_im, n4, 1);
 
-    # Post-twiddle: x[i] = (4/N) * Re(z[i] * exp(+j*pi*i/(2N)))
-    var scale = f64_div(f64_from(4), f64_from(n));
-    var i = 0;
-    while (i < n) {
-        var tw_re = load64(_imdct_post_re + i * 8);
-        var tw_im = load64(_imdct_post_im + i * 8);
-        var zr = load64(z_re + i * 8);
-        var zi = load64(z_im + i * 8);
-        store64(output + i * 8, f64_mul(_cmul_re(zr, zi, tw_re, tw_im), scale));
-        i = i + 1;
+    # Step 3: Post-rotate and unfold N/4 complex → N real time-domain samples
+    # Y[k] = Z[k] * exp(+j*pi*(2k+1)/(4N)) * (8/N)
+    var scale = f64_div(f64_from(8), f64_from(n));
+    var tmp_re = alloc(n2 * 8);
+    var tmp_im = alloc(n2 * 8);
+
+    k = 0;
+    while (k < n4) {
+        var zr = load64(z_re + k * 8);
+        var zi = load64(z_im + k * 8);
+        var tw_re = load64(_imdct_post_re + k * 8);
+        var tw_im = load64(_imdct_post_im + k * 8);
+        store64(tmp_re + k * 8, f64_mul(_cmul_re(zr, zi, tw_re, tw_im), scale));
+        store64(tmp_im + k * 8, f64_mul(_cmul_im(zr, zi, tw_re, tw_im), scale));
+        k = k + 1;
+    }
+
+    # Unfold to N output samples using MDCT symmetry
+    # output[2k] = Re(Y[k]), output[N-1-2k] = -Re(Y[k])
+    # output[N/2+2k] = Im(Y[k]), output[N/2-1-2k] = Im(Y[k])
+    k = 0;
+    while (k < n4) {
+        var yr = load64(tmp_re + k * 8);
+        var yi = load64(tmp_im + k * 8);
+        store64(output + (2 * k) * 8, yr);
+        store64(output + (n - 1 - 2 * k) * 8, f64_neg(yr));
+        store64(output + (n2 + 2 * k) * 8, yi);
+        store64(output + (n2 - 1 - 2 * k) * 8, yi);
+        k = k + 1;
     }
 
     return 0;
