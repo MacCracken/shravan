@@ -22,6 +22,11 @@ var F64_8388608    = 0;
 var F64_8388607    = 0;
 var F64_2147483648 = 0;
 var F64_2147483647 = 0;
+var F64_RCP_128        = 0;
+var F64_RCP_32768      = 0;
+var F64_RCP_8388608    = 0;
+var F64_RCP_2147483648 = 0;
+var F64_2_NEG_149  = 0;
 
 fn shravan_init_constants() {
     F64_ZERO       = f64_from(0);
@@ -36,6 +41,11 @@ fn shravan_init_constants() {
     F64_8388607    = f64_from(8388607);
     F64_2147483648 = f64_mul(f64_from(32768), f64_from(65536));
     F64_2147483647 = f64_sub(F64_2147483648, F64_ONE);
+    F64_RCP_128        = f64_div(F64_ONE, F64_128);
+    F64_RCP_32768      = f64_div(F64_ONE, F64_32768);
+    F64_RCP_8388608    = f64_div(F64_ONE, F64_8388608);
+    F64_RCP_2147483648 = f64_div(F64_ONE, F64_2147483648);
+    F64_2_NEG_149 = f64_pow(F64_TWO, f64_from(0 - 149));
     return 0;
 }
 
@@ -100,12 +110,22 @@ fn sign_extend(val, bits) {
 
 fn f64_clamp_sample(x) { return f64_clamp(x, F64_NEG_ONE, F64_ONE); }
 
+fn _vec_new_cap(n) {
+    var v = alloc(24);
+    var data = alloc(n * 8);
+    store64(v, data);
+    store64(v + 8, 0);
+    store64(v + 16, n);
+    return v;
+}
+
 fn i16_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_32768;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u16_le(src, i * 2);
         var signed = sign_extend(raw, 16);
-        vec_push(v, f64_div(f64_from(signed), F64_32768));
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
@@ -121,37 +141,40 @@ fn f64_to_i16(samples, out) {
 }
 
 fn i32_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_2147483648;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u32_le(src, i * 4);
         var signed = sign_extend(raw, 32);
-        vec_push(v, f64_div(f64_from(signed), F64_2147483648));
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
 
 fn i24_packed_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_8388608;
     for (var i = 0; i < count; i = i + 1) {
         var off = i * 3;
         var raw = load8(src+off) | (load8(src+off+1)<<8) | (load8(src+off+2)<<16);
         var signed = sign_extend(raw, 24);
-        vec_push(v, f64_div(f64_from(signed), F64_8388608));
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
 
 fn u8_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_128;
     for (var i = 0; i < count; i = i + 1) {
         var raw = load8(src + i);
-        vec_push(v, f64_div(f64_sub(f64_from(raw), F64_128), F64_128));
+        vec_push(v, f64_mul(f64_sub(f64_from(raw), F64_128), scale));
     }
     return v;
 }
 
 fn f32_to_f64_vec(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
     for (var i = 0; i < count; i = i + 1) {
         var bits = read_u32_le(src, i * 4);
         var sign = (bits >> 31) & 1;
@@ -160,7 +183,7 @@ fn f32_to_f64_vec(src, count) {
         var f = F64_ZERO;
         if (exp == 0) {
             if (mant != 0) {
-                f = f64_mul(f64_from(mant), f64_pow(F64_TWO, f64_from(0 - 149)));
+                f = f64_mul(f64_from(mant), F64_2_NEG_149);
             }
         } else {
             if (exp != 0xFF) {

@@ -33,6 +33,49 @@ fn fft_init() {
 }
 
 # ================================================================
+# Twiddle factor cache — pre-computed cos/sin tables per FFT size
+# ================================================================
+# tw_re[k] = cos(-2*pi*k/N), tw_im[k] = sin(-2*pi*k/N) for k=0..N-1
+# Single-size cache: rebuilt when N changes (common case is repeated
+# calls at same size within a codec — AAC always uses 2048, etc.)
+
+var _fft_tw_re = 0;
+var _fft_tw_im = 0;
+var _fft_tw_n  = 0;
+
+fn _fft_ensure_twiddles(n) {
+    if (n == _fft_tw_n) { return 0; }
+    _fft_tw_re = alloc(n * 8);
+    _fft_tw_im = alloc(n * 8);
+    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+    var k = 0;
+    while (k < n) {
+        var theta = f64_mul(angle_base, f64_from(k));
+        store64(_fft_tw_re + k * 8, f64_cos(theta));
+        store64(_fft_tw_im + k * 8, f64_sin(theta));
+        k = k + 1;
+    }
+    _fft_tw_n = n;
+    return 0;
+}
+
+# MDCT twiddle caches (pre and post rotation angles)
+var _mdct_pre_re = 0;
+var _mdct_pre_im = 0;
+var _mdct_pre_n  = 0;
+var _mdct_post_re = 0;
+var _mdct_post_im = 0;
+var _mdct_post_n  = 0;
+
+# IMDCT twiddle caches
+var _imdct_pre_re = 0;
+var _imdct_pre_im = 0;
+var _imdct_pre_n  = 0;
+var _imdct_post_re = 0;
+var _imdct_post_im = 0;
+var _imdct_post_n  = 0;
+
+# ================================================================
 # Complex helpers (operate on f64 bit patterns)
 # ================================================================
 
@@ -188,8 +231,18 @@ fn _fft_forward(re, im, n) {
         r = r + 1;
     }
 
-    # Combine: generic radix-R butterfly
+    # Combine: generic radix-R butterfly with pre-computed twiddles
+    # Pre-compute all N twiddle factors for this level
+    var tw_re_buf = alloc(n * 8);
+    var tw_im_buf = alloc(n * 8);
     var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+    var ti = 0;
+    while (ti < n) {
+        var theta = f64_mul(angle_base, f64_from(ti));
+        store64(tw_re_buf + ti * 8, f64_cos(theta));
+        store64(tw_im_buf + ti * 8, f64_sin(theta));
+        ti = ti + 1;
+    }
 
     var k = 0;
     while (k < n) {
@@ -199,9 +252,9 @@ fn _fft_forward(re, im, n) {
 
         r = 0;
         while (r < radix) {
-            var theta = f64_mul(angle_base, f64_from(r * k));
-            var tw_re = f64_cos(theta);
-            var tw_im = f64_sin(theta);
+            var tw_idx = (r * k) % n;
+            var tw_re = load64(tw_re_buf + tw_idx * 8);
+            var tw_im = load64(tw_im_buf + tw_idx * 8);
 
             var xr = load64(tmp_re + (r * m + km) * 8);
             var xi = load64(tmp_im + (r * m + km) * 8);
@@ -242,6 +295,34 @@ fn fft_mdct(input, n, output) {
 
     var n0 = f64_add(f64_from(n4), F64_HALF);  # 0.5 + N/4
 
+    # Pre-compute MDCT pre-twiddle table if needed
+    if (_mdct_pre_n != n) {
+        _mdct_pre_re = alloc(n * 8);
+        _mdct_pre_im = alloc(n * 8);
+        var i = 0;
+        while (i < n) {
+            var tw_angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn)));
+            store64(_mdct_pre_re + i * 8, f64_cos(tw_angle));
+            store64(_mdct_pre_im + i * 8, f64_sin(tw_angle));
+            i = i + 1;
+        }
+        _mdct_pre_n = n;
+    }
+
+    # Pre-compute MDCT post-twiddle table if needed
+    if (_mdct_post_n != n) {
+        _mdct_post_re = alloc(n2 * 8);
+        _mdct_post_im = alloc(n2 * 8);
+        var k = 0;
+        while (k < n2) {
+            var angle = f64_neg(f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn)));
+            store64(_mdct_post_re + k * 8, f64_cos(angle));
+            store64(_mdct_post_im + k * 8, f64_sin(angle));
+            k = k + 1;
+        }
+        _mdct_post_n = n;
+    }
+
     # Pre-twiddle + zero-pad to 2N
     var z_re = alloc(nn * 8);
     var z_im = alloc(nn * 8);
@@ -250,38 +331,25 @@ fn fft_mdct(input, n, output) {
 
     var i = 0;
     while (i < n) {
-        # twiddle angle = -pi * i / (2N)
-        var tw_angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn)));
-        var tw_re = f64_cos(tw_angle);
-        var tw_im = f64_sin(tw_angle);
-
+        var tw_re = load64(_mdct_pre_re + i * 8);
+        var tw_im = load64(_mdct_pre_im + i * 8);
         var xval = load64(input + i * 8);
-
-        # z[i] = x[i] * exp(-j * pi * i / 2N)
         store64(z_re + i * 8, f64_mul(xval, tw_re));
         store64(z_im + i * 8, f64_mul(xval, tw_im));
-
         i = i + 1;
     }
-    # Remaining elements (i=n..2N-1) are zero from memset
 
     # FFT of length 2N
     fft_compute(z_re, z_im, nn, 0);
 
-    # Post-twiddle: X[k] = Re(exp(-j * pi * n0 * (2k+1) / (2N)) * Z[k])
+    # Post-twiddle: X[k] = Re(exp(-j*pi*n0*(2k+1)/(2N)) * Z[k])
     var k = 0;
     while (k < n2) {
-        var angle = f64_neg(f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn)));
-        var tw_re = f64_cos(angle);
-        var tw_im = f64_sin(angle);
-
+        var tw_re = load64(_mdct_post_re + k * 8);
+        var tw_im = load64(_mdct_post_im + k * 8);
         var zr = load64(z_re + k * 8);
         var zi = load64(z_im + k * 8);
-
-        # result = Re((zr+zi*j)*(tw_re+tw_im*j))
-        var result = _cmul_re(zr, zi, tw_re, tw_im);
-        store64(output + k * 8, result);
-
+        store64(output + k * 8, _cmul_re(zr, zi, tw_re, tw_im));
         k = k + 1;
     }
 
@@ -306,7 +374,35 @@ fn fft_imdct(input, n, output) {
 
     var n0 = f64_add(f64_from(n4), F64_HALF);
 
-    # Build complex input for IFFT: Z[k] = X[k] * exp(+j * pi * n0 * (2k+1) / (2N))
+    # Pre-compute IMDCT pre-twiddle table if needed
+    if (_imdct_pre_n != n) {
+        _imdct_pre_re = alloc(n2 * 8);
+        _imdct_pre_im = alloc(n2 * 8);
+        var k = 0;
+        while (k < n2) {
+            var angle = f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn));
+            store64(_imdct_pre_re + k * 8, f64_cos(angle));
+            store64(_imdct_pre_im + k * 8, f64_sin(angle));
+            k = k + 1;
+        }
+        _imdct_pre_n = n;
+    }
+
+    # Pre-compute IMDCT post-twiddle table if needed
+    if (_imdct_post_n != n) {
+        _imdct_post_re = alloc(n * 8);
+        _imdct_post_im = alloc(n * 8);
+        var i = 0;
+        while (i < n) {
+            var tw_angle = f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn));
+            store64(_imdct_post_re + i * 8, f64_cos(tw_angle));
+            store64(_imdct_post_im + i * 8, f64_sin(tw_angle));
+            i = i + 1;
+        }
+        _imdct_post_n = n;
+    }
+
+    # Build complex input for IFFT: Z[k] = X[k] * exp(+j*pi*n0*(2k+1)/(2N))
     var z_re = alloc(nn * 8);
     var z_im = alloc(nn * 8);
     memset(z_re, 0, nn * 8);
@@ -314,36 +410,26 @@ fn fft_imdct(input, n, output) {
 
     var k = 0;
     while (k < n2) {
-        var angle = f64_div(f64_mul(f64_mul(F64_PI, n0), f64_from(2 * k + 1)), f64_from(nn));
-        var tw_re = f64_cos(angle);
-        var tw_im = f64_sin(angle);
-
+        var tw_re = load64(_imdct_pre_re + k * 8);
+        var tw_im = load64(_imdct_pre_im + k * 8);
         var xval = load64(input + k * 8);
-
         store64(z_re + k * 8, f64_mul(xval, tw_re));
         store64(z_im + k * 8, f64_mul(xval, tw_im));
-
         k = k + 1;
     }
 
     # Inverse FFT of length 2N
     fft_compute(z_re, z_im, nn, 1);
 
-    # Post-twiddle: extract time-domain samples
-    # x[i] = (4/N) * Re(z[i] * exp(+j * pi * i / (2N)))
+    # Post-twiddle: x[i] = (4/N) * Re(z[i] * exp(+j*pi*i/(2N)))
     var scale = f64_div(f64_from(4), f64_from(n));
     var i = 0;
     while (i < n) {
-        var tw_angle = f64_div(f64_mul(F64_PI, f64_from(i)), f64_from(nn));
-        var tw_re = f64_cos(tw_angle);
-        var tw_im = f64_sin(tw_angle);
-
+        var tw_re = load64(_imdct_post_re + i * 8);
+        var tw_im = load64(_imdct_post_im + i * 8);
         var zr = load64(z_re + i * 8);
         var zi = load64(z_im + i * 8);
-
-        var result = _cmul_re(zr, zi, tw_re, tw_im);
-        store64(output + i * 8, f64_mul(result, scale));
-
+        store64(output + i * 8, f64_mul(_cmul_re(zr, zi, tw_re, tw_im), scale));
         i = i + 1;
     }
 

@@ -23,7 +23,7 @@ var F64_NEG_HALF   = 0;
 var F64_NEG_ONE    = 0;
 # F64_ONE and F64_TWO are in math.cyr
 
-# Divisors for PCM normalization
+# PCM normalization constants (divisors and reciprocals)
 var F64_128        = 0;
 var F64_255        = 0;
 var F64_32768      = 0;
@@ -32,6 +32,16 @@ var F64_8388608    = 0;
 var F64_8388607    = 0;
 var F64_2147483648 = 0;
 var F64_2147483647 = 0;
+
+# Pre-computed reciprocals for PCM conversion (mul instead of div)
+var F64_RCP_128        = 0;
+var F64_RCP_32768      = 0;
+var F64_RCP_8388608    = 0;
+var F64_RCP_2147483648 = 0;
+
+# Pre-computed power for f32 denormal conversion
+var F64_2_NEG_149  = 0;
+var F64_2_NEG_150  = 0;
 
 fn shravan_init_constants() {
     F64_ZERO       = f64_from(0);
@@ -46,6 +56,16 @@ fn shravan_init_constants() {
     F64_8388607    = f64_from(8388607);
     F64_2147483648 = f64_mul(f64_from(32768), f64_from(65536));
     F64_2147483647 = f64_sub(F64_2147483648, F64_ONE);
+
+    # Reciprocals for PCM hot paths (mul is ~3x faster than div)
+    F64_RCP_128        = f64_div(F64_ONE, F64_128);
+    F64_RCP_32768      = f64_div(F64_ONE, F64_32768);
+    F64_RCP_8388608    = f64_div(F64_ONE, F64_8388608);
+    F64_RCP_2147483648 = f64_div(F64_ONE, F64_2147483648);
+
+    # f32 denormal: 2^-149 and 2^-150
+    F64_2_NEG_149 = f64_pow(F64_TWO, f64_from(0 - 149));
+    F64_2_NEG_150 = f64_pow(F64_TWO, f64_from(0 - 150));
     return 0;
 }
 
@@ -313,16 +333,26 @@ fn f64_clamp_sample(x) {
     return f64_clamp(x, F64_NEG_ONE, F64_ONE);
 }
 
+# Allocate a vec with pre-set capacity (avoids growth in hot loops)
+fn _vec_new_cap(n) {
+    var v = alloc(24);
+    var data = alloc(n * 8);
+    store64(v, data);
+    store64(v + 8, 0);
+    store64(v + 16, n);
+    return v;
+}
+
 # Convert signed 16-bit samples to f64 vec.
 # src: pointer to i16 LE samples, count: number of samples
 # Returns: vec of f64 bit patterns
 fn i16_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_32768;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u16_le(src, i * 2);
         var signed = sign_extend(raw, 16);
-        var f = f64_div(f64_from(signed), F64_32768);
-        vec_push(v, f);
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
@@ -342,12 +372,12 @@ fn f64_to_i16(samples, out) {
 
 # Convert signed 32-bit samples to f64 vec.
 fn i32_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_2147483648;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u32_le(src, i * 4);
         var signed = sign_extend(raw, 32);
-        var f = f64_div(f64_from(signed), F64_2147483648);
-        vec_push(v, f);
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
@@ -365,13 +395,13 @@ fn f64_to_i32(samples, out) {
 
 # Convert 24-bit packed LE samples (3 bytes each) to f64 vec.
 fn i24_packed_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_8388608;
     for (var i = 0; i < count; i = i + 1) {
         var off = i * 3;
         var raw = load8(src + off) | (load8(src + off + 1) << 8) | (load8(src + off + 2) << 16);
         var signed = sign_extend(raw, 24);
-        var f = f64_div(f64_from(signed), F64_8388608);
-        vec_push(v, f);
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
@@ -394,12 +424,12 @@ fn f64_to_i24_packed(samples, out) {
 # src: pointer to i64 values, count: number of samples
 # Returns: vec of f64 bit patterns
 fn i24_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_8388608;
     for (var i = 0; i < count; i = i + 1) {
         var raw = load64(src + i * 8) & 0xFFFFFF;
         var signed = sign_extend(raw, 24);
-        var f = f64_div(f64_from(signed), F64_8388608);
-        vec_push(v, f);
+        vec_push(v, f64_mul(f64_from(signed), scale));
     }
     return v;
 }
@@ -419,11 +449,11 @@ fn f64_to_i24(samples, out) {
 
 # Convert unsigned 8-bit PCM (center=128) to f64 vec.
 fn u8_to_f64(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
+    var scale = F64_RCP_128;
     for (var i = 0; i < count; i = i + 1) {
         var raw = load8(src + i);
-        var f = f64_div(f64_sub(f64_from(raw), F64_128), F64_128);
-        vec_push(v, f);
+        vec_push(v, f64_mul(f64_sub(f64_from(raw), F64_128), scale));
     }
     return v;
 }
@@ -443,7 +473,7 @@ fn f64_to_u8(samples, out) {
 
 # Convert IEEE 754 float32 (4 bytes LE) to f64 vec.
 fn f32_to_f64_vec(src, count) {
-    var v = vec_new();
+    var v = _vec_new_cap(count);
     for (var i = 0; i < count; i = i + 1) {
         var bits = read_u32_le(src, i * 4);
         # Decompose f32: sign(1) | exp(8) | mantissa(23)
@@ -457,17 +487,15 @@ fn f32_to_f64_vec(src, count) {
                 # +-0.0
                 f = F64_ZERO;
             } else {
-                # Denormalized: value = (-1)^s * 2^(-126) * (0.mant)
-                # Convert via integer path: mant * 2^(-126-23) = mant * 2^(-149)
-                f = f64_mul(f64_from(mant), f64_pow(F64_TWO, f64_from(0 - 149)));
+                # Denormalized: mant * 2^(-149) — use pre-computed constant
+                f = f64_mul(f64_from(mant), F64_2_NEG_149);
             }
         } else {
             if (exp == 0xFF) {
                 # Inf/NaN — just produce 0 for safety
                 f = F64_ZERO;
             } else {
-                # Normalized: value = (-1)^s * 2^(exp-127) * (1 + mant/2^23)
-                # Build as: (2^23 + mant) * 2^(exp - 127 - 23) = (2^23 + mant) * 2^(exp - 150)
+                # Normalized: (2^23 + mant) * 2^(exp - 150)
                 var int_mant = 8388608 + mant;
                 var power = exp - 150;
                 f = f64_mul(f64_from(int_mant), f64_pow(F64_TWO, f64_from(power)));
@@ -546,17 +574,11 @@ fn decode_result_samples(dr) { return load64(dr + 8); }
 fn wav_decode(data, len) {
     if (len < 44) { return err(ERR_INVALID_HEADER); }
 
-    # Validate RIFF magic
-    if (load8(data) != 0x52)     { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 1) != 0x49) { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 2) != 0x46) { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 3) != 0x46) { return err(ERR_INVALID_HEADER); }
+    # Validate RIFF magic ("RIFF" = 0x46464952 LE)
+    if (read_u32_le(data, 0) != 0x46464952) { return err(ERR_INVALID_HEADER); }
 
-    # Validate WAVE identifier
-    if (load8(data + 8) != 0x57)  { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 9) != 0x41)  { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 10) != 0x56) { return err(ERR_INVALID_HEADER); }
-    if (load8(data + 11) != 0x45) { return err(ERR_INVALID_HEADER); }
+    # Validate WAVE identifier ("WAVE" = 0x45564157 LE)
+    if (read_u32_le(data, 8) != 0x45564157) { return err(ERR_INVALID_HEADER); }
 
     # Scan for fmt and data chunks
     var pos = 12;
@@ -570,49 +592,34 @@ fn wav_decode(data, len) {
     var dat_found = 0;
 
     while (pos + 8 <= len) {
-        var ck0 = load8(data + pos);
-        var ck1 = load8(data + pos + 1);
-        var ck2 = load8(data + pos + 2);
-        var ck3 = load8(data + pos + 3);
+        var chunk_id = read_u32_le(data, pos);
         var ck_size = read_u32_le(data, pos + 4);
 
-        # "fmt " = 0x66 0x6D 0x74 0x20
-        if (ck0 == 0x66) {
-            if (ck1 == 0x6D) {
-                if (ck2 == 0x74) {
-                    if (ck3 == 0x20) {
-                        if (ck_size < 16) { return err(ERR_INVALID_HEADER); }
-                        fmt_code = read_u16_le(data, pos + 8);
-                        fmt_ch   = read_u16_le(data, pos + 10);
-                        fmt_rate = read_u32_le(data, pos + 12);
-                        # skip byte_rate(4) + block_align(2)
-                        fmt_bps  = read_u16_le(data, pos + 22);
+        # "fmt " = 0x20746D66 LE
+        if (chunk_id == 0x20746D66) {
+            if (ck_size < 16) { return err(ERR_INVALID_HEADER); }
+            fmt_code = read_u16_le(data, pos + 8);
+            fmt_ch   = read_u16_le(data, pos + 10);
+            fmt_rate = read_u32_le(data, pos + 12);
+            # skip byte_rate(4) + block_align(2)
+            fmt_bps  = read_u16_le(data, pos + 22);
 
-                        # WAVE_FORMAT_EXTENSIBLE
-                        if (fmt_code == WAV_FMT_EXTENSIBLE) {
-                            if (ck_size >= 40) {
-                                var valid_bits = read_u16_le(data, pos + 26);
-                                if (valid_bits > 0) { fmt_bps = valid_bits; }
-                                fmt_code = read_u16_le(data, pos + 32);
-                            }
-                        }
-                        fmt_found = 1;
-                    }
+            # WAVE_FORMAT_EXTENSIBLE
+            if (fmt_code == WAV_FMT_EXTENSIBLE) {
+                if (ck_size >= 40) {
+                    var valid_bits = read_u16_le(data, pos + 26);
+                    if (valid_bits > 0) { fmt_bps = valid_bits; }
+                    fmt_code = read_u16_le(data, pos + 32);
                 }
             }
+            fmt_found = 1;
         }
 
-        # "data" = 0x64 0x61 0x74 0x61
-        if (ck0 == 0x64) {
-            if (ck1 == 0x61) {
-                if (ck2 == 0x74) {
-                    if (ck3 == 0x61) {
-                        dat_start = pos + 8;
-                        dat_size = ck_size;
-                        dat_found = 1;
-                    }
-                }
-            }
+        # "data" = 0x61746164 LE
+        if (chunk_id == 0x61746164) {
+            dat_start = pos + 8;
+            dat_size = ck_size;
+            dat_found = 1;
         }
 
         # Advance to next chunk (pad to even)
