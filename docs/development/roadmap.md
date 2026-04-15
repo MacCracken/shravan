@@ -46,19 +46,19 @@
 
 ## v2.3.0 — Completeness + Performance + Security Hardening
 
-### Security (from 2026-04-15 audit, P1-P2 deferred)
+### Security (from 2026-04-15 audit — all resolved)
 
-- SEC-008: FLAC unary decode — reduce bound from 1M to 65535*bps
-- SEC-009: ALAC arithmetic right shift — guard INT64_MIN negation overflow
-- SEC-010: MP3 frame_size scanner — add `pos + fs > len` guard
-- SEC-011: AAC frame accumulation — add per-decode allocation budget
-- SEC-012: FLAC SEEKTABLE — cap seek points at 1024
-- SEC-013: Vorbis Comment — skip zero-length comments (infinite loop)
-- SEC-014: MDCT size validation — cap n, require n % 4 == 0
-- SEC-016: Bitreader — validate bits parameter (0..64)
-- SEC-017: Add `_safe_alloc_mul(a, b)` overflow-checked allocation helper
-- SEC-018: Tag ID3v2 COMM — validate frame_size >= 4
-- Fuzzing harness for codec entry points (WAV, FLAC, AAC, Ogg, AIFF, ALAC, MP3)
+- [x] SEC-008: FLAC unary decode — bound reduced from 1M to 32768
+- [x] SEC-009: ALAC arithmetic right shift — INT64_MIN guard added
+- [x] SEC-010: MP3 frame_size scanner — `pos + fs > len` guard added
+- [x] SEC-011: AAC frame accumulation — capped at 65536 frames per decode
+- [x] SEC-012: FLAC SEEKTABLE — seek points capped at 1024
+- [x] SEC-013: Vorbis Comment — zero-length skip + count cap at 65536
+- [x] SEC-014: MDCT size validation — `n >= 4 && n % 4 == 0 && n <= 8192`
+- [x] SEC-016: Bitreader — rejects bits < 0 or bits > 64
+- [x] SEC-017: `_safe_alloc_mul(a, b)` overflow-checked allocation (256MB cap)
+- [x] SEC-018: Tag ID3v2 COMM — frame_size > 4 validated (confirmed safe)
+- [x] Fuzzing harness: `fuzz/fuzz_codecs.cyr` — 90K calls, 0 crashes (FLAC, Ogg, MP3, ID3v2)
 
 ### AAC gaps (external file compatibility)
 

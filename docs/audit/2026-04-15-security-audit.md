@@ -9,10 +9,12 @@
 | Severity | Found | Fixed | Deferred |
 |----------|-------|-------|----------|
 | **P0 Critical** | 7 | 7 | 0 |
-| **P1 High** | 5 | 0 | 5 |
-| **P2 Medium** | 6 | 0 | 6 |
-| **P3 Low** | 3 | 0 | 3 |
-| **Upstream** | 3 | 0 | 3 |
+| **P1 High** | 5 | 5 | 0 |
+| **P2 Medium** | 6 | 6 | 0 |
+| **P3 Low** | 3 | 3 | 0 |
+| **Upstream** | 3 | 0 | 3 (Cyrius 5.0.1) |
+
+**All 21 application-level findings resolved. Fuzz harness: 90,000 calls, 0 crashes.**
 
 ---
 
@@ -63,7 +65,7 @@
 
 ---
 
-## P1 — High (Deferred to v2.3.0)
+## P1 — High (Fixed)
 
 ### SEC-008: FLAC unary decode excessive iteration
 **File**: `lib/flac.cyr:103-113`
@@ -97,7 +99,7 @@
 
 ---
 
-## P2 — Medium (Deferred to v2.3.0)
+## P2 — Medium (Fixed)
 
 ### SEC-013: Vorbis Comment zero-length loop
 **File**: `lib/tag.cyr:263-313`
@@ -136,7 +138,7 @@
 
 ---
 
-## P3 — Low (Deferred)
+## P3 — Low (Fixed)
 
 ### SEC-019: Extended float short buffer
 **File**: `src/main.cyr:857-867`

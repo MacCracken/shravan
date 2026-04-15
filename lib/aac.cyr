@@ -1766,6 +1766,8 @@ fn aac_decode(data, len) {
         }
 
         frame_count = frame_count + 1;
+        # SEC-011: cap frame count to prevent unbounded allocation
+        if (frame_count > 65536) { break; }
         pos = pos + frame_length;
     }
 

@@ -1,0 +1,255 @@
+# Fuzz: codec parse/decode entry points with random byte buffers.
+# Invariants:
+#   - No parse/decode function crashes on any input.
+#   - All functions return error codes (negative) on invalid input.
+#
+# Tests: FLAC metadata, Ogg page parsing, MP3 frame scanning,
+#        ID3v2/Vorbis tag reading. WAV/AIFF/ALAC require main.cyr
+#        library (deferred to library factoring).
+#
+# Usage: ./build/fuzz_codecs [iters]   (default: 10000)
+
+# Stdlib modules resolved via cyrius.toml [deps] stdlib.
+
+# ================================================================
+# Minimal constants needed by codec modules
+# ================================================================
+
+var F64_ZERO       = 0;
+var F64_HALF       = 0;
+var F64_NEG_HALF   = 0;
+var F64_NEG_ONE    = 0;
+var F64_128        = 0;
+var F64_32768      = 0;
+var F64_32767      = 0;
+var F64_8388608    = 0;
+var F64_8388607    = 0;
+var F64_2147483648 = 0;
+var F64_2147483647 = 0;
+var F64_RCP_128    = 0;
+var F64_RCP_32768  = 0;
+var F64_RCP_8388608 = 0;
+var F64_RCP_2147483648 = 0;
+var F64_2_NEG_149  = 0;
+var F64_255        = 0;
+
+fn shravan_init_constants() {
+    F64_ZERO = f64_from(0);
+    F64_HALF = f64_div(F64_ONE, F64_TWO);
+    F64_NEG_HALF = f64_neg(F64_HALF);
+    F64_NEG_ONE = f64_neg(F64_ONE);
+    F64_128 = f64_from(128);
+    F64_255 = f64_from(255);
+    F64_32768 = f64_from(32768);
+    F64_32767 = f64_from(32767);
+    F64_8388608 = f64_from(8388608);
+    F64_8388607 = f64_from(8388607);
+    F64_2147483648 = f64_mul(f64_from(32768), f64_from(65536));
+    F64_2147483647 = f64_sub(F64_2147483648, F64_ONE);
+    F64_RCP_128 = f64_div(F64_ONE, F64_128);
+    F64_RCP_32768 = f64_div(F64_ONE, F64_32768);
+    F64_RCP_8388608 = f64_div(F64_ONE, F64_8388608);
+    F64_RCP_2147483648 = f64_div(F64_ONE, F64_2147483648);
+    F64_2_NEG_149 = f64_pow(F64_TWO, f64_from(0 - 149));
+    return 0;
+}
+
+# Error codes (needed by codec modules)
+enum ShravanErr {
+    ERR_NONE = 0; ERR_UNSUPPORTED_FMT = 1; ERR_INVALID_HEADER = 2;
+    ERR_DECODE = 3; ERR_ENCODE = 4; ERR_END_OF_STREAM = 5;
+    ERR_INVALID_RATE = 6; ERR_INVALID_CHANNELS = 7;
+}
+fn err(code) { return 0 - code; }
+fn is_err(r) { if (r < 0) { return 1; } return 0; }
+fn is_ok(r) { if (r >= 0) { return 1; } return 0; }
+
+enum AudioFormat {
+    FMT_WAV = 0; FMT_FLAC = 1; FMT_RAW = 2; FMT_OGG = 3;
+    FMT_AIFF = 4; FMT_MP3 = 5; FMT_OPUS = 6; FMT_AAC = 7; FMT_ALAC = 8;
+}
+
+fn fmtinfo_new(format, sample_rate, channels, bit_depth, duration_secs, total_samples) {
+    var fi = alloc(48);
+    store64(fi, format); store64(fi+8, sample_rate); store64(fi+16, channels);
+    store64(fi+24, bit_depth); store64(fi+32, duration_secs); store64(fi+40, total_samples);
+    return fi;
+}
+fn decode_result_new(fi, samples) { var dr = alloc(16); store64(dr, fi); store64(dr + 8, samples); return dr; }
+
+# Minimal helpers needed by codecs
+fn read_u16_le(data, off) { return load8(data+off) | (load8(data+off+1) << 8); }
+fn read_u32_le(data, off) { return load8(data+off) | (load8(data+off+1)<<8) | (load8(data+off+2)<<16) | (load8(data+off+3)<<24); }
+fn sign_extend(val, bits) { var half = 1 << (bits - 1); if (val >= half) { return val - (1 << bits); } return val; }
+fn f64_clamp_sample(x) { return f64_clamp(x, F64_NEG_ONE, F64_ONE); }
+fn _vec_new_cap(n) { var v = alloc(24); var data = alloc(n * 8); store64(v, data); store64(v + 8, 0); store64(v + 16, n); return v; }
+
+# Bitreader (needed by FLAC)
+fn bitreader_new(data, len) {
+    var br = alloc(32);
+    store64(br, data); store64(br + 8, 0); store64(br + 16, 0); store64(br + 24, len);
+    return br;
+}
+fn bitreader_read(br, bits) {
+    if (bits == 0) { return 0; }
+    if (bits < 0) { return err(ERR_DECODE); }
+    if (bits > 64) { return err(ERR_DECODE); }
+    var data = load64(br); var bpos = load64(br + 8);
+    var bbit = load64(br + 16); var dlen = load64(br + 24);
+    var result = 0; var remaining = bits;
+    while (remaining > 0) {
+        if (bpos >= dlen) { return err(ERR_END_OF_STREAM); }
+        var avail = 8 - bbit; var take = remaining;
+        if (take > avail) { take = avail; }
+        var shift = avail - take;
+        var mask = ((1 << take) - 1) << shift;
+        var val = (load8(data + bpos) & mask) >> shift;
+        result = (result << take) | val;
+        remaining = remaining - take;
+        bbit = bbit + take;
+        if (bbit >= 8) { bbit = 0; bpos = bpos + 1; }
+    }
+    store64(br + 8, bpos); store64(br + 16, bbit);
+    return result;
+}
+fn bitreader_read_bit(br) { return bitreader_read(br, 1); }
+
+# Include codec modules
+include "lib/flac.cyr"
+include "lib/ogg.cyr"
+include "lib/mp3.cyr"
+include "lib/tag.cyr"
+include "lib/fft.cyr"
+
+# ================================================================
+# PRNG
+# ================================================================
+
+var _fz_state = 314159265;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_u(m) {
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    return r % m;
+}
+
+fn _fz_fill(buf, len) {
+    var i = 0;
+    while (i < len) { store8(buf + i, _fz_u(256)); i = i + 1; }
+    return 0;
+}
+
+fn _fz_fill_magic(buf, len, magic, mlen) {
+    var i = 0;
+    while (i < mlen) { if (i < len) { store8(buf + i, load8(magic + i)); } i = i + 1; }
+    while (i < len) { store8(buf + i, _fz_u(256)); i = i + 1; }
+    return 0;
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+alloc_init();
+shravan_init_constants();
+fft_init();
+mp3_init();
+
+var iters = 10000;
+args_init();
+if (argc() > 1) {
+    iters = atoi(argv(1));
+    if (iters <= 0) { iters = 10000; }
+}
+
+var max_size = 4096;
+var buf = alloc(max_size);
+var total = 0;
+
+# FLAC magic
+var flac_m = alloc(4);
+store8(flac_m, 0x66); store8(flac_m+1, 0x4C); store8(flac_m+2, 0x61); store8(flac_m+3, 0x43);
+
+# Ogg magic
+var ogg_m = alloc(4);
+store8(ogg_m, 0x4F); store8(ogg_m+1, 0x67); store8(ogg_m+2, 0x67); store8(ogg_m+3, 0x53);
+
+# MP3 sync
+var mp3_m = alloc(2);
+store8(mp3_m, 0xFF); store8(mp3_m+1, 0xFB);
+
+# ID3v2
+var id3_m = alloc(3);
+store8(id3_m, 0x49); store8(id3_m+1, 0x44); store8(id3_m+2, 0x33);
+
+syscall(1, 1, "fuzz_codecs: ", 13);
+fmt_int(iters);
+syscall(1, 1, " iterations per target\n", 23);
+
+# --- FLAC metadata ---
+syscall(1, 1, "  flac_parse_metadata... ", 24);
+var fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 42) + 42;
+    _fz_fill_magic(buf, sz, flac_m, 4);
+    flac_parse_metadata(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# --- Ogg page parse ---
+syscall(1, 1, "  ogg_parse_page... ", 20);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 27) + 27;
+    _fz_fill_magic(buf, sz, ogg_m, 4);
+    ogg_parse_page(buf, 0, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# --- MP3 frame scan ---
+syscall(1, 1, "  mp3_scan_frames... ", 21);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 4) + 4;
+    _fz_fill_magic(buf, sz, mp3_m, 2);
+    mp3_scan_frames(buf, sz, 0);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# --- ID3v2 tag parse ---
+syscall(1, 1, "  tag_read_id3v2... ", 20);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 10) + 10;
+    _fz_fill_magic(buf, sz, id3_m, 3);
+    tag_read_id3v2(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# --- Pure random bytes (all codecs) ---
+syscall(1, 1, "  random bytes... ", 18);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size) + 1;
+    _fz_fill(buf, sz);
+    flac_parse_metadata(buf, sz);
+    ogg_parse_page(buf, 0, sz);
+    mp3_scan_frames(buf, sz, 0);
+    tag_read_id3v2(buf, sz);
+    fi = fi + 1; total = total + 5;
+}
+syscall(1, 1, "ok\n", 3);
+
+syscall(1, 1, "\nfuzz_codecs: ", 14);
+fmt_int(total);
+syscall(1, 1, " calls, 0 crashes\n", 18);
+syscall(60, 0);

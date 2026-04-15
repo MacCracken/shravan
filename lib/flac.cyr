@@ -100,6 +100,7 @@ fn flac_crc16(data, len) {
 # ================================================================
 
 # Read unary: count zero-bits before first 1-bit
+# SEC-008: bound reduced from 1M to 32768 (max realistic: 65535 * 32bps Rice residual)
 fn flac_br_read_unary(br) {
     var count = 0;
     while (1) {
@@ -107,7 +108,7 @@ fn flac_br_read_unary(br) {
         if (is_err(b) == 1) { return b; }
         if (b == 1) { return count; }
         count = count + 1;
-        if (count > 1000000) { return err(ERR_DECODE); }
+        if (count > 32768) { return err(ERR_DECODE); }
     }
     return count;
 }
@@ -242,6 +243,8 @@ fn flac_parse_metadata(data, len) {
         }
         if (block_type == 3) {
             var num_points = block_size / 18;
+            # SEC-012: cap seek points to prevent DoS from crafted SEEKTABLE
+            if (num_points > 1024) { num_points = 1024; }
             var sp_pos = pos;
             for (var i = 0; i < num_points; i = i + 1) {
                 if (sp_pos + 18 > len) { break; }

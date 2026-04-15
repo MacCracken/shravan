@@ -289,6 +289,10 @@ fn _fft_forward(re, im, n) {
 # Uses a 2N-point FFT with pre/post twiddle.
 
 fn fft_mdct(input, n, output) {
+    # SEC-014: validate MDCT size (must be >= 4, divisible by 4, bounded)
+    if (n < 4) { return 0 - 1; }
+    if (n % 4 != 0) { return 0 - 1; }
+    if (n > 8192) { return 0 - 1; }
     var n2 = n / 2;
     var n4 = n / 4;
 
@@ -372,6 +376,10 @@ fn fft_mdct(input, n, output) {
 # IMDCT: x[i] = (2/N) * sum_{k=0}^{N/2-1} X[k] * cos(pi/N * (i+0.5+N/4) * (k+0.5))
 
 fn fft_imdct(input, n, output) {
+    # SEC-014: validate IMDCT size
+    if (n < 4) { return 0 - 1; }
+    if (n % 4 != 0) { return 0 - 1; }
+    if (n > 8192) { return 0 - 1; }
     var n2 = n / 2;
     var n4 = n / 4;
 

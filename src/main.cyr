@@ -338,6 +338,18 @@ fn f64_clamp_sample(x) {
     return f64_clamp(x, F64_NEG_ONE, F64_ONE);
 }
 
+# SEC-017: Overflow-checked allocation for a*b bytes.
+# Returns pointer on success, or negative error if a*b would overflow
+# or exceed 256MB safety cap.
+var _ALLOC_MAX = 268435456;  # 256MB
+
+fn _safe_alloc_mul(a, b) {
+    if (a <= 0) { return err(ERR_DECODE); }
+    if (b <= 0) { return err(ERR_DECODE); }
+    if (a > _ALLOC_MAX / b) { return err(ERR_DECODE); }
+    return alloc(a * b);
+}
+
 # Allocate a vec with pre-set capacity (avoids growth in hot loops)
 fn _vec_new_cap(n) {
     var v = alloc(24);
@@ -1267,6 +1279,9 @@ fn bitreader_new(data, len) {
 
 fn bitreader_read(br, bits) {
     if (bits == 0) { return 0; }
+    # SEC-016: reject negative or oversized bit requests
+    if (bits < 0) { return err(ERR_DECODE); }
+    if (bits > 64) { return err(ERR_DECODE); }
     var data = load64(br);
     var bpos = load64(br + 8);
     var bbit = load64(br + 16);
@@ -1415,13 +1430,19 @@ fn alac_unfilter(buf, num_samples, coefs, num_coefs, den_shift) {
             prediction = prediction + diff * coef;
         }
         # Arithmetic right shift for signed values
+        # SEC-009: guard INT64_MIN (negation overflows in two's complement)
         var pred_shifted = prediction;
         if (den_shift > 0) {
             # Manual arithmetic right shift since >> is logical
-            if (prediction < 0) {
-                pred_shifted = 0 - ((0 - prediction) >> den_shift);
+            if (prediction == (1 << 63)) {
+                # Guard: 0 - INT64_MIN == INT64_MIN (overflow), treat as 0
+                pred_shifted = 0;
             } else {
-                pred_shifted = prediction >> den_shift;
+                if (prediction < 0) {
+                    pred_shifted = 0 - ((0 - prediction) >> den_shift);
+                } else {
+                    pred_shifted = prediction >> den_shift;
+                }
             }
         }
         var prev_sample = load64(buf + (j-1) * 8);

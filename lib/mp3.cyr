@@ -282,9 +282,10 @@ fn mp3_scan_frames(data, len) {
                 if (is_ok(info) == 1) {
                     var fs = mp3_frame_size(info);
                     if (fs > 0) {
+                        # SEC-010: guard against frame_size pointing past buffer
+                        if (pos + fs > len) { break; }
                         vec_push(frames, info);
                         pos = pos + fs;
-                        if (fs < 1) { pos = pos + 1; }
                     } else {
                         pos = pos + 1;
                     }
