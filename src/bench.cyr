@@ -2,14 +2,7 @@
 # Equivalent to benches/benchmarks.rs from the Rust version.
 # Uses manual timing via clock_gettime (CLOCK_MONOTONIC).
 
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/math.cyr"
-include "lib/tagged.cyr"
+# Stdlib modules resolved via cyrius.toml [deps] stdlib.
 
 # ================================================================
 # Pull in shravan library code (same as main.cyr minus tests)

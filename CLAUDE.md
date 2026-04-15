@@ -14,12 +14,12 @@
 
 ## Architecture
 
-Single-file library with codec modules in `lib/`. `src/main.cyr` is the entry point containing error, format, PCM, WAV, AIFF, ALAC, and codec dispatch inline, with codec modules (FLAC, Ogg, MP3, Opus, AAC, etc.) included from `lib/`. Stdlib vendored in `lib/`. Consumers include the entry point and get all codecs.
+Single-file library with codec modules in `lib/`. `src/main.cyr` is the entry point containing error, format, PCM, WAV, AIFF, ALAC, and codec dispatch inline, with codec modules (FLAC, Ogg, MP3, Opus, AAC, etc.) included from `lib/`. Stdlib resolved via `cyrius.toml` deps (not vendored). Consumers include the entry point and get all codecs.
 
 ```
 src/main.cyr     -- library + test harness (entry point)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
-lib/             -- codec modules + vendored Cyrius stdlib
+lib/             -- codec modules (project-specific only)
 build/           -- compiled binaries (gitignored)
 scripts/         -- bench-history.sh, version-bump.sh
 docs/            -- architecture, roadmap
@@ -28,8 +28,8 @@ docs/            -- architecture, roadmap
 ## Build
 
 ```sh
-cyrius build src/main.cyr build/shravan    # compile
-./build/shravan                             # run tests (119 assertions)
+cyrius build src/main.cyr build/shravan    # compile (requires cc3 >= 4.10.3)
+./build/shravan                             # run tests (520 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -56,6 +56,8 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | dither | lib/dither.cyr | Dithering for sample depth reduction |
 | simd | lib/simd.cyr | SIMD-optimized inner loops |
 | stream | lib/stream.cyr | Streaming decoder interface (WAV/FLAC/AIFF) |
+| serde | lib/serde.cyr | Audio format enum/metadata serialization |
+| sankoch | dep (cyrius.toml) | Compression (LZ4, DEFLATE, zlib, gzip) |
 
 ## Consumer Map
 
@@ -72,7 +74,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 499 assertions pass
+2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 520 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

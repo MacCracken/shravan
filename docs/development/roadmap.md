@@ -1,8 +1,9 @@
 # Development Roadmap
 
-> **v2.1.1** — 520 tests, 333KB binary, cc3 >= 3.4.3.
-> AAC-LC decoder with Huffman codebooks, M/S stereo, short windows.
-> Metadata writing. Incremental FLAC streaming. Rust source removed (tag `1.1.0`).
+> **v2.2.0** — 520 tests, 462KB binary, cc3 >= 4.10.3.
+> Stdlib modernization: vendored stdlib removed, resolved via cyrius.toml deps.
+> Sankoch compression dep (LZ4, DEFLATE, zlib, gzip). Upgraded stdlib with
+> inverse trig, word-at-a-time strlen, rep movsb memcpy, extended str/fmt.
 
 ## Completed (v2.0.0)
 
@@ -29,7 +30,14 @@
 - [x] General-purpose Huffman decoder (_aac_huff_decode)
 - [x] Correct section length coding for short vs long windows
 
-## v2.2.0 — Completeness + Performance
+## Completed (v2.2.0)
+
+- [x] Compiler upgrade: cc3 3.4.3 → 4.10.3
+- [x] Stdlib modernization: 12 vendored files removed, resolved via cyrius.toml [deps] stdlib
+- [x] Sankoch compression dep (LZ4, DEFLATE, zlib, gzip) via [deps.sankoch]
+- [x] Stdlib gains: inverse trig, inverse hyperbolic, lerp/hypot/sign/trunc/fract, gcd/lcm/fibonacci/binomial, f64_parse, word-at-a-time strlen, rep movsb/stosb, ASCII case helpers, extended str functions, bounds-checked fmt_sprintf
+
+## v2.3.0 — Completeness + Performance
 
 ### AAC gaps (external file compatibility)
 
@@ -58,7 +66,7 @@
 
 - decode_file / decode_reader convenience helpers
 
-## v2.3.0 — Own the stack
+## v2.4.0 — Own the stack
 
 ### Opus encoder
 

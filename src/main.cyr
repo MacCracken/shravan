@@ -10,16 +10,7 @@
 #   - Vec used for dynamic sample arrays (stores f64 bit patterns as i64)
 #   - Error codes are integer enums, error messages via helper functions
 
-include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/args.cyr"
-include "lib/assert.cyr"
-include "lib/tagged.cyr"
-include "lib/math.cyr"
+# Stdlib modules resolved via cyrius.toml [deps] stdlib.
 
 # ================================================================
 # Constants — f64 bit patterns for common values
