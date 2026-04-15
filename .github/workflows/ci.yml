@@ -9,7 +9,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 env:
-  CYRIUS_VERSION: "3.4.3"
+  CYRIUS_VERSION: "4.10.3"
 jobs:
   build-and-test:
     name: Build & Test

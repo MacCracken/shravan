@@ -5,7 +5,7 @@ on:
 permissions:
   contents: write
 env:
-  CYRIUS_VERSION: "3.4.3"
+  CYRIUS_VERSION: "4.10.3"
 jobs:
   ci:
     name: CI Gate

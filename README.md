@@ -82,7 +82,7 @@ Benchmarked against the previous Rust+LLVM implementation (v1.1.0):
 
 ## Requirements
 
-- Cyrius >= 3.4.3
+- Cyrius >= 4.10.3
 - Linux x86_64
 
 ## License
