@@ -612,9 +612,11 @@ fn wav_decode(data, len) {
             # WAVE_FORMAT_EXTENSIBLE
             if (fmt_code == WAV_FMT_EXTENSIBLE) {
                 if (ck_size >= 40) {
-                    var valid_bits = read_u16_le(data, pos + 26);
-                    if (valid_bits > 0) { fmt_bps = valid_bits; }
-                    fmt_code = read_u16_le(data, pos + 32);
+                    if (pos + 34 <= len) {
+                        var valid_bits = read_u16_le(data, pos + 26);
+                        if (valid_bits > 0) { fmt_bps = valid_bits; }
+                        fmt_code = read_u16_le(data, pos + 32);
+                    }
                 }
             }
             fmt_found = 1;
@@ -627,9 +629,12 @@ fn wav_decode(data, len) {
             dat_found = 1;
         }
 
-        # Advance to next chunk (pad to even)
-        var padded = ck_size + (ck_size & 1);
-        pos = pos + padded + 8;
+        # Advance to next chunk (pad to even), with overflow guard
+        if (ck_size > len - pos - 8) { pos = len + 1; }
+        else {
+            var padded = ck_size + (ck_size & 1);
+            pos = pos + padded + 8;
+        }
 
         if (fmt_found == 1) {
             if (dat_found == 1) {
@@ -1044,14 +1049,21 @@ fn aiff_decode(data, len) {
         if (ck0==0x53) { if (ck1==0x53) { if (ck2==0x4E) { if (ck3==0x44) {
             if (ck_size >= 8) {
                 var ssnd_offset = read_u32_be(data, pos + 8);
-                var pcm_start = pos + 8 + 8 + ssnd_offset;
-                ssnd_len = ck_size - 8 - ssnd_offset;
-                ssnd_start = pcm_start;
-                ssnd_found = 1;
+                # Guard against underflow: ssnd_offset must fit within chunk
+                if (ssnd_offset <= ck_size - 8) {
+                    var pcm_start = pos + 8 + 8 + ssnd_offset;
+                    if (pcm_start <= len) {
+                        ssnd_len = ck_size - 8 - ssnd_offset;
+                        ssnd_start = pcm_start;
+                        ssnd_found = 1;
+                    }
+                }
             }
         }}}}
 
-        pos = pos + 8 + ck_size + (ck_size & 1);
+        # Advance to next chunk with overflow guard
+        if (ck_size > len - pos - 8) { pos = len + 1; }
+        else { pos = pos + 8 + ck_size + (ck_size & 1); }
         if (comm_found == 1) { if (ssnd_found == 1) { pos = len + 1; } }
     }
 

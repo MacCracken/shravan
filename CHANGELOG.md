@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Resample polyphase filter table**: Pre-computes 256-phase windowed sinc kernel table, replacing per-sample `f64_sin`/`f64_cos` calls (65 trig calls per sample for BEST quality → 0).
 - **Struct size constants**: `FMTINFO_SIZE`, `DECODE_RESULT_SIZE`, `BITREADER_SIZE` replace magic numbers.
 
+### Security (P0 — from 2026-04-15 audit)
+
+- **SEC-001**: WAV chunk size overflow — added bounds guard before pos advancement.
+- **SEC-002**: AIFF SSND offset underflow — validated `ssnd_offset <= ck_size - 8` and `pcm_start <= len`.
+- **SEC-003**: AIFF chunk pos overflow — added overflow guard matching WAV fix.
+- **SEC-004**: WAV extensible format OOB — added `pos + 34 <= len` guard.
+- **SEC-005**: FLAC block_size cap — enforced `block_size <= 65535` in `flac_decode_block_size()`.
+- **SEC-006**: FLAC metadata block OOB — validated `pos + block_size <= len` before advancing.
+- **SEC-007**: Ogg packet accumulation overflow — added integer overflow check and 16MB hard cap.
+- Full report: `docs/audit/2026-04-15-security-audit.md` (14 deferred P1-P3 items on v2.3.0 roadmap, 3 upstream issues filed for Cyrius 5.0.1).
+
 ### Changed
 
 - **Compiler requirement**: cc3 >= 4.10.3 (from 3.4.3). Gains linalg, security fixes, improved stdlib.

@@ -249,7 +249,9 @@ fn ogg_extract_packets(data, len) {
                 return err(ERR_DECODE);
             }
 
-            # Ensure capacity
+            # Ensure capacity (with overflow guard on accumulated length)
+            if (cur_len + lacing_value < cur_len) { return err(ERR_DECODE); }
+            if (cur_len + lacing_value > 16777216) { return err(ERR_DECODE); }
             if (cur_len + lacing_value > cur_cap) {
                 var new_cap = cur_cap * 2;
                 if (new_cap < cur_len + lacing_value) {

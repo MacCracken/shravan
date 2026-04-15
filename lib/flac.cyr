@@ -259,6 +259,7 @@ fn flac_parse_metadata(data, len) {
             }
         }
 
+        if (pos + block_size > len) { return err(ERR_INVALID_HEADER); }
         pos = pos + block_size;
         if (is_last) { done = 1; }
     }
@@ -308,6 +309,7 @@ fn flac_decode_block_size(code, br) {
     if (code == 7) {
         var v = bitreader_read(br, 16);
         if (is_err(v) == 1) { return v; }
+        if (v + 1 > 65535) { return err(ERR_DECODE); }
         return v + 1;
     }
     if (code >= 8) { if (code <= 15) { return 256 << (code - 8); } }
