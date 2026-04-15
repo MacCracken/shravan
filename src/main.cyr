@@ -147,6 +147,11 @@ fn format_name(fmt) {
     return "Unknown";
 }
 
+# Struct size constants
+var FMTINFO_SIZE       = 48;
+var DECODE_RESULT_SIZE = 16;
+var BITREADER_SIZE     = 32;
+
 # FormatInfo — heap-allocated struct
 # Layout (48 bytes):
 #   +0:  format        (i64, AudioFormat enum)
@@ -1263,6 +1268,7 @@ fn bitreader_read(br, bits) {
         var take = remaining;
         if (take > avail) { take = avail; }
         var shift = avail - take;
+        # take is at most 8 (capped by avail), so 1 << take is safe
         var mask = ((1 << take) - 1) << shift;
         var val = (load8(data + bpos) & mask) >> shift;
         result = (result << take) | val;

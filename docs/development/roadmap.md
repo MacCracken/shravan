@@ -36,6 +36,11 @@
 - [x] Stdlib modernization: 12 vendored files removed, resolved via cyrius.toml [deps] stdlib
 - [x] Sankoch compression dep (LZ4, DEFLATE, zlib, gzip) via [deps.sankoch]
 - [x] Stdlib gains: inverse trig, inverse hyperbolic, lerp/hypot/sign/trunc/fract, gcd/lcm/fibonacci/binomial, f64_parse, word-at-a-time strlen, rep movsb/stosb, ASCII case helpers, extended str functions, bounds-checked fmt_sprintf
+- [x] PCM hot path: div→mul reciprocals, vec pre-allocation, f32 denormal constant
+- [x] FFT twiddle pre-computation: per-level tables, MDCT/IMDCT twiddle caching
+- [x] AAC Huffman: sorted codebook decode replacing linear scan
+- [x] WAV chunk parsing: u32 comparison replacing nested byte checks
+- [x] Named struct size constants (FMTINFO_SIZE, DECODE_RESULT_SIZE, BITREADER_SIZE)
 
 ## v2.3.0 — Completeness + Performance
 
@@ -45,7 +50,7 @@
 - Spectral codebooks 9-10 (unsigned pairs, larger magnitude range)
 - TNS (Temporal Noise Shaping) — IIR filter before IMDCT
 - MP4/M4A container support (currently ADTS only)
-- Huffman decoder optimization (current is linear search — add 2-level lookup table)
+- ~~Huffman decoder optimization~~ (done: sorted codebook decode in v2.2.0; 2-level lookup table future)
 
 ### AAC encoder improvements
 
@@ -56,10 +61,10 @@
 
 ### Performance
 
-- Opus MDCT: N/4-point folding (current 2N-point FFT — 4x more work)
-- Opus FFT: specialized radix-2/3/5 butterflies with precomputed twiddles
+- MDCT: N/2-point FFT rewrite (current 2N-point — 4x reduction possible)
+- ~~Opus FFT: specialized radix-2/3/5 butterflies with precomputed twiddles~~ (done: per-level twiddle tables in v2.2.0)
 - Resampler: polyphase filter bank (current recomputes sinc taps per sample)
-- PCM: inline asm SSE2 for i16/f64 hot loops (close the 211x gap)
+- PCM: inline asm SSE2 for i16/f64 hot loops
 - FLAC encoder: LPC encoding (better compression than Fixed prediction)
 
 ### Streaming
