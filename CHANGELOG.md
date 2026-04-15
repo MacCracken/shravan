@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-04-15
+
+### Added
+
+- **AAC spectral codebooks 9-10**: ISO 14496-3 HCB9/HCB10 (169 entries each, 13x13 unsigned pairs, values 0-12). Full Huffman decode with 2-level LUT + sorted fallback. Wired into spectral decoder dispatch.
+- **AAC 4-tuple decoder**: `_aac_decode_spectral_quad()` for codebooks 1-4. Decodes 4 spectral values per Huffman symbol. HCB1/2 (signed quads, values -1,0,1), HCB3/4 (unsigned quads with sign bits, values 0,1,2). Dispatch wired into spectral decoder for bands using codebooks 1-4.
+- **AAC codebook 1-4 table data**: ISO 14496-3 HCB1-4 (81 entries each, 3^4 4-tuple codebooks). Tables loaded with 2-level LUT decode.
+
 ## [2.3.0] - 2026-04-15
 
 ### Added

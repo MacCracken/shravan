@@ -63,10 +63,11 @@
 - [x] AAC: codebook 1-4 dispatch (skip bands — tables not yet loaded)
 - [x] AAC: codebook 9-10 dispatch (stub — tables not yet loaded)
 
-### v2.3.1 — AAC spectral codebooks (Huffman table data)
+### v2.3.1 — AAC spectral codebooks (done)
 
-- Spectral codebooks 9-10: ISO 14496-3 Table 4.A.7/4.A.8 (169 entries each, unsigned pairs 0-12). Dispatch wired, tables needed.
-- Spectral codebooks 1-4: ISO 14496-3 Table 4.A.1-4.A.4 (81 entries each, signed 4-tuples). Requires `_aac_decode_spectral_quad()` for 4-value decode.
+- [x] HCB9/HCB10: 169 entries each (13x13 unsigned pairs), full decode with 2-level LUT
+- [x] HCB1-4: 81 entries each (3^4 4-tuples), `_aac_decode_spectral_quad()` decoder
+- [x] All 11 AAC spectral codebooks now operational (was 5-8 + 11 only)
 
 ### v2.3.2 — AAC encoder improvements
 

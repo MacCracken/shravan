@@ -1073,6 +1073,10 @@ var _aac_hcb7_sorted = 0;
 var _aac_hcb7_lut = 0;
 var _aac_hcb8_sorted = 0;
 var _aac_hcb8_lut = 0;
+var _aac_hcb9_sorted = 0;
+var _aac_hcb9_lut = 0;
+var _aac_hcb10_sorted = 0;
+var _aac_hcb10_lut = 0;
 
 # Decode a scale factor value using the Huffman codebook.
 # Returns the codebook index (0..120), which maps to diff = index - 60.
@@ -1091,6 +1095,14 @@ fn _aac_decode_scf(br) {
 
 var _aac_hcb5_lens = 0;
 var _aac_hcb5_codes = 0;
+var _aac_hcb1_lens = 0;
+var _aac_hcb1_codes = 0;
+var _aac_hcb2_lens = 0;
+var _aac_hcb2_codes = 0;
+var _aac_hcb3_lens = 0;
+var _aac_hcb3_codes = 0;
+var _aac_hcb4_lens = 0;
+var _aac_hcb4_codes = 0;
 var _aac_hcb6_lens = 0;
 var _aac_hcb6_codes = 0;
 var _aac_hcb7_lens = 0;
@@ -1171,11 +1183,325 @@ fn _aac_init_hcb8() {
     return 0;
 }
 
+fn _aac_init_hcb9() {
+    var L = alloc(169 * 8); var C = alloc(169 * 8);
+    _aac_hcb9_lens = L; _aac_hcb9_codes = C;
+    # Row 0: y=0, x=0..12
+    store64(L+  0*8, 1); store64(L+  1*8, 3); store64(L+  2*8, 6); store64(L+  3*8, 8); store64(L+  4*8, 9); store64(L+  5*8,10); store64(L+  6*8,10); store64(L+  7*8,11); store64(L+  8*8,11); store64(L+  9*8,12); store64(L+ 10*8,12); store64(L+ 11*8,13); store64(L+ 12*8,13);
+    # Row 1: y=1, x=0..12
+    store64(L+ 13*8, 3); store64(L+ 14*8, 4); store64(L+ 15*8, 6); store64(L+ 16*8, 7); store64(L+ 17*8, 8); store64(L+ 18*8, 8); store64(L+ 19*8, 9); store64(L+ 20*8,10); store64(L+ 21*8,10); store64(L+ 22*8,10); store64(L+ 23*8,11); store64(L+ 24*8,12); store64(L+ 25*8,12);
+    # Row 2: y=2, x=0..12
+    store64(L+ 26*8, 6); store64(L+ 27*8, 6); store64(L+ 28*8, 7); store64(L+ 29*8, 8); store64(L+ 30*8, 8); store64(L+ 31*8, 9); store64(L+ 32*8,10); store64(L+ 33*8,10); store64(L+ 34*8,10); store64(L+ 35*8,11); store64(L+ 36*8,12); store64(L+ 37*8,12); store64(L+ 38*8,12);
+    # Row 3: y=3, x=0..12
+    store64(L+ 39*8, 8); store64(L+ 40*8, 7); store64(L+ 41*8, 8); store64(L+ 42*8, 9); store64(L+ 43*8, 9); store64(L+ 44*8,10); store64(L+ 45*8,10); store64(L+ 46*8,11); store64(L+ 47*8,11); store64(L+ 48*8,11); store64(L+ 49*8,12); store64(L+ 50*8,12); store64(L+ 51*8,13);
+    # Row 4: y=4, x=0..12
+    store64(L+ 52*8, 9); store64(L+ 53*8, 8); store64(L+ 54*8, 9); store64(L+ 55*8, 9); store64(L+ 56*8,10); store64(L+ 57*8,10); store64(L+ 58*8,11); store64(L+ 59*8,11); store64(L+ 60*8,11); store64(L+ 61*8,12); store64(L+ 62*8,12); store64(L+ 63*8,12); store64(L+ 64*8,13);
+    # Row 5: y=5, x=0..12
+    store64(L+ 65*8,10); store64(L+ 66*8, 9); store64(L+ 67*8, 9); store64(L+ 68*8,10); store64(L+ 69*8,11); store64(L+ 70*8,11); store64(L+ 71*8,11); store64(L+ 72*8,12); store64(L+ 73*8,11); store64(L+ 74*8,12); store64(L+ 75*8,12); store64(L+ 76*8,13); store64(L+ 77*8,13);
+    # Row 6: y=6, x=0..12
+    store64(L+ 78*8,11); store64(L+ 79*8, 9); store64(L+ 80*8,10); store64(L+ 81*8,11); store64(L+ 82*8,11); store64(L+ 83*8,11); store64(L+ 84*8,12); store64(L+ 85*8,12); store64(L+ 86*8,12); store64(L+ 87*8,12); store64(L+ 88*8,13); store64(L+ 89*8,13); store64(L+ 90*8,13);
+    # Row 7: y=7, x=0..12
+    store64(L+ 91*8,11); store64(L+ 92*8,10); store64(L+ 93*8,10); store64(L+ 94*8,11); store64(L+ 95*8,11); store64(L+ 96*8,12); store64(L+ 97*8,12); store64(L+ 98*8,13); store64(L+ 99*8,13); store64(L+100*8,13); store64(L+101*8,13); store64(L+102*8,13); store64(L+103*8,13);
+    # Row 8: y=8, x=0..12
+    store64(L+104*8,11); store64(L+105*8,10); store64(L+106*8,10); store64(L+107*8,11); store64(L+108*8,11); store64(L+109*8,11); store64(L+110*8,12); store64(L+111*8,12); store64(L+112*8,13); store64(L+113*8,13); store64(L+114*8,14); store64(L+115*8,13); store64(L+116*8,14);
+    # Row 9: y=9, x=0..12
+    store64(L+117*8,11); store64(L+118*8,10); store64(L+119*8,11); store64(L+120*8,11); store64(L+121*8,12); store64(L+122*8,12); store64(L+123*8,12); store64(L+124*8,12); store64(L+125*8,13); store64(L+126*8,13); store64(L+127*8,14); store64(L+128*8,14); store64(L+129*8,14);
+    # Row 10: y=10, x=0..12
+    store64(L+130*8,12); store64(L+131*8,11); store64(L+132*8,11); store64(L+133*8,12); store64(L+134*8,12); store64(L+135*8,12); store64(L+136*8,13); store64(L+137*8,13); store64(L+138*8,13); store64(L+139*8,14); store64(L+140*8,14); store64(L+141*8,14); store64(L+142*8,15);
+    # Row 11: y=11, x=0..12
+    store64(L+143*8,12); store64(L+144*8,11); store64(L+145*8,12); store64(L+146*8,12); store64(L+147*8,12); store64(L+148*8,13); store64(L+149*8,13); store64(L+150*8,13); store64(L+151*8,13); store64(L+152*8,14); store64(L+153*8,14); store64(L+154*8,15); store64(L+155*8,15);
+    # Row 12: y=12, x=0..12
+    store64(L+156*8,13); store64(L+157*8,12); store64(L+158*8,12); store64(L+159*8,12); store64(L+160*8,13); store64(L+161*8,13); store64(L+162*8,13); store64(L+163*8,13); store64(L+164*8,14); store64(L+165*8,14); store64(L+166*8,14); store64(L+167*8,14); store64(L+168*8,15);
+    # Codewords
+    store64(C+  0*8,0x0000); store64(C+  1*8,0x0005); store64(C+  2*8,0x0037); store64(C+  3*8,0x00e7); store64(C+  4*8,0x01de); store64(C+  5*8,0x03ce); store64(C+  6*8,0x03d9); store64(C+  7*8,0x07c8); store64(C+  8*8,0x07cd); store64(C+  9*8,0x0fc8); store64(C+ 10*8,0x0fdd); store64(C+ 11*8,0x1fe4); store64(C+ 12*8,0x1fec);
+    store64(C+ 13*8,0x0004); store64(C+ 14*8,0x000c); store64(C+ 15*8,0x0035); store64(C+ 16*8,0x0072); store64(C+ 17*8,0x00ea); store64(C+ 18*8,0x00ed); store64(C+ 19*8,0x01e2); store64(C+ 20*8,0x03d1); store64(C+ 21*8,0x03d3); store64(C+ 22*8,0x03e0); store64(C+ 23*8,0x07d8); store64(C+ 24*8,0x0fcf); store64(C+ 25*8,0x0fd5);
+    store64(C+ 26*8,0x0036); store64(C+ 27*8,0x0034); store64(C+ 28*8,0x0071); store64(C+ 29*8,0x00e8); store64(C+ 30*8,0x00ec); store64(C+ 31*8,0x01e1); store64(C+ 32*8,0x03cf); store64(C+ 33*8,0x03dd); store64(C+ 34*8,0x03db); store64(C+ 35*8,0x07d0); store64(C+ 36*8,0x0fc7); store64(C+ 37*8,0x0fd4); store64(C+ 38*8,0x0fe4);
+    store64(C+ 39*8,0x00e6); store64(C+ 40*8,0x0070); store64(C+ 41*8,0x00e9); store64(C+ 42*8,0x01dd); store64(C+ 43*8,0x01e3); store64(C+ 44*8,0x03d2); store64(C+ 45*8,0x03dc); store64(C+ 46*8,0x07cc); store64(C+ 47*8,0x07ca); store64(C+ 48*8,0x07de); store64(C+ 49*8,0x0fd8); store64(C+ 50*8,0x0fea); store64(C+ 51*8,0x1fdb);
+    store64(C+ 52*8,0x01df); store64(C+ 53*8,0x00eb); store64(C+ 54*8,0x01dc); store64(C+ 55*8,0x01e6); store64(C+ 56*8,0x03d5); store64(C+ 57*8,0x03de); store64(C+ 58*8,0x07cb); store64(C+ 59*8,0x07dd); store64(C+ 60*8,0x07dc); store64(C+ 61*8,0x0fcd); store64(C+ 62*8,0x0fe2); store64(C+ 63*8,0x0fe7); store64(C+ 64*8,0x1fe1);
+    store64(C+ 65*8,0x03d0); store64(C+ 66*8,0x01e0); store64(C+ 67*8,0x01e4); store64(C+ 68*8,0x03d6); store64(C+ 69*8,0x07c5); store64(C+ 70*8,0x07d1); store64(C+ 71*8,0x07db); store64(C+ 72*8,0x0fd2); store64(C+ 73*8,0x07e0); store64(C+ 74*8,0x0fd9); store64(C+ 75*8,0x0feb); store64(C+ 76*8,0x1fe3); store64(C+ 77*8,0x1fe9);
+    store64(C+ 78*8,0x07c4); store64(C+ 79*8,0x01e5); store64(C+ 80*8,0x03d7); store64(C+ 81*8,0x07c6); store64(C+ 82*8,0x07cf); store64(C+ 83*8,0x07da); store64(C+ 84*8,0x0fcb); store64(C+ 85*8,0x0fda); store64(C+ 86*8,0x0fe3); store64(C+ 87*8,0x0fe9); store64(C+ 88*8,0x1fe6); store64(C+ 89*8,0x1ff3); store64(C+ 90*8,0x1ff7);
+    store64(C+ 91*8,0x07d3); store64(C+ 92*8,0x03d8); store64(C+ 93*8,0x03e1); store64(C+ 94*8,0x07d4); store64(C+ 95*8,0x07d9); store64(C+ 96*8,0x0fd3); store64(C+ 97*8,0x0fde); store64(C+ 98*8,0x1fdd); store64(C+ 99*8,0x1fd9); store64(C+100*8,0x1fe2); store64(C+101*8,0x1fea); store64(C+102*8,0x1ff1); store64(C+103*8,0x1ff6);
+    store64(C+104*8,0x07d2); store64(C+105*8,0x03d4); store64(C+106*8,0x03da); store64(C+107*8,0x07c7); store64(C+108*8,0x07d7); store64(C+109*8,0x07e2); store64(C+110*8,0x0fce); store64(C+111*8,0x0fdb); store64(C+112*8,0x1fd8); store64(C+113*8,0x1fee); store64(C+114*8,0x3ff0); store64(C+115*8,0x1ff4); store64(C+116*8,0x3ff2);
+    store64(C+117*8,0x07e1); store64(C+118*8,0x03df); store64(C+119*8,0x07c9); store64(C+120*8,0x07d6); store64(C+121*8,0x0fca); store64(C+122*8,0x0fd0); store64(C+123*8,0x0fe5); store64(C+124*8,0x0fe6); store64(C+125*8,0x1feb); store64(C+126*8,0x1fef); store64(C+127*8,0x3ff3); store64(C+128*8,0x3ff4); store64(C+129*8,0x3ff5);
+    store64(C+130*8,0x0fe0); store64(C+131*8,0x07ce); store64(C+132*8,0x07d5); store64(C+133*8,0x0fc6); store64(C+134*8,0x0fd1); store64(C+135*8,0x0fe1); store64(C+136*8,0x1fe0); store64(C+137*8,0x1fe8); store64(C+138*8,0x1ff0); store64(C+139*8,0x3ff1); store64(C+140*8,0x3ff8); store64(C+141*8,0x3ff6); store64(C+142*8,0x7ffc);
+    store64(C+143*8,0x0fe8); store64(C+144*8,0x07df); store64(C+145*8,0x0fc9); store64(C+146*8,0x0fd7); store64(C+147*8,0x0fdc); store64(C+148*8,0x1fdc); store64(C+149*8,0x1fdf); store64(C+150*8,0x1fed); store64(C+151*8,0x1ff5); store64(C+152*8,0x3ff9); store64(C+153*8,0x3ffb); store64(C+154*8,0x7ffd); store64(C+155*8,0x7ffe);
+    store64(C+156*8,0x1fe7); store64(C+157*8,0x0fcc); store64(C+158*8,0x0fd6); store64(C+159*8,0x0fdf); store64(C+160*8,0x1fde); store64(C+161*8,0x1fda); store64(C+162*8,0x1fe5); store64(C+163*8,0x1ff2); store64(C+164*8,0x3ffa); store64(C+165*8,0x3ff7); store64(C+166*8,0x3ffc); store64(C+167*8,0x3ffd); store64(C+168*8,0x7fff);
+    return 0;
+}
+
+fn _aac_init_hcb10() {
+    var L = alloc(169 * 8); var C = alloc(169 * 8);
+    _aac_hcb10_lens = L; _aac_hcb10_codes = C;
+    # Row 0: y=0, x=0..12
+    store64(L+  0*8, 6); store64(L+  1*8, 5); store64(L+  2*8, 6); store64(L+  3*8, 6); store64(L+  4*8, 7); store64(L+  5*8, 8); store64(L+  6*8, 9); store64(L+  7*8,10); store64(L+  8*8,10); store64(L+  9*8,10); store64(L+ 10*8,11); store64(L+ 11*8,11); store64(L+ 12*8,12);
+    # Row 1: y=1, x=0..12
+    store64(L+ 13*8, 5); store64(L+ 14*8, 4); store64(L+ 15*8, 4); store64(L+ 16*8, 5); store64(L+ 17*8, 6); store64(L+ 18*8, 7); store64(L+ 19*8, 7); store64(L+ 20*8, 8); store64(L+ 21*8, 8); store64(L+ 22*8, 9); store64(L+ 23*8,10); store64(L+ 24*8,10); store64(L+ 25*8,11);
+    # Row 2: y=2, x=0..12
+    store64(L+ 26*8, 6); store64(L+ 27*8, 4); store64(L+ 28*8, 5); store64(L+ 29*8, 5); store64(L+ 30*8, 6); store64(L+ 31*8, 6); store64(L+ 32*8, 7); store64(L+ 33*8, 8); store64(L+ 34*8, 8); store64(L+ 35*8, 9); store64(L+ 36*8, 9); store64(L+ 37*8,10); store64(L+ 38*8,10);
+    # Row 3: y=3, x=0..12
+    store64(L+ 39*8, 6); store64(L+ 40*8, 5); store64(L+ 41*8, 5); store64(L+ 42*8, 5); store64(L+ 43*8, 6); store64(L+ 44*8, 7); store64(L+ 45*8, 7); store64(L+ 46*8, 8); store64(L+ 47*8, 8); store64(L+ 48*8, 9); store64(L+ 49*8, 9); store64(L+ 50*8,10); store64(L+ 51*8,10);
+    # Row 4: y=4, x=0..12
+    store64(L+ 52*8, 7); store64(L+ 53*8, 6); store64(L+ 54*8, 6); store64(L+ 55*8, 6); store64(L+ 56*8, 6); store64(L+ 57*8, 7); store64(L+ 58*8, 7); store64(L+ 59*8, 8); store64(L+ 60*8, 8); store64(L+ 61*8, 9); store64(L+ 62*8, 9); store64(L+ 63*8,10); store64(L+ 64*8,10);
+    # Row 5: y=5, x=0..12
+    store64(L+ 65*8, 8); store64(L+ 66*8, 7); store64(L+ 67*8, 6); store64(L+ 68*8, 7); store64(L+ 69*8, 7); store64(L+ 70*8, 7); store64(L+ 71*8, 8); store64(L+ 72*8, 8); store64(L+ 73*8, 8); store64(L+ 74*8, 9); store64(L+ 75*8,10); store64(L+ 76*8,10); store64(L+ 77*8,11);
+    # Row 6: y=6, x=0..12
+    store64(L+ 78*8, 9); store64(L+ 79*8, 7); store64(L+ 80*8, 7); store64(L+ 81*8, 7); store64(L+ 82*8, 7); store64(L+ 83*8, 8); store64(L+ 84*8, 8); store64(L+ 85*8, 9); store64(L+ 86*8, 9); store64(L+ 87*8, 9); store64(L+ 88*8,10); store64(L+ 89*8,10); store64(L+ 90*8,11);
+    # Row 7: y=7, x=0..12
+    store64(L+ 91*8, 9); store64(L+ 92*8, 8); store64(L+ 93*8, 8); store64(L+ 94*8, 8); store64(L+ 95*8, 8); store64(L+ 96*8, 8); store64(L+ 97*8, 9); store64(L+ 98*8, 9); store64(L+ 99*8, 9); store64(L+100*8,10); store64(L+101*8,10); store64(L+102*8,11); store64(L+103*8,11);
+    # Row 8: y=8, x=0..12
+    store64(L+104*8, 9); store64(L+105*8, 8); store64(L+106*8, 8); store64(L+107*8, 8); store64(L+108*8, 8); store64(L+109*8, 8); store64(L+110*8, 9); store64(L+111*8, 9); store64(L+112*8,10); store64(L+113*8,10); store64(L+114*8,10); store64(L+115*8,11); store64(L+116*8,11);
+    # Row 9: y=9, x=0..12
+    store64(L+117*8,10); store64(L+118*8, 9); store64(L+119*8, 9); store64(L+120*8, 9); store64(L+121*8, 9); store64(L+122*8, 9); store64(L+123*8, 9); store64(L+124*8,10); store64(L+125*8,10); store64(L+126*8,10); store64(L+127*8,11); store64(L+128*8,11); store64(L+129*8,12);
+    # Row 10: y=10, x=0..12
+    store64(L+130*8,10); store64(L+131*8, 9); store64(L+132*8, 9); store64(L+133*8, 9); store64(L+134*8, 9); store64(L+135*8,10); store64(L+136*8,10); store64(L+137*8,10); store64(L+138*8,10); store64(L+139*8,11); store64(L+140*8,11); store64(L+141*8,11); store64(L+142*8,12);
+    # Row 11: y=11, x=0..12
+    store64(L+143*8,11); store64(L+144*8,10); store64(L+145*8, 9); store64(L+146*8,10); store64(L+147*8,10); store64(L+148*8,10); store64(L+149*8,10); store64(L+150*8,10); store64(L+151*8,11); store64(L+152*8,11); store64(L+153*8,11); store64(L+154*8,11); store64(L+155*8,12);
+    # Row 12: y=12, x=0..12
+    store64(L+156*8,11); store64(L+157*8,10); store64(L+158*8,10); store64(L+159*8,10); store64(L+160*8,10); store64(L+161*8,10); store64(L+162*8,10); store64(L+163*8,11); store64(L+164*8,11); store64(L+165*8,12); store64(L+166*8,12); store64(L+167*8,12); store64(L+168*8,12);
+    # Codewords
+    store64(C+  0*8,0x0022); store64(C+  1*8,0x0008); store64(C+  2*8,0x001d); store64(C+  3*8,0x0026); store64(C+  4*8,0x005f); store64(C+  5*8,0x00d3); store64(C+  6*8,0x01cf); store64(C+  7*8,0x03d0); store64(C+  8*8,0x03d7); store64(C+  9*8,0x03ed); store64(C+ 10*8,0x07f0); store64(C+ 11*8,0x07f6); store64(C+ 12*8,0x0ffd);
+    store64(C+ 13*8,0x0007); store64(C+ 14*8,0x0000); store64(C+ 15*8,0x0001); store64(C+ 16*8,0x0009); store64(C+ 17*8,0x0020); store64(C+ 18*8,0x0054); store64(C+ 19*8,0x0060); store64(C+ 20*8,0x00d5); store64(C+ 21*8,0x00dc); store64(C+ 22*8,0x01d4); store64(C+ 23*8,0x03cd); store64(C+ 24*8,0x03de); store64(C+ 25*8,0x07e7);
+    store64(C+ 26*8,0x001c); store64(C+ 27*8,0x0002); store64(C+ 28*8,0x0006); store64(C+ 29*8,0x000c); store64(C+ 30*8,0x001e); store64(C+ 31*8,0x0028); store64(C+ 32*8,0x005b); store64(C+ 33*8,0x00cd); store64(C+ 34*8,0x00d9); store64(C+ 35*8,0x01ce); store64(C+ 36*8,0x01dc); store64(C+ 37*8,0x03d9); store64(C+ 38*8,0x03f1);
+    store64(C+ 39*8,0x0025); store64(C+ 40*8,0x000b); store64(C+ 41*8,0x000a); store64(C+ 42*8,0x000d); store64(C+ 43*8,0x0024); store64(C+ 44*8,0x0057); store64(C+ 45*8,0x0061); store64(C+ 46*8,0x00cc); store64(C+ 47*8,0x00dd); store64(C+ 48*8,0x01cc); store64(C+ 49*8,0x01de); store64(C+ 50*8,0x03d3); store64(C+ 51*8,0x03e7);
+    store64(C+ 52*8,0x005d); store64(C+ 53*8,0x0021); store64(C+ 54*8,0x001f); store64(C+ 55*8,0x0023); store64(C+ 56*8,0x0027); store64(C+ 57*8,0x0059); store64(C+ 58*8,0x0064); store64(C+ 59*8,0x00d8); store64(C+ 60*8,0x00df); store64(C+ 61*8,0x01d2); store64(C+ 62*8,0x01e2); store64(C+ 63*8,0x03dd); store64(C+ 64*8,0x03ee);
+    store64(C+ 65*8,0x00d1); store64(C+ 66*8,0x0055); store64(C+ 67*8,0x0029); store64(C+ 68*8,0x0056); store64(C+ 69*8,0x0058); store64(C+ 70*8,0x0062); store64(C+ 71*8,0x00ce); store64(C+ 72*8,0x00e0); store64(C+ 73*8,0x00e2); store64(C+ 74*8,0x01da); store64(C+ 75*8,0x03d4); store64(C+ 76*8,0x03e3); store64(C+ 77*8,0x07eb);
+    store64(C+ 78*8,0x01c9); store64(C+ 79*8,0x005e); store64(C+ 80*8,0x005a); store64(C+ 81*8,0x005c); store64(C+ 82*8,0x0063); store64(C+ 83*8,0x00ca); store64(C+ 84*8,0x00da); store64(C+ 85*8,0x01c7); store64(C+ 86*8,0x01ca); store64(C+ 87*8,0x01e0); store64(C+ 88*8,0x03db); store64(C+ 89*8,0x03e8); store64(C+ 90*8,0x07ec);
+    store64(C+ 91*8,0x01e3); store64(C+ 92*8,0x00d2); store64(C+ 93*8,0x00cb); store64(C+ 94*8,0x00d0); store64(C+ 95*8,0x00d7); store64(C+ 96*8,0x00db); store64(C+ 97*8,0x01c6); store64(C+ 98*8,0x01d5); store64(C+ 99*8,0x01d8); store64(C+100*8,0x03ca); store64(C+101*8,0x03da); store64(C+102*8,0x07ea); store64(C+103*8,0x07f1);
+    store64(C+104*8,0x01e1); store64(C+105*8,0x00d4); store64(C+106*8,0x00cf); store64(C+107*8,0x00d6); store64(C+108*8,0x00de); store64(C+109*8,0x00e1); store64(C+110*8,0x01d0); store64(C+111*8,0x01d6); store64(C+112*8,0x03d1); store64(C+113*8,0x03d5); store64(C+114*8,0x03f2); store64(C+115*8,0x07ee); store64(C+116*8,0x07fb);
+    store64(C+117*8,0x03e9); store64(C+118*8,0x01cd); store64(C+119*8,0x01c8); store64(C+120*8,0x01cb); store64(C+121*8,0x01d1); store64(C+122*8,0x01d7); store64(C+123*8,0x01df); store64(C+124*8,0x03cf); store64(C+125*8,0x03e0); store64(C+126*8,0x03ef); store64(C+127*8,0x07e6); store64(C+128*8,0x07f8); store64(C+129*8,0x0ffa);
+    store64(C+130*8,0x03eb); store64(C+131*8,0x01dd); store64(C+132*8,0x01d3); store64(C+133*8,0x01d9); store64(C+134*8,0x01db); store64(C+135*8,0x03d2); store64(C+136*8,0x03cc); store64(C+137*8,0x03dc); store64(C+138*8,0x03ea); store64(C+139*8,0x07ed); store64(C+140*8,0x07f3); store64(C+141*8,0x07f9); store64(C+142*8,0x0ff9);
+    store64(C+143*8,0x07f2); store64(C+144*8,0x03ce); store64(C+145*8,0x01e4); store64(C+146*8,0x03cb); store64(C+147*8,0x03d8); store64(C+148*8,0x03d6); store64(C+149*8,0x03e2); store64(C+150*8,0x03e5); store64(C+151*8,0x07e8); store64(C+152*8,0x07f4); store64(C+153*8,0x07f5); store64(C+154*8,0x07f7); store64(C+155*8,0x0ffb);
+    store64(C+156*8,0x07fa); store64(C+157*8,0x03ec); store64(C+158*8,0x03df); store64(C+159*8,0x03e1); store64(C+160*8,0x03e4); store64(C+161*8,0x03e6); store64(C+162*8,0x03f0); store64(C+163*8,0x07e9); store64(C+164*8,0x07ef); store64(C+165*8,0x0ff8); store64(C+166*8,0x0ffe); store64(C+167*8,0x0ffc); store64(C+168*8,0x0fff);
+    return 0;
+}
+
+# HCB1: signed quad, 81 entries (3^4), values -1,0,1. No sign bits.
+# index = (w+1)*27 + (x+1)*9 + (y+1)*3 + (z+1)
+# ISO 14496-3 Table 4.A.1
+fn _aac_init_hcb1() {
+    var L = alloc(81 * 8); var C = alloc(81 * 8);
+    _aac_hcb1_lens = L; _aac_hcb1_codes = C;
+    # Lengths (81 entries)
+    store64(L+ 0*8,11); store64(L+ 1*8, 9); store64(L+ 2*8,11); store64(L+ 3*8,10); store64(L+ 4*8, 7); store64(L+ 5*8,10); store64(L+ 6*8,11); store64(L+ 7*8, 9); store64(L+ 8*8,11);
+    store64(L+ 9*8, 9); store64(L+10*8, 7); store64(L+11*8, 9); store64(L+12*8, 7); store64(L+13*8, 5); store64(L+14*8, 7); store64(L+15*8, 9); store64(L+16*8, 7); store64(L+17*8, 9);
+    store64(L+18*8,11); store64(L+19*8, 9); store64(L+20*8,11); store64(L+21*8,10); store64(L+22*8, 7); store64(L+23*8,10); store64(L+24*8,11); store64(L+25*8, 9); store64(L+26*8,11);
+    store64(L+27*8, 9); store64(L+28*8, 7); store64(L+29*8, 9); store64(L+30*8, 7); store64(L+31*8, 5); store64(L+32*8, 7); store64(L+33*8, 9); store64(L+34*8, 7); store64(L+35*8, 9);
+    store64(L+36*8, 7); store64(L+37*8, 5); store64(L+38*8, 7); store64(L+39*8, 5); store64(L+40*8, 1); store64(L+41*8, 5); store64(L+42*8, 7); store64(L+43*8, 5); store64(L+44*8, 7);
+    store64(L+45*8, 9); store64(L+46*8, 7); store64(L+47*8, 9); store64(L+48*8, 7); store64(L+49*8, 5); store64(L+50*8, 7); store64(L+51*8, 9); store64(L+52*8, 7); store64(L+53*8, 9);
+    store64(L+54*8,11); store64(L+55*8, 9); store64(L+56*8,11); store64(L+57*8,10); store64(L+58*8, 7); store64(L+59*8,10); store64(L+60*8,11); store64(L+61*8, 9); store64(L+62*8,11);
+    store64(L+63*8, 9); store64(L+64*8, 7); store64(L+65*8, 9); store64(L+66*8, 7); store64(L+67*8, 5); store64(L+68*8, 7); store64(L+69*8, 9); store64(L+70*8, 7); store64(L+71*8, 9);
+    store64(L+72*8,11); store64(L+73*8, 9); store64(L+74*8,11); store64(L+75*8,10); store64(L+76*8, 7); store64(L+77*8,10); store64(L+78*8,11); store64(L+79*8, 9); store64(L+80*8,11);
+    # Codes (81 entries)
+    store64(C+ 0*8,0x7f8); store64(C+ 1*8,0x1f1); store64(C+ 2*8,0x7fd); store64(C+ 3*8,0x3f5); store64(C+ 4*8,0x068); store64(C+ 5*8,0x3f0); store64(C+ 6*8,0x7f7); store64(C+ 7*8,0x1ec); store64(C+ 8*8,0x7f5);
+    store64(C+ 9*8,0x1f0); store64(C+10*8,0x061); store64(C+11*8,0x1ea); store64(C+12*8,0x05e); store64(C+13*8,0x010); store64(C+14*8,0x05f); store64(C+15*8,0x1e9); store64(C+16*8,0x063); store64(C+17*8,0x1ef);
+    store64(C+18*8,0x7f1); store64(C+19*8,0x1eb); store64(C+20*8,0x7f9); store64(C+21*8,0x3f1); store64(C+22*8,0x06a); store64(C+23*8,0x3f3); store64(C+24*8,0x7fe); store64(C+25*8,0x1f2); store64(C+26*8,0x7fc);
+    store64(C+27*8,0x1e1); store64(C+28*8,0x062); store64(C+29*8,0x1ee); store64(C+30*8,0x064); store64(C+31*8,0x00c); store64(C+32*8,0x065); store64(C+33*8,0x1e6); store64(C+34*8,0x060); store64(C+35*8,0x1e5);
+    store64(C+36*8,0x066); store64(C+37*8,0x00e); store64(C+38*8,0x067); store64(C+39*8,0x00a); store64(C+40*8,0x000); store64(C+41*8,0x009); store64(C+42*8,0x06f); store64(C+43*8,0x00d); store64(C+44*8,0x06b);
+    store64(C+45*8,0x1e4); store64(C+46*8,0x069); store64(C+47*8,0x1e8); store64(C+48*8,0x05c); store64(C+49*8,0x00b); store64(C+50*8,0x05d); store64(C+51*8,0x1e7); store64(C+52*8,0x06e); store64(C+53*8,0x1ed);
+    store64(C+54*8,0x7f6); store64(C+55*8,0x1e3); store64(C+56*8,0x7fb); store64(C+57*8,0x3f4); store64(C+58*8,0x06d); store64(C+59*8,0x3f6); store64(C+60*8,0x7f2); store64(C+61*8,0x1f3); store64(C+62*8,0x7fa);
+    store64(C+63*8,0x1e2); store64(C+64*8,0x06c); store64(C+65*8,0x1e0); store64(C+66*8,0x05a); store64(C+67*8,0x00f); store64(C+68*8,0x05b); store64(C+69*8,0x1f5); store64(C+70*8,0x059); store64(C+71*8,0x1f4);
+    store64(C+72*8,0x7f3); store64(C+73*8,0x1f6); store64(C+74*8,0x7f0); store64(C+75*8,0x3f2); store64(C+76*8,0x06e); store64(C+77*8,0x3f7); store64(C+78*8,0x7f4); store64(C+79*8,0x1f7); store64(C+80*8,0x7ff);
+    return 0;
+}
+
+# HCB2: signed quad, 81 entries (3^4), values -1,0,1. No sign bits.
+# ISO 14496-3 Table 4.A.2
+fn _aac_init_hcb2() {
+    var L = alloc(81 * 8); var C = alloc(81 * 8);
+    _aac_hcb2_lens = L; _aac_hcb2_codes = C;
+    # Lengths (81 entries)
+    store64(L+ 0*8, 9); store64(L+ 1*8, 7); store64(L+ 2*8, 9); store64(L+ 3*8, 8); store64(L+ 4*8, 6); store64(L+ 5*8, 8); store64(L+ 6*8, 9); store64(L+ 7*8, 8); store64(L+ 8*8, 9);
+    store64(L+ 9*8, 7); store64(L+10*8, 6); store64(L+11*8, 7); store64(L+12*8, 6); store64(L+13*8, 5); store64(L+14*8, 6); store64(L+15*8, 7); store64(L+16*8, 6); store64(L+17*8, 8);
+    store64(L+18*8, 9); store64(L+19*8, 8); store64(L+20*8, 9); store64(L+21*8, 8); store64(L+22*8, 6); store64(L+23*8, 8); store64(L+24*8, 9); store64(L+25*8, 8); store64(L+26*8, 9);
+    store64(L+27*8, 8); store64(L+28*8, 6); store64(L+29*8, 7); store64(L+30*8, 6); store64(L+31*8, 5); store64(L+32*8, 6); store64(L+33*8, 7); store64(L+34*8, 6); store64(L+35*8, 8);
+    store64(L+36*8, 6); store64(L+37*8, 5); store64(L+38*8, 6); store64(L+39*8, 5); store64(L+40*8, 3); store64(L+41*8, 5); store64(L+42*8, 6); store64(L+43*8, 5); store64(L+44*8, 6);
+    store64(L+45*8, 8); store64(L+46*8, 6); store64(L+47*8, 7); store64(L+48*8, 6); store64(L+49*8, 5); store64(L+50*8, 6); store64(L+51*8, 8); store64(L+52*8, 6); store64(L+53*8, 8);
+    store64(L+54*8, 9); store64(L+55*8, 8); store64(L+56*8, 9); store64(L+57*8, 8); store64(L+58*8, 6); store64(L+59*8, 8); store64(L+60*8, 9); store64(L+61*8, 8); store64(L+62*8, 9);
+    store64(L+63*8, 8); store64(L+64*8, 6); store64(L+65*8, 7); store64(L+66*8, 6); store64(L+67*8, 5); store64(L+68*8, 6); store64(L+69*8, 8); store64(L+70*8, 6); store64(L+71*8, 8);
+    store64(L+72*8, 9); store64(L+73*8, 8); store64(L+74*8, 9); store64(L+75*8, 8); store64(L+76*8, 6); store64(L+77*8, 8); store64(L+78*8, 9); store64(L+79*8, 8); store64(L+80*8, 9);
+    # Codes (81 entries)
+    store64(C+ 0*8,0x1f3); store64(C+ 1*8,0x06f); store64(C+ 2*8,0x1fd); store64(C+ 3*8,0x0eb); store64(C+ 4*8,0x023); store64(C+ 5*8,0x0ea); store64(C+ 6*8,0x1f7); store64(C+ 7*8,0x0e8); store64(C+ 8*8,0x1fa);
+    store64(C+ 9*8,0x06e); store64(C+10*8,0x02c); store64(C+11*8,0x06c); store64(C+12*8,0x02e); store64(C+13*8,0x00a); store64(C+14*8,0x027); store64(C+15*8,0x06d); store64(C+16*8,0x02d); store64(C+17*8,0x0ed);
+    store64(C+18*8,0x1f1); store64(C+19*8,0x0e9); store64(C+20*8,0x1f9); store64(C+21*8,0x0ec); store64(C+22*8,0x022); store64(C+23*8,0x0f0); store64(C+24*8,0x1f6); store64(C+25*8,0x0ee); store64(C+26*8,0x1fe);
+    store64(C+27*8,0x0e6); store64(C+28*8,0x02a); store64(C+29*8,0x06b); store64(C+30*8,0x02f); store64(C+31*8,0x009); store64(C+32*8,0x02b); store64(C+33*8,0x06a); store64(C+34*8,0x025); store64(C+35*8,0x0e7);
+    store64(C+36*8,0x028); store64(C+37*8,0x00b); store64(C+38*8,0x026); store64(C+39*8,0x008); store64(C+40*8,0x001); store64(C+41*8,0x007); store64(C+42*8,0x024); store64(C+43*8,0x00c); store64(C+44*8,0x029);
+    store64(C+45*8,0x0e5); store64(C+46*8,0x021); store64(C+47*8,0x069); store64(C+48*8,0x020); store64(C+49*8,0x00d); store64(C+50*8,0x030); store64(C+51*8,0x0ef); store64(C+52*8,0x031); store64(C+53*8,0x0f1);
+    store64(C+54*8,0x1f4); store64(C+55*8,0x0e4); store64(C+56*8,0x1fb); store64(C+57*8,0x0f2); store64(C+58*8,0x032); store64(C+59*8,0x0f3); store64(C+60*8,0x1f2); store64(C+61*8,0x0f4); store64(C+62*8,0x1f5);
+    store64(C+63*8,0x0e3); store64(C+64*8,0x033); store64(C+65*8,0x068); store64(C+66*8,0x034); store64(C+67*8,0x00e); store64(C+68*8,0x035); store64(C+69*8,0x0e2); store64(C+70*8,0x036); store64(C+71*8,0x0e1);
+    store64(C+72*8,0x1f0); store64(C+73*8,0x0e0); store64(C+74*8,0x1fc); store64(C+75*8,0x0f5); store64(C+76*8,0x037); store64(C+77*8,0x0f6); store64(C+78*8,0x1f8); store64(C+79*8,0x0f7); store64(C+80*8,0x1ff);
+    return 0;
+}
+
+# HCB3: unsigned quad, 81 entries (3^4), values 0,1,2. Sign bits separate.
+# ISO 14496-3 Table 4.A.3
+fn _aac_init_hcb3() {
+    var L = alloc(81 * 8); var C = alloc(81 * 8);
+    _aac_hcb3_lens = L; _aac_hcb3_codes = C;
+    # Lengths (81 entries)
+    store64(L+ 0*8, 1); store64(L+ 1*8, 4); store64(L+ 2*8, 8); store64(L+ 3*8, 4); store64(L+ 4*8, 5); store64(L+ 5*8, 8); store64(L+ 6*8, 9); store64(L+ 7*8, 9); store64(L+ 8*8,10);
+    store64(L+ 9*8, 4); store64(L+10*8, 6); store64(L+11*8, 8); store64(L+12*8, 6); store64(L+13*8, 6); store64(L+14*8, 9); store64(L+15*8, 9); store64(L+16*8, 9); store64(L+17*8,10);
+    store64(L+18*8, 9); store64(L+19*8, 8); store64(L+20*8,11); store64(L+21*8, 9); store64(L+22*8, 8); store64(L+23*8,10); store64(L+24*8,11); store64(L+25*8,10); store64(L+26*8,12);
+    store64(L+27*8, 4); store64(L+28*8, 6); store64(L+29*8, 9); store64(L+30*8, 6); store64(L+31*8, 6); store64(L+32*8, 9); store64(L+33*8, 9); store64(L+34*8, 9); store64(L+35*8,10);
+    store64(L+36*8, 5); store64(L+37*8, 6); store64(L+38*8, 9); store64(L+39*8, 6); store64(L+40*8, 7); store64(L+41*8, 9); store64(L+42*8, 9); store64(L+43*8, 9); store64(L+44*8,11);
+    store64(L+45*8, 9); store64(L+46*8, 9); store64(L+47*8,11); store64(L+48*8, 8); store64(L+49*8, 9); store64(L+50*8,11); store64(L+51*8,11); store64(L+52*8,10); store64(L+53*8,12);
+    store64(L+54*8, 9); store64(L+55*8, 9); store64(L+56*8,11); store64(L+57*8, 9); store64(L+58*8, 9); store64(L+59*8,11); store64(L+60*8,11); store64(L+61*8,11); store64(L+62*8,12);
+    store64(L+63*8, 9); store64(L+64*8, 9); store64(L+65*8,11); store64(L+66*8, 9); store64(L+67*8, 9); store64(L+68*8,11); store64(L+69*8,11); store64(L+70*8,10); store64(L+71*8,12);
+    store64(L+72*8,10); store64(L+73*8,10); store64(L+74*8,12); store64(L+75*8,10); store64(L+76*8,10); store64(L+77*8,11); store64(L+78*8,12); store64(L+79*8,11); store64(L+80*8,12);
+    # Codes (81 entries)
+    store64(C+ 0*8,0x000); store64(C+ 1*8,0x009); store64(C+ 2*8,0x0ef); store64(C+ 3*8,0x00b); store64(C+ 4*8,0x019); store64(C+ 5*8,0x0f0); store64(C+ 6*8,0x1eb); store64(C+ 7*8,0x1e6); store64(C+ 8*8,0x3f2);
+    store64(C+ 9*8,0x00a); store64(C+10*8,0x035); store64(C+11*8,0x0f5); store64(C+12*8,0x034); store64(C+13*8,0x036); store64(C+14*8,0x1ef); store64(C+15*8,0x1e9); store64(C+16*8,0x1f0); store64(C+17*8,0x3f6);
+    store64(C+18*8,0x1e7); store64(C+19*8,0x0f1); store64(C+20*8,0x7f8); store64(C+21*8,0x1e8); store64(C+22*8,0x0f4); store64(C+23*8,0x3f4); store64(C+24*8,0x7f6); store64(C+25*8,0x3f0); store64(C+26*8,0xff4);
+    store64(C+27*8,0x00c); store64(C+28*8,0x037); store64(C+29*8,0x1ed); store64(C+30*8,0x033); store64(C+31*8,0x038); store64(C+32*8,0x1f1); store64(C+33*8,0x1ee); store64(C+34*8,0x1ec); store64(C+35*8,0x3f7);
+    store64(C+36*8,0x01a); store64(C+37*8,0x039); store64(C+38*8,0x1f3); store64(C+39*8,0x03a); store64(C+40*8,0x071); store64(C+41*8,0x1f4); store64(C+42*8,0x1ea); store64(C+43*8,0x1f2); store64(C+44*8,0x7f9);
+    store64(C+45*8,0x1f5); store64(C+46*8,0x1e5); store64(C+47*8,0x7f4); store64(C+48*8,0x0f2); store64(C+49*8,0x1f6); store64(C+50*8,0x7fa); store64(C+51*8,0x7f7); store64(C+52*8,0x3f5); store64(C+53*8,0xff5);
+    store64(C+54*8,0x1e4); store64(C+55*8,0x1f7); store64(C+56*8,0x7f5); store64(C+57*8,0x1e3); store64(C+58*8,0x1e2); store64(C+59*8,0x7fb); store64(C+60*8,0x7f0); store64(C+61*8,0x7f1); store64(C+62*8,0xff6);
+    store64(C+63*8,0x1e1); store64(C+64*8,0x1e0); store64(C+65*8,0x7f2); store64(C+66*8,0x1f8); store64(C+67*8,0x1f9); store64(C+68*8,0x7fc); store64(C+69*8,0x7f3); store64(C+70*8,0x3f1); store64(C+71*8,0xff7);
+    store64(C+72*8,0x3f3); store64(C+73*8,0x3f8); store64(C+74*8,0xff0); store64(C+75*8,0x3f9); store64(C+76*8,0x3fa); store64(C+77*8,0x7fd); store64(C+78*8,0xff1); store64(C+79*8,0x7fe); store64(C+80*8,0xff8);
+    return 0;
+}
+
+# HCB4: unsigned quad, 81 entries (3^4), values 0,1,2. Sign bits separate.
+# ISO 14496-3 Table 4.A.4
+fn _aac_init_hcb4() {
+    var L = alloc(81 * 8); var C = alloc(81 * 8);
+    _aac_hcb4_lens = L; _aac_hcb4_codes = C;
+    # Lengths (81 entries)
+    store64(L+ 0*8, 4); store64(L+ 1*8, 5); store64(L+ 2*8, 8); store64(L+ 3*8, 5); store64(L+ 4*8, 4); store64(L+ 5*8, 8); store64(L+ 6*8, 9); store64(L+ 7*8, 8); store64(L+ 8*8,11);
+    store64(L+ 9*8, 5); store64(L+10*8, 5); store64(L+11*8, 8); store64(L+12*8, 5); store64(L+13*8, 4); store64(L+14*8, 8); store64(L+15*8, 8); store64(L+16*8, 8); store64(L+17*8,10);
+    store64(L+18*8, 9); store64(L+19*8, 8); store64(L+20*8,11); store64(L+21*8, 8); store64(L+22*8, 8); store64(L+23*8,10); store64(L+24*8,11); store64(L+25*8,10); store64(L+26*8,11);
+    store64(L+27*8, 4); store64(L+28*8, 5); store64(L+29*8, 8); store64(L+30*8, 4); store64(L+31*8, 4); store64(L+32*8, 8); store64(L+33*8, 8); store64(L+34*8, 8); store64(L+35*8,10);
+    store64(L+36*8, 4); store64(L+37*8, 4); store64(L+38*8, 8); store64(L+39*8, 4); store64(L+40*8, 4); store64(L+41*8, 7); store64(L+42*8, 8); store64(L+43*8, 7); store64(L+44*8,10);
+    store64(L+45*8, 9); store64(L+46*8, 8); store64(L+47*8,10); store64(L+48*8, 8); store64(L+49*8, 7); store64(L+50*8,10); store64(L+51*8,10); store64(L+52*8, 9); store64(L+53*8,11);
+    store64(L+54*8, 9); store64(L+55*8, 8); store64(L+56*8,11); store64(L+57*8, 9); store64(L+58*8, 8); store64(L+59*8,10); store64(L+60*8,11); store64(L+61*8,10); store64(L+62*8,11);
+    store64(L+63*8, 8); store64(L+64*8, 8); store64(L+65*8,10); store64(L+66*8, 8); store64(L+67*8, 7); store64(L+68*8,10); store64(L+69*8,10); store64(L+70*8, 9); store64(L+71*8,11);
+    store64(L+72*8,11); store64(L+73*8,10); store64(L+74*8,12); store64(L+75*8,10); store64(L+76*8,10); store64(L+77*8,11); store64(L+78*8,12); store64(L+79*8,11); store64(L+80*8,12);
+    # Codes (81 entries)
+    store64(C+ 0*8,0x007); store64(C+ 1*8,0x016); store64(C+ 2*8,0x0f6); store64(C+ 3*8,0x018); store64(C+ 4*8,0x008); store64(C+ 5*8,0x0ef); store64(C+ 6*8,0x1ef); store64(C+ 7*8,0x0f3); store64(C+ 8*8,0x7f8);
+    store64(C+ 9*8,0x019); store64(C+10*8,0x017); store64(C+11*8,0x0f8); store64(C+12*8,0x015); store64(C+13*8,0x009); store64(C+14*8,0x0f2); store64(C+15*8,0x0f4); store64(C+16*8,0x0f1); store64(C+17*8,0x3f5);
+    store64(C+18*8,0x1ee); store64(C+19*8,0x0f5); store64(C+20*8,0x7f4); store64(C+21*8,0x0f0); store64(C+22*8,0x0f7); store64(C+23*8,0x3f9); store64(C+24*8,0x7f5); store64(C+25*8,0x3f7); store64(C+26*8,0x7f7);
+    store64(C+27*8,0x006); store64(C+28*8,0x014); store64(C+29*8,0x0ee); store64(C+30*8,0x005); store64(C+31*8,0x003); store64(C+32*8,0x0ed); store64(C+33*8,0x0e9); store64(C+34*8,0x0eb); store64(C+35*8,0x3f4);
+    store64(C+36*8,0x004); store64(C+37*8,0x002); store64(C+38*8,0x0ec); store64(C+39*8,0x001); store64(C+40*8,0x000); store64(C+41*8,0x072); store64(C+42*8,0x0ea); store64(C+43*8,0x071); store64(C+44*8,0x3f6);
+    store64(C+45*8,0x1f1); store64(C+46*8,0x0e8); store64(C+47*8,0x3f3); store64(C+48*8,0x0e7); store64(C+49*8,0x070); store64(C+50*8,0x3f0); store64(C+51*8,0x3f2); store64(C+52*8,0x1ed); store64(C+53*8,0x7f6);
+    store64(C+54*8,0x1f0); store64(C+55*8,0x0e6); store64(C+56*8,0x7f0); store64(C+57*8,0x1ec); store64(C+58*8,0x0e5); store64(C+59*8,0x3f1); store64(C+60*8,0x7f2); store64(C+61*8,0x3fa); store64(C+62*8,0x7f3);
+    store64(C+63*8,0x0e4); store64(C+64*8,0x0e3); store64(C+65*8,0x3f8); store64(C+66*8,0x0e2); store64(C+67*8,0x073); store64(C+68*8,0x3fb); store64(C+69*8,0x3fc); store64(C+70*8,0x1eb); store64(C+71*8,0x7f9);
+    store64(C+72*8,0x7f1); store64(C+73*8,0x3fd); store64(C+74*8,0xff0); store64(C+75*8,0x3fe); store64(C+76*8,0x3ff); store64(C+77*8,0x7fa); store64(C+78*8,0xff1); store64(C+79*8,0x7fb); store64(C+80*8,0xff8);
+    return 0;
+}
+
 fn _aac_init_spectral_codebooks() {
+    _aac_init_hcb1();
+    _aac_init_hcb2();
+    _aac_init_hcb3();
+    _aac_init_hcb4();
     _aac_init_hcb5();
     _aac_init_hcb7();
     _aac_init_hcb8();
+    _aac_init_hcb9();
+    _aac_init_hcb10();
     return 0;
+}
+
+# Decode a spectral quad (4 values) using codebooks 1-4.
+# cb: codebook number (1-4)
+# br: bitreader
+# out: pointer to write 4 i64 values (w, x, y, z)
+# Returns 0 on success, err on failure.
+#
+# HCB1/2: signed quads, 81 entries (3^4), values -1,0,1
+#   index = (w+1)*27 + (x+1)*9 + (y+1)*3 + (z+1)
+#   values recovered as: val = (idx / divisor) % 3 - 1
+# HCB3/4: unsigned quads, 81 entries (3^4), values 0,1,2
+#   index = w*27 + x*9 + y*3 + z
+#   sign bits read separately for nonzero values
+var _aac_hcb1_sorted = 0;
+var _aac_hcb1_lut = 0;
+var _aac_hcb2_sorted = 0;
+var _aac_hcb2_lut = 0;
+var _aac_hcb3_sorted = 0;
+var _aac_hcb3_lut = 0;
+var _aac_hcb4_sorted = 0;
+var _aac_hcb4_lut = 0;
+
+fn _aac_decode_spectral_quad(br, cb, out) {
+    if (_aac_hcb5_lens == 0) { _aac_init_spectral_codebooks(); }
+
+    # Build sorted + LUT tables for quad codebooks on first use
+    if (_aac_hcb1_sorted == 0) {
+        if (_aac_hcb1_lens != 0) {
+            _aac_hcb1_sorted = _aac_huff_build_sorted(_aac_hcb1_lens, _aac_hcb1_codes, 81);
+            _aac_hcb1_lut = _aac_huff_build_lut(_aac_hcb1_lens, _aac_hcb1_codes, 81);
+        }
+        if (_aac_hcb2_lens != 0) {
+            _aac_hcb2_sorted = _aac_huff_build_sorted(_aac_hcb2_lens, _aac_hcb2_codes, 81);
+            _aac_hcb2_lut = _aac_huff_build_lut(_aac_hcb2_lens, _aac_hcb2_codes, 81);
+        }
+        if (_aac_hcb3_lens != 0) {
+            _aac_hcb3_sorted = _aac_huff_build_sorted(_aac_hcb3_lens, _aac_hcb3_codes, 81);
+            _aac_hcb3_lut = _aac_huff_build_lut(_aac_hcb3_lens, _aac_hcb3_codes, 81);
+        }
+        if (_aac_hcb4_lens != 0) {
+            _aac_hcb4_sorted = _aac_huff_build_sorted(_aac_hcb4_lens, _aac_hcb4_codes, 81);
+            _aac_hcb4_lut = _aac_huff_build_lut(_aac_hcb4_lens, _aac_hcb4_codes, 81);
+        }
+    }
+
+    # Codebook 1-2: signed quads (values -1,0,1 directly encoded)
+    if (cb == 1) {
+        if (_aac_hcb1_sorted == 0) { store64(out,0); store64(out+8,0); store64(out+16,0); store64(out+24,0); return 0; }
+        var idx = _aac_huff_decode_lut(br, _aac_hcb1_lut, _aac_hcb1_sorted, 81);
+        if (is_err(idx) == 1) { return idx; }
+        var w = (idx / 27) % 3 - 1;
+        var x = (idx / 9) % 3 - 1;
+        var y = (idx / 3) % 3 - 1;
+        var z = idx % 3 - 1;
+        store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
+        return 0;
+    }
+    if (cb == 2) {
+        if (_aac_hcb2_sorted == 0) { store64(out,0); store64(out+8,0); store64(out+16,0); store64(out+24,0); return 0; }
+        var idx = _aac_huff_decode_lut(br, _aac_hcb2_lut, _aac_hcb2_sorted, 81);
+        if (is_err(idx) == 1) { return idx; }
+        var w = (idx / 27) % 3 - 1;
+        var x = (idx / 9) % 3 - 1;
+        var y = (idx / 3) % 3 - 1;
+        var z = idx % 3 - 1;
+        store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
+        return 0;
+    }
+
+    # Codebook 3-4: unsigned quads (values 0,1,2 + sign bits)
+    if (cb == 3) {
+        if (_aac_hcb3_sorted == 0) { store64(out,0); store64(out+8,0); store64(out+16,0); store64(out+24,0); return 0; }
+        var idx = _aac_huff_decode_lut(br, _aac_hcb3_lut, _aac_hcb3_sorted, 81);
+        if (is_err(idx) == 1) { return idx; }
+        var w = (idx / 27) % 3;
+        var x = (idx / 9) % 3;
+        var y = (idx / 3) % 3;
+        var z = idx % 3;
+        if (w > 0) { var sw = _br_read(br, 1); if (is_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
+        if (x > 0) { var sx = _br_read(br, 1); if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
+        if (y > 0) { var sy = _br_read(br, 1); if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
+        if (z > 0) { var sz = _br_read(br, 1); if (is_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
+        store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
+        return 0;
+    }
+    if (cb == 4) {
+        if (_aac_hcb4_sorted == 0) { store64(out,0); store64(out+8,0); store64(out+16,0); store64(out+24,0); return 0; }
+        var idx = _aac_huff_decode_lut(br, _aac_hcb4_lut, _aac_hcb4_sorted, 81);
+        if (is_err(idx) == 1) { return idx; }
+        var w = (idx / 27) % 3;
+        var x = (idx / 9) % 3;
+        var y = (idx / 3) % 3;
+        var z = idx % 3;
+        if (w > 0) { var sw = _br_read(br, 1); if (is_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
+        if (x > 0) { var sx = _br_read(br, 1); if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
+        if (y > 0) { var sy = _br_read(br, 1); if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
+        if (z > 0) { var sz = _br_read(br, 1); if (is_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
+        store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
+        return 0;
+    }
+
+    return err(ERR_DECODE);
 }
 
 # Decode a spectral pair using the given codebook.
@@ -1194,6 +1520,10 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         _aac_hcb7_lut = _aac_huff_build_lut(_aac_hcb7_lens, _aac_hcb7_codes, 64);
         _aac_hcb8_sorted = _aac_huff_build_sorted(_aac_hcb8_lens, _aac_hcb8_codes, 64);
         _aac_hcb8_lut = _aac_huff_build_lut(_aac_hcb8_lens, _aac_hcb8_codes, 64);
+        _aac_hcb9_sorted = _aac_huff_build_sorted(_aac_hcb9_lens, _aac_hcb9_codes, 169);
+        _aac_hcb9_lut = _aac_huff_build_lut(_aac_hcb9_lens, _aac_hcb9_codes, 169);
+        _aac_hcb10_sorted = _aac_huff_build_sorted(_aac_hcb10_lens, _aac_hcb10_codes, 169);
+        _aac_hcb10_lut = _aac_huff_build_lut(_aac_hcb10_lens, _aac_hcb10_codes, 169);
     }
 
     # Codebook 5-6: signed pairs, 81 entries, values -4..4
@@ -1254,17 +1584,40 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         return 0;
     }
 
-    # Codebook 9-10: unsigned pairs, 169 entries (13x13), values 0..12
+    # Codebook 9: unsigned pairs, 169 entries (13x13), values 0..12, sign bits separate
     if (cb == 9) {
-        # TODO: HCB9 Huffman table not yet loaded — skip band
-        store64(out, 0);
-        store64(out + 8, 0);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb9_lut, _aac_hcb9_sorted, 169);
+        if (is_err(idx) == 1) { return idx; }
+        var x = idx / 13;
+        var y = idx % 13;
+        if (x > 0) {
+            var sx = _br_read(br, 1);
+            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+        }
+        if (y > 0) {
+            var sy = _br_read(br, 1);
+            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+        }
+        store64(out, x);
+        store64(out + 8, y);
         return 0;
     }
+    # Codebook 10: unsigned pairs, 169 entries (13x13), values 0..12, sign bits separate
     if (cb == 10) {
-        # TODO: HCB10 Huffman table not yet loaded — skip band
-        store64(out, 0);
-        store64(out + 8, 0);
+        var idx = _aac_huff_decode_lut(br, _aac_hcb10_lut, _aac_hcb10_sorted, 169);
+        if (is_err(idx) == 1) { return idx; }
+        var x = idx / 13;
+        var y = idx % 13;
+        if (x > 0) {
+            var sx = _br_read(br, 1);
+            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+        }
+        if (y > 0) {
+            var sy = _br_read(br, 1);
+            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+        }
+        store64(out, x);
+        store64(out + 8, y);
         return 0;
     }
 
@@ -1361,10 +1714,24 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
             if (bend > AAC_FRAME_SIZE) { bend = AAC_FRAME_SIZE; }
             var i = bstart;
 
-            # Codebooks 1-4: 4-tuple codebooks (skip for now — TODO)
+            # Codebooks 1-4: 4-tuple codebooks (decode 4 values at a time)
             if (cb >= 1) {
                 if (cb <= 4) {
-                    # Skip band — codebooks 1-4 not yet implemented
+                    var quad_buf = alloc(32);
+                    while (i + 3 < bend) {
+                        if (_br_bits_left(br) < 2) { i = bend; }
+                        if (i + 3 < bend) {
+                            var rc = _aac_decode_spectral_quad(br, cb, quad_buf);
+                            if (is_err(rc) == 1) { i = bend; }
+                            if (is_err(rc) == 0) {
+                                store64(quant_spec + i * 8, load64(quad_buf));
+                                store64(quant_spec + (i+1) * 8, load64(quad_buf + 8));
+                                store64(quant_spec + (i+2) * 8, load64(quad_buf + 16));
+                                store64(quant_spec + (i+3) * 8, load64(quad_buf + 24));
+                                i = i + 4;
+                            }
+                        }
+                    }
                     band = band + 1;
                 }
             }
