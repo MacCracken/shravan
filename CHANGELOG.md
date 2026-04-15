@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2026-04-15
+
+### Added
+
+- **AAC per-band codebook selection**: Encoder now selects the most efficient Huffman codebook per scale factor band based on max quantized magnitude. Codebook 1-2 for |q|<=1, 3-4 for |q|<=2, 5-6 for |q|<=4, 7-8 for |q|<=7, 9-10 for |q|<=12, 11 for escape. Quad codebooks used when band width is divisible by 4.
+- **AAC M/S stereo encoding**: Stereo input now encoded as CPE (Channel Pair Element) with Mid/Side transform (M=(L+R)/2, S=(L-R)/2) and ms_mask_present=2 (all bands). Side channel gets own MDCT, quantization, section coding, scale factors, and spectral data. Previously downmixed to mono SCE.
+- **AAC VBR mode**: `aac_encode_vbr(samples, rate, channels, quality, out)` with quality levels 1-5 (64-320 kbps). Maps quality to target bitrate and delegates to CBR encoder.
+- **AAC spectral encoding per-codebook**: Encoder now writes spectral data using the selected codebook (1-10 + escape) instead of always using escape pairs (cb=11). Signed quads, unsigned quads with sign bits, signed pairs, unsigned pairs with sign bits all supported.
+
 ## [2.3.1] - 2026-04-15
 
 ### Added

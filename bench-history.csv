@@ -71,3 +71,12 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-04-15T19:01:57Z,efea92b,main,mdct_forward_2048,1000000
 2026-04-15T19:01:57Z,efea92b,main,flac_encode_1sec_i16,11000000
 2026-04-15T19:01:57Z,efea92b,main,flac_decode_1sec_i16,4000000
+2026-04-15T19:33:07Z,b8700ea,main,wav_decode_1sec_i16,745000
+2026-04-15T19:33:07Z,b8700ea,main,wav_encode_1sec_i16,740000
+2026-04-15T19:33:07Z,b8700ea,main,pcm_i16_to_f64_4096,71000
+2026-04-15T19:33:07Z,b8700ea,main,pcm_i24_packed_4096,68000
+2026-04-15T19:33:07Z,b8700ea,main,pcm_u8_to_f64_4096,51000
+2026-04-15T19:33:07Z,b8700ea,main,fft_forward_1024,1000000
+2026-04-15T19:33:07Z,b8700ea,main,mdct_forward_2048,1000000
+2026-04-15T19:33:07Z,b8700ea,main,flac_encode_1sec_i16,11000000
+2026-04-15T19:33:07Z,b8700ea,main,flac_decode_1sec_i16,4000000

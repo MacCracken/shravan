@@ -69,11 +69,12 @@
 - [x] HCB1-4: 81 entries each (3^4 4-tuples), `_aac_decode_spectral_quad()` decoder
 - [x] All 11 AAC spectral codebooks now operational (was 5-8 + 11 only)
 
-### v2.3.2 — AAC encoder improvements
+### v2.3.2 — AAC encoder improvements (done)
 
-- Per-band Huffman codebook selection (current uses escape pairs for all)
-- M/S stereo encoding (current downmixes to mono)
-- VBR mode
+- [x] Per-band Huffman codebook selection (1-11 based on max band magnitude)
+- [x] M/S stereo encoding (CPE with mid/side transform, replaces mono downmix)
+- [x] VBR mode (`aac_encode_vbr`, quality levels 1-5)
+- [x] Per-codebook spectral encoding (quad/pair/escape dispatch)
 
 ### v2.3.3 — TNS (Temporal Noise Shaping)
 

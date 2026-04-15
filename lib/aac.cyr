@@ -343,19 +343,34 @@ fn _bw_byte_len(bw) {
 fn _aac_encode_frame(samples, channels, target_bytes) {
     var ch = channels;
 
-    # Downmix to mono
+    # Extract mono or M/S stereo channels
     var mono = alloc(AAC_FRAME_SIZE * 8);
+    var side = alloc(AAC_FRAME_SIZE * 8);
+    var is_stereo = 0;
+    if (ch >= 2) { is_stereo = 1; }
+
     var i = 0;
-    while (i < AAC_FRAME_SIZE) {
-        var sum = F64_ZERO;
-        var c = 0;
-        while (c < ch) {
-            var idx = i * ch + c;
-            sum = f64_add(sum, load64(samples + idx * 8));
-            c = c + 1;
+    if (is_stereo == 1) {
+        # M/S stereo: mid = (L+R)/2, side = (L-R)/2
+        while (i < AAC_FRAME_SIZE) {
+            var left = load64(samples + (i * ch) * 8);
+            var right = load64(samples + (i * ch + 1) * 8);
+            store64(mono + i * 8, f64_mul(f64_add(left, right), F64_HALF));
+            store64(side + i * 8, f64_mul(f64_sub(left, right), F64_HALF));
+            i = i + 1;
         }
-        store64(mono + i * 8, f64_div(sum, f64_from(ch)));
-        i = i + 1;
+    } else {
+        # Mono or multi-channel downmix
+        while (i < AAC_FRAME_SIZE) {
+            var sum = F64_ZERO;
+            var c = 0;
+            while (c < ch) {
+                sum = f64_add(sum, load64(samples + (i * ch + c) * 8));
+                c = c + 1;
+            }
+            store64(mono + i * 8, f64_div(sum, f64_from(ch)));
+            i = i + 1;
+        }
     }
 
     # Apply sine window (2048-point for AAC MDCT)
@@ -447,18 +462,35 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     # Build AAC bitstream
     var bw = _bw_new();
 
-    # ID_SCE tag (3 bits) + instance tag (4 bits)
-    _bw_write(bw, 0, 3);  # ID_SCE = 0
-    _bw_write(bw, 0, 4);  # instance_tag = 0
+    if (is_stereo == 1) {
+        # ID_CPE tag (3 bits) + instance tag (4 bits)
+        _bw_write(bw, 1, 3);  # ID_CPE = 1
+        _bw_write(bw, 0, 4);  # instance_tag = 0
 
-    # ICS info
-    _bw_write(bw, 0, 1);  # ics_reserved_bit
-    _bw_write(bw, 0, 2);  # window_sequence = ONLY_LONG_SEQUENCE
-    _bw_write(bw, 0, 1);  # window_shape = sine
-    _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
+        # Common window flag = 1 (shared ICS info for both channels)
+        _bw_write(bw, 1, 1);
 
-    # predictor_data_present = 0
-    _bw_write(bw, 0, 1);
+        # ICS info (shared)
+        _bw_write(bw, 0, 1);  # ics_reserved_bit
+        _bw_write(bw, 0, 2);  # window_sequence = ONLY_LONG_SEQUENCE
+        _bw_write(bw, 0, 1);  # window_shape = sine
+        _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
+        _bw_write(bw, 0, 1);  # predictor_data_present = 0
+
+        # M/S mask: ms_mask_present = 2 (all bands use M/S)
+        _bw_write(bw, 2, 2);
+    } else {
+        # ID_SCE tag (3 bits) + instance tag (4 bits)
+        _bw_write(bw, 0, 3);  # ID_SCE = 0
+        _bw_write(bw, 0, 4);  # instance_tag = 0
+
+        # ICS info
+        _bw_write(bw, 0, 1);  # ics_reserved_bit
+        _bw_write(bw, 0, 2);  # window_sequence = ONLY_LONG_SEQUENCE
+        _bw_write(bw, 0, 1);  # window_shape = sine
+        _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
+        _bw_write(bw, 0, 1);  # predictor_data_present = 0
+    }
 
     # Determine which bands have nonzero data
     var band_has_data = alloc(_AAC_NUM_SWB * 8);
@@ -478,12 +510,63 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         band = band + 1;
     }
 
+    # Per-band codebook selection: pick the most efficient codebook
+    # based on max quantized magnitude in each band.
+    # cb=0: zero (no data), cb=1-2: max<=1, cb=3-4: max<=2,
+    # cb=5-6: max<=4, cb=7-8: max<=7, cb=9-10: max<=12, cb=11: escape (>12)
+    var band_cb = alloc(_AAC_NUM_SWB * 8);
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        if (load64(band_has_data + band * 8) == 0) {
+            store64(band_cb + band * 8, 0);
+        } else {
+            var bstart = load64(_aac_swb_offset + band * 8);
+            var bend = load64(_aac_swb_offset + (band + 1) * 8);
+            var max_abs = 0;
+            var bi = bstart;
+            while (bi < bend) {
+                var qv = load64(quant_spec + bi * 8);
+                if (qv < 0) { qv = 0 - qv; }
+                if (qv > max_abs) { max_abs = qv; }
+                bi = bi + 1;
+            }
+            # Check if band width is multiple of 4 (for quad codebooks)
+            var bw = bend - bstart;
+            var can_quad = 0;
+            if (bw % 4 == 0) { can_quad = 1; }
+            # Select codebook
+            if (max_abs <= 1) {
+                if (can_quad == 1) { store64(band_cb + band * 8, 1); }
+                else { store64(band_cb + band * 8, 5); }
+            } else {
+                if (max_abs <= 2) {
+                    if (can_quad == 1) { store64(band_cb + band * 8, 3); }
+                    else { store64(band_cb + band * 8, 5); }
+                } else {
+                    if (max_abs <= 4) {
+                        store64(band_cb + band * 8, 5);
+                    } else {
+                        if (max_abs <= 7) {
+                            store64(band_cb + band * 8, 7);
+                        } else {
+                            if (max_abs <= 12) {
+                                store64(band_cb + band * 8, 9);
+                            } else {
+                                store64(band_cb + band * 8, 11);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        band = band + 1;
+    }
+
     # Section coding: group consecutive bands with same codebook
     band = 0;
     while (band < _AAC_NUM_SWB) {
         var has_data = load64(band_has_data + band * 8);
-        var cb = 0;
-        if (has_data != 0) { cb = 11; }  # escape book
+        var cb = load64(band_cb + band * 8);
 
         # Find run of same codebook
         var run = 1;
@@ -533,75 +616,248 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         band = band + 1;
     }
 
-    # Spectral data: for each band with codebook 11 (escape pairs)
+    # Spectral data: encode each band using selected codebook
+    if (_aac_hcb5_lens == 0) { _aac_init_spectral_codebooks(); }
     band = 0;
     while (band < _AAC_NUM_SWB) {
-        if (load64(band_has_data + band * 8) == 0) {
-            band = band + 1;
-            continue;
-        }
+        var cb = load64(band_cb + band * 8);
+        if (cb == 0) { band = band + 1; continue; }
 
         var start = load64(_aac_swb_offset + band * 8);
         var end = load64(_aac_swb_offset + (band + 1) * 8);
-
-        # Encode in pairs
         i = start;
-        while (i + 1 < end) {
-            var qx = load64(quant_spec + i * 8);
-            var qy = load64(quant_spec + (i + 1) * 8);
 
-            var ax = qx;
-            if (ax < 0) { ax = 0 - ax; }
-            var ay = qy;
-            if (ay < 0) { ay = 0 - ay; }
-
-            var cx = ax;
-            if (cx > 16) { cx = 16; }
-            var cy = ay;
-            if (cy > 16) { cy = 16; }
-
-            # Pair index: cx * 17 + cy (9 bits)
-            var pair_idx = cx * 17 + cy;
-            _bw_write(bw, pair_idx, 9);
-
-            # Sign bits
-            if (cx > 0) {
-                if (qx < 0) { _bw_write(bw, 1, 1); }
-                else { _bw_write(bw, 0, 1); }
+        # Codebooks 1-2: signed quads (4 values, directly signed, 81 entries)
+        if (cb <= 2) {
+            while (i + 3 < end) {
+                var w = load64(quant_spec + i * 8);
+                var x = load64(quant_spec + (i+1) * 8);
+                var y = load64(quant_spec + (i+2) * 8);
+                var z = load64(quant_spec + (i+3) * 8);
+                var idx = (w+1)*27 + (x+1)*9 + (y+1)*3 + (z+1);
+                if (idx < 0) { idx = 40; }
+                if (idx > 80) { idx = 40; }
+                var nbits = load64(_aac_hcb1_lens + idx * 8);
+                var code = load64(_aac_hcb1_codes + idx * 8);
+                _bw_write(bw, code, nbits);
+                i = i + 4;
             }
-            if (cy > 0) {
-                if (qy < 0) { _bw_write(bw, 1, 1); }
-                else { _bw_write(bw, 0, 1); }
-            }
-
-            # Escape codes for values >= 16
-            if (ax >= 16) {
-                var esc = ax - 16;
-                _bw_write(bw, esc, 8);  # simplified escape
-            }
-            if (ay >= 16) {
-                var esc = ay - 16;
-                _bw_write(bw, esc, 8);
-            }
-
-            i = i + 2;
         }
-        # Handle odd trailing coefficient
-        if (i < end) {
-            var qx = load64(quant_spec + i * 8);
-            var ax = qx;
-            if (ax < 0) { ax = 0 - ax; }
-            var cx = ax;
-            if (cx > 16) { cx = 16; }
-            var pair_idx = cx * 17;
-            _bw_write(bw, pair_idx, 9);
-            if (cx > 0) {
-                if (qx < 0) { _bw_write(bw, 1, 1); }
-                else { _bw_write(bw, 0, 1); }
+
+        # Codebooks 3-4: unsigned quads (4 values + sign bits, 81 entries)
+        if (cb >= 3) { if (cb <= 4) {
+            while (i + 3 < end) {
+                var w = load64(quant_spec + i * 8);
+                var x = load64(quant_spec + (i+1) * 8);
+                var y = load64(quant_spec + (i+2) * 8);
+                var z = load64(quant_spec + (i+3) * 8);
+                var aw = w; if (aw < 0) { aw = 0 - aw; }
+                var ax = x; if (ax < 0) { ax = 0 - ax; }
+                var ay = y; if (ay < 0) { ay = 0 - ay; }
+                var az = z; if (az < 0) { az = 0 - az; }
+                var idx = aw*27 + ax*9 + ay*3 + az;
+                if (idx > 80) { idx = 0; }
+                var nbits = load64(_aac_hcb3_lens + idx * 8);
+                var code = load64(_aac_hcb3_codes + idx * 8);
+                _bw_write(bw, code, nbits);
+                if (aw > 0) { if (w < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ax > 0) { if (x < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ay > 0) { if (y < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (az > 0) { if (z < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                i = i + 4;
+            }
+        }}
+
+        # Codebooks 5-6: signed pairs (81 entries, values -4..4)
+        if (cb >= 5) { if (cb <= 6) {
+            while (i + 1 < end) {
+                var qx = load64(quant_spec + i * 8);
+                var qy = load64(quant_spec + (i+1) * 8);
+                var idx = (qx+4)*9 + (qy+4);
+                if (idx < 0) { idx = 40; }
+                if (idx > 80) { idx = 40; }
+                var nbits = load64(_aac_hcb5_lens + idx * 8);
+                var code = load64(_aac_hcb5_codes + idx * 8);
+                _bw_write(bw, code, nbits);
+                i = i + 2;
+            }
+        }}
+
+        # Codebooks 7-8: unsigned pairs (64 entries, values 0..7 + sign)
+        if (cb >= 7) { if (cb <= 8) {
+            var hcb_lens = _aac_hcb7_lens;
+            var hcb_codes = _aac_hcb7_codes;
+            if (cb == 8) { hcb_lens = _aac_hcb8_lens; hcb_codes = _aac_hcb8_codes; }
+            while (i + 1 < end) {
+                var qx = load64(quant_spec + i * 8);
+                var qy = load64(quant_spec + (i+1) * 8);
+                var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                if (ax > 7) { ax = 7; }
+                if (ay > 7) { ay = 7; }
+                var idx = ax * 8 + ay;
+                var nbits = load64(hcb_lens + idx * 8);
+                var code = load64(hcb_codes + idx * 8);
+                _bw_write(bw, code, nbits);
+                if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                i = i + 2;
+            }
+        }}
+
+        # Codebooks 9-10: unsigned pairs (169 entries, values 0..12 + sign)
+        if (cb >= 9) { if (cb <= 10) {
+            var hcb_lens = _aac_hcb9_lens;
+            var hcb_codes = _aac_hcb9_codes;
+            if (cb == 10) { hcb_lens = _aac_hcb10_lens; hcb_codes = _aac_hcb10_codes; }
+            while (i + 1 < end) {
+                var qx = load64(quant_spec + i * 8);
+                var qy = load64(quant_spec + (i+1) * 8);
+                var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                if (ax > 12) { ax = 12; }
+                if (ay > 12) { ay = 12; }
+                var idx = ax * 13 + ay;
+                var nbits = load64(hcb_lens + idx * 8);
+                var code = load64(hcb_codes + idx * 8);
+                _bw_write(bw, code, nbits);
+                if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                i = i + 2;
+            }
+        }}
+
+        # Codebook 11: escape pairs (17x17, 9-bit index + sign + escape)
+        if (cb == 11) {
+            while (i + 1 < end) {
+                var qx = load64(quant_spec + i * 8);
+                var qy = load64(quant_spec + (i+1) * 8);
+                var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                var cx = ax; if (cx > 16) { cx = 16; }
+                var cy = ay; if (cy > 16) { cy = 16; }
+                _bw_write(bw, cx * 17 + cy, 9);
+                if (cx > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (cy > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ax >= 16) { _bw_write(bw, ax - 16, 8); }
+                if (ay >= 16) { _bw_write(bw, ay - 16, 8); }
+                i = i + 2;
             }
         }
 
         band = band + 1;
+    }
+
+    # Side channel (for stereo M/S)
+    if (is_stereo == 1) {
+        # Window + MDCT the side channel
+        var side_windowed = alloc(windowed_size * 8);
+        memset(side_windowed, 0, windowed_size * 8);
+        i = 0;
+        while (i < windowed_size) {
+            var angle = f64_div(
+                f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
+                f64_from(windowed_size)
+            );
+            var w = f64_sin(angle);
+            if (i < AAC_FRAME_SIZE) {
+                store64(side_windowed + i * 8, f64_mul(load64(side + i * 8), w));
+            }
+            i = i + 1;
+        }
+        var side_mdct = alloc(AAC_FRAME_SIZE * 8);
+        memset(side_mdct, 0, AAC_FRAME_SIZE * 8);
+        fft_mdct(side_windowed, windowed_size, side_mdct);
+
+        # Quantize side channel with same scale factors
+        var side_quant = alloc(AAC_FRAME_SIZE * 8);
+        memset(side_quant, 0, AAC_FRAME_SIZE * 8);
+        band = 0;
+        while (band < _AAC_NUM_SWB) {
+            var bstart = load64(_aac_swb_offset + band * 8);
+            var bend = load64(_aac_swb_offset + (band + 1) * 8);
+            var scf = load64(scale_factors + band * 8);
+            var step = f64_pow(F64_TWO, f64_mul(f64_from(1), f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4))));
+            var floor_step = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
+            j = bstart;
+            while (j < bend) {
+                var xval = load64(side_mdct + j * 8);
+                var abs_val = f64_abs(xval);
+                if (f64_gt(step, floor_step) == 1) {
+                    var powered = f64_pow(abs_val, f64_div(f64_from(3), f64_from(4)));
+                    var q = f64_to(f64_floor(f64_add(f64_div(powered, step), F64_HALF)));
+                    if (q > 8191) { q = 8191; }
+                    if (f64_lt(xval, F64_ZERO) == 1) { store64(side_quant + j * 8, 0 - q); }
+                    else { store64(side_quant + j * 8, q); }
+                }
+                j = j + 1;
+            }
+            band = band + 1;
+        }
+
+        # Side channel ICS info (not shared — written per-channel after CPE common window)
+        _bw_write(bw, 0, 1);  # ics_reserved_bit
+        _bw_write(bw, 0, 2);  # window_sequence
+        _bw_write(bw, 0, 1);  # window_shape
+        _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
+        _bw_write(bw, 0, 1);  # predictor
+
+        # Side channel section coding — use same codebook selection as mid
+        band = 0;
+        while (band < _AAC_NUM_SWB) {
+            var scb = load64(band_cb + band * 8);
+            var run = 1;
+            while (band + run < _AAC_NUM_SWB) {
+                if (load64(band_cb + (band + run) * 8) != scb) { break; }
+                run = run + 1;
+            }
+            _bw_write(bw, scb, 4);
+            var remaining = run;
+            while (remaining >= 31) { _bw_write(bw, 31, 5); remaining = remaining - 31; }
+            _bw_write(bw, remaining, 5);
+            band = band + run;
+        }
+
+        # Side channel scale factors (same as mid for simplicity)
+        _bw_write(bw, load64(scale_factors), 8);
+        prev_scf = load64(scale_factors);
+        band = 0;
+        while (band < _AAC_NUM_SWB) {
+            if (load64(band_has_data + band * 8) != 0) {
+                var scf_val = load64(scale_factors + band * 8);
+                var diff = scf_val - prev_scf;
+                if (diff < 0 - 60) { diff = 0 - 60; }
+                if (diff > 60) { diff = 60; }
+                var index = diff + 60;
+                _bw_write(bw, load64(_aac_scf_codes + index * 8), load64(_aac_scf_lens + index * 8));
+                prev_scf = scf_val;
+            }
+            band = band + 1;
+        }
+
+        # Side channel spectral data — encode with escape pairs (simplified)
+        band = 0;
+        while (band < _AAC_NUM_SWB) {
+            if (load64(band_has_data + band * 8) == 0) { band = band + 1; continue; }
+            var bstart = load64(_aac_swb_offset + band * 8);
+            var bend = load64(_aac_swb_offset + (band + 1) * 8);
+            i = bstart;
+            while (i + 1 < bend) {
+                var qx = load64(side_quant + i * 8);
+                var qy = load64(side_quant + (i+1) * 8);
+                var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                var cx = ax; if (cx > 16) { cx = 16; }
+                var cy = ay; if (cy > 16) { cy = 16; }
+                _bw_write(bw, cx * 17 + cy, 9);
+                if (cx > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (cy > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                if (ax >= 16) { _bw_write(bw, ax - 16, 8); }
+                if (ay >= 16) { _bw_write(bw, ay - 16, 8); }
+                i = i + 2;
+            }
+            band = band + 1;
+        }
     }
 
     # ID_END tag
@@ -705,6 +961,34 @@ fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     }
 
     return write_pos;
+}
+
+# ================================================================
+# VBR encoding
+# ================================================================
+# Quality levels: 1 (lowest, ~64kbps) to 5 (highest, ~320kbps)
+# Target bitrate estimated per quality level, but actual frame size
+# varies based on spectral complexity.
+
+var AAC_VBR_Q1 = 1;
+var AAC_VBR_Q2 = 2;
+var AAC_VBR_Q3 = 3;
+var AAC_VBR_Q4 = 4;
+var AAC_VBR_Q5 = 5;
+
+fn aac_encode_vbr(samples_vec, sample_rate, channels, quality, out_buf) {
+    # Map quality to approximate bitrate
+    var bitrate = 128000;
+    if (quality == 1) { bitrate = 64000; }
+    if (quality == 2) { bitrate = 96000; }
+    if (quality == 3) { bitrate = 128000; }
+    if (quality == 4) { bitrate = 192000; }
+    if (quality == 5) { bitrate = 320000; }
+
+    # Scale for stereo
+    if (channels >= 2) { bitrate = bitrate * 2; }
+
+    return aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf);
 }
 
 # ================================================================
