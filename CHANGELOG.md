@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] - 2026-07-01
+
+Stabilization — rebuild the fuzz harness for the 6.3.19 toolchain. No codec or
+serde changes; the 563-assertion suite is unchanged.
+
+### Fixed
+
+- **Fuzz harness (`fuzz/fuzz_codecs.cyr`) builds + runs under Cyrius 6.3.19.**
+  6.3.19's stricter linker refuses *reachable* undefined fns; the standalone
+  harness referenced `src/main.cyr` helpers it didn't include. Added the missing
+  self-contained helpers (`fmtinfo_format`/`sample_rate`/`channels`/`bit_depth`,
+  `decode_result_info`/`samples`, `write_u32_le`, `read`/`write_u32_be`, and an
+  unreachable `opus_decode_from_packets` stub) and corrected the `ogg_parse_page`
+  (4-arg) / `mp3_scan_frames` (2-arg) call sites. Clean build, **90,000 calls /
+  0 crashes** via `./fuzz/run.sh`.
+
+### Changed
+
+- **CI** gains `cyrius vet` (include-dependency audit — 0 untrusted / 0 missing)
+  and a fuzz smoke pass (1000 iters, gated on "0 crashes").
+
 ## [2.4.1] - 2026-07-01
 
 Full serde type coverage — restores the complete Rust `#[derive(Serialize,

@@ -60,6 +60,18 @@ jobs:
           echo "bench: $(wc -c < build/bench) bytes"
           ./build/bench
 
+      - name: Vet dependencies
+        # Audit the include-dependency graph (0 untrusted / 0 missing).
+        run: cyrius vet src/main.cyr
+
+      - name: Fuzz smoke
+        # The fuzz harness self-contains its codec helpers; run a short pass to
+        # catch crashes on malformed input (full 90K pass: ./fuzz/run.sh).
+        run: |
+          cyrius build fuzz/fuzz_codecs.cyr build/fuzz_codecs
+          ./build/fuzz_codecs 1000 2>&1 | tee /tmp/fuzz-out.txt
+          grep -q "0 crashes" /tmp/fuzz-out.txt || { echo "Fuzz crash detected"; exit 1; }
+
       - name: Security scan
         # Scan shravan-authored code (entry + codec modules) for raw execve —
         # NOT the vendored stdlib in lib/, which legitimately wraps syscalls.

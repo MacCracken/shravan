@@ -81,9 +81,23 @@ fn decode_result_new(fi, samples) { var dr = alloc(16); store64(dr, fi); store64
 # Minimal helpers needed by codecs
 fn read_u16_le(data, off) { return load8(data+off) | (load8(data+off+1) << 8); }
 fn read_u32_le(data, off) { return load8(data+off) | (load8(data+off+1)<<8) | (load8(data+off+2)<<16) | (load8(data+off+3)<<24); }
+fn write_u32_le(buf, off, val) { store8(buf+off, val & 0xFF); store8(buf+off+1, (val>>8) & 0xFF); store8(buf+off+2, (val>>16) & 0xFF); store8(buf+off+3, (val>>24) & 0xFF); return 0; }
+fn read_u32_be(data, off) { return (load8(data+off)<<24) | (load8(data+off+1)<<16) | (load8(data+off+2)<<8) | load8(data+off+3); }
+fn write_u32_be(buf, off, val) { store8(buf+off, (val>>24) & 0xFF); store8(buf+off+1, (val>>16) & 0xFF); store8(buf+off+2, (val>>8) & 0xFF); store8(buf+off+3, val & 0xFF); return 0; }
 fn sign_extend(val, bits) { var half = 1 << (bits - 1); if (val >= half) { return val - (1 << bits); } return val; }
 fn f64_clamp_sample(x) { return f64_clamp(x, F64_NEG_ONE, F64_ONE); }
 fn _vec_new_cap(n) { var v = alloc(24); var data = alloc(n * 8); store64(v, data); store64(v + 8, 0); store64(v + 16, n); return v; }
+# FormatInfo / decode_result accessors (mirror src/main.cyr) — referenced by the included codec modules
+fn fmtinfo_format(fi)       { return load64(fi); }
+fn fmtinfo_sample_rate(fi)  { return load64(fi + 8); }
+fn fmtinfo_channels(fi)     { return load64(fi + 16); }
+fn fmtinfo_bit_depth(fi)    { return load64(fi + 24); }
+fn decode_result_info(dr)    { return load64(dr); }
+fn decode_result_samples(dr) { return load64(dr + 8); }
+# ogg.cyr references opus_decode_from_packets, but this harness only exercises
+# ogg_parse_page (never full ogg_decode), so it's unreachable — stub it to keep
+# the build free of undefined-function warnings.
+fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) { return 0 - 1; }
 
 # Bitreader (needed by FLAC)
 fn bitreader_new(data, len) {
@@ -209,7 +223,8 @@ fi = 0;
 while (fi < iters) {
     var sz = _fz_u(max_size - 27) + 27;
     _fz_fill_magic(buf, sz, ogg_m, 4);
-    ogg_parse_page(buf, 0, sz);
+    var oe = alloc(8);
+    ogg_parse_page(buf, sz, 0, oe);   # (data, len, pos, out_end) — 4-arg signature
     fi = fi + 1; total = total + 1;
 }
 syscall(1, 1, "ok\n", 3);
@@ -220,7 +235,7 @@ fi = 0;
 while (fi < iters) {
     var sz = _fz_u(max_size - 4) + 4;
     _fz_fill_magic(buf, sz, mp3_m, 2);
-    mp3_scan_frames(buf, sz, 0);
+    mp3_scan_frames(buf, sz);   # (data, len) — 2-arg signature
     fi = fi + 1; total = total + 1;
 }
 syscall(1, 1, "ok\n", 3);
@@ -242,9 +257,10 @@ fi = 0;
 while (fi < iters) {
     var sz = _fz_u(max_size) + 1;
     _fz_fill(buf, sz);
+    var oe2 = alloc(8);
     flac_parse_metadata(buf, sz);
-    ogg_parse_page(buf, 0, sz);
-    mp3_scan_frames(buf, sz, 0);
+    ogg_parse_page(buf, sz, 0, oe2);
+    mp3_scan_frames(buf, sz);
     tag_read_id3v2(buf, sz);
     fi = fi + 1; total = total + 5;
 }

@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.4.1** — 563 tests, Cyrius 6.3.19.
-> Full serde type coverage: enums + int structs (`#derive(Serialize)`),
-> AudioMetadata (Str), codec markers. (v2.4.0: `cyrius.cyml` manifest,
-> `cyrius lib sync` stdlib vendoring, `ganita`, `bayan`; deps incl. sankoch retained.)
+> **v2.4.2** — 563 tests + fuzz (90K/0 crashes), Cyrius 6.3.19.
+> Stabilize: fuzz harness rebuilt for 6.3.19, `cyrius vet` + fuzz smoke in CI.
+> (v2.4.1: full serde type coverage. v2.4.0: `cyrius.cyml` manifest, `cyrius lib
+> sync` stdlib vendoring, `ganita`, `bayan`; deps incl. sankoch retained.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -109,6 +109,15 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       shipped a hand-written `audio_metadata_from_json` stopgap. **Remove once the
       derive is fixed upstream.**
 
+## v2.4.2 — Stabilize (shipped 2026-07-01)
+
+- [x] **Fuzz harness rebuilt for 6.3.19** — `fuzz/fuzz_codecs.cyr` self-contains
+      the codec helpers it needs (`fmtinfo_*`, `decode_result_*`, `write_u32_le`,
+      `read/write_u32_be`, unreachable `opus_decode_from_packets` stub); fixed the
+      `ogg_parse_page`/`mp3_scan_frames` call arities. Builds clean, 90K calls / 0
+      crashes (`./fuzz/run.sh`).
+- [x] `cyrius vet` (include-dep audit) + a fuzz smoke pass wired into CI.
+
 ## v2.4.x — Own the stack (proposed — pending review)
 
 ### Opus encoder
@@ -132,16 +141,6 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
   matching the naad model (`cyrius distlib`)
 - Requires separating the library from the inline test harness in `src/main.cyr`
   so the bundle ships codecs without the 563-assertion suite
-
-### Maintenance
-
-- **Fuzz harness (`fuzz/fuzz_codecs.cyr`) rebuild** — pre-existing gap surfaced by
-  6.3.19's stricter linker (refuses reachable undefined fns). The standalone
-  harness references `src/main.cyr` helpers (`fmtinfo_*`, `decode_result_*`,
-  `write_u32_le`, `opus_decode_from_packets`, …) it doesn't include, so it no
-  longer links. Needs a self-contained include set (or migration to a
-  `fuzz/*.fcyr` harness run via `cyrius fuzz`). Unrelated to codec correctness;
-  the 563-assertion suite is unaffected.
 
 ---
 
