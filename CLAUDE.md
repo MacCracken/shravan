@@ -36,7 +36,7 @@ the pin requires re-vendoring stdlib: `cyrius lib sync`.
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
 cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.19)
-./build/shravan                             # run tests (539 assertions)
+./build/shravan                             # run tests (563 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -63,7 +63,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | dither | lib/dither.cyr | Dithering for sample depth reduction |
 | simd | lib/simd.cyr | SIMD-optimized inner loops |
 | stream | lib/stream.cyr | Streaming decoder interface (WAV/FLAC/AIFF) |
-| serde | lib/serde.cyr | JSON serialization — AudioFormat/PcmFormat/ShravanErr/FormatInfo to/from JSON (`#derive(Serialize)` + bayan) |
+| serde | lib/serde.cyr | JSON serialization — full type surface: format/pcm/error + AlacConfig/Mp3FrameInfo/OpusHead/AudioMetadata + mp3/resample enums + codec markers (`#derive(Serialize)` + bayan) |
 | sankoch | dep (cyrius.cyml) | Compression (LZ4, DEFLATE, zlib, gzip) — `compress()`/`decompress()` |
 
 ## Consumer Map
@@ -81,7 +81,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 539 assertions pass
+2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 563 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

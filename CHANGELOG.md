@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-07-01
+
+Full serde type coverage — restores the complete Rust `#[derive(Serialize,
+Deserialize)]` surface as JSON serialization. **563 assertions pass** (539 + 24).
+
+### Added
+
+- **Enums** (value-based JSON, like AudioFormat): `MpegVersion`, `MpegLayer`,
+  `ChannelMode` (mp3), `ResampleQuality` (resample) — `_to_json`/`_from_json`.
+- **Int-field structs** via `#derive(Serialize)`: `ShrAlacConfig` (10 fields),
+  `ShrMp3FrameInfo` (7), `ShrOpusHead` (6) — full roundtrip.
+- **`ShrAudioMetadata`** (7 `Str` tag fields: title/artist/album/track_number/
+  year/genre/comment). `to_json` via `#derive(Serialize)`; roundtrip verified.
+- **Codec markers** `WavCodec`…`AlacCodec` (8) — serialize their identity
+  (`{"codec":"…"}`).
+- Roundtrip tests for every type (+24 assertions → 563).
+
+### Fixed / worked around
+
+- **`#derive(Serialize)` `Str`-field deserialize is broken on cyrius 6.3.x** —
+  the generated `_from_json` yields garbage for `Str` fields (`to_json` is fine;
+  int fields roundtrip fine). Filed upstream (cyrius issue
+  `2026-07-01-derive-serialize-str-field-deserialize-broken`, with repro).
+  shravan ships a hand-written `audio_metadata_from_json` (bayan
+  `json_get`, 8-byte `Str`-handle fields) as the stopgap — remove once the
+  derive is fixed.
+
 ## [2.4.0] - 2026-07-01
 
 Language/toolchain modernization to Cyrius **6.3.19** (from cc3 4.10.3). No

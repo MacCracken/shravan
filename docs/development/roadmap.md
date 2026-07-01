@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.4.0** — 539 tests, Cyrius 6.3.19.
-> Language/toolchain modernization: `cyrius.cyml` manifest, `cyrius lib sync`
-> stdlib vendoring, `ganita` added; deps (incl. sankoch) retained; serde JSON
-> serialization wired in (`bayan` + `#derive(Serialize)`).
+> **v2.4.1** — 563 tests, Cyrius 6.3.19.
+> Full serde type coverage: enums + int structs (`#derive(Serialize)`),
+> AudioMetadata (Str), codec markers. (v2.4.0: `cyrius.cyml` manifest,
+> `cyrius lib sync` stdlib vendoring, `ganita`, `bayan`; deps incl. sankoch retained.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -95,16 +95,19 @@ repurposed as the modernization release — moved to **v2.5.x** below.)_
       `ShrFormatInfo`; AudioFormat/PcmFormat/ShravanErr to/from JSON now live + tested
 - [x] 539 tests pass (520 + 19 serde)
 
-## v2.4.1 — serde full type coverage (after 2.4.0 release)
+## v2.4.1 — serde full type coverage (shipped 2026-07-01)
 
-Restore the full Rust `#[derive(Serialize, Deserialize)]` surface. The Rust
-source (tag 1.1.0) serialized ~18 types across codec/format/error/pcm/mp3/opus/
-tag/alac/resample; the current `serde.cyr` covers only AudioFormat, PcmFormat,
-ShravanErr, and FormatInfo.
+Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 
-- Serialize the remaining metadata/config structs (per-codec headers, tag frames)
-- `#derive(Serialize)` on the struct types; hand-written enum helpers as needed
-- Roundtrip tests per type
+- [x] Enums: MpegVersion, MpegLayer, ChannelMode, ResampleQuality (value-based)
+- [x] Int structs via `#derive(Serialize)`: ShrAlacConfig, ShrMp3FrameInfo, ShrOpusHead
+- [x] ShrAudioMetadata (7 Str tag fields) — `to_json` via derive; roundtrip verified
+- [x] Codec markers WavCodec…AlacCodec (8)
+- [x] Roundtrip tests per type (563 total)
+- [!] `#derive(Serialize)` `Str`-**deserialize** is broken on cyrius 6.3.x — filed
+      upstream (`cyrius …/2026-07-01-derive-serialize-str-field-deserialize-broken`);
+      shipped a hand-written `audio_metadata_from_json` stopgap. **Remove once the
+      derive is fixed upstream.**
 
 ## v2.4.x — Own the stack (proposed — pending review)
 
@@ -128,7 +131,7 @@ ShravanErr, and FormatInfo.
 - `dist/shravan.cyr` distlib bundle for consumers (tarang/jalwa/dhvani/shruti),
   matching the naad model (`cyrius distlib`)
 - Requires separating the library from the inline test harness in `src/main.cyr`
-  so the bundle ships codecs without the 539-assertion suite
+  so the bundle ships codecs without the 563-assertion suite
 
 ### Maintenance
 
@@ -138,7 +141,7 @@ ShravanErr, and FormatInfo.
   `write_u32_le`, `opus_decode_from_packets`, …) it doesn't include, so it no
   longer links. Needs a self-contained include set (or migration to a
   `fuzz/*.fcyr` harness run via `cyrius fuzz`). Unrelated to codec correctness;
-  the 539-assertion suite is unaffected.
+  the 563-assertion suite is unaffected.
 
 ---
 

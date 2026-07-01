@@ -1,6 +1,6 @@
 commit	93263bc67324f70e0b4e83dde3c0985411a4db90	sankoch	https://github.com/MacCracken/sankoch.git	1.0.0
 215fc2baa5f99c08ab75e86a8d28f7fa80628bc8a384405d87e713930a342153  lib/fft.cyr
-815d1b5678abe86a0a517183bd39b1c2a59e43294eb4dd124acc99a564357f0b  lib/serde.cyr
+2ec7ac9b2775e2f8118f176e908ad1a9182f65f262b824cd6554bdc2eb45262c  lib/serde.cyr
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 d7a14f337a9e8c67ac95023cddf58614a21d8aacd2eb1736da798843ccf0deba  lib/syscalls_macos.cyr
 bcfc647d3f38c3c656d9213dfc2427aeb3224a827c6d1b471bb3fe89a8b08297  lib/simd.cyr

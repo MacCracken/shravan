@@ -2852,7 +2852,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.4.0 — audio codecs for AGNOS (Cyrius)\n", 50);
+syscall(1, 1, "shravan v2.4.1 — audio codecs for AGNOS (Cyrius)\n", 50);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2942,6 +2942,12 @@ test_serde_enums();
 test_wav_f32_roundtrip();
 test_aiff_8bit();
 test_aiff_stereo();
+test_serde_extra_enums();
+test_serde_alac_config();
+test_serde_mp3_frame_info();
+test_serde_opus_head();
+test_serde_audio_metadata();
+test_serde_codec_markers();
 
 print_summary();
 

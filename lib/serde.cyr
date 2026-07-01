@@ -5,6 +5,23 @@
 #derive(Serialize)
 struct ShrFormatInfo { fmt; rate; ch; depth; dur; samples; }
 
+# v2.4.1 — full Rust serde surface. #derive(Serialize) generates
+# <Name>_to_json(ptr, sb) / <Name>_from_json(pairs) for i64/primitive fields
+# (Cyrius v5.9.30). Field names become the JSON keys (matching the Rust structs).
+#derive(Serialize)
+struct ShrAlacConfig { frame_length; bit_depth; pb; mb; kb; num_channels; max_run; max_frame_bytes; avg_bit_rate; sample_rate; }
+
+#derive(Serialize)
+struct ShrMp3FrameInfo { version; layer; bitrate; sample_rate; channel_mode; frame_size; samples_per_frame; }
+
+#derive(Serialize)
+struct ShrOpusHead { version; channel_count; pre_skip; input_sample_rate; output_gain; channel_mapping_family; }
+
+# AudioMetadata — Str-typed fields (tag frames). #derive(Serialize) Str-field
+# support (serializes "value" not the pointer) landed ~v5.10.x.
+#derive(Serialize)
+struct ShrAudioMetadata { title: Str; artist: Str; album: Str; track_number: Str; year: Str; genre: Str; comment: Str; }
+
 fn AudioFormat_to_json(val, sb) {
     str_builder_add_cstr(sb, "{\"value\": ");
     str_builder_add_int(sb, val);
@@ -39,6 +56,32 @@ fn ShravanErr_to_json(val, sb) {
 fn ShravanErr_from_json(pairs) {
     return bayan_json_get_int(pairs, str_new("value", 5));
 }
+
+# v2.4.1 enums — value-based (like AudioFormat/PcmFormat): MpegVersion,
+# MpegLayer, ChannelMode (mp3), ResampleQuality (resample).
+fn MpegVersion_to_json(val, sb) {
+    str_builder_add_cstr(sb, "{\"value\": "); str_builder_add_int(sb, val); str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn MpegVersion_from_json(pairs) { return bayan_json_get_int(pairs, str_new("value", 5)); }
+
+fn MpegLayer_to_json(val, sb) {
+    str_builder_add_cstr(sb, "{\"value\": "); str_builder_add_int(sb, val); str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn MpegLayer_from_json(pairs) { return bayan_json_get_int(pairs, str_new("value", 5)); }
+
+fn ChannelMode_to_json(val, sb) {
+    str_builder_add_cstr(sb, "{\"value\": "); str_builder_add_int(sb, val); str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn ChannelMode_from_json(pairs) { return bayan_json_get_int(pairs, str_new("value", 5)); }
+
+fn ResampleQuality_to_json(val, sb) {
+    str_builder_add_cstr(sb, "{\"value\": "); str_builder_add_int(sb, val); str_builder_add_cstr(sb, "}");
+    return 0;
+}
+fn ResampleQuality_from_json(pairs) { return bayan_json_get_int(pairs, str_new("value", 5)); }
 
 fn test_serde_format_info() {
     syscall(1, 1, "test: serde FormatInfo roundtrip\n", 33);
@@ -124,5 +167,137 @@ fn test_aiff_stereo() {
     var result = aiff_decode(abuf, asz);
     assert(res_ok(result) == 1, "aiff stereo decode ok");
     assert_eq(fmtinfo_channels(decode_result_info(result)), 2, "aiff stereo ch=2");
+    return 0;
+}
+
+# --- v2.4.1 roundtrip tests: enums + int-field structs ---
+
+fn test_serde_extra_enums() {
+    syscall(1, 1, "test: serde extra enums roundtrip\n", 34);
+    var sb1 = str_builder_new(); MpegVersion_to_json(2, sb1);
+    assert_eq(MpegVersion_from_json(bayan_json_parse(str_builder_build(sb1))), 2, "serde MpegVersion roundtrip");
+    var sb2 = str_builder_new(); MpegLayer_to_json(3, sb2);
+    assert_eq(MpegLayer_from_json(bayan_json_parse(str_builder_build(sb2))), 3, "serde MpegLayer roundtrip");
+    var sb3 = str_builder_new(); ChannelMode_to_json(1, sb3);
+    assert_eq(ChannelMode_from_json(bayan_json_parse(str_builder_build(sb3))), 1, "serde ChannelMode roundtrip");
+    var sb4 = str_builder_new(); ResampleQuality_to_json(2, sb4);
+    assert_eq(ResampleQuality_from_json(bayan_json_parse(str_builder_build(sb4))), 2, "serde ResampleQuality roundtrip");
+    return 0;
+}
+
+fn test_serde_alac_config() {
+    syscall(1, 1, "test: serde AlacConfig roundtrip\n", 33);
+    var c = alloc(80);   # 10 i64 fields
+    store64(c, 4096); store64(c+8, 24); store64(c+16, 40); store64(c+24, 10); store64(c+32, 14);
+    store64(c+40, 2); store64(c+48, 255); store64(c+56, 8192); store64(c+64, 128000); store64(c+72, 44100);
+    var sb = str_builder_new();
+    ShrAlacConfig_to_json(c, sb);
+    var rec = ShrAlacConfig_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(load64(rec), 4096, "serde alac frame_length");
+    assert_eq(load64(rec+8), 24, "serde alac bit_depth");
+    assert_eq(load64(rec+40), 2, "serde alac num_channels");
+    assert_eq(load64(rec+72), 44100, "serde alac sample_rate");
+    return 0;
+}
+
+fn test_serde_mp3_frame_info() {
+    syscall(1, 1, "test: serde Mp3FrameInfo roundtrip\n", 35);
+    var m = alloc(56);   # 7 i64 fields
+    store64(m, 0); store64(m+8, 2); store64(m+16, 128); store64(m+24, 44100);
+    store64(m+32, 0); store64(m+40, 417); store64(m+48, 1152);
+    var sb = str_builder_new();
+    ShrMp3FrameInfo_to_json(m, sb);
+    var rec = ShrMp3FrameInfo_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(load64(rec+16), 128, "serde mp3 bitrate");
+    assert_eq(load64(rec+24), 44100, "serde mp3 sample_rate");
+    assert_eq(load64(rec+48), 1152, "serde mp3 samples_per_frame");
+    return 0;
+}
+
+fn test_serde_opus_head() {
+    syscall(1, 1, "test: serde OpusHead roundtrip\n", 31);
+    var o = alloc(48);   # 6 i64 fields
+    store64(o, 1); store64(o+8, 2); store64(o+16, 312); store64(o+24, 48000);
+    store64(o+32, 0); store64(o+40, 1);
+    var sb = str_builder_new();
+    ShrOpusHead_to_json(o, sb);
+    var rec = ShrOpusHead_from_json(bayan_json_parse(str_builder_build(sb)));
+    assert_eq(load64(rec), 1, "serde opus version");
+    assert_eq(load64(rec+8), 2, "serde opus channel_count");
+    assert_eq(load64(rec+24), 48000, "serde opus input_sample_rate");
+    return 0;
+}
+
+# AudioMetadata (Str fields). #derive(Serialize) to_json works, but the
+# generated ShrAudioMetadata_from_json is BROKEN for Str fields on cyrius 6.3.x
+# (it doesn't parse JSON strings back — yields garbage pointer bytes).
+# WORKAROUND, pending the upstream fix — see cyrius issue
+# docs/development/issues/2026-07-01-derive-serialize-str-field-deserialize-broken.md.
+# Delete audio_metadata_from_json and use the derive's once that lands.
+# A Str field is an 8-byte handle (sizeof reports 8/field); bayan_json_get
+# returns the Str handle directly (str_len works on it), so store it as-is.
+# Absent (Option::None) fields become an empty Str.
+fn _meta_get_str(dst, pairs, key, keylen) {
+    var v = bayan_json_get(pairs, str_new(key, keylen));
+    if (v == 0) { v = str_new("", 0); }
+    store64(dst, v);
+    return 0;
+}
+fn audio_metadata_from_json(pairs) {
+    var m = alloc(56);   # 7 Str-handle fields x 8 bytes
+    _meta_get_str(m + 0,  pairs, "title", 5);
+    _meta_get_str(m + 8,  pairs, "artist", 6);
+    _meta_get_str(m + 16, pairs, "album", 5);
+    _meta_get_str(m + 24, pairs, "track_number", 12);
+    _meta_get_str(m + 32, pairs, "year", 4);
+    _meta_get_str(m + 40, pairs, "genre", 5);
+    _meta_get_str(m + 48, pairs, "comment", 7);
+    return m;
+}
+
+fn test_serde_audio_metadata() {
+    syscall(1, 1, "test: serde AudioMetadata roundtrip\n", 36);
+    var m = ShrAudioMetadata { str_new("Song", 4), str_new("Band", 4), str_new("Album", 5), str_new("3", 1), str_new("2024", 4), str_new("Rock", 4), str_new("hi", 2) };
+    var sb = str_builder_new();
+    ShrAudioMetadata_to_json(&m, sb);
+    var js = str_builder_build(sb);
+    assert(str_eq_cstr(js, "{\"title\":\"Song\",\"artist\":\"Band\",\"album\":\"Album\",\"track_number\":\"3\",\"year\":\"2024\",\"genre\":\"Rock\",\"comment\":\"hi\"}") == 1, "serde AudioMetadata to_json");
+    # roundtrip via the hand-written deserializer: re-serialize must match
+    var rec = audio_metadata_from_json(bayan_json_parse(js));
+    var sb2 = str_builder_new();
+    ShrAudioMetadata_to_json(rec, sb2);
+    assert(str_eq(js, str_builder_build(sb2)) == 1, "serde AudioMetadata roundtrip");
+    return 0;
+}
+
+# --- Codec marker structs (WavCodec..AlacCodec) ---
+# Zero-field dispatch markers in Rust; serialize their identity as {"codec":"x"}.
+fn WavCodec_to_json(sb)  { str_builder_add_cstr(sb, "{\"codec\": \"wav\"}");  return 0; }
+fn FlacCodec_to_json(sb) { str_builder_add_cstr(sb, "{\"codec\": \"flac\"}"); return 0; }
+fn OggCodec_to_json(sb)  { str_builder_add_cstr(sb, "{\"codec\": \"ogg\"}");  return 0; }
+fn AiffCodec_to_json(sb) { str_builder_add_cstr(sb, "{\"codec\": \"aiff\"}"); return 0; }
+fn Mp3Codec_to_json(sb)  { str_builder_add_cstr(sb, "{\"codec\": \"mp3\"}");  return 0; }
+fn OpusCodec_to_json(sb) { str_builder_add_cstr(sb, "{\"codec\": \"opus\"}"); return 0; }
+fn AacCodec_to_json(sb)  { str_builder_add_cstr(sb, "{\"codec\": \"aac\"}");  return 0; }
+fn AlacCodec_to_json(sb) { str_builder_add_cstr(sb, "{\"codec\": \"alac\"}"); return 0; }
+
+fn test_serde_codec_markers() {
+    syscall(1, 1, "test: serde codec markers\n", 26);
+    var s1 = str_builder_new(); WavCodec_to_json(s1);
+    assert(str_eq_cstr(str_builder_build(s1), "{\"codec\": \"wav\"}") == 1, "serde WavCodec marker");
+    var s2 = str_builder_new(); FlacCodec_to_json(s2);
+    assert(str_eq_cstr(str_builder_build(s2), "{\"codec\": \"flac\"}") == 1, "serde FlacCodec marker");
+    var s3 = str_builder_new(); OggCodec_to_json(s3);
+    assert(str_eq_cstr(str_builder_build(s3), "{\"codec\": \"ogg\"}") == 1, "serde OggCodec marker");
+    var s4 = str_builder_new(); AiffCodec_to_json(s4);
+    assert(str_eq_cstr(str_builder_build(s4), "{\"codec\": \"aiff\"}") == 1, "serde AiffCodec marker");
+    var s5 = str_builder_new(); Mp3Codec_to_json(s5);
+    assert(str_eq_cstr(str_builder_build(s5), "{\"codec\": \"mp3\"}") == 1, "serde Mp3Codec marker");
+    var s6 = str_builder_new(); OpusCodec_to_json(s6);
+    assert(str_eq_cstr(str_builder_build(s6), "{\"codec\": \"opus\"}") == 1, "serde OpusCodec marker");
+    var s7 = str_builder_new(); AacCodec_to_json(s7);
+    assert(str_eq_cstr(str_builder_build(s7), "{\"codec\": \"aac\"}") == 1, "serde AacCodec marker");
+    var s8 = str_builder_new(); AlacCodec_to_json(s8);
+    assert(str_eq_cstr(str_builder_build(s8), "{\"codec\": \"alac\"}") == 1, "serde AlacCodec marker");
     return 0;
 }
