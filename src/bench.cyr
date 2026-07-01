@@ -11,9 +11,9 @@
 
 # --- f64 constants (initialized below) ---
 var F64_ZERO       = 0;
-var F64_HALF       = 0;
 var F64_NEG_HALF   = 0;
 var F64_NEG_ONE    = 0;
+# F64_ONE, F64_TWO, F64_HALF are provided by math.cyr (stdlib)
 var F64_128        = 0;
 var F64_255        = 0;
 var F64_32768      = 0;
@@ -30,8 +30,7 @@ var F64_2_NEG_149  = 0;
 
 fn shravan_init_constants() {
     F64_ZERO       = f64_from(0);
-    F64_HALF       = f64_div(F64_ONE, F64_TWO);
-    F64_NEG_HALF   = f64_neg(F64_HALF);
+    F64_NEG_HALF   = f64_neg(F64_HALF);  # F64_HALF from math.cyr
     F64_NEG_ONE    = f64_neg(F64_ONE);
     F64_128        = f64_from(128);
     F64_255        = f64_from(255);
@@ -62,8 +61,10 @@ enum ShravanErr {
 }
 
 fn err(code) { return 0 - code; }
-fn is_err(r) { if (r < 0) { return 1; } return 0; }
-fn is_ok(r)  { if (r >= 0) { return 1; } return 0; }
+# is_err / err_code come from the stdlib (syscalls via io) — byte-identical
+# to shravan's packed-Result convention. res_ok is shravan's own positive
+# check (result.cyr's is_ok operates on tagged Result structs, not ints).
+fn res_ok(r)  { if (r >= 0) { return 1; } return 0; }
 
 # --- Format ---
 enum AudioFormat {
@@ -78,7 +79,9 @@ fn fmtinfo_new(format, sample_rate, channels, bit_depth, duration_secs, total_sa
     return fi;
 }
 fn fmtinfo_format(fi)       { return load64(fi); }
+fn fmtinfo_sample_rate(fi)  { return load64(fi + 8); }
 fn fmtinfo_channels(fi)     { return load64(fi + 16); }
+fn fmtinfo_bit_depth(fi)    { return load64(fi + 24); }
 fn fmtinfo_total_samples(fi){ return load64(fi + 40); }
 
 # --- PCM ---
@@ -733,7 +736,7 @@ flac_init();
 fft_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.0.0 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.4.0 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();

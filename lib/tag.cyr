@@ -615,7 +615,7 @@ fn test_tag_id3v2_parse() {
 
     var tag_str = _tag_build_id3v2(ids, vals, 6);
     var meta = tag_read_id3v2(str_data(tag_str), str_len(tag_str));
-    assert(is_ok(meta) == 1, "id3v2 parse ok");
+    assert(res_ok(meta) == 1, "id3v2 parse ok");
 
     var title = tag_meta_title(meta);
     assert_neq(title, 0, "has title");
@@ -682,7 +682,7 @@ fn test_tag_vorbis_comment_parse() {
 
     var vorbis_str = _tag_build_vorbis(vendor, comments, 7);
     var meta = tag_read_vorbis(str_data(vorbis_str), str_len(vorbis_str));
-    assert(is_ok(meta) == 1, "vorbis parse ok");
+    assert(res_ok(meta) == 1, "vorbis parse ok");
 
     var title = tag_meta_title(meta);
     assert_neq(title, 0, "vorbis has title");
@@ -725,7 +725,7 @@ fn test_tag_vorbis_case_insensitive() {
 
     var vorbis_str = _tag_build_vorbis(vendor, comments, 2);
     var meta = tag_read_vorbis(str_data(vorbis_str), str_len(vorbis_str));
-    assert(is_ok(meta) == 1, "case insensitive parse ok");
+    assert(res_ok(meta) == 1, "case insensitive parse ok");
 
     var title = tag_meta_title(meta);
     assert_neq(title, 0, "lowercase title found");

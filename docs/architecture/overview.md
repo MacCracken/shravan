@@ -20,10 +20,13 @@ shravan/
     dither.cyr      -- TPDF + noise-shaped dithering
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)
     stream.cyr      -- Streaming decoders (WAV, FLAC, AIFF, chunked output)
+    serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo (bayan, #derive(Serialize))
     alloc.cyr       -- Bump allocator (vendored stdlib)
     vec.cyr         -- Dynamic vector (vendored stdlib)
     str.cyr         -- Fat string type (vendored stdlib)
-    ...             -- other vendored stdlib modules
+    ...             -- other stdlib modules, vendored version-matched to the
+                       cyrius.cyml pin via `cyrius lib sync` (math, ganita,
+                       io, syscalls, fmt, string, args, assert, thread, fnptr, …)
 ```
 
 ## Data Flow

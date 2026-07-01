@@ -279,7 +279,7 @@ fn mp3_scan_frames(data, len) {
         if (load8(data + pos) == 0xFF) {
             if ((load8(data + pos + 1) & 0xE0) == 0xE0) {
                 var info = mp3_parse_frame_header(data, pos);
-                if (is_ok(info) == 1) {
+                if (res_ok(info) == 1) {
                     var fs = mp3_frame_size(info);
                     if (fs > 0) {
                         # SEC-010: guard against frame_size pointing past buffer
@@ -356,7 +356,7 @@ fn test_mp3_valid_header_parse() {
     _mp3_make_valid_header(hdr);
 
     var info = mp3_parse_frame_header(hdr, 0);
-    assert(is_ok(info) == 1, "parse ok");
+    assert(res_ok(info) == 1, "parse ok");
     assert_eq(mp3_frame_version(info), MP3_VERSION_V1, "version V1");
     assert_eq(mp3_frame_layer(info), MP3_LAYER_III, "layer III");
     assert_eq(mp3_frame_bitrate(info), 128, "bitrate 128");
@@ -472,7 +472,7 @@ fn test_mp3_frame_size_with_padding() {
     var hdr = alloc(4);
     store8(hdr, 0xFF); store8(hdr+1, 0xFB); store8(hdr+2, 0x92); store8(hdr+3, 0x00);
     var info = mp3_parse_frame_header(hdr, 0);
-    assert(is_ok(info) == 1, "padded parse ok");
+    assert(res_ok(info) == 1, "padded parse ok");
     assert_eq(mp3_frame_padding(info), 1, "has padding");
     assert_eq(mp3_frame_size(info), 418, "frame size 418");
 
@@ -524,7 +524,7 @@ fn test_mp3_mono_channel() {
     var hdr = alloc(4);
     store8(hdr, 0xFF); store8(hdr+1, 0xFB); store8(hdr+2, 0x90); store8(hdr+3, 0xC0);
     var info = mp3_parse_frame_header(hdr, 0);
-    assert(is_ok(info) == 1, "mono parse ok");
+    assert(res_ok(info) == 1, "mono parse ok");
     assert_eq(mp3_frame_channel_mode(info), MP3_CHANNEL_MONO, "mono mode");
 
     return 0;
@@ -571,7 +571,7 @@ fn test_mp3_decode_produces_info() {
     }
 
     var result = mp3_decode(data, total);
-    assert(is_ok(result) == 1, "decode ok");
+    assert(res_ok(result) == 1, "decode ok");
 
     var finfo = load64(result);
     assert_eq(fmtinfo_format(finfo), FMT_MP3, "format MP3");

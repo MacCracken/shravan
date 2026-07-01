@@ -1762,10 +1762,10 @@ fn _aac_decode_spectral_quad(br, cb, out) {
         var x = (idx / 9) % 3;
         var y = (idx / 3) % 3;
         var z = idx % 3;
-        if (w > 0) { var sw = _br_read(br, 1); if (is_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
-        if (x > 0) { var sx = _br_read(br, 1); if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
-        if (y > 0) { var sy = _br_read(br, 1); if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
-        if (z > 0) { var sz = _br_read(br, 1); if (is_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
+        if (w > 0) { var sw = _br_read(br, 1); if (res_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
+        if (x > 0) { var sx = _br_read(br, 1); if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
+        if (y > 0) { var sy = _br_read(br, 1); if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
+        if (z > 0) { var sz = _br_read(br, 1); if (res_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
         store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
         return 0;
     }
@@ -1777,10 +1777,10 @@ fn _aac_decode_spectral_quad(br, cb, out) {
         var x = (idx / 9) % 3;
         var y = (idx / 3) % 3;
         var z = idx % 3;
-        if (w > 0) { var sw = _br_read(br, 1); if (is_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
-        if (x > 0) { var sx = _br_read(br, 1); if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
-        if (y > 0) { var sy = _br_read(br, 1); if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
-        if (z > 0) { var sz = _br_read(br, 1); if (is_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
+        if (w > 0) { var sw = _br_read(br, 1); if (res_ok(sw) == 1) { if (sw == 1) { w = 0 - w; } } }
+        if (x > 0) { var sx = _br_read(br, 1); if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } } }
+        if (y > 0) { var sy = _br_read(br, 1); if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } } }
+        if (z > 0) { var sz = _br_read(br, 1); if (res_ok(sz) == 1) { if (sz == 1) { z = 0 - z; } } }
         store64(out, w); store64(out + 8, x); store64(out + 16, y); store64(out + 24, z);
         return 0;
     }
@@ -1840,11 +1840,11 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         var y = idx % 8;
         if (x > 0) {
             var sx = _br_read(br, 1);
-            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+            if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
         }
         if (y > 0) {
             var sy = _br_read(br, 1);
-            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+            if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
         }
         store64(out, x);
         store64(out + 8, y);
@@ -1857,11 +1857,11 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         var y = idx % 8;
         if (x > 0) {
             var sx = _br_read(br, 1);
-            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+            if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
         }
         if (y > 0) {
             var sy = _br_read(br, 1);
-            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+            if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
         }
         store64(out, x);
         store64(out + 8, y);
@@ -1876,11 +1876,11 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         var y = idx % 13;
         if (x > 0) {
             var sx = _br_read(br, 1);
-            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+            if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
         }
         if (y > 0) {
             var sy = _br_read(br, 1);
-            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+            if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
         }
         store64(out, x);
         store64(out + 8, y);
@@ -1894,11 +1894,11 @@ fn _aac_decode_spectral_pair(br, cb, out) {
         var y = idx % 13;
         if (x > 0) {
             var sx = _br_read(br, 1);
-            if (is_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
+            if (res_ok(sx) == 1) { if (sx == 1) { x = 0 - x; } }
         }
         if (y > 0) {
             var sy = _br_read(br, 1);
-            if (is_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
+            if (res_ok(sy) == 1) { if (sy == 1) { y = 0 - y; } }
         }
         store64(out, x);
         store64(out + 8, y);
@@ -2088,22 +2088,22 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
                             var qy = cy;
                             if (cx > 0) {
                                 var sx = _br_read(br, 1);
-                                if (is_ok(sx) == 1) { if (sx == 1) { qx = 0 - cx; } }
+                                if (res_ok(sx) == 1) { if (sx == 1) { qx = 0 - cx; } }
                             }
                             if (cy > 0) {
                                 var sy = _br_read(br, 1);
-                                if (is_ok(sy) == 1) { if (sy == 1) { qy = 0 - cy; } }
+                                if (res_ok(sy) == 1) { if (sy == 1) { qy = 0 - cy; } }
                             }
                             if (cx == 16) {
                                 var ex = _br_read(br, 8);
-                                if (is_ok(ex) == 1) {
+                                if (res_ok(ex) == 1) {
                                     if (qx < 0) { qx = 0 - (16 + ex); }
                                     else { qx = 16 + ex; }
                                 }
                             }
                             if (cy == 16) {
                                 var ey = _br_read(br, 8);
-                                if (is_ok(ey) == 1) {
+                                if (res_ok(ey) == 1) {
                                     if (qy < 0) { qy = 0 - (16 + ey); }
                                     else { qy = 16 + ey; }
                                 }
@@ -2594,7 +2594,7 @@ fn aac_decode(data, len) {
         var plen = fl2 - hs2;
         if (plen > 0) {
             var rc = _aac_decode_frame(data + pos + hs2, plen, overlap, frame_buf);
-            if (is_ok(rc) == 1) {
+            if (res_ok(rc) == 1) {
                 # rc = number of channels decoded (1 or 2)
                 var frame_samples = AAC_FRAME_SIZE * rc;
                 var i = 0;

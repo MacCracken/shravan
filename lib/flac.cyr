@@ -2003,7 +2003,7 @@ fn test_flac_encode_decode_silence() {
 
     var out_buf = alloc(num_samples * 8 + 4096);
     var bytes_written = flac_encode(samples, 44100, 1, 16, out_buf);
-    assert(is_ok(bytes_written) == 1, "flac silence encode ok");
+    assert(res_ok(bytes_written) == 1, "flac silence encode ok");
     assert(bytes_written > 0, "flac silence bytes > 0");
 
     # Check magic
@@ -2014,7 +2014,7 @@ fn test_flac_encode_decode_silence() {
 
     # Decode
     var result = flac_decode(out_buf, bytes_written);
-    assert(is_ok(result) == 1, "flac silence decode ok");
+    assert(res_ok(result) == 1, "flac silence decode ok");
 
     var fi = decode_result_info(result);
     assert_eq(fmtinfo_format(fi), FMT_FLAC, "flac silence format");
@@ -2070,10 +2070,10 @@ fn test_flac_encode_decode_sine() {
 
     var out_buf = alloc(num_samples * 8 + 8192);
     var bytes_written = flac_encode(samples, 44100, 1, 16, out_buf);
-    assert(is_ok(bytes_written) == 1, "flac sine encode ok");
+    assert(res_ok(bytes_written) == 1, "flac sine encode ok");
 
     var result = flac_decode(out_buf, bytes_written);
-    assert(is_ok(result) == 1, "flac sine decode ok");
+    assert(res_ok(result) == 1, "flac sine decode ok");
 
     var dec = decode_result_samples(result);
     assert_eq(vec_len(dec), num_samples, "flac sine count");
@@ -2117,10 +2117,10 @@ fn test_flac_encode_decode_stereo() {
 
     var out_buf = alloc(num_frames * 16 + 8192);
     var bytes_written = flac_encode(samples, 44100, 2, 16, out_buf);
-    assert(is_ok(bytes_written) == 1, "flac stereo encode ok");
+    assert(res_ok(bytes_written) == 1, "flac stereo encode ok");
 
     var result = flac_decode(out_buf, bytes_written);
-    assert(is_ok(result) == 1, "flac stereo decode ok");
+    assert(res_ok(result) == 1, "flac stereo decode ok");
 
     var fi = decode_result_info(result);
     assert_eq(fmtinfo_channels(fi), 2, "flac stereo channels");
@@ -2145,10 +2145,10 @@ fn test_flac_encode_decode_8bit() {
 
     var out_buf = alloc(num_samples * 4 + 4096);
     var bytes_written = flac_encode(samples, 44100, 1, 8, out_buf);
-    assert(is_ok(bytes_written) == 1, "flac 8bit encode ok");
+    assert(res_ok(bytes_written) == 1, "flac 8bit encode ok");
 
     var result = flac_decode(out_buf, bytes_written);
-    assert(is_ok(result) == 1, "flac 8bit decode ok");
+    assert(res_ok(result) == 1, "flac 8bit decode ok");
 
     var fi = decode_result_info(result);
     assert_eq(fmtinfo_bit_depth(fi), 8, "flac 8bit depth");
@@ -2171,10 +2171,10 @@ fn test_flac_encode_decode_24bit() {
 
     var out_buf = alloc(num_samples * 12 + 8192);
     var bytes_written = flac_encode(samples, 48000, 1, 24, out_buf);
-    assert(is_ok(bytes_written) == 1, "flac 24bit encode ok");
+    assert(res_ok(bytes_written) == 1, "flac 24bit encode ok");
 
     var result = flac_decode(out_buf, bytes_written);
-    assert(is_ok(result) == 1, "flac 24bit decode ok");
+    assert(res_ok(result) == 1, "flac 24bit decode ok");
 
     var fi = decode_result_info(result);
     assert_eq(fmtinfo_bit_depth(fi), 24, "flac 24bit depth");

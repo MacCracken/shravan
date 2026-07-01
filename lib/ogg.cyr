@@ -544,7 +544,7 @@ fn test_ogg_page_parse_roundtrip() {
     # Parse it back
     var end_buf = alloc(8);
     var page = ogg_parse_page(page_data, page_len, 0, end_buf);
-    assert(is_ok(page) == 1, "parse built page ok");
+    assert(res_ok(page) == 1, "parse built page ok");
 
     var end = load64(end_buf);
     assert_eq(end, page_len, "parse consumed all bytes");
@@ -593,7 +593,7 @@ fn test_ogg_extract_single_packet() {
     var pl = str_len(page_str);
 
     var packets = ogg_extract_packets(pd, pl);
-    assert(is_ok(packets) == 1, "extract ok");
+    assert(res_ok(packets) == 1, "extract ok");
     assert_eq(vec_len(packets), 1, "1 packet");
 
     var pkt0 = vec_get(packets, 0);
@@ -617,7 +617,7 @@ fn test_ogg_extract_multi_packet() {
     var pl = str_len(page_str);
 
     var packets = ogg_extract_packets(pd, pl);
-    assert(is_ok(packets) == 1, "multi extract ok");
+    assert(res_ok(packets) == 1, "multi extract ok");
     assert_eq(vec_len(packets), 2, "2 packets");
 
     var p0 = vec_get(packets, 0);
@@ -655,7 +655,7 @@ fn test_ogg_continuation_pages() {
     memcpy(combined + str_len(p1_str), str_data(p2_str), str_len(p2_str));
 
     var packets = ogg_extract_packets(combined, total_len);
-    assert(is_ok(packets) == 1, "continuation extract ok");
+    assert(res_ok(packets) == 1, "continuation extract ok");
     assert_eq(vec_len(packets), 1, "1 continued packet");
 
     var pkt = vec_get(packets, 0);
@@ -698,7 +698,7 @@ fn test_ogg_large_packet_lacing() {
 
     var stream = ogg_mux_packets(packets, granules, 1, 1);
     var extracted = ogg_extract_packets(str_data(stream), str_len(stream));
-    assert(is_ok(extracted) == 1, "large packet extract ok");
+    assert(res_ok(extracted) == 1, "large packet extract ok");
     assert_eq(vec_len(extracted), 1, "1 large packet");
 
     var pkt = vec_get(extracted, 0);
@@ -726,7 +726,7 @@ fn test_ogg_mux_roundtrip() {
 
     var stream = ogg_mux_packets(packets, granules, 1, 3);
     var extracted = ogg_extract_packets(str_data(stream), str_len(stream));
-    assert(is_ok(extracted) == 1, "mux roundtrip extract ok");
+    assert(res_ok(extracted) == 1, "mux roundtrip extract ok");
     assert_eq(vec_len(extracted), 3, "3 packets");
 
     var e0 = vec_get(extracted, 0);
@@ -759,7 +759,7 @@ fn test_ogg_mux_single_has_bos_eos() {
     # Parse the single page and check flags
     var end_buf = alloc(8);
     var page = ogg_parse_page(str_data(stream), str_len(stream), 0, end_buf);
-    assert(is_ok(page) == 1, "single page parse ok");
+    assert(res_ok(page) == 1, "single page parse ok");
 
     var ht = ogg_page_header_type(page);
     assert_neq(ht & OGG_FLAG_BOS, 0, "has BOS");
@@ -806,7 +806,7 @@ fn test_ogg_multiple_pages() {
     memcpy(combined + str_len(p1_str), str_data(p2_str), str_len(p2_str));
 
     var packets = ogg_extract_packets(combined, total_len);
-    assert(is_ok(packets) == 1, "multi page extract ok");
+    assert(res_ok(packets) == 1, "multi page extract ok");
     assert_eq(vec_len(packets), 2, "2 packets from 2 pages");
 
     var pk0 = vec_get(packets, 0);

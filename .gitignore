@@ -1,7 +1,13 @@
-# Build
-/target
+# Cyrius build output (regenerated per-build; never committed)
+build/
 
-# Editor / IDE
+# Claude Code state + transient workflow worktrees
+.claude/
+
+# Core dumps
+*.core
+
+# Editors / IDE
 .vscode/
 .idea/
 *.swp
@@ -16,13 +22,12 @@ Thumbs.db
 .env
 .env.*
 
-# Profiling / coverage
+# Profiling
 *.profraw
 *.profdata
-lcov.info
-tarpaulin-report.html
 perf.data
 perf.data.old
 
-# Cargo
-*.orig
+# NOTE: cyrius.lock and lib/ (vendored stdlib via `cyrius lib sync` +
+# project codec modules) ARE committed — do not ignore them. bench-history.csv
+# is tracked benchmark history — do not ignore *.csv.

@@ -1,41 +1,44 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_call:
+  workflow_call:   # reusable: release.yml gates on this CI workflow
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-env:
-  CYRIUS_VERSION: "4.10.3"
+
 jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
 
       - name: Install Cyrius toolchain
+        # The cyrius.cyml [package].cyrius pin is the single source of truth
+        # for the toolchain version — never hardcode it here. Read the pin and
+        # hand it to the canonical upstream installer (matches naad / patra).
         run: |
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "Cyrius $CYRIUS_VERSION installed"
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
-      - name: Syntax check
-        run: |
-          for f in src/*.cyr; do
-            echo "  check: $f"
-            cyrius check "$f"
-          done
+      - name: Vendor stdlib from pin
+        # Re-vendor the declared [deps].stdlib from the pinned snapshot so the
+        # build is reproducible from the pin regardless of committed lib/ state.
+        run: cyrius lib sync
+
+      - name: Resolve dependencies
+        # Resolve/verify any [deps.NAME] git deps and refresh cyrius.lock.
+        # (shravan currently has none — this also writes the lib/ hash lock.)
+        run: cyrius deps
 
       - name: Build
         run: |
@@ -44,92 +47,66 @@ jobs:
           echo "shravan: $(wc -c < build/shravan) bytes"
 
       - name: Verify ELF
-        run: |
-          file build/shravan | grep -q "ELF 64-bit" || { echo "Not a valid ELF binary"; exit 1; }
+        run: file build/shravan | grep -q "ELF 64-bit" || { echo "Not a valid ELF binary"; exit 1; }
 
       - name: Test suite
         run: |
           ./build/shravan 2>&1 | tee /tmp/test-output.txt
           grep -q "0 failed" /tmp/test-output.txt || { echo "Tests failed"; exit 1; }
 
-      - name: Lint
-        run: |
-          for f in src/*.cyr; do
-            echo "  lint: $f"
-            cyrius lint "$f" || true
-          done
-
-      - name: Build benchmarks
+      - name: Build & run benchmarks
         run: |
           cyrius build src/bench.cyr build/bench
           echo "bench: $(wc -c < build/bench) bytes"
+          ./build/bench
 
-      - name: Run benchmarks
-        run: ./build/bench
-
-  check:
-    name: Check & Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Cyrius toolchain
+      - name: Security scan
+        # Scan shravan-authored code (entry + codec modules) for raw execve —
+        # NOT the vendored stdlib in lib/, which legitimately wraps syscalls.
         run: |
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-
-      - name: Format check
-        run: |
-          fail=0
-          for f in src/*.cyr; do
-            cyrfmt "$f" > /tmp/fmt_check 2>/dev/null
-            if ! diff -q "$f" /tmp/fmt_check > /dev/null 2>&1; then
-              echo "needs formatting: $(basename $f)"
-              fail=1
-            fi
-          done
-          rm -f /tmp/fmt_check
-          test $fail -eq 0
-        continue-on-error: true
-
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Scan for dangerous patterns
-        run: |
+          SHRAVAN_SRC="src/main.cyr src/bench.cyr \
+            lib/flac.cyr lib/ogg.cyr lib/mp3.cyr lib/tag.cyr lib/fft.cyr lib/opus.cyr \
+            lib/aac.cyr lib/resample.cyr lib/dither.cyr lib/simd.cyr lib/stream.cyr lib/serde.cyr"
           WARN=0
-          if grep -rn 'syscall(59' src/ lib/ 2>/dev/null | grep -v "# "; then
+          if grep -n 'syscall(59' $SHRAVAN_SRC 2>/dev/null | grep -v '# '; then
             echo "WARN: raw execve in shravan modules"; WARN=1
           fi
           echo "security scan complete (warnings: $WARN)"
 
-  docs:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check required files
+      - name: Documentation & version consistency
         run: |
           MISSING=0
-          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE cyrius.toml CLAUDE.md; do
+          for doc in README.md CHANGELOG.md VERSION CONTRIBUTING.md SECURITY.md LICENSE cyrius.cyml CLAUDE.md; do
             if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
           done
-          exit $MISSING
-
-      - name: Verify version consistency
-        run: |
+          [ "$MISSING" = 0 ] || { echo "Required files missing"; exit 1; }
+          # VERSION is the single source of truth; cyrius.cyml derives it via
+          # version = "${file:VERSION}". CHANGELOG must carry the entry.
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TOML_VERSION=$(grep '^version = ' cyrius.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          [ "$FILE_VERSION" = "$TOML_VERSION" ] || { echo "VERSION ($FILE_VERSION) != cyrius.toml ($TOML_VERSION)"; exit 1; }
           grep -q "\\[$FILE_VERSION\\]" CHANGELOG.md || { echo "Version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
           echo "Version consistent: $FILE_VERSION"
+
+  quality:
+    name: Format & Lint (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Vendor stdlib from pin
+        run: cyrius lib sync
+
+      - name: Format & lint (shravan-authored code only)
+        run: |
+          for f in src/main.cyr src/bench.cyr; do
+            echo "  fmt:  $f"; cyrius fmt "$f" --check || echo "    needs formatting: $f"
+            echo "  lint: $f"; cyrius lint "$f" || true
+          done

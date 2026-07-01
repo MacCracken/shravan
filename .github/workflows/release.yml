@@ -1,43 +1,54 @@
 name: Release
+
 on:
   push:
-    tags: ["*"]
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
+
 permissions:
   contents: write
-env:
-  CYRIUS_VERSION: "4.10.3"
+
 jobs:
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
 
-  build:
-    name: Build Release
+  release:
+    name: Build & Release
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
 
-      - name: Verify version
+      - name: Verify version consistency
+        # VERSION is the single source of truth; cyrius.cyml derives it via
+        # version = "${file:VERSION}". Both must equal the pushed tag.
         run: |
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
-          TOML_VERSION=$(grep '^version = ' cyrius.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          CYML_RAW=$(grep '^version = ' cyrius.cyml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [ "$CYML_RAW" = "\${file:VERSION}" ]; then
+              CYML_VERSION="$FILE_VERSION"
+          else
+              CYML_VERSION="$CYML_RAW"
+          fi
           TAG="${GITHUB_REF_NAME}"
           [ "$FILE_VERSION" = "$TAG" ] || { echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
-          [ "$TOML_VERSION" = "$TAG" ] || { echo "cyrius.toml ($TOML_VERSION) != tag ($TAG)"; exit 1; }
-          echo "Version verified: $TAG"
+          [ "$CYML_VERSION" = "$TAG" ] || { echo "cyrius.cyml ($CYML_RAW) != tag ($TAG)"; exit 1; }
+          echo "Version verified: $TAG (cyml: $CYML_RAW)"
 
       - name: Install Cyrius toolchain
+        # Canonical installer — see ci.yml for rationale.
         run: |
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/bin/cyrius" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Vendor stdlib + resolve deps
+        run: |
+          cyrius lib sync
+          cyrius deps
 
       - name: Build
         run: |
@@ -50,43 +61,28 @@ jobs:
           ./build/shravan 2>&1 | tee /tmp/test-output.txt
           grep -q "0 failed" /tmp/test-output.txt || { echo "Tests failed"; exit 1; }
 
-      - name: Clean toolchain artifacts
-        run: rm -f cyrius-*.tar.gz
-
-      - name: Archive
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          git archive --format=tar.gz --prefix="shravan-${TAG}/" -o "shravan-${TAG}-src.tar.gz" HEAD
-          sha256sum shravan-*.tar.gz > SHA256SUMS
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-artifacts
-          path: |
-            shravan-*.tar.gz
-            SHA256SUMS
-
-  release:
-    name: Create GitHub Release
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-artifacts
-
       - name: Extract changelog
         run: |
           TAG="${GITHUB_REF_NAME}"
-          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
+          BODY=$(awk "/^## \\[$TAG\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md)
+          [ -n "$BODY" ] || BODY="No changelog entry for $TAG."
+          echo "$BODY" > /tmp/release-body.md
 
-      - uses: softprops/action-gh-release@v2
+      - name: Source tarball + checksums
+        # The source tarball + SHA256SUMS are what `cyrius deps` fetches and
+        # sha256-verifies downstream — this is the consumable release artifact.
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="shravan-$TAG/" -o "shravan-$TAG.tar.gz" HEAD
+          sha256sum "shravan-$TAG.tar.gz" build/shravan > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned — CVE-21)
         with:
           name: "shravan ${{ github.ref_name }}"
-          body_path: /tmp/body.md
+          body_path: /tmp/release-body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') }}
           files: |
-            shravan-*.tar.gz
+            shravan-${{ github.ref_name }}.tar.gz
             SHA256SUMS
+            build/shravan

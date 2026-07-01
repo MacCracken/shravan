@@ -1,0 +1,30 @@
+[package]
+name = "shravan"
+version = "${file:VERSION}"
+description = "shravan — audio codecs for AGNOS"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/shravan"
+language = "cyrius"
+cyrius = "6.3.19"
+
+# [build] entry/output are metadata/convention only — `cyrius build`
+# takes explicit <source> <output> positionals (see CI). src/main.cyr
+# `include`s the codec modules directly, so no [build] modules list.
+[build]
+entry = "src/main.cyr"
+output = "build/shravan"
+
+# stdlib leaves — the original cyrius.toml set, preserved, with two 6.x updates:
+#   - `ganita` ADDED: the transcendentals shravan calls (f64_pow/asin/acos/
+#     atan2/sinh/cosh/tanh/hypot) moved OUT of `math` into `ganita` in the 6.x
+#     line; without it the build fails on undefined f64_pow.
+#   - `json` -> `bayan`: the json stdlib was carved into `bayan` at 6.1.25.
+#     `bayan` provides bayan_json_* (parse/get_int/build/…); serde.cyr uses them.
+#     bayan's result/io needs resolve via `io` (already listed).
+[deps]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "tagged", "math", "ganita", "thread", "fnptr", "bayan"]
+
+[deps.sankoch]
+git = "https://github.com/MacCracken/sankoch.git"
+tag = "1.0.0"
+modules = ["dist/sankoch.cyr"]

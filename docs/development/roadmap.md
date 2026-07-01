@@ -1,8 +1,10 @@
 # Development Roadmap
 
-> **v2.3.0** — 520 tests, 473KB binary, cc3 >= 4.10.3.
-> Security audit complete (21/21 findings fixed, 90K fuzz calls 0 crashes).
-> MDCT 5.45x, PCM 1.3-1.6x, polyphase resampler, sorted Huffman decode.
+> **v2.4.0** — 539 tests, Cyrius 6.3.19.
+> Language/toolchain modernization: `cyrius.cyml` manifest, `cyrius lib sync`
+> stdlib vendoring, `ganita` added; deps (incl. sankoch) retained; serde JSON
+> serialization wired in (`bayan` + `#derive(Serialize)`).
+> (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
 
@@ -76,26 +78,35 @@
 - [x] VBR mode (`aac_encode_vbr`, quality levels 1-5)
 - [x] Per-codebook spectral encoding (quad/pair/escape dispatch)
 
-### v2.3.3 — TNS (Temporal Noise Shaping)
-
-- IIR filter before IMDCT for AAC decoder
-- TNS encoding support
-
-### v2.3.4 — MP4/M4A container
-
-- MP4 box parsing (moov/trak/mdia/stbl)
-- AAC extraction from MP4 container
-- Currently ADTS-only — this enables real-world .m4a files
-
-### v2.3.5 — Performance
-
-- PCM: inline asm SSE2 for i16/f64 hot loops
-- FLAC encoder: LPC encoding (better compression than Fixed prediction)
-- AAC: psychoacoustic model (masking thresholds)
+_(v2.3.3 TNS, v2.3.4 MP4/M4A, v2.3.5 Performance were unshipped when 2.4.0 was
+repurposed as the modernization release — moved to **v2.5.x** below.)_
 
 ---
 
-## v2.4.0 — Own the stack
+## v2.4.0 — Language & toolchain modernization (shipped 2026-07-01)
+
+- [x] Cyrius toolchain 4.10.3 → 6.3.19; pin in `cyrius.cyml [package].cyrius`
+- [x] Manifest `cyrius.toml` → `cyrius.cyml` (`${file:VERSION}`, `language`, toolchain pin)
+- [x] Stdlib re-vendored via `cyrius lib sync` (version-matched 6.3.19 snapshot in `lib/`)
+- [x] `ganita` added for transcendentals (moved out of `math` in 6.x); all deps retained (incl. `sankoch`)
+- [x] Symbol collisions resolved (F64_HALF, is_err/err_code, is_ok→res_ok)
+- [x] CI/release workflows modernized (pin-driven install, `cyrius lib sync` → `deps` → build)
+- [x] `serde` JSON serialization wired in — `bayan` dep + `#derive(Serialize)` for
+      `ShrFormatInfo`; AudioFormat/PcmFormat/ShravanErr to/from JSON now live + tested
+- [x] 539 tests pass (520 + 19 serde)
+
+## v2.4.1 — serde full type coverage (after 2.4.0 release)
+
+Restore the full Rust `#[derive(Serialize, Deserialize)]` surface. The Rust
+source (tag 1.1.0) serialized ~18 types across codec/format/error/pcm/mp3/opus/
+tag/alac/resample; the current `serde.cyr` covers only AudioFormat, PcmFormat,
+ShravanErr, and FormatInfo.
+
+- Serialize the remaining metadata/config structs (per-codec headers, tag frames)
+- `#derive(Serialize)` on the struct types; hand-written enum helpers as needed
+- Roundtrip tests per type
+
+## v2.4.x — Own the stack (proposed — pending review)
 
 ### Opus encoder
 
@@ -111,6 +122,45 @@
 - 88.2/96/176.4/192/352.8/384 kHz sample rates
 - 32-bit integer, 64-bit float PCM
 - DSD support (DSD64/DSD128/DSD256, DoP)
+
+### Distlib bundle (under evaluation)
+
+- `dist/shravan.cyr` distlib bundle for consumers (tarang/jalwa/dhvani/shruti),
+  matching the naad model (`cyrius distlib`)
+- Requires separating the library from the inline test harness in `src/main.cyr`
+  so the bundle ships codecs without the 539-assertion suite
+
+### Maintenance
+
+- **Fuzz harness (`fuzz/fuzz_codecs.cyr`) rebuild** — pre-existing gap surfaced by
+  6.3.19's stricter linker (refuses reachable undefined fns). The standalone
+  harness references `src/main.cyr` helpers (`fmtinfo_*`, `decode_result_*`,
+  `write_u32_le`, `opus_decode_from_packets`, …) it doesn't include, so it no
+  longer links. Needs a self-contained include set (or migration to a
+  `fuzz/*.fcyr` harness run via `cyrius fuzz`). Unrelated to codec correctness;
+  the 539-assertion suite is unaffected.
+
+---
+
+## v2.5.x — Completeness (deferred from 2.3.x)
+
+### v2.5.1 — TNS (Temporal Noise Shaping)
+
+- IIR filter before IMDCT for AAC decoder
+- TNS encoding support
+
+### v2.5.2 — MP4/M4A container
+
+- MP4 box parsing (moov/trak/mdia/stbl)
+- AAC extraction from MP4 container
+- Currently ADTS-only — this enables real-world .m4a files
+- `sankoch` (compression) is already a dependency — wire it in for container payloads
+
+### v2.5.3 — Performance
+
+- PCM: inline asm SSE2 for i16/f64 hot loops
+- FLAC encoder: LPC encoding (better compression than Fixed prediction)
+- AAC: psychoacoustic model (masking thresholds)
 
 ---
 

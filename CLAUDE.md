@@ -14,12 +14,14 @@
 
 ## Architecture
 
-Single-file library with codec modules in `lib/`. `src/main.cyr` is the entry point containing error, format, PCM, WAV, AIFF, ALAC, and codec dispatch inline, with codec modules (FLAC, Ogg, MP3, Opus, AAC, etc.) included from `lib/`. Stdlib resolved via `cyrius.toml` deps (not vendored). Consumers include the entry point and get all codecs.
+Single-file library with codec modules in `lib/`. `src/main.cyr` is the entry point containing error, format, PCM, WAV, AIFF, ALAC, and codec dispatch inline, with codec modules (FLAC, Ogg, MP3, Opus, AAC, etc.) included from `lib/`. Stdlib is declared in `cyrius.cyml` `[deps].stdlib` and vendored into `lib/` (version-matched to the toolchain pin) via `cyrius lib sync`. Consumers include the entry point and get all codecs.
 
 ```
+cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, version = ${file:VERSION})
+cyrius.lock      -- per-file stdlib hash lock (committed)
 src/main.cyr     -- library + test harness (entry point)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
-lib/             -- codec modules (project-specific only)
+lib/             -- project codec modules + vendored stdlib snapshot
 build/           -- compiled binaries (gitignored)
 scripts/         -- bench-history.sh, version-bump.sh
 docs/            -- architecture, roadmap
@@ -27,9 +29,14 @@ docs/            -- architecture, roadmap
 
 ## Build
 
+Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.3.19**). Bumping
+the pin requires re-vendoring stdlib: `cyrius lib sync`.
+
 ```sh
-cyrius build src/main.cyr build/shravan    # compile (requires cc3 >= 4.10.3)
-./build/shravan                             # run tests (520 assertions)
+cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
+cyrius deps                                 # resolve git deps + refresh cyrius.lock
+cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.19)
+./build/shravan                             # run tests (539 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -56,8 +63,8 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | dither | lib/dither.cyr | Dithering for sample depth reduction |
 | simd | lib/simd.cyr | SIMD-optimized inner loops |
 | stream | lib/stream.cyr | Streaming decoder interface (WAV/FLAC/AIFF) |
-| serde | lib/serde.cyr | Audio format enum/metadata serialization |
-| sankoch | dep (cyrius.toml) | Compression (LZ4, DEFLATE, zlib, gzip) |
+| serde | lib/serde.cyr | JSON serialization — AudioFormat/PcmFormat/ShravanErr/FormatInfo to/from JSON (`#derive(Serialize)` + bayan) |
+| sankoch | dep (cyrius.cyml) | Compression (LZ4, DEFLATE, zlib, gzip) — `compress()`/`decompress()` |
 
 ## Consumer Map
 
@@ -74,7 +81,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 520 assertions pass
+2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 539 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
@@ -96,7 +103,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 8. Run benchmarks again -- prove the wins
 9. If review heavy -> return to step 5
 10. Documentation -- update CHANGELOG, roadmap, docs
-11. Version check -- VERSION, cyrius.toml in sync
+11. Version check -- `VERSION` is the source of truth (`cyrius.cyml` derives it via `${file:VERSION}`); keep VERSION + CHANGELOG in sync
 12. Return to step 1
 
 ### Key Principles
@@ -110,9 +117,9 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 ## Conventions
 
-- Error encoding: packed Result -- ok >= 0, err < 0 (bit 63 set), error code via `err_code(r)`
+- Error encoding: packed Result -- ok >= 0, err < 0, code via `err_code(r)`. `is_err`/`err_code` come from the stdlib (`syscalls`, via `io`) — byte-identical; shravan's own positive check is `res_ok(r)` (not `is_ok`, which the stdlib's `result.cyr` owns for tagged Results)
 - Error codes: integer enum `ShravanErr`, messages via `err_print(code)` helper
-- f64 constants: initialized at startup via `shravan_init_constants()`, never hardcode bit patterns
+- f64 constants: `F64_ONE`/`F64_TWO`/`F64_HALF` come from `math.cyr`; shravan inits the PCM-specific ones at startup via `shravan_init_constants()`, never hardcoding bit patterns
 - f64 arithmetic: builtins `f64_add`, `f64_mul`, `f64_div`, `f64_sub`, `f64_neg`, etc.
 - `>>` is logical (unsigned) shift -- use conditional subtraction for sign extension
 - Entry point is top-level statements, not `fn main()`
@@ -129,7 +136,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 - Do not skip benchmarks before claiming performance improvements
 - Do not commit `build/` directory
 - Do not break backward compatibility without a major version bump
-- Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`)
+- Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`, `secret`)
 
 ## Documentation Structure
 

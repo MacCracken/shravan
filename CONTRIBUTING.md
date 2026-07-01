@@ -12,7 +12,7 @@ Thank you for your interest in contributing to shravan.
 
 ## Prerequisites
 
-- Cyrius >= 4.10.3 (`cyrius --version`)
+- Cyrius 6.3.19 (`cyrius --version`; pinned in `cyrius.cyml [package].cyrius`)
 - Linux x86_64
 
 ## Cleanliness Check
