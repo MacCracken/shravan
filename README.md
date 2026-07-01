@@ -10,7 +10,7 @@ WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, and AAC-LC encoding/decoding. PCM sample f
 # Build
 cyrius build src/main.cyr build/shravan
 
-# Run tests (563 assertions)
+# Run tests (610 assertions)
 ./build/shravan
 
 # Benchmarks

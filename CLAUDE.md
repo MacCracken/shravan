@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
-the **test harness** — it `include`s the library + codecs and runs the 563-assertion
+the **test harness** — it `include`s the library + codecs and runs the 610-assertion
 suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
 the **self-contained bundle consumers include** (they supply stdlib + bayan +
 sankoch from their own manifest).
@@ -46,7 +46,7 @@ the pin requires re-vendoring stdlib: `cyrius lib sync`.
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
 cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.19)
-./build/shravan                             # run tests (563 assertions)
+./build/shravan                             # run tests (610 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -67,7 +67,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | mp3 | src/mp3.cyr | MP3 header parse, frame scanning, ID3v2 skip, decode stub |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
-| opus | src/opus.cyr | Opus CELT-mode encoder (FFT-based MDCT) |
+| opus | src/opus.cyr | Opus CELT-mode encoder + encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch); SILK/hybrid = 2.5.x |
 | aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
 | dither | src/dither.cyr | Dithering for sample depth reduction |
@@ -91,7 +91,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 563 assertions pass
+2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 610 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

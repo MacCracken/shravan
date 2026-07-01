@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.4.3** — 563 tests + fuzz (90K/0), `dist/shravan.cyr` bundle, Cyrius 6.3.19.
-> Distlib bundle for consumers; codec modules relocated `lib/` → `src/` (lib/ =
-> stdlib only). (v2.4.2: fuzz rebuilt + `cyrius vet`/fuzz-smoke in CI. v2.4.1:
-> full serde type coverage. v2.4.0: `cyrius.cyml`, `lib sync`, `ganita`, `bayan`.)
+> **v2.4.4** — 610 tests + fuzz (90K/0), Cyrius 6.3.19.
+> Opus encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch);
+> full Opus features roadmapped as 2.5.x. (v2.4.3: `dist/shravan.cyr` bundle,
+> codecs → src/. v2.4.2: fuzz + CI vet. v2.4.1: serde full coverage. v2.4.0: modernize.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -127,44 +127,70 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - [x] Relocated codec modules `lib/` → `src/`; `lib/` is now vendored stdlib only
       (distlib stops mis-capturing them as leaves; `cyrius vet`/audit cleaner).
 
-## v2.4.x — Own the stack (proposed — pending review)
+## v2.4.4 — Opus encoder framework (shipped 2026-07-01)
 
-### Opus encoder
-
-- SILK mode for speech content
-- Hybrid mode (SILK + CELT)
-- VBR support
-- Stereo coupling (dual-coded stereo instead of mono downmix)
-- Full PVQ spectral shape coding (current is sign-only)
-- Transient detection and short-window switching
-
-### High-resolution audio
-
-- 88.2/96/176.4/192/352.8/384 kHz sample rates
-- 32-bit integer, 64-bit float PCM
-- DSD support (DSD64/DSD128/DSD256, DoP)
+- [x] Encoder framework in `src/opus.cyr` (additive; 563 → 610 tests):
+      `OpusEncoder` config/state, mode + bandwidth selection, RFC 6716 TOC byte
+      (config 0–31), `opus_encode_frame` dispatch (CELT wired; SILK/HYBRID = 2.5.x seams).
+- [x] Design doc: `docs/adr/0001-opus-encoder-framework.md`.
+- [ ] CLEANUP (do in 2.5.1): `_opus_encode_celt_frame` hardcodes TOC config 30
+      (CELT/FB 10ms) for 20ms frames — should be config 31 (`opus_toc_byte` computes
+      it); swap the hardcode with a decode round-trip guard.
 
 ---
 
-## v2.5.x — Completeness (deferred from 2.3.x)
+## v2.5.x — Opus encoder (spine) + deferred items
 
-### v2.5.1 — TNS (Temporal Noise Shaping)
+The 2.4.4 framework gates every Opus item. Order = dependency order; the 2.3.x
+deferrals + hi-res/DSD are dependency-independent breathers between Opus vertebrae.
 
-- IIR filter before IMDCT for AAC decoder
-- TNS encoding support
+### v2.5.1 — Full PVQ spectral shape (CELT) · root
 
-### v2.5.2 — MP4/M4A container
+- Magnitude + K-pulse pyramid vector quant with CWRS index (replaces sign-only).
+- Spreading/folding for zero-bit bands; anti-collapse. Everything below allocates bits against this.
+- Includes the TOC config 30→31 cleanup.
 
-- MP4 box parsing (moov/trak/mdia/stbl)
-- AAC extraction from MP4 container
-- Currently ADTS-only — this enables real-world .m4a files
-- `sankoch` (compression) is already a dependency — wire it in for container payloads
+### v2.5.2 — AAC TNS + psychoacoustic model · deferred (independent)
 
-### v2.5.3 — Performance
+- TNS: IIR filter before IMDCT (decoder) + TNS encoding.
+- Psychoacoustic masking thresholds for the AAC encoder.
 
-- PCM: inline asm SSE2 for i16/f64 hot loops
-- FLAC encoder: LPC encoding (better compression than Fixed prediction)
-- AAC: psychoacoustic model (masking thresholds)
+### v2.5.3 — Transient detection + short-window switching (CELT) · needs 2.5.1
+
+- Transient detector → 2/4/8 short MDCTs; `transient` flag; per-band tf resolution.
+
+### v2.5.4 — Stereo coupling (CELT) · needs 2.5.1
+
+- Per-band mid/side + intensity stereo; coupled-vs-dual decision. Replaces mono downmix.
+
+### v2.5.5 — MP4/M4A container · deferred (independent)
+
+- MP4 box parsing (moov/trak/mdia/stbl), AAC extraction; enables real `.m4a`.
+  `sankoch` already a dep for payloads.
+
+### v2.5.6 — Rate control + VBR (CELT/Opus) · needs 2.5.1/3/4
+
+- Bit-reservoir rate-control state; unconstrained + constrained VBR. Completes CELT mode.
+
+### v2.5.7 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
+
+- 88.2–384 kHz; 32-bit int / 64-bit float PCM; PCM SSE2 hot loops (the perf item).
+
+### v2.5.8 — SILK mode (speech) · needs framework
+
+- LPC/LTP/LSF, excitation, shared range coder. Largest new subsystem.
+
+### v2.5.9 — Hybrid mode (SILK + CELT) · needs 2.5.8 + full CELT
+
+- SILK low-band + CELT high-band over one range coder. Completes the Opus encoder.
+
+### v2.5.10 — FLAC LPC encoder · deferred (independent)
+
+- LPC prediction (beats Fixed); matters most for 24/32-bit hi-res lossless.
+
+### v2.5.11 — DSD (DSD64/128/256, DoP) · hi-res (independent)
+
+- 1-bit sigma-delta path.
 
 ---
 

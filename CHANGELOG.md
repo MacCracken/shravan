@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.4] - 2026-07-01
+
+Opus encoder **framework** — the opening/foundational work for a full Opus
+encoder. The feature set (SILK, hybrid, VBR, PVQ, stereo, transient) is
+roadmapped as 2.5.x; this release lands only the scaffolding, additive to the
+existing CELT-mode encoder. 610 assertions (was 563, +47).
+
+### Added
+
+- **Opus encoder framework** (`src/opus.cyr`, additive — the existing
+  `opus_encode` Ogg path is untouched):
+  - `OpusEncoder` config/state struct + `OpusMode`/`OpusBandwidth`/`OpusSignal`/
+    `OpusApp` enums.
+  - `opus_encoder_new` + setters (bitrate / vbr / bandwidth / mode).
+  - Mode + bandwidth **selection logic** (`opus_select_mode`,
+    `opus_select_bandwidth`, `opus_bandwidth_cap`) — bitrate thresholds + a
+    sample-rate cap.
+  - RFC 6716 §3.1 **TOC byte** (`opus_toc_config` / `opus_toc_byte`, config 0–31).
+  - `opus_encode_frame` dispatch — routes CELT to the existing encoder;
+    SILK/HYBRID return `ERR_UNSUPPORTED_FMT` (documented 2.5.x seams).
+  - 5 test functions (+47 assertions).
+- **Design doc** `docs/adr/0001-opus-encoder-framework.md` (architecture + 2.5.x plan).
+- **2.5.x roadmap** — full Opus encoder sequenced (PVQ → transient → stereo →
+  rate-control/VBR → SILK → hybrid), with the 2.3.x deferrals + hi-res/DSD interleaved.
+
+### Known issues
+
+- `_opus_encode_celt_frame` hardcodes TOC config 30 (CELT/FB 10ms) for its 20ms
+  frames (should be config 31, which `opus_toc_byte` computes); logged as a 2.5.1
+  cleanup — it needs a decode round-trip guard, so it's kept out of this additive
+  release.
+
 ## [2.4.3] - 2026-07-01
 
 Distlib bundle for consumers + a source-layout cleanup. No codec behavior
