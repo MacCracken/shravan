@@ -130,11 +130,11 @@ fn bitreader_read(br, bits) {
 fn bitreader_read_bit(br) { return bitreader_read(br, 1); }
 
 # Include codec modules
-include "lib/flac.cyr"
-include "lib/ogg.cyr"
-include "lib/mp3.cyr"
-include "lib/tag.cyr"
-include "lib/fft.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
 
 # ================================================================
 # PRNG

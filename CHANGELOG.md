@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.3] - 2026-07-01
+
+Distlib bundle for consumers + a source-layout cleanup. No codec behavior
+changes; the 563-assertion test build is unchanged.
+
+### Added
+
+- **`dist/shravan.cyr` — the consumable distlib bundle** (`cyrius distlib`).
+  Concatenates the library (`src/shravan.cyr`) + all codec modules into one
+  self-contained file (0 unresolved `include`s). Consumers `include` it and
+  supply stdlib + `bayan` + `sankoch` from their own manifest, then call
+  `shravan_init_constants()`. Verified end-to-end by a consumer smoke test
+  (encode → decode → detect through the bundle alone). Declared via `[lib]`
+  in `cyrius.cyml`; committed under `dist/`.
+
+### Changed
+
+- **Source layout: `src/main.cyr` split into library + test harness.**
+  `src/shravan.cyr` now holds the library (error/format/pcm/wav/aiff/alac +
+  codec dispatch + `decode_file`/`decode_reader`); `src/main.cyr` is the test
+  harness that `include`s it + the codecs and runs the suite.
+- **Codec modules relocated `lib/` → `src/`** (flac, ogg, mp3, tag, fft, opus,
+  aac, resample, dither, simd, stream, serde). `lib/` is now **only** the
+  vendored Cyrius stdlib — `cyrius distlib` no longer mistakes shravan's own
+  modules for external stdlib leaves, and `cyrius vet`/audit is cleaner.
+  Updated: `main.cyr`/`bench.cyr`/`fuzz` includes, CI security scan (`src/` +
+  `fuzz/` sweep), `cyrius.lock` (31 entries — stdlib only), and docs.
+
 ## [2.4.2] - 2026-07-01
 
 Stabilization — rebuild the fuzz harness for the 6.3.19 toolchain. No codec or

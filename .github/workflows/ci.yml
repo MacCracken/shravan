@@ -73,14 +73,11 @@ jobs:
           grep -q "0 crashes" /tmp/fuzz-out.txt || { echo "Fuzz crash detected"; exit 1; }
 
       - name: Security scan
-        # Scan shravan-authored code (entry + codec modules) for raw execve —
-        # NOT the vendored stdlib in lib/, which legitimately wraps syscalls.
+        # All shravan-authored code now lives in src/ + fuzz/ (lib/ is vendored
+        # Cyrius stdlib only), so the scan is a clean src/ sweep for raw execve.
         run: |
-          SHRAVAN_SRC="src/main.cyr src/bench.cyr \
-            lib/flac.cyr lib/ogg.cyr lib/mp3.cyr lib/tag.cyr lib/fft.cyr lib/opus.cyr \
-            lib/aac.cyr lib/resample.cyr lib/dither.cyr lib/simd.cyr lib/stream.cyr lib/serde.cyr"
           WARN=0
-          if grep -n 'syscall(59' $SHRAVAN_SRC 2>/dev/null | grep -v '# '; then
+          if grep -rn 'syscall(59' src/ fuzz/ 2>/dev/null | grep -v '# '; then
             echo "WARN: raw execve in shravan modules"; WARN=1
           fi
           echo "security scan complete (warnings: $WARN)"

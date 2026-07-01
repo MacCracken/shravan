@@ -3,18 +3,18 @@
 # `cyrius distlib`); this file includes it plus the codec modules and runs the
 # 563-assertion suite. Consumers use dist/shravan.cyr, not this file.
 include "src/shravan.cyr"
-include "lib/flac.cyr"
-include "lib/ogg.cyr"
-include "lib/mp3.cyr"
-include "lib/tag.cyr"
-include "lib/fft.cyr"
-include "lib/opus.cyr"
-include "lib/aac.cyr"
-include "lib/resample.cyr"
-include "lib/dither.cyr"
-include "lib/simd.cyr"
-include "lib/stream.cyr"
-include "lib/serde.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
+include "src/opus.cyr"
+include "src/aac.cyr"
+include "src/resample.cyr"
+include "src/dither.cyr"
+include "src/simd.cyr"
+include "src/stream.cyr"
+include "src/serde.cyr"
 
 # ================================================================
 # Tests
@@ -1059,7 +1059,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.4.2 — audio codecs for AGNOS (Cyrius)\n", 50);
+syscall(1, 1, "shravan v2.4.3 — audio codecs for AGNOS (Cyrius)\n", 50);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.4.2** — 563 tests + fuzz (90K/0 crashes), Cyrius 6.3.19.
-> Stabilize: fuzz harness rebuilt for 6.3.19, `cyrius vet` + fuzz smoke in CI.
-> (v2.4.1: full serde type coverage. v2.4.0: `cyrius.cyml` manifest, `cyrius lib
-> sync` stdlib vendoring, `ganita`, `bayan`; deps incl. sankoch retained.)
+> **v2.4.3** — 563 tests + fuzz (90K/0), `dist/shravan.cyr` bundle, Cyrius 6.3.19.
+> Distlib bundle for consumers; codec modules relocated `lib/` → `src/` (lib/ =
+> stdlib only). (v2.4.2: fuzz rebuilt + `cyrius vet`/fuzz-smoke in CI. v2.4.1:
+> full serde type coverage. v2.4.0: `cyrius.cyml`, `lib sync`, `ganita`, `bayan`.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -118,6 +118,15 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       crashes (`./fuzz/run.sh`).
 - [x] `cyrius vet` (include-dep audit) + a fuzz smoke pass wired into CI.
 
+## v2.4.3 — Distlib bundle + source-layout cleanup (shipped 2026-07-01)
+
+- [x] **`dist/shravan.cyr` distlib bundle** for consumers (tarang/jalwa/dhvani/
+      shruti), matching the naad model (`cyrius distlib`). Self-contained;
+      consumer smoke test verified (encode→decode→detect through the bundle).
+- [x] Split `src/main.cyr` → `src/shravan.cyr` (library) + `src/main.cyr` (test harness).
+- [x] Relocated codec modules `lib/` → `src/`; `lib/` is now vendored stdlib only
+      (distlib stops mis-capturing them as leaves; `cyrius vet`/audit cleaner).
+
 ## v2.4.x — Own the stack (proposed — pending review)
 
 ### Opus encoder
@@ -134,13 +143,6 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - 88.2/96/176.4/192/352.8/384 kHz sample rates
 - 32-bit integer, 64-bit float PCM
 - DSD support (DSD64/DSD128/DSD256, DoP)
-
-### Distlib bundle (under evaluation)
-
-- `dist/shravan.cyr` distlib bundle for consumers (tarang/jalwa/dhvani/shruti),
-  matching the naad model (`cyrius distlib`)
-- Requires separating the library from the inline test harness in `src/main.cyr`
-  so the bundle ships codecs without the 563-assertion suite
 
 ---
 

@@ -14,14 +14,24 @@
 
 ## Architecture
 
-Single-file library with codec modules in `lib/`. `src/main.cyr` is the entry point containing error, format, PCM, WAV, AIFF, ALAC, and codec dispatch inline, with codec modules (FLAC, Ogg, MP3, Opus, AAC, etc.) included from `lib/`. Stdlib is declared in `cyrius.cyml` `[deps].stdlib` and vendored into `lib/` (version-matched to the toolchain pin) via `cyrius lib sync`. Consumers include the entry point and get all codecs.
+All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
+stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
+(error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
+codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
+the **test harness** — it `include`s the library + codecs and runs the 563-assertion
+suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
+the **self-contained bundle consumers include** (they supply stdlib + bayan +
+sankoch from their own manifest).
 
 ```
-cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, version = ${file:VERSION})
+cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, [lib] bundle, version = ${file:VERSION})
 cyrius.lock      -- per-file stdlib hash lock (committed)
-src/main.cyr     -- library + test harness (entry point)
+src/shravan.cyr  -- the library (core + codec dispatch); first [lib] module
+src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, aac, resample, dither, simd, stream, serde)
+src/main.cyr     -- test harness entry (includes shravan.cyr + codecs, runs tests)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
-lib/             -- project codec modules + vendored stdlib snapshot
+dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyrius distlib`)
+lib/             -- vendored Cyrius stdlib snapshot ONLY (cyrius lib sync)
 build/           -- compiled binaries (gitignored)
 scripts/         -- bench-history.sh, version-bump.sh
 docs/            -- architecture, roadmap
@@ -45,25 +55,25 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 | Module | Location | Description |
 |--------|----------|-------------|
-| error | src/main.cyr | ShravanErr enum, packed Result helpers |
-| format | src/main.cyr | AudioFormat enum, FormatInfo struct, format detection |
-| pcm | src/main.cyr | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
-| wav | src/main.cyr | RIFF WAVE encode/decode (PCM 8/16/24/32-bit, IEEE float 32-bit) |
-| aiff | src/main.cyr | AIFF encode/decode (big-endian, 80-bit extended sample rate) |
-| alac | src/main.cyr | Apple Lossless Audio Codec decoder |
-| codec | src/main.cyr | Auto-detect format and dispatch to decoder |
-| flac | lib/flac.cyr | FLAC encode/decode (all subframe types, Rice coding, channel decorrelation) |
-| ogg | lib/ogg.cyr | Ogg container parse/mux (CRC32, page extraction, lacing) |
-| mp3 | lib/mp3.cyr | MP3 header parse, frame scanning, ID3v2 skip, decode stub |
-| tag | lib/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
-| fft | lib/fft.cyr | Mixed-radix FFT for MDCT |
-| opus | lib/opus.cyr | Opus CELT-mode encoder (FFT-based MDCT) |
-| aac | lib/aac.cyr | AAC-LC encoder/decoder (ADTS) |
-| resample | lib/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
-| dither | lib/dither.cyr | Dithering for sample depth reduction |
-| simd | lib/simd.cyr | SIMD-optimized inner loops |
-| stream | lib/stream.cyr | Streaming decoder interface (WAV/FLAC/AIFF) |
-| serde | lib/serde.cyr | JSON serialization — full type surface: format/pcm/error + AlacConfig/Mp3FrameInfo/OpusHead/AudioMetadata + mp3/resample enums + codec markers (`#derive(Serialize)` + bayan) |
+| error | src/shravan.cyr | ShravanErr enum, packed Result helpers |
+| format | src/shravan.cyr | AudioFormat enum, FormatInfo struct, format detection |
+| pcm | src/shravan.cyr | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
+| wav | src/shravan.cyr | RIFF WAVE encode/decode (PCM 8/16/24/32-bit, IEEE float 32-bit) |
+| aiff | src/shravan.cyr | AIFF encode/decode (big-endian, 80-bit extended sample rate) |
+| alac | src/shravan.cyr | Apple Lossless Audio Codec decoder |
+| codec | src/shravan.cyr | Auto-detect format and dispatch to decoder |
+| flac | src/flac.cyr | FLAC encode/decode (all subframe types, Rice coding, channel decorrelation) |
+| ogg | src/ogg.cyr | Ogg container parse/mux (CRC32, page extraction, lacing) |
+| mp3 | src/mp3.cyr | MP3 header parse, frame scanning, ID3v2 skip, decode stub |
+| tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
+| fft | src/fft.cyr | Mixed-radix FFT for MDCT |
+| opus | src/opus.cyr | Opus CELT-mode encoder (FFT-based MDCT) |
+| aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
+| resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
+| dither | src/dither.cyr | Dithering for sample depth reduction |
+| simd | src/simd.cyr | SIMD-optimized inner loops |
+| stream | src/stream.cyr | Streaming decoder interface (WAV/FLAC/AIFF) |
+| serde | src/serde.cyr | JSON serialization — full type surface: format/pcm/error + AlacConfig/Mp3FrameInfo/OpusHead/AudioMetadata + mp3/resample enums + codec markers (`#derive(Serialize)` + bayan) |
 | sankoch | dep (cyrius.cyml) | Compression (LZ4, DEFLATE, zlib, gzip) — `compress()`/`decompress()` |
 
 ## Consumer Map

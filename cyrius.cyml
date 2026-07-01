@@ -24,18 +24,18 @@ output = "build/shravan"
 [lib]
 modules = [
     "src/shravan.cyr",
-    "lib/flac.cyr",
-    "lib/ogg.cyr",
-    "lib/mp3.cyr",
-    "lib/tag.cyr",
-    "lib/fft.cyr",
-    "lib/opus.cyr",
-    "lib/aac.cyr",
-    "lib/resample.cyr",
-    "lib/dither.cyr",
-    "lib/simd.cyr",
-    "lib/stream.cyr",
-    "lib/serde.cyr",
+    "src/flac.cyr",
+    "src/ogg.cyr",
+    "src/mp3.cyr",
+    "src/tag.cyr",
+    "src/fft.cyr",
+    "src/opus.cyr",
+    "src/aac.cyr",
+    "src/resample.cyr",
+    "src/dither.cyr",
+    "src/simd.cyr",
+    "src/stream.cyr",
+    "src/serde.cyr",
 ]
 
 # stdlib leaves — the original cyrius.toml set, preserved, with two 6.x updates:

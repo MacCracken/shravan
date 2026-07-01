@@ -438,9 +438,9 @@ fn bitreader_read(br, bits) {
 fn bitreader_read_bit(br) { return bitreader_read(br, 1); }
 
 # --- Include FLAC, FFT, resample libs ---
-include "lib/flac.cyr"
-include "lib/fft.cyr"
-include "lib/resample.cyr"
+include "src/flac.cyr"
+include "src/fft.cyr"
+include "src/resample.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -736,7 +736,7 @@ flac_init();
 fft_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.4.2 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.4.3 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();

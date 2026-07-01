@@ -5,10 +5,8 @@
 ```
 shravan/
   src/
-    main.cyr        -- entry point: error, format, PCM, WAV, AIFF, ALAC,
-                       codec dispatch, tests, init
-    bench.cyr       -- benchmarks (clock_gettime timing)
-  lib/
+    shravan.cyr     -- library: error, format, PCM, WAV, AIFF, ALAC, codec dispatch,
+                       decode_file/reader (first [lib] bundle module)
     flac.cyr        -- FLAC encoder/decoder (all subframe types, SEEKTABLE, MD5)
     ogg.cyr         -- Ogg container parser/muxer (CRC-32, page extraction)
     mp3.cyr         -- MP3 frame header parsing, ID3v2 skipping
@@ -20,13 +18,14 @@ shravan/
     dither.cyr      -- TPDF + noise-shaped dithering
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)
     stream.cyr      -- Streaming decoders (WAV, FLAC, AIFF, chunked output)
-    serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo (bayan, #derive(Serialize))
-    alloc.cyr       -- Bump allocator (vendored stdlib)
-    vec.cyr         -- Dynamic vector (vendored stdlib)
-    str.cyr         -- Fat string type (vendored stdlib)
-    ...             -- other stdlib modules, vendored version-matched to the
-                       cyrius.cyml pin via `cyrius lib sync` (math, ganita,
-                       io, syscalls, fmt, string, args, assert, thread, fnptr, …)
+    serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo/... (bayan, #derive(Serialize))
+    main.cyr        -- test harness entry (includes shravan.cyr + codecs, runs tests + init)
+    bench.cyr       -- benchmarks (clock_gettime timing)
+  dist/
+    shravan.cyr     -- distlib bundle (all src [lib] modules concatenated; consumers include this)
+  lib/              -- vendored Cyrius stdlib ONLY (alloc, vec, str, math, ganita, io,
+                       syscalls, fmt, string, args, assert, tagged, thread, fnptr, bayan, …),
+                       version-matched to the cyrius.cyml pin via `cyrius lib sync`
 ```
 
 ## Data Flow
@@ -70,7 +69,7 @@ tag_write_vorbis()--> Vorbis Comment bytes
 ## Design Decisions
 
 - **f64 internally**: Cyrius native SSE2 double-precision. Higher precision than f32, simpler code (no f32 bit manipulation needed except for WAV IEEE float I/O).
-- **Include-based**: No separate compilation. Consumers `include "src/main.cyr"` and get all codecs. Feature-gating is done via `#ifdef` at the consumer level.
+- **Distlib bundle**: No separate compilation. Consumers `include "dist/shravan.cyr"` (the `cyrius distlib` bundle of `src/shravan.cyr` + codec modules) and get all codecs; they supply stdlib + bayan + sankoch from their own manifest and call `shravan_init_constants()` at startup.
 - **Packed Result**: Negative values are errors (bit 63 set). No heap allocation for error paths. `is_err(r)` is a single comparison.
 - **Caller-provided buffers**: Encode functions take an output buffer pointer. Decode functions return a vec (heap-allocated via bump allocator).
 - **Bump allocator**: No individual free. Working memory grows monotonically. Suitable for batch processing; streaming use cases should be aware of memory growth.
