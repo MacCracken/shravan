@@ -8,11 +8,35 @@ language = "cyrius"
 cyrius = "6.3.19"
 
 # [build] entry/output are metadata/convention only — `cyrius build`
-# takes explicit <source> <output> positionals (see CI). src/main.cyr
-# `include`s the codec modules directly, so no [build] modules list.
+# takes explicit <source> <output> positionals (see CI). src/main.cyr is the
+# test harness: it `include`s the library (src/shravan.cyr) + codec modules.
 [build]
 entry = "src/main.cyr"
 output = "build/shravan"
+
+# [lib] declares the distlib bundle `cyrius distlib` concatenates into
+# dist/shravan.cyr — the consumable library (tarang/jalwa/dhvani/shruti
+# include it). src/shravan.cyr (core: error/format/pcm/wav/aiff/alac + codec
+# dispatch + decode_file/reader) must come first; the codec modules reference
+# its symbols. No test harness, no cross-includes — the bundle is self-contained;
+# consumers supply stdlib + bayan + sankoch from their own manifest (see
+# dist/shravan.deps). Regenerate with `cyrius distlib`.
+[lib]
+modules = [
+    "src/shravan.cyr",
+    "lib/flac.cyr",
+    "lib/ogg.cyr",
+    "lib/mp3.cyr",
+    "lib/tag.cyr",
+    "lib/fft.cyr",
+    "lib/opus.cyr",
+    "lib/aac.cyr",
+    "lib/resample.cyr",
+    "lib/dither.cyr",
+    "lib/simd.cyr",
+    "lib/stream.cyr",
+    "lib/serde.cyr",
+]
 
 # stdlib leaves — the original cyrius.toml set, preserved, with two 6.x updates:
 #   - `ganita` ADDED: the transcendentals shravan calls (f64_pow/asin/acos/
