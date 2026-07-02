@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.9] - 2026-07-02
+
+**Opus/CELT decodes to real PCM audio** — the headline gap the 2.5.0–2.5.8 scaffolding
+was built for. `opus_decode_from_packets` now returns actual samples (it returned an
+empty vector before), verified by waveform correlation, not sample counts. 859
+assertions (was 843, +16).
+
+### Added
+
+- **Magnitude synthesis** (`_opus_denorm_frame`, `src/opus.cyr`) — reconstructs MDCT
+  coefficients from the decoded band energies (`2^(q/2)·band_size` sum-of-squares,
+  split by width across PVQ sub-blocks) × the unit-L2 shapes. This is the missing step
+  that turns the CELT "direction" into real spectral magnitude.
+- **Verified TDAC MDCT/IMDCT pair** (`_opus_mdct`/`_opus_imdct`) — a self-matched
+  direct cosine-basis pair (measured OLA reconstruction 0.999). Root cause found: the
+  shared `fft_mdct`/`fft_imdct` in `fft.cyr` are **not a matched analysis/synthesis
+  pair** — `fft_imdct` is a valid IMDCT (it decodes real AAC), but `fft_mdct`'s
+  convention does not invert it, so encode→decode cancels to silence. This also
+  explains a large part of the silent AAC encoder. (Fixing `fft.cyr`'s pair for the
+  AAC encoder + optimizing the O(N²) direct transform is tracked for 2.5.x.)
+- **Full decode path wired** — `opus_decode_from_packets` iterates the audio packets,
+  decodes each CELT frame (mono via `_opus_celt_decode_mono_time`, stereo via
+  `_opus_celt_decode_stereo_time` with `_opus_stereo_decouple`), IMDCTs, applies the
+  synthesis sine window, and **50%-overlap-adds** (Princen-Bradley: sin²+cos²=1) into
+  PCM. The encoder now frames with 50% overlap (hop = half a frame) to match.
+- **Real end-to-end round-trip tests** — encode a tone/sweep, decode via the public
+  `ogg_decode` path, assert best-lag normalized cross-correlation with the input:
+  mono **0.997**, stereo **L 0.996 / R 0.999**, transient-containing **0.998**.
+
+### Changed
+
+- **Band-energy DPCM range widened 128→256 symbols** (±127 half-log2-power steps).
+  The old ±63 clamp saturated the jump from a silent band to a loud tone band, so
+  loud and quiet content collapsed to the same reconstructed energy (absolute levels
+  were lost — steady tones only passed because correlation is scale-invariant). A
+  step-amplitude signal now round-trips at 0.998 (was 0.28).
+- **Rate-control complexity from the real MDCT spectrum** (`_opus_frame_complexity`) —
+  fraction of spectral energy in the upper band, replacing the time-domain
+  first-difference proxy (completes a 2.5.8 deferral; transients raise it naturally,
+  so allocation is transient-aware). Two-pass VBR remains future work.
+- **Encoder no longer truncates overflow packets** — an over-budget frame is emitted
+  at its true length (Ogg carries it; each frame's range coder is independent) instead
+  of cutting the trailing bytes and corrupting the whole packet.
+
+### Deferred
+
+- True CELT **overlapping short-window** transient coding (pre-echo reduction):
+  transient frames are detected + flagged but decoded via the long MDCT for now (they
+  produce correct audio, just without short-block time resolution).
+- **RFC 6716 conformance** — the stream is still a bespoke shravan-internal format
+  (LZMA-style range coder, uniform energy coding); it does not interoperate with
+  libopus. Tracked as a dedicated 2.5.x release.
+
 ## [2.5.8] - 2026-07-01
 
 CELT/Opus rate control + VBR — completes the CELT rate model. 843 assertions

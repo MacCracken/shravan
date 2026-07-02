@@ -1,17 +1,12 @@
 # Development Roadmap
 
-> **v2.5.8** — 843 tests + fuzz (90K/0), Cyrius 6.3.27. This is the current shipped
-> version. The forward plan below was **reorganized 2026-07-02**: the sprawling
-> 2.5.9–2.5.23 point-release list was collapsed into **four audio-milestone releases**
-> (2.6.0 → 3.0.0), each packed with a bite-sized commit plan. The organizing principle:
-> **make the codecs actually produce audio, and stop the test suite from hiding that
-> they don't**, before adding breadth.
-
-> **Reorg assumptions (flag to revisit):** (1) release shape = 4 milestones, honesty/
-> safety first; (2) Opus target = **bespoke-internal decode first** (wire the existing
-> bit-exact encoder/decoder into a real PCM round-trip, explicitly labeled non-RFC-6716),
-> with **RFC-6716 conformance deferred to the 3.x breadth tier**. If either assumption is
-> wrong, 2.7.0/2.8.0 scope changes.
+> **v2.5.9** — 859 tests, Cyrius 6.3.27. **Opus now decodes to real PCM audio**
+> (encode→decode waveform correlation 0.99+, mono+stereo) — the headline deferred item.
+> The forward plan below was **reorganized 2026-07-02**: the sprawling
+> 2.5.9–2.5.23 point-release list was collapsed into **four focused 2.5.x releases**
+> that **do the deferred core work** — the actual audio the 2.5.0–2.5.8 scaffolding was
+> built for. Nothing here is pushed to a future major; every deferred tail lives inside
+> the 2.5.x arc and gets *done*, packed as bite-sized commits.
 
 ## Functional status (verified 2026-07-02)
 
@@ -27,15 +22,18 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
   FIXED/LPC, Rice, all 4 stereo modes, CRC, SEEKTABLE-ranged).
 - **AAC *decode*** (real dequant → IMDCT → overlap-add) and **MP4/M4A** demux → AAC-decode
   → PCM (verified: 1024 non-zero samples from a real AU).
+- **Opus/CELT encode+decode → PCM** *(2.5.9)* — `opus_encode` → `opus_decode_from_packets`
+  round-trips real audio (waveform correlation: mono 0.997, stereo 0.996/0.999, transient
+  0.998), mono + stereo. Caveat: a **bespoke, non-RFC-6716** stream (won't interoperate
+  with libopus — conformance is a pinned 2.5.x item); transient frames decode via the
+  long MDCT (short-window pre-echo coding deferred).
 
 **🟥 Looks done, isn't (scaffolding / broken — the "actual core" that remains):**
 - **AAC *encode* → silence.** The quantizer step is ~100× too coarse **and** the encode/
   decode quantizers don't invert → every coefficient rounds to 0. A 0.6-amplitude sine
-  decodes to ~2e-7. *(The old status wrongly listed AAC as end-to-end.)*
-- **Opus/CELT — no audio either direction.** `opus_decode_from_packets` returns an
-  **empty** vector; the CELT frame decoders are called **only from tests**; there is no
-  magnitude synthesis / IMDCT / overlap-add. ~30% of all assertions are Opus, and *none*
-  check audio. The encoder emits a **bespoke, non-RFC-6716** stream (LZMA-style coder).
+  decodes to ~2e-7. *(The old status wrongly listed AAC as end-to-end.)* Also: `fft_mdct`
+  is not the inverse of `fft_imdct` (found in 2.5.9), a second reason encode→decode can't
+  reconstruct — the AAC encoder needs the fixed transform pair too.
 - **ALAC — dead code.** A full decoder exists but is **unwired**: `detect_format` has no
   ALAC branch and MP4 routes only to AAC, so `codec_open`'s `FMT_ALAC` dispatch is
   unreachable and the decoder is unverified on real frames.
@@ -61,118 +59,94 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
 
 ---
 
-## Forward plan — four audio-milestone releases
+## Forward plan — the deferred 2.5.x core work, done
 
-Acceptance rule for every release below: **new/changed audio paths are proven by
-value-level tests (SNR or correlation vs. input), never by sample count.** Each commit
-must build clean (`cyrius build src/main.cyr build/shravan`) and keep the suite green.
+Every deferred tail from 2.5.0–2.5.8 (the "Deferred:" footnotes) plus the bugs the audit
+found are packed here into **four focused 2.5.x releases**, ordered dependency-first. This
+is the work the scaffolding was for — none of it is pushed to a future major.
 
-### v2.6.0 — Honesty & Safety · small–medium · no new DSP subsystems
+Acceptance rule for every release: **new/changed audio paths are proven by value-level
+tests (SNR or correlation vs. input), never by sample count** — that is how the old suite
+hid the silence. Each commit must build clean (`cyrius build src/main.cyr build/shravan`)
+and keep the suite green.
 
-**Goal:** make the suite tell the truth and close every correctness/safety hole that does
-*not* need a new DSP subsystem. This unblocks all later work: once tests assert real audio
-(and honestly pin the not-yet-working paths), the AAC/Opus/MP3 fixes can't silently
-regress or silently "pass."
+### v2.5.9 — Opus/CELT decode → PCM · shipped 2026-07-02 · THE headline deferred item
 
-**Commit plan (bite-sized, ordered — each green):**
-1. `test: value-level PCM helpers (assert_pcm_close / snr_db) + apply to WAV/AIFF roundtrips`
-2. `test: extend FLAC roundtrips to assert values across all subframe/stereo modes`
-3. `test: honestly pin current no-audio behavior — assert AAC-encode→decode is silent,`
-   `opus_decode_from_packets returns empty, mp3_decode returns empty (each with a`
-   `TODO(2.7.0/2.8.0/3.0.0) pointer)` — reality lives in the suite; fixes flip these later
-4. `fix(aac): guard reserved section codebooks 12–15 in _aac_decode_spectral (DoS) + reject-not-hang test`
-5. `fix(aac): remove decoder band double-increment for cb 1–4/9/10 + alignment test`
-6. `fix(aac): scale-factor DPCM predictor tracks transmitted (clamped) value (mono + CPE) + large-delta roundtrip test`
-7. `fix(opus): make the decode metadata/data contract explicit (align total_samples with returned audio) + test`
-8. `fix(mp3): add Layer I/II bitrate tables, select by layer + frame-size test for an L2 frame`
-9. `fix(flac): decode_range seek anchor uses stream block size + trailing-short-frame test`
-10. `fix(flac): raise/handle Rice unary bound for valid deep-bps streams`
-11. `fix(wav): WAVE_FORMAT_EXTENSIBLE tracks container bytes vs. valid bits (24-in-32) + test`
-12. `test(alac): verify the ALAC decoder on a real frame (Rice/LPC/unmix → PCM)`
-13. `feat(alac): wire detect_format + codec_open dispatch (or explicitly gate FMT_ALAC as unreachable)`
-14. `chore: resolve detect_format/sankoch collision (namespace shravan's audio detector) — clears build warning`
-15. `docs: roadmap functional-status → verified truth; CHANGELOG 2.6.0; VERSION bump`
+**Done:** `opus_encode` → `opus_decode_from_packets` round-trips real audio — waveform
+correlation mono 0.997, stereo 0.996/0.999, transient 0.998 (verified by value, not
+sample count). The 2.5.0–2.5.8 pieces are now composed into PCM and the real decode path
+is wired. Stream stays shravan-internal (RFC-6716 conformance is its own item below).
 
-### v2.7.0 — AAC produces audio · medium–large
+- [x] Magnitude synthesis (`_opus_denorm_frame`): band energy × unit PVQ shape → MDCT coeffs.
+- [x] **Found + fixed the real blocker:** `fft_mdct`/`fft_imdct` are not a matched pair
+      (encode→decode cancelled to silence — also a cause of the silent AAC encoder); added a
+      verified direct pair `_opus_mdct`/`_opus_imdct` (OLA reconstruction 0.999).
+- [x] IMDCT + synthesis sine window + 50%-overlap-add (Princen-Bradley TDAC); encoder now
+      frames with 50% overlap to match.
+- [x] Wired `opus_decode_from_packets` (mono + stereo via `_opus_stereo_decouple`).
+- [x] Band-energy DPCM widened 128→256 symbols (the ±63 clamp was losing absolute levels).
+- [x] Rate-control complexity from the real MDCT spectrum (2.5.8 deferral).
+- [x] Encoder overflow no longer truncates/corrupts the packet.
+- [~] Transient frames decode via the long MDCT (correct audio); true overlapping
+      short-window coding deferred (see 2.5.10-tail / CELT transient completion).
+- [~] Two-pass VBR still future.
 
-**Goal:** `aac_encode` → `aac_decode` reconstructs the input within an SNR threshold
-(lossy but faithful), **mono and stereo**. Flip the 2.6.0 AAC "silence" pin to a real
-round-trip.
+**Follow-on hardening (do in 2.5.12):** fix `fft.cyr`'s `fft_mdct`/`fft_imdct` to be a
+matched pair (unblocks the AAC encoder + lets Opus drop the O(N²) direct transform), and
+add a real MDCT↔IMDCT reconstruction test (today's only asserts "output nonzero").
+
+### v2.5.10 — AAC produces audio + all AAC bugs/completions · medium–large
+
+**Goal:** `aac_encode` → `aac_decode` faithfully round-trips (SNR-verified), **mono and
+stereo**, and every AAC correctness/safety bug the audit found is closed. Folds in the
+deferred TNS + psychoacoustic completions.
 
 **Commit plan:**
-1. `fix(aac): quantizer step/scale-factor so encode and decode invert (consistent 0.75-power placement) + single-band roundtrip test`
+1. `fix(aac): quantizer step/scale-factor so encode and decode invert (consistent 0.75-power placement) + single-band roundtrip test` *(the silent-encoder root cause)*
 2. `feat(aac): rate/distortion scale-factor loop to hit a bit budget (replaces the fixed heuristic) + bitrate-tracks-target test`
 3. `fix(aac): encoder MDCT framing — 50% overlap, stop zeroing the 2nd half so TDAC cancels aliasing + windowed-SNR test`
-4. `fix(aac): CPE stereo bitstream — drop the stray side ICS, make side section codebooks match the coding + stereo SNR test`
-5. `feat(aac): real HCB6 spectral tables (remove the HCB5 placeholder)`
-6. `test(aac): content-based SNR roundtrip — sine/sweep/noise, mono + stereo (flip the 2.6.0 pin)`
-7. `docs: CHANGELOG 2.7.0; VERSION bump; update functional-status`
+4. `fix(aac): scale-factor DPCM predictor tracks transmitted (clamped) value (mono + CPE) + large-delta roundtrip test` *(confirmed desync bug)*
+5. `fix(aac): CPE stereo bitstream — drop the stray side ICS, make side section codebooks match the coding + stereo SNR test`
+6. `fix(aac): guard reserved section codebooks 12–15 (DoS infinite-loop) + remove decoder band double-increment for cb 1–4/9/10 + reject-not-hang test`
+7. `feat(aac): real HCB6 tables; TNS short-window + stereo/CPE; psychoacoustic ATH floor + tonality-adjusted SMR` *(completes the 2.5.2/2.5.3 deferrals)*
+8. `test(aac): content-based SNR roundtrip — sine/sweep/noise, mono + stereo`
+9. `docs/CHANGELOG/VERSION: 2.5.10 — AAC produces audio`
 
-### v2.8.0 — Opus decodes to audio (bespoke-internal) · large
+### v2.5.11 — MP3 decode → PCM · large
 
-**Goal:** `opus_encode(tone/sweep)` → `opus_decode_from_packets` → PCM that **correlates
-with the input** (mono + stereo). Uses the existing invertible LZMA-range coder + CWRS
-PVQ + energy DPCM. **Explicitly labeled shravan-internal / non-RFC-6716** (will not read
-`.opus` files from libopus/ffmpeg; conformance is a 3.x milestone). This is the headline
-gap the 2.5.0–2.5.8 scaffolding was building toward.
+**Goal:** MP3 Layer III (+ Layer I/II bitrate correctness) decodes to real PCM — replaces
+the metadata-only stub.
 
 **Commit plan:**
-1. `feat(opus): magnitude synthesis — apply band-energy gain to the unit PVQ shape → MDCT coefficients + unit test`
-2. `feat(opus): CELT IMDCT + sine-window inter-frame TDAC overlap-add (mono) via fft_imdct + single/two-frame test`
-3. `feat(opus): wire opus_decode_from_packets — iterate audio packets → CELT frame decode → PCM, honor pre_skip (mono) + waveform-correlation test`
-4. `feat(opus): stereo decode — _opus_stereo_decouple + per-channel synth + stereo correlation test`
-5. `feat(opus): transient/short-block inverse (short IMDCT + overlap) so transient frames decode + test`
-6. `fix(opus): encoder payload overflow — no silent truncation past target_bytes`
-7. `docs(opus): label the bitstream shravan-internal/non-RFC-6716; note conformance = 3.x` + `test(opus): flip the 2.6.0 decode pin to real-audio assertions`
-8. `docs: CHANGELOG 2.8.0; VERSION bump; update functional-status`
+1. `fix(mp3): Layer I/II bitrate tables (select by layer) + frame-size test` *(existing bug)*
+2. `feat(mp3): granule/side-info parse + scalefactor decode + cross-frame bit reservoir`
+3. `feat(mp3): Huffman tables + big_values/count1 decode of the 576 frequency lines`
+4. `feat(mp3): requantization (power law + pretab) + short-block reorder`
+5. `feat(mp3): alias reduction + hybrid IMDCT (long 36 / short 12) + overlap-add`
+6. `feat(mp3): 32-band polyphase synthesis filterbank`
+7. `feat(mp3): MS/intensity stereo + wire into mp3_decode + real-file correlation test`
+8. `docs/CHANGELOG/VERSION: 2.5.11 — MP3 decode`
 
-### v3.0.0 — MP3 decode + breadth · large (major)
+### v2.5.12 — remaining deferred tails + hardening + new subsystems · medium–large
 
-**Goal:** MP3 Layer III decodes to PCM; the major bump also carries the breadth items that
-change surface/compat (PCM_F64, RFC-Opus stream, etc.). MP3 decode is a full subsystem, so
-it gets its own ordered commit series; breadth items follow as an explicitly-sequenced
-backlog (any one may be split into its own 3.x minor).
+**Goal:** finish every remaining deferral and the low-severity bugs, then the genuinely-new
+breadth. Order these by priority; each is an independent bite.
 
-**MP3 Layer III decode — commit plan:**
-1. `feat(mp3): granule/side-info parse + scalefactor decode + cross-frame bit reservoir`
-2. `feat(mp3): Huffman tables + big_values/count1 decode of the 576 frequency lines`
-3. `feat(mp3): requantization (power law + pretab) + short-block reorder`
-4. `feat(mp3): alias reduction + hybrid IMDCT (long 36 / short 12) + overlap-add`
-5. `feat(mp3): 32-band polyphase synthesis filterbank`
-6. `feat(mp3): MS/intensity stereo + wire into mp3_decode + real-file correlation test (flip the 2.6.0 pin)`
-7. `docs: CHANGELOG 3.0.0; VERSION bump`
+**Deferred tails + audit bugs (do first):**
+- `feat(mp4): esds/AudioSpecificConfig parse (drop hardcoded LC), AudioSampleEntry v1/v2, multi-track/edit-list (elst/stts gapless trim), co64/largesize >4 GiB` *(2.5.7 deferral)*
+- `feat(alac): wire detect_format + codec_open dispatch + ALAC-in-MP4 routing; verify the decoder on a real frame` *(dead-code today)*
+- `test/fuzz: add AAC, MP4, and Opus-decode fuzz targets (untrusted-input paths since 2.5.2)` *(2.5.7 deferral)*
+- `fix(flac): decode_range seek anchor uses stream block size; Rice unary bound for valid deep-bps streams`
+- `fix(wav): WAVE_FORMAT_EXTENSIBLE container-bytes vs valid-bits (24-in-32)`
+- `chore: resolve detect_format/sankoch collision (namespace shravan's) — clears the build warning`
+- `feat: hi-res 88.2–384 kHz roundtrip tests; PCM_F64 WAV encode/decode; PCM SSE2/unrolled hot loops + before/after benchmarks`
+- `feat(flac): LPC encoder (autocorr + Levinson-Durbin + quantized coeffs), partitioned Rice, adaptive stereo choice, CONSTANT subframe, SEEKTABLE emit, decoder MD5 verify`
 
-**Breadth backlog (post-MP3; each independent, sequence as capacity allows):**
-- **Opus RFC-6716 conformance** — real `ec_enc`/`ec_dec`, Laplace coarse/fine energy,
-  spec band layout + allocation tables (trim/boost/anti-collapse/fine-energy), correct
-  TOC. Makes shravan decode real `.opus` and libopus decode ours. *Large; supersedes the
-  bespoke coder.* (The big one if interop matters.)
-- **Opus transient/stereo/rate-control completion** — overlapping short-window shapes +
-  per-band time-frequency resolution + cross-frame transient memory; stereo+transient
-  combined + intensity stereo + non-even mid/side split; VBR driven by real MDCT/masking
-  complexity + stereo/transient-aware allocation + two-pass. *(needs 2.8.0.)*
-- **FLAC LPC encoder** — autocorrelation + Levinson-Durbin + quantized coeffs (beats
-  Fixed, matters for 24/32-bit); plus partitioned Rice search, adaptive stereo-mode
-  choice, CONSTANT-subframe emission, SEEKTABLE emit, decoder MD5 verify. *(decode already
-  works.)*
-- **AAC TNS completion** — short-window + stereo/CPE TNS (today: long-window mono only).
-- **AAC psychoacoustic completion** — absolute-threshold-of-hearing floor + tonality-
-  adjusted SMR (SPL calibration).
-- **Hi-res + wide PCM + SSE2** — 88.2–384 kHz roundtrip tests; **PCM_F64** WAV encode/
-  decode (today `wav_encode` rejects it); PCM conversion SSE2/unrolled hot loops with
-  before/after benchmarks.
-- **SILK mode (speech)** — LPC/LTP/LSF, excitation, shared range coder. *(needs the Opus
-  framework.)*
-- **Hybrid mode (SILK + CELT)** — SILK low-band + CELT high-band over one range coder;
-  completes the Opus encoder. *(needs SILK + 2.8.0.)*
-- **MP4 completion** — `esds`/AudioSpecificConfig parse (today profile hardcoded LC),
-  AudioSampleEntry v1/v2, multi-track/edit-list (`elst`/`stts`, gapless trim), co64/
-  largesize >4 GiB, and vendor the AAC chain into the fuzz harness to fuzz `mp4_decode`.
-- **ALAC-in-MP4** — recognize the `alac` sample entry, extract `ALACSpecificConfig`, route
-  `mdat` frames to `alac_decode` *(if not already wired in 2.6.0)*.
-- **DSD** — DSD64/128/256 + DoP (1-bit sigma-delta path).
-- **Fuzz-coverage completion** — add AAC, MP4, and Opus-decode targets so the untrusted-
-  input paths shipped since 2.5.2 are actually fuzzed.
+**New subsystems (larger; may each become their own 2.5.x point release):**
+- `feat(opus): RFC-6716 conformance — real ec_enc/ec_dec, Laplace coarse/fine energy, spec band layout + allocation (trim/boost/anti-collapse/fine-energy), correct TOC` — decode real `.opus`, libopus decodes ours *(supersedes the bespoke coder)*
+- `feat(opus): SILK mode — LPC/LTP/LSF, excitation, shared range coder`
+- `feat(opus): hybrid mode — SILK low-band + CELT high-band over one range coder (completes the Opus encoder)`
+- `feat: DSD — DSD64/128/256 + DoP (1-bit sigma-delta path)`
 
 ---
 

@@ -825,6 +825,195 @@ fn test_ogg_opus_dispatch() {
     return 0;
 }
 
+
+# Best-lag normalized cross-correlation (×1000) of decoded array d[dlen] vs input
+# x[xlen], where d[k] ~= x[base + k + lag]; searches a small lag window. Interior-only.
+fn _best_lag_corr(d, dlen, x, xlen, base) {
+    var best = F64_ZERO;
+    var lag = 0 - 16;
+    while (lag <= 16) {
+        var sdx = F64_ZERO;
+        var sd2 = F64_ZERO;
+        var sx2 = F64_ZERO;
+        var k = 480;
+        var kstop = dlen - 480;
+        while (k < kstop) {
+            var ii = base + k + lag;
+            if (ii >= 0) {
+                if (ii < xlen) {
+                    var dv = load64(d + k * 8);
+                    var xv = load64(x + ii * 8);
+                    sdx = f64_add(sdx, f64_mul(dv, xv));
+                    sd2 = f64_add(sd2, f64_mul(dv, dv));
+                    sx2 = f64_add(sx2, f64_mul(xv, xv));
+                }
+            }
+            k = k + 1;
+        }
+        if (f64_gt(sd2, F64_ZERO) == 1) {
+            if (f64_gt(sx2, F64_ZERO) == 1) {
+                var c = f64_div(sdx, f64_sqrt(f64_mul(sd2, sx2)));
+                if (f64_gt(c, best) == 1) { best = c; }
+            }
+        }
+        lag = lag + 1;
+    }
+    return f64_to(f64_mul(best, f64_from(1000)));
+}
+
+# 2.5.9: real end-to-end Opus stereo audio. Encode two distinct tones (L, R), decode,
+# deinterleave, and assert each channel correlates with its input — verifies the mid/
+# side decouple + per-channel IMDCT/overlap actually separate the channels.
+fn test_opus_decode_stereo_roundtrip() {
+    syscall(1, 1, "test: opus decode stereo roundtrip\n", 35);
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var n = 4800;
+    var aL = f64_div(F64_ONE, F64_TWO);
+    var aR = f64_div(f64_from(2), f64_from(5));
+    var samples = vec_new();
+    var xl = alloc(n * 8);
+    var xr = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        var l = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(40))), aL);
+        var r = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(60))), aR);
+        vec_push(samples, l);
+        vec_push(samples, r);
+        store64(xl + i * 8, l);
+        store64(xr + i * 8, r);
+        i = i + 1;
+    }
+    var out_buf = alloc(524288);
+    var ogg_size = opus_encode(samples, 48000, 2, 160000, out_buf);
+    assert(res_ok(ogg_size) == 1, "opus stereo encode ok");
+    var result = ogg_decode(out_buf, ogg_size);
+    assert(res_ok(result) == 1, "opus stereo decode ok");
+    var sout = decode_result_samples(result);
+    var pairs = vec_len(sout) / 2;
+    assert(pairs > 0, "opus stereo decode produced PCM");
+    var dl = alloc(pairs * 8);
+    var dr = alloc(pairs * 8);
+    i = 0;
+    while (i < pairs) {
+        store64(dl + i * 8, vec_get(sout, i * 2));
+        store64(dr + i * 8, vec_get(sout, i * 2 + 1));
+        i = i + 1;
+    }
+    var cl = _best_lag_corr(dl, pairs, xl, n, 480);
+    var cr = _best_lag_corr(dr, pairs, xr, n, 480);
+    syscall(1, 1, "  opus stereo corr*1000 L=", 26);
+    fmt_int(cl);
+    syscall(1, 1, " R=", 3);
+    fmt_int(cr);
+    syscall(1, 1, "\n", 1);
+    assert(cl > 850, "left channel correlates (>0.85)");
+    assert(cr > 850, "right channel correlates (>0.85)");
+    return 0;
+}
+
+# 2.5.9: real end-to-end Opus audio. Encode a tone, decode via the public ogg_decode
+# path, and assert the decoded PCM correlates with the input (best-lag normalized
+# cross-correlation) — NOT just a sample count. This is the test the old suite lacked.
+fn test_opus_decode_audio_roundtrip() {
+    syscall(1, 1, "test: opus decode audio roundtrip\n", 34);
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var n = 4800;
+    var half = f64_div(F64_ONE, F64_TWO);
+    var samples = vec_new();
+    var i = 0;
+    while (i < n) {
+        var ph = f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(40));
+        vec_push(samples, f64_mul(f64_sin(ph), half));
+        i = i + 1;
+    }
+    var out_buf = alloc(262144);
+    var ogg_size = opus_encode(samples, 48000, 1, 96000, out_buf);
+    assert(res_ok(ogg_size) == 1, "opus encode ok");
+    var result = ogg_decode(out_buf, ogg_size);
+    assert(res_ok(result) == 1, "opus decode ok");
+    var sout = decode_result_samples(result);
+    var len_out = vec_len(sout);
+    assert(len_out > 0, "opus decode produced PCM samples");
+
+    # decoded[k] ~= input[hop + k] (hop=480); search a small lag window for the best fit.
+    var hop = 480;
+    var k0 = 480;
+    var k1 = len_out - 480;
+    var best = F64_ZERO;
+    var lag = 0 - 16;
+    while (lag <= 16) {
+        var sdx = F64_ZERO;
+        var sd2 = F64_ZERO;
+        var sx2 = F64_ZERO;
+        var k = k0;
+        while (k < k1) {
+            var ii = hop + k + lag;
+            if (ii >= 0) {
+                if (ii < n) {
+                    var d = vec_get(sout, k);
+                    var x = vec_get(samples, ii);
+                    sdx = f64_add(sdx, f64_mul(d, x));
+                    sd2 = f64_add(sd2, f64_mul(d, d));
+                    sx2 = f64_add(sx2, f64_mul(x, x));
+                }
+            }
+            k = k + 1;
+        }
+        if (f64_gt(sd2, F64_ZERO) == 1) {
+            if (f64_gt(sx2, F64_ZERO) == 1) {
+                var corr = f64_div(sdx, f64_sqrt(f64_mul(sd2, sx2)));
+                if (f64_gt(corr, best) == 1) { best = corr; }
+            }
+        }
+        lag = lag + 1;
+    }
+    syscall(1, 1, "  opus roundtrip corr*1000 = ", 29);
+    fmt_int(f64_to(f64_mul(best, f64_from(1000))));
+    syscall(1, 1, "\n", 1);
+    var thresh = f64_div(f64_from(9), f64_from(10));
+    assert(f64_gt(best, thresh) == 1, "decoded audio correlates with input (>0.9)");
+    return 0;
+}
+
+# 2.5.9: a signal with a sharp amplitude step fires transient detection; verify those
+# frames still decode to correct audio (transient short-block coding is deferred, so
+# transient frames fall back to the long MDCT — they must not decode to garbage).
+fn test_opus_decode_transient_roundtrip() {
+    syscall(1, 1, "test: opus decode transient roundtrip\n", 38);
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var n = 4800;
+    var samples = vec_new();
+    var xin = alloc(n * 8);
+    var lo = f64_div(f64_from(15), f64_from(100));
+    var hi = f64_div(f64_from(7), f64_from(10));
+    var i = 0;
+    while (i < n) {
+        var amp = lo;
+        if (i >= 2400) { amp = hi; }
+        var v = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(40))), amp);
+        vec_push(samples, v);
+        store64(xin + i * 8, v);
+        i = i + 1;
+    }
+    var out_buf = alloc(262144);
+    var ogg_size = opus_encode(samples, 48000, 1, 128000, out_buf);
+    assert(res_ok(ogg_size) == 1, "opus transient encode ok");
+    var result = ogg_decode(out_buf, ogg_size);
+    assert(res_ok(result) == 1, "opus transient decode ok");
+    var sout = decode_result_samples(result);
+    var len_out = vec_len(sout);
+    assert(len_out > 0, "opus transient decode produced PCM");
+    var d = alloc(len_out * 8);
+    i = 0;
+    while (i < len_out) { store64(d + i * 8, vec_get(sout, i)); i = i + 1; }
+    var c = _best_lag_corr(d, len_out, xin, n, 480);
+    syscall(1, 1, "  opus transient corr*1000 = ", 29);
+    fmt_int(c);
+    syscall(1, 1, "\n", 1);
+    assert(c > 850, "transient-containing signal decodes correctly (>0.85)");
+    return 0;
+}
+
 fn test_stream_aiff_chunking() {
     syscall(1, 1, "test: aiff stream chunking\n", 27);
 
@@ -1141,6 +1330,9 @@ test_pcm_roundtrips();
 test_codec_open_formats();
 test_flac_decode_range();
 test_ogg_opus_dispatch();
+test_opus_decode_audio_roundtrip();
+test_opus_decode_stereo_roundtrip();
+test_opus_decode_transient_roundtrip();
 test_aac_encode_decode_roundtrip();
 test_tag_write_id3v2_roundtrip();
 test_tag_write_vorbis_roundtrip();
