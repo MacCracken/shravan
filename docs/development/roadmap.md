@@ -6,9 +6,11 @@
 > (MPEG-1 Layer III, 0.99999 vs minimp3) and **Opus/AAC** (2.5.9/2.5.10, encode→decode 0.99+).
 > **Honest scope (do not claim "almost done").** The 2.5.x arc got every codec *producing
 > audio*. It did **not** make them complete or conformant — a lot was deferred along the
-> way. The 2.6.x–2.8.x plan below is the real remaining work, and it is large: **~11
-> releases**. It is enumerated in full here (nothing hidden in "deferred" asides), ALAC
-> first, so the true distance to a v1.0-quality codec suite is visible, not glossed.
+> way. The 2.6.x–2.8.x plan below is the real remaining work, and it is large. It is
+> enumerated in full here (nothing hidden in "deferred" asides), **Opus-real first** —
+> decoding an actual `.opus` file was the one thing 2.5.x kept punting, so it is now
+> v2.6.0, ahead of everything else, built foundation-up with each stage proven bit-exact
+> against libopus. The true distance to a v1.0-quality codec suite stays visible.
 
 ## Functional status (verified 2026-07-02)
 
@@ -72,7 +74,57 @@ is how the old suite hid the silence. Each commit builds clean
 (`cyrius build src/main.cyr build/shravan`) and keeps the suite green. **Never skip
 benchmarks** on a perf claim.
 
-### v2.6.0 — ALAC live + the open correctness bugs · medium
+### v2.6.0 — **Opus is REAL: decode actual `.opus` files (RFC-6716 CELT)** · large · IN PROGRESS
+**This is now #1, not last.** For the entire 2.5.x arc this was deferred every release
+(it sat at v2.7.0, behind ALAC/fuzz/MP4/FLAC/AAC/hi-res). It is pulled to the front and
+being built foundation-up, each stage proven **bit-exact against libopus** (system
+libopus 1.6.1 + a C reference harness built from the fetched CELT source), and the whole
+chain proven by PCM correlation vs ffmpeg's libopus decoder. Target: real libopus-encoded
+fullband files (`config 31`, CELT-only, 20 ms, mono **and** stereo — confirmed what
+libopus actually emits for music) decode to PCM. The bespoke LZMA-style coder is removed
+from the file-decode path.
+
+Progress (checked = landed + verified in the suite; unchecked = remaining, enumerated in
+full — nothing hidden):
+- [x] **Real `ec_dec` range decoder** (entdec.c/entcode.c port) — **bit-exact vs libopus**
+  (`test_ec_dec_rfc_vectors`, 11 asserts against a libopus-`ec_enc`-produced vector).
+- [x] **`ec_laplace_decode`** (laplace.c port) — **bit-exact vs libopus**
+  (`test_ec_laplace_rfc_vectors`, 8 asserts). Coarse/fine/finalise energy decode ported
+  from the float-build spec (`celt_unquant_coarse/fine/energy_finalise`).
+- [ ] **Bit allocation** (rate.c: `clt_compute_allocation` / `interp_bits2pulses` + the
+  `eband5ms` / `logN400` / `cache_index50` / `cache_bits50` / `cache_caps50` /
+  `band_allocation` tables) — decode `alloc_trim`/boosts/skip, produce `pulses[]`,
+  `fine_quant[]`, `fine_priority[]`.
+- [ ] **Bands + PVQ + CWRS** (bands.c/vq.c/cwrs.c: `quant_all_bands` decode, `alg_unquant`
+  → `cwrsi`, `exp_rotation` spreading, θ/split, intensity+dual stereo, `renormalise`,
+  `denormalise_bands`, `anti_collapse`). Note: CELT's `cwrsi`/`icwrs` ordering must
+  replace the bespoke PVQ index scheme for interop.
+- [ ] **Inverse MDCT + FFT** (mdct.c/kiss_fft.c: `clt_mdct_backward`, the CELT low-overlap
+  window (overlap=120, **not** 50%), pre/post rotation, per-channel overlap-add buffers).
+- [ ] **Orchestration + state** (celt_decoder.c: `celt_decode_with_ec` order — silence,
+  post-filter parse, transient/`tf_decode`, spread, dynalloc, trim, anti-collapse rsv,
+  intensity/dual; persistent `oldBandE`/overlap/deemph state across frames; de-emphasis
+  to PCM).
+- [ ] **Wire + verify**: `detect_format` `.opus` → Ogg demux → real CELT decode; assert
+  PCM correlation ≥ 0.99 vs ffmpeg for `real_mono.opus` + `real_stereo.opus`; retire the
+  bespoke path from the file-decode dispatch.
+
+### v2.6.1 — Opus encoder conformance (libopus decodes OURS) · large
+- `feat(opus): real ec_enc + RFC band layout/allocation/TOC on the encode side` — goal:
+  a shravan-encoded `.opus` decodes correctly in libopus/ffmpeg. Supersedes the bespoke
+  encoder.
+
+### v2.6.2 — Opus SILK mode · large (voice `.opus`)
+- `feat(opus): SILK — LPC/LTP/LSF, excitation, shared range coder` (low-bitrate/voice
+  files use SILK; needed for arbitrary `.opus`, not just fullband music).
+
+### v2.6.3 — Opus hybrid mode · large (completes Opus)
+- `feat(opus): hybrid — SILK low-band + CELT high-band over one range coder`.
+
+### v2.6.4 — Opus CELT completion · medium (refinements from 2.5.9)
+- `feat(opus): true overlapping short-window transient coding + two-pass VBR`.
+
+### v2.6.5 — ALAC live + the open correctness bugs · medium
 Make the dead code live and close every low-severity bug.
 - `feat(alac): wire detect_format ALAC branch + codec_open FMT_ALAC dispatch + ALAC-in-MP4 routing (mp4 → alac_decode); verify on a real ALAC frame with a value-level test` — the decoder exists but is unreachable today.
 - `fix(mp3): MPEG-2.5 8 kHz low-bitrate short blocks (~0.7 today; sfb tables + reservoir are byte-verified, 8 kHz is exact at higher bitrate — a narrow short-block interaction)`.
@@ -80,38 +132,25 @@ Make the dead code live and close every low-severity bug.
 - `fix(wav): WAVE_FORMAT_EXTENSIBLE container-bytes vs valid-bits (24-in-32 mis-decode)`.
 - `chore(core): resolve the detect_format/sankoch symbol collision (namespace shravan's) — clears the build warning + consumer hazard`.
 
-### v2.6.1 — untrusted-input fuzz coverage · small–medium
+### v2.6.6 — untrusted-input fuzz coverage · small–medium
 Close the fuzz gaps opened since 2.5.2 (decoders that parse hostile input but have no fuzz target).
 - `test/fuzz: AAC-decode, MP4-demux, and Opus-decode fuzz targets (vendor the codec chain into the standalone harness); harden anything they surface. Target ≥90K calls / 0 crashes each.`
 
-### v2.6.2 — MP4/M4A container completeness · medium (real-world `.m4a`)
+### v2.6.7 — MP4/M4A container completeness · medium (real-world `.m4a`)
 - `feat(mp4): esds/AudioSpecificConfig parse (drop the hardcoded LC config), AudioSampleEntry v1/v2, multi-track + edit-list (elst/stts gapless trim), co64/largesize (>4 GiB)`.
 
-### v2.6.3 — FLAC encoder completion · medium–large
+### v2.6.8 — FLAC encoder completion · medium–large
 Today FLAC encodes Fixed-prediction only; make it a real encoder + verify the decoder.
 - `feat(flac): LPC encoder (autocorrelation + Levinson-Durbin + quantized coefficients), partitioned Rice, adaptive stereo-mode choice, CONSTANT subframe, SEEKTABLE emit, decoder MD5 signature verify`.
 
-### v2.6.4 — AAC quality completion · medium
+### v2.6.9 — AAC quality completion · medium
 Refinements deferred from 2.5.10 (AAC already produces audio).
 - `feat(aac): re-enable TNS with proper prediction-gain-gated noise shaping (disabled today — it amplified quant noise) + short-window + stereo/CPE`.
 - `feat(aac): real HCB6 tables (reuses HCB5 today; our encoder never selects cb6) + psychoacoustic ATH floor + tonality-adjusted SMR; optional rate/distortion scale-factor loop (replaces the peak heuristic)`.
 
-### v2.6.5 — hi-res, PCM breadth, transform perf · medium
+### v2.7.0 — hi-res, PCM breadth, transform perf · medium
 - `feat(core): hi-res 88.2–384 kHz roundtrip tests; PCM_F64 WAV encode/decode; PCM SSE2/unrolled hot loops (before/after benchmarks)`.
 - `perf: fast FFT-based MDCT/IMDCT preserving the verified TDAC convention — fft.cyr's pair and the MP3 IMDCT/synthesis cosines are direct O(N²) today (correct but slow). Benchmark before/after.`
-
-### v2.6.6 — Opus CELT completion · medium (refinements from 2.5.9)
-- `feat(opus): true overlapping short-window transient coding (transient frames decode via the long MDCT today — no pre-echo control) + two-pass VBR`.
-
-### v2.7.0 — Opus RFC-6716 conformance · large (interop milestone)
-The bespoke stream must go: make our Opus real.
-- `feat(opus): real ec_enc/ec_dec, Laplace coarse/fine energy, spec band layout + allocation (trim/boost/anti-collapse/fine-energy), correct TOC` — goal: **decode real `.opus`, and libopus decodes ours**. Supersedes the bespoke LZMA-style coder.
-
-### v2.7.1 — Opus SILK mode · large
-- `feat(opus): SILK — LPC/LTP/LSF, excitation, shared range coder`.
-
-### v2.7.2 — Opus hybrid mode · large (completes Opus)
-- `feat(opus): hybrid — SILK low-band + CELT high-band over one range coder`.
 
 ### v2.8.0 — DSD · large (new format)
 - `feat: DSD64/128/256 + DoP (1-bit sigma-delta path)`.

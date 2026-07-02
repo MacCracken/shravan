@@ -336,6 +336,496 @@ fn opus_range_dec_bit(rd) {
     return opus_range_dec_uint(rd, 2);
 }
 
+# ================================================================
+# RFC 6716 range decoder (ec_dec) — exact port of libopus entdec.c/entcode.c
+# ================================================================
+# THE REAL Opus entropy decoder. The bespoke opus_range_* coder above is the
+# legacy, non-interoperable path (kept for the legacy encoder+tests); this ec_dec
+# is what decodes an actual libopus/RFC-6716 stream. All uint32 arithmetic is
+# emulated in i64 with explicit 0xFFFFFFFF / 0x7FFFFFFF masks.
+#
+# State layout (96 bytes):
+#   +0  buf (byte ptr)   +8  storage (len)   +16 end_offs   +24 end_window (u32)
+#   +32 nend_bits        +40 nbits_total     +48 offs       +56 rng (u32)
+#   +64 val (u32)        +72 ext (u32)       +80 rem        +88 error
+# Constants (mfrngcod.h): SYM_BITS=8, CODE_BITS=32, SYM_MAX=255,
+#   CODE_TOP=1<<31, CODE_BOT=1<<23 (0x800000), CODE_EXTRA=7, BITRES=3.
+
+var EC_U32 = 0xFFFFFFFF;
+var _ec_corr = 0;   # lazily-built ec_tell_frac correction[8]
+
+# EC_ILOG(v): number of significant bits of v (floor(log2 v)+1); ec_ilog(0)=0.
+fn ec_ilog(v) {
+    var r = 0;
+    var x = v & EC_U32;
+    while (x > 0) { r = r + 1; x = x >> 1; }
+    return r;
+}
+
+fn ec_read_byte(ec) {
+    var offs = load64(ec + 48);
+    var b = 0;
+    if (offs < load64(ec + 8)) {
+        b = load8(load64(ec) + offs);
+        store64(ec + 48, offs + 1);
+    }
+    return b;
+}
+
+fn ec_read_byte_from_end(ec) {
+    var eo = load64(ec + 16);
+    var b = 0;
+    if (eo < load64(ec + 8)) {
+        eo = eo + 1;
+        store64(ec + 16, eo);
+        b = load8(load64(ec) + load64(ec + 8) - eo);
+    }
+    return b;
+}
+
+# Normalize: while rng <= CODE_BOT, shift in a symbol (mirrors ec_dec_normalize).
+fn ec_dec_normalize(ec) {
+    while (load64(ec + 56) <= 0x800000) {
+        store64(ec + 40, load64(ec + 40) + 8);                        # nbits_total += 8
+        store64(ec + 56, (load64(ec + 56) << 8) & EC_U32);            # rng <<= 8
+        var sym = load64(ec + 80);                                    # sym = old rem
+        var newrem = ec_read_byte(ec);
+        store64(ec + 80, newrem);
+        sym = ((sym << 8) | newrem) >> 1;                             # >>(SYM_BITS-CODE_EXTRA)=1
+        var notb = 255 - (sym & 255);                                 # 255 & ~sym
+        store64(ec + 64, ((load64(ec + 64) << 8) + notb) & 0x7FFFFFFF);  # & (CODE_TOP-1)
+    }
+    return 0;
+}
+
+# Allocate + initialize a decoder over buf[0..len).
+fn ec_dec_new(buf, len) {
+    var ec = alloc(96);
+    memset(ec, 0, 96);
+    store64(ec, buf);
+    store64(ec + 8, len);
+    store64(ec + 40, 9);        # nbits_total = CODE_BITS+1 - ((CODE_BITS-CODE_EXTRA)/SYM_BITS)*SYM_BITS
+    store64(ec + 56, 128);      # rng = 1<<CODE_EXTRA (1<<7)
+    var rem = ec_read_byte(ec);
+    store64(ec + 80, rem);
+    store64(ec + 64, 127 - (rem >> 1));   # val = rng-1 - (rem>>(SYM_BITS-CODE_EXTRA))
+    ec_dec_normalize(ec);
+    return ec;
+}
+
+# ec_decode: return the cumulative frequency fs in [0,ft) for the coded symbol.
+fn ec_decode(ec, ft) {
+    var ext = load64(ec + 56) / ft;             # celt_udiv(rng, ft)
+    store64(ec + 72, ext);
+    var s = load64(ec + 64) / ext;
+    var m = s + 1; if (m > ft) { m = ft; }
+    return ft - m;
+}
+
+# ec_decode_bin: ec_decode with ft = 1<<bits (division replaced by shift).
+fn ec_decode_bin(ec, bits) {
+    var ext = load64(ec + 56) >> bits;
+    store64(ec + 72, ext);
+    var s = load64(ec + 64) / ext;
+    var top = 1 << bits;
+    var m = s + 1; if (m > top) { m = top; }
+    return top - m;
+}
+
+# ec_dec_update: consume the symbol occupying [fl,fh) of ft.
+fn ec_dec_update(ec, fl, fh, ft) {
+    var ext = load64(ec + 72);
+    var s = (ext * (ft - fh)) & EC_U32;
+    store64(ec + 64, (load64(ec + 64) - s) & EC_U32);
+    if (fl > 0) {
+        store64(ec + 56, (ext * (fh - fl)) & EC_U32);
+    } else {
+        store64(ec + 56, (load64(ec + 56) - s) & EC_U32);
+    }
+    ec_dec_normalize(ec);
+    return 0;
+}
+
+# Decode one bit with P(one) = 1/(1<<logp).
+fn ec_dec_bit_logp(ec, logp) {
+    var r = load64(ec + 56);
+    var d = load64(ec + 64);
+    var s = r >> logp;
+    var ret = 0;
+    if (d < s) { ret = 1; }
+    if (ret == 0) { store64(ec + 64, d - s); }
+    if (ret == 1) { store64(ec + 56, s); } else { store64(ec + 56, r - s); }
+    ec_dec_normalize(ec);
+    return ret;
+}
+
+# Decode a symbol from an inverse-CDF byte table with total 1<<ftb.
+fn ec_dec_icdf(ec, icdf, ftb) {
+    var s = load64(ec + 56);
+    var d = load64(ec + 64);
+    var r = s >> ftb;
+    var ret = 0 - 1;
+    var t = s;
+    var cont = 1;
+    while (cont == 1) {
+        t = s;
+        ret = ret + 1;
+        s = (r * load8(icdf + ret)) & EC_U32;
+        if (d < s) { cont = 1; } else { cont = 0; }
+    }
+    store64(ec + 64, d - s);
+    store64(ec + 56, t - s);
+    ec_dec_normalize(ec);
+    return ret;
+}
+
+# Decode `bits` raw bits from the END of the buffer (LSB-first window).
+fn ec_dec_bits(ec, bits) {
+    var window = load64(ec + 24);
+    var available = load64(ec + 32);
+    if (available < bits) {
+        var cont = 1;
+        while (cont == 1) {
+            window = (window | (ec_read_byte_from_end(ec) << available)) & EC_U32;
+            available = available + 8;
+            if (available <= 24) { cont = 1; } else { cont = 0; }
+        }
+    }
+    var ret = window & ((1 << bits) - 1);
+    store64(ec + 24, window >> bits);
+    store64(ec + 32, available - bits);
+    store64(ec + 40, load64(ec + 40) + bits);
+    return ret;
+}
+
+# Decode a uniformly-distributed integer in [0, ft) (ft > 1).
+fn ec_dec_uint(ec, ft) {
+    var ftm = ft - 1;
+    var ftb = ec_ilog(ftm);
+    if (ftb > 8) {
+        ftb = ftb - 8;
+        var ftv = (ftm >> ftb) + 1;
+        var s = ec_decode(ec, ftv);
+        ec_dec_update(ec, s, s + 1, ftv);
+        var t = (s << ftb) | ec_dec_bits(ec, ftb);
+        if (t <= ftm) { return t; }
+        store64(ec + 88, 1);
+        return ftm;
+    }
+    var s2 = ec_decode(ec, ft);
+    ec_dec_update(ec, s2, s2 + 1, ft);
+    return s2;
+}
+
+# ec_tell: whole bits used so far.
+fn ec_tell(ec) {
+    return load64(ec + 40) - ec_ilog(load64(ec + 56));
+}
+
+fn _ec_corr_init() {
+    _ec_corr = alloc(8 * 8);
+    store64(_ec_corr + 0 * 8, 35733);
+    store64(_ec_corr + 1 * 8, 38967);
+    store64(_ec_corr + 2 * 8, 42495);
+    store64(_ec_corr + 3 * 8, 46340);
+    store64(_ec_corr + 4 * 8, 50535);
+    store64(_ec_corr + 5 * 8, 55109);
+    store64(_ec_corr + 6 * 8, 60097);
+    store64(_ec_corr + 7 * 8, 65535);
+    return 0;
+}
+
+# ec_tell_frac: bits used so far, in 1/8-bit (BITRES) units.
+fn ec_tell_frac(ec) {
+    if (_ec_corr == 0) { _ec_corr_init(); }
+    var nbits = load64(ec + 40) << 3;                 # nbits_total << BITRES
+    var l = ec_ilog(load64(ec + 56));
+    var r = load64(ec + 56) >> (l - 16);
+    var b = (r >> 12) - 8;
+    if (r > load64(_ec_corr + b * 8)) { b = b + 1; }
+    l = (l << 3) + b;
+    return nbits - l;
+}
+
+# ================================================================
+# CELT band-energy decode (RFC 6716 §4.3) — float-build port of quant_bands.c
+# ================================================================
+# Energy is stored as base-2 log with the per-band mean (eMeans) removed
+# (celt_glog). oldBandE persists ACROSS frames (it is the inter-frame predictor).
+# Three phases, strict stream order: coarse (front range coder), fine (raw bits
+# from the back), finalise (raw bits). LM=3, nbEBands=21 (fullband).
+
+var _celt_eprob_inter = 0;    # e_prob_model[3][0], 42 bytes (LM=3 inter)
+var _celt_eprob_intra = 0;    # e_prob_model[3][1], 42 bytes (LM=3 intra)
+var _celt_small_en_icdf = 0;  # small_energy_icdf = {2,1,0}
+var CELT_LM = 3;
+var CELT_NB_EBANDS = 21;
+var CELT_MAX_FINE_BITS = 8;
+# float pred/beta for LM=3 (see quant_bands.c:67-69, indexed [3]); inited at startup.
+var CELT_PRED_COEF3 = 0;      # 0.5
+var CELT_BETA_COEF3 = 0;      # 0.20001220703125
+var CELT_BETA_INTRA = 0;      # 0.149993896484375
+
+fn _celt_energy_tables_init() {
+    _celt_eprob_inter = alloc(42);
+    var bi = alloc(42 * 8);
+    store64(bi+0*8,42);  store64(bi+1*8,121); store64(bi+2*8,96);  store64(bi+3*8,66);
+    store64(bi+4*8,108); store64(bi+5*8,43);  store64(bi+6*8,111); store64(bi+7*8,40);
+    store64(bi+8*8,117); store64(bi+9*8,44);  store64(bi+10*8,123);store64(bi+11*8,32);
+    store64(bi+12*8,120);store64(bi+13*8,36); store64(bi+14*8,119);store64(bi+15*8,33);
+    store64(bi+16*8,127);store64(bi+17*8,33); store64(bi+18*8,134);store64(bi+19*8,34);
+    store64(bi+20*8,139);store64(bi+21*8,21); store64(bi+22*8,147);store64(bi+23*8,23);
+    store64(bi+24*8,152);store64(bi+25*8,20); store64(bi+26*8,158);store64(bi+27*8,25);
+    store64(bi+28*8,154);store64(bi+29*8,26); store64(bi+30*8,166);store64(bi+31*8,21);
+    store64(bi+32*8,173);store64(bi+33*8,16); store64(bi+34*8,184);store64(bi+35*8,13);
+    store64(bi+36*8,184);store64(bi+37*8,10); store64(bi+38*8,150);store64(bi+39*8,13);
+    store64(bi+40*8,139);store64(bi+41*8,15);
+    var i = 0;
+    while (i < 42) { store8(_celt_eprob_inter + i, load64(bi + i * 8)); i = i + 1; }
+
+    _celt_eprob_intra = alloc(42);
+    var bt = alloc(42 * 8);
+    store64(bt+0*8,22); store64(bt+1*8,178); store64(bt+2*8,63); store64(bt+3*8,114);
+    store64(bt+4*8,74); store64(bt+5*8,82);  store64(bt+6*8,84); store64(bt+7*8,83);
+    store64(bt+8*8,92); store64(bt+9*8,82);  store64(bt+10*8,103);store64(bt+11*8,62);
+    store64(bt+12*8,96);store64(bt+13*8,72); store64(bt+14*8,96); store64(bt+15*8,67);
+    store64(bt+16*8,101);store64(bt+17*8,73);store64(bt+18*8,107);store64(bt+19*8,72);
+    store64(bt+20*8,113);store64(bt+21*8,55);store64(bt+22*8,118);store64(bt+23*8,52);
+    store64(bt+24*8,125);store64(bt+25*8,52);store64(bt+26*8,118);store64(bt+27*8,52);
+    store64(bt+28*8,117);store64(bt+29*8,55);store64(bt+30*8,135);store64(bt+31*8,49);
+    store64(bt+32*8,137);store64(bt+33*8,39);store64(bt+34*8,157);store64(bt+35*8,32);
+    store64(bt+36*8,145);store64(bt+37*8,29);store64(bt+38*8,97); store64(bt+39*8,33);
+    store64(bt+40*8,77); store64(bt+41*8,40);
+    i = 0;
+    while (i < 42) { store8(_celt_eprob_intra + i, load64(bt + i * 8)); i = i + 1; }
+
+    _celt_small_en_icdf = alloc(3);
+    store8(_celt_small_en_icdf + 0, 2);
+    store8(_celt_small_en_icdf + 1, 1);
+    store8(_celt_small_en_icdf + 2, 0);
+
+    CELT_PRED_COEF3 = f64_div(f64_from(16384), f64_from(32768));   # 0.5
+    CELT_BETA_COEF3 = f64_div(f64_from(6554),  f64_from(32768));   # 0.20001220703125
+    CELT_BETA_INTRA = f64_div(f64_from(4915),  f64_from(32768));   # 0.149993896484375
+    return 0;
+}
+
+# ec_laplace_get_freq1: ft=32736-fs0; return (ft*(16384-decay))>>15.
+fn _ec_laplace_get_freq1(fs0, decay) {
+    var ft = 32736 - fs0;
+    return (ft * (16384 - decay)) >> 15;
+}
+
+# ec_laplace_decode(dec, fs, decay) -> signed energy delta qi (exact port).
+fn ec_laplace_decode(ec, fs, decay) {
+    var val = 0;
+    var fm = ec_decode_bin(ec, 15);
+    var fl = 0;
+    if (fm >= fs) {
+        val = 1;
+        fl = fs;
+        fs = _ec_laplace_get_freq1(fs, decay) + 1;
+        while ((fs > 1) & (fm >= fl + 2 * fs)) {
+            fs = fs * 2;
+            fl = fl + fs;
+            fs = ((fs - 2) * decay) >> 15;
+            fs = fs + 1;
+            val = val + 1;
+        }
+        if (fs <= 1) {
+            var di = (fm - fl) >> 1;
+            val = val + di;
+            fl = fl + 2 * di;
+        }
+        if (fm < fl + fs) {
+            val = 0 - val;
+        } else {
+            fl = fl + fs;
+        }
+    }
+    var fh = fl + fs;
+    if (fh > 32768) { fh = 32768; }
+    ec_dec_update(ec, fl, fh, 32768);
+    return val;
+}
+
+# unquant_coarse_energy: fills oldEBands[0..C*21) with base-2 log energies.
+# `intra` is decoded by the caller (orchestration) and passed in.
+fn celt_unquant_coarse_energy(oldEBands, intra, ec, C) {
+    if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
+    var prob = 0;
+    var coef = F64_ZERO;
+    var beta = F64_ZERO;
+    if (intra != 0) {
+        prob = _celt_eprob_intra;
+        coef = F64_ZERO;
+        beta = CELT_BETA_INTRA;
+    } else {
+        prob = _celt_eprob_inter;
+        coef = CELT_PRED_COEF3;
+        beta = CELT_BETA_COEF3;
+    }
+    var budget = load64(ec + 8) * 8;
+    var prev0 = F64_ZERO;
+    var prev1 = F64_ZERO;
+    var neg9 = f64_neg(f64_from(9));
+    var i = 0;
+    while (i < CELT_NB_EBANDS) {
+        var c = 0;
+        while (c < C) {
+            var idx = i + c * CELT_NB_EBANDS;
+            var tell = ec_tell(ec);
+            var qi = 0;
+            if (budget - tell >= 15) {
+                var pi = 2 * i;   # min(i,20)=i for i<21
+                qi = ec_laplace_decode(ec, load8(prob + pi) << 7, load8(prob + pi + 1) << 6);
+            } else {
+                if (budget - tell >= 2) {
+                    var sym = ec_dec_icdf(ec, _celt_small_en_icdf, 2);
+                    qi = (sym >> 1) ^ (0 - (sym & 1));
+                } else {
+                    if (budget - tell >= 1) {
+                        qi = 0 - ec_dec_bit_logp(ec, 1);
+                    } else {
+                        qi = 0 - 1;
+                    }
+                }
+            }
+            var q = f64_from(qi);
+            var oldE = load64(oldEBands + idx * 8);
+            oldE = f64_max(neg9, oldE);
+            var prevc = prev0;
+            if (c == 1) { prevc = prev1; }
+            var tmp = f64_add(f64_add(f64_mul(coef, oldE), prevc), q);
+            store64(oldEBands + idx * 8, tmp);
+            # prev[c] += q - beta*q
+            var np = f64_add(prevc, f64_sub(q, f64_mul(beta, q)));
+            if (c == 1) { prev1 = np; } else { prev0 = np; }
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# unquant_fine_energy: adds fine corrections (raw bits from the back).
+fn celt_unquant_fine_energy(oldEBands, fine_quant, ec, C) {
+    var i = 0;
+    while (i < CELT_NB_EBANDS) {
+        var extra = load64(fine_quant + i * 8);
+        if (extra <= 0) {
+            i = i + 1;
+        } else {
+            if (ec_tell(ec) + C * extra > load64(ec + 8) * 8) {
+                i = i + 1;
+            } else {
+                var c = 0;
+                while (c < C) {
+                    var idx = i + c * CELT_NB_EBANDS;
+                    var q2 = ec_dec_bits(ec, extra);
+                    # offset = (q2+0.5)/(1<<extra) - 0.5   (prev==0 factor is 1.0)
+                    var num = f64_add(f64_from(q2), F64_HALF);
+                    var den = f64_from(1 << extra);
+                    var offset = f64_sub(f64_div(num, den), F64_HALF);
+                    store64(oldEBands + idx * 8, f64_add(load64(oldEBands + idx * 8), offset));
+                    c = c + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# unquant_energy_finalise: use leftover bits, 1 per (band,ch), two priority passes.
+fn celt_unquant_energy_finalise(oldEBands, fine_quant, fine_priority, bits_left, ec, C) {
+    var prio = 0;
+    while (prio < 2) {
+        var i = 0;
+        while ((i < CELT_NB_EBANDS) & (bits_left >= C)) {
+            var fq = load64(fine_quant + i * 8);
+            if ((fq >= CELT_MAX_FINE_BITS) | (load64(fine_priority + i * 8) != prio)) {
+                i = i + 1;
+            } else {
+                var c = 0;
+                while (c < C) {
+                    var idx = i + c * CELT_NB_EBANDS;
+                    var q2 = ec_dec_bits(ec, 1);
+                    # offset = (q2-0.5)/(1<<(fq+1))
+                    var den = f64_from(1 << (fq + 1));
+                    var offset = f64_div(f64_sub(f64_from(q2), F64_HALF), den);
+                    store64(oldEBands + idx * 8, f64_add(load64(oldEBands + idx * 8), offset));
+                    bits_left = bits_left - 1;
+                    c = c + 1;
+                }
+                i = i + 1;
+            }
+        }
+        prio = prio + 1;
+    }
+    return 0;
+}
+
+# Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
+# was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
+# decoding it here must reproduce the identical values and ec_tell. This is the
+# proof that ec_dec interoperates with a real RFC-6716 stream.
+fn test_ec_laplace_rfc_vectors() {
+    test_group("opus: ec_laplace_decode bit-exact vs libopus");
+    if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
+    # 7-byte prefix from libopus ec_laplace_encode of {0,1,-1,3,-5,2,0,7}
+    # using e_prob_model[3][0] pairs, padded with zeros (laplace reads front only).
+    var buf = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(buf + i, 0); i = i + 1; }
+    store8(buf + 0, 31);  store8(buf + 1, 232); store8(buf + 2, 205); store8(buf + 3, 197);
+    store8(buf + 4, 144); store8(buf + 5, 140); store8(buf + 6, 128);
+    var expect = alloc(8 * 8);
+    store64(expect + 0, 0);      store64(expect + 8, 1);       store64(expect + 16, 0 - 1);
+    store64(expect + 24, 3);     store64(expect + 32, 0 - 5);  store64(expect + 40, 2);
+    store64(expect + 48, 0);     store64(expect + 56, 7);
+    var ec = ec_dec_new(buf, 16);
+    var prob = _celt_eprob_inter;
+    i = 0;
+    while (i < 8) {
+        var qi = ec_laplace_decode(ec, load8(prob + 2 * i) << 7, load8(prob + 2 * i + 1) << 6);
+        assert_eq(qi, load64(expect + i * 8), "laplace qi matches libopus");
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_ec_dec_rfc_vectors() {
+    test_group("opus: ec_dec bit-exact vs libopus");
+    var buf = alloc(16);
+    var b = alloc(16 * 8);
+    store64(b + 0,  146); store64(b + 8,  99);  store64(b + 16, 168); store64(b + 24, 224);
+    store64(b + 32, 0);   store64(b + 40, 0);   store64(b + 48, 0);   store64(b + 56, 0);
+    store64(b + 64, 0);   store64(b + 72, 0);   store64(b + 80, 0);   store64(b + 88, 3);
+    store64(b + 96, 255); store64(b + 104, 255); store64(b + 112, 168); store64(b + 120, 42);
+    var i = 0;
+    while (i < 16) { store8(buf + i, load64(b + i * 8)); i = i + 1; }
+    # icdf tables (inverse CDF, ftb=8)
+    var icdf3 = alloc(4);
+    store8(icdf3 + 0, 224); store8(icdf3 + 1, 160); store8(icdf3 + 2, 96); store8(icdf3 + 3, 0);
+    var icdf2 = alloc(2);
+    store8(icdf2 + 0, 192); store8(icdf2 + 1, 0);
+
+    var ec = ec_dec_new(buf, 16);
+    assert_eq(ec_dec_uint(ec, 10), 5, "ec uint 5/10");
+    assert_eq(ec_dec_bit_logp(ec, 1), 1, "ec bit_logp1 = 1");
+    assert_eq(ec_dec_bit_logp(ec, 3), 0, "ec bit_logp3 = 0");
+    assert_eq(ec_dec_bits(ec, 6), 42, "ec raw bits6 = 42");
+    assert_eq(ec_dec_icdf(ec, icdf3, 8), 2, "ec icdf3 = 2");
+    assert_eq(ec_dec_uint(ec, 200000), 100000, "ec uint 100000/200000");
+    assert_eq(ec_dec_bits(ec, 10), 1023, "ec raw bits10 = 1023");
+    assert_eq(ec_dec_icdf(ec, icdf2, 8), 0, "ec icdf2 = 0");
+    assert_eq(ec_dec_uint(ec, 65536), 65535, "ec uint 65535/65536");
+    assert_eq(ec_dec_bit_logp(ec, 4), 1, "ec bit_logp4 = 1");
+    assert_eq(ec_tell(ec), 64, "ec_tell = 64");
+    return 0;
+}
+
 fn test_opus_range_roundtrip() {
     test_group("opus: range coder roundtrip");
     var rc = opus_range_enc_init();
@@ -1716,6 +2206,8 @@ fn test_opus_vbr_encode() {
 }
 
 fn test_opus_pvq_all() {
+    test_ec_dec_rfc_vectors();
+    test_ec_laplace_rfc_vectors();
     test_opus_range_roundtrip();
     test_pvq_v_counting();
     test_pvq_cwrs_roundtrip();
