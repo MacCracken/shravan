@@ -2396,6 +2396,25 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 36 * 8), 0, "sw0 LTPI1");
     assert_eq(load64(out + 37 * 8), 0, "sw0 LTPI2");
     assert_eq(load64(out + 38 * 8), 0, "sw0 LTPI3");
+    # sw0 NLSF -> pNLSF_Q15 (bit-exact vs libopus silk_NLSF_decode)
+    var pn = alloc(16 * 8);
+    silk_nlsf_decode(out + 18 * 8, 16, pn);
+    assert_eq(load64(pn + 0 * 8), 598, "sw0 pNLSF0");
+    assert_eq(load64(pn + 1 * 8), 2048, "sw0 pNLSF1");
+    assert_eq(load64(pn + 2 * 8), 3716, "sw0 pNLSF2");
+    assert_eq(load64(pn + 3 * 8), 5151, "sw0 pNLSF3");
+    assert_eq(load64(pn + 4 * 8), 7319, "sw0 pNLSF4");
+    assert_eq(load64(pn + 5 * 8), 9309, "sw0 pNLSF5");
+    assert_eq(load64(pn + 6 * 8), 11598, "sw0 pNLSF6");
+    assert_eq(load64(pn + 7 * 8), 13676, "sw0 pNLSF7");
+    assert_eq(load64(pn + 8 * 8), 16041, "sw0 pNLSF8");
+    assert_eq(load64(pn + 9 * 8), 17536, "sw0 pNLSF9");
+    assert_eq(load64(pn + 10 * 8), 19712, "sw0 pNLSF10");
+    assert_eq(load64(pn + 11 * 8), 21888, "sw0 pNLSF11");
+    assert_eq(load64(pn + 12 * 8), 24192, "sw0 pNLSF12");
+    assert_eq(load64(pn + 13 * 8), 26240, "sw0 pNLSF13");
+    assert_eq(load64(pn + 14 * 8), 28416, "sw0 pNLSF14");
+    assert_eq(load64(pn + 15 * 8), 30336, "sw0 pNLSF15");
     # sw1
     var sw1_p = alloc(28);
     store8(sw1_p + 0, 167); store8(sw1_p + 1, 33); store8(sw1_p + 2, 153); store8(sw1_p + 3, 115); store8(sw1_p + 4, 110); store8(sw1_p + 5, 47); store8(sw1_p + 6, 26); store8(sw1_p + 7, 189); store8(sw1_p + 8, 218); store8(sw1_p + 9, 230); store8(sw1_p + 10, 208); store8(sw1_p + 11, 14); store8(sw1_p + 12, 195); store8(sw1_p + 13, 190);
@@ -2469,6 +2488,18 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 30 * 8), 0, "sn0 LTPI1");
     assert_eq(load64(out + 31 * 8), 0, "sn0 LTPI2");
     assert_eq(load64(out + 32 * 8), 0, "sn0 LTPI3");
+    # sn0 NLSF -> pNLSF_Q15 (NB, order 10)
+    silk_nlsf_decode(out + 18 * 8, 8, pn);
+    assert_eq(load64(pn + 0 * 8), 1716, "sn0 pNLSF0");
+    assert_eq(load64(pn + 1 * 8), 2731, "sn0 pNLSF1");
+    assert_eq(load64(pn + 2 * 8), 4578, "sn0 pNLSF2");
+    assert_eq(load64(pn + 3 * 8), 8198, "sn0 pNLSF3");
+    assert_eq(load64(pn + 4 * 8), 11571, "sn0 pNLSF4");
+    assert_eq(load64(pn + 5 * 8), 14808, "sn0 pNLSF5");
+    assert_eq(load64(pn + 6 * 8), 18331, "sn0 pNLSF6");
+    assert_eq(load64(pn + 7 * 8), 21772, "sn0 pNLSF7");
+    assert_eq(load64(pn + 8 * 8), 25872, "sn0 pNLSF8");
+    assert_eq(load64(pn + 9 * 8), 29694, "sn0 pNLSF9");
     # sn1
     var sn1_p = alloc(16);
     store8(sn1_p + 0, 166); store8(sn1_p + 1, 148); store8(sn1_p + 2, 176); store8(sn1_p + 3, 15); store8(sn1_p + 4, 63); store8(sn1_p + 5, 212); store8(sn1_p + 6, 70); store8(sn1_p + 7, 179); store8(sn1_p + 8, 102); store8(sn1_p + 9, 77); store8(sn1_p + 10, 112); store8(sn1_p + 11, 201); store8(sn1_p + 12, 233); store8(sn1_p + 13, 158);
