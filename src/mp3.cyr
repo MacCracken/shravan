@@ -655,9 +655,9 @@ var _MP3_HUFF_CSV = "513,0,513,16,513,1,17,513,0,1025,513,16,1,513,17,1025,513,3
 # g_synth_dtbl: 512 synthesis-window doubles as IEEE-754 bit patterns.
 var _MP3_DTBL_CSV = "0,13758496923874626529,13758496923874626529,13758496923874626529,13758496923874626529,13758496923874626529,13758496923874626529,13763000523501997025,13763000523501997025,13763000523501997025,13763000523501997025,13765252206870610307,13765252206870610307,13767504037813176180,13767504037813176180,13768629964813674162,13768629964813674162,13769755880284957098,13770881795756240035,13770881795756240035,13772007637440546676,13772570606705403190,13773133564441044658,13773696522176686126,13774822400754480915,13775385358490122383,13776511267043876292,13776792727464952952,13777355685200594420,13777918642936235888,13778763061092954017,13779326018828595485,13780170436985313613,13780733376274211008,13781437075749605852,13781859284827964916,13782281493906323980,13782844451641965448,13783407400154234880,13783970348666504311,13784674036612684109,13785377724558863907,13785799935943065981,13786151779916155880,13786573988994514944,13786996202684560027,13787418416374605109,13787840630064650192,13788333208859964440,13788825792266964706,13789248001345323770,13789810954469279220,13790162796136526110,13790409087840026243,13790690562096160959,13790936853799661092,13791183143197318215,13791464617453452931,13791710909156953064,13791957198554610188,13792203490258110321,13792414597103132862,13792625701642312395,13792836808487334936,4569640693619104077,4569816615605649027,4569957352733716385,4570062907309149160,4570133274720261334,4570168459578738926,4570168459578738926,4570133274720261334,4570027722450671568,4569922167875238793,4569711063336059261,4569464771632559128,4569183297376424412,4568796268544856921,4568374057160654848,4567881476059497591,4567283340382907559,4566579652436727760,4565101911439098999,4563483426395873852,4561161260323997934,4556798400130537805,13763000523501997025,13781577805960144182,13786081410199200696,13788825792266964706,13790901668941183500,13792449779655767445,13794103447251627175,13795194161723531455,13796126547791051085,13797076525134888007,13798096872195680113,13799090831189074777,13799636188425026917,13800199138666678605,13800779680761108337,13801377815284776865,13801984745446604038,13802609268037670007,13803242586843355374,13803708779877115190,13804029837099037196,13804350894609189578,13804671951831111585,13804993009341263967,13805309668744106651,13805617531932329936,13805920997013243523,13806215666167768088,13806497141288593932,13806765422087490679,13807020508852688705,13807253605369568613,13807469109457209725,13807658225477453395,13807829749356688646,13807966088665676681,13808056248712604005,13808095831101930544,13808117821350248662,13808122219457558361,13808106826226089603,13808069442890417914,4584616042059218992,4584453314394603139,4584242208126041350,4583982723541764001,4583670462246231016,4583305424239442396,4582887609809628517,4582408222742169981,4581876059251686186,4581286720942637056,4580631411888633570,4579685831787415219,4578137719919909769,4576475257838812898,4573722080709350995,4568655531416789564,13782844451641965448,13795088608301020184,13799319529310414610,13801685678184769774,13803845119186103225,13805133746757561701,13806470752932966114,13807851739605006765,13808656582145812194,13809388856780698719,13810138723700708852,13810901784798532894,13811680238983710506,13812467489383507516,13812901796499559984,13813300919189480424,13813702240933055714,13814102463149803580,13814500486384954189,13814894111512795100,13815281139623786651,13815661570645871247,13816031006543796784,13816389447389620855,13816733594458745999,13817053002606599650,13817208033763567515,13817353169287174948,13817486759959238406,13817608255980315380,13817716557895636039,13817809466615516737,13817887531939399984,13817948554849659725,13817991435783439741,13818015075285970200,13818018923593837389,13818001881144185088,13817962298754858550,13817900176317771383,13817813314923383927,13817701714499638588,13817564275519707940,13817399898528822153,13817208583526981227,13816933705603148729,13816436726322624179,13815880373458109821,4591892610082772254,4591216410451393262,4590478638182369613,4589679293203643713,4588464332920816378,4586614954305476251,4584616042059218992,4580415907800992458,4562568633910514521,13803304159192769655,13808199185182556589,13810789634647402639,13813020543739597193,13814433416185230003,13815902363706427940,13817234971810551451,13818023871392503207,13818837510003812846,13819675887608451572,13820537904715620757,13821421362307694348,13821936208646962971,13822397728637663036,13822868044734896107,13823346332293541617,13823831491804786539,13824322973505217161,13824819677886020456,13825320780302075856,13825825181262584734,13826191456074924620,13826445580700105454,13826699705325286288,13826953555077767466,13827206442744274646,13827457956029269144,13827707407737491017,13827954248096519354,13828197927360954841,13828438033208237194,13828673878452113671,13828904913338177759,13829130862975715402,13829350765296767003,13829564482869486332,13829771328498613447,13829970752420734638,13830162479763150247,13830345960762446561,13830520645673224266,13830620288913858148,13830698285521818279,13830771334322105395,13830839160446523436,13830901763890568804,13830958801056611527,13831010271944651607,13831056039113835615,13831095896411890607,13831129775113886271,13831157606503899491,13831179390577426669,13831194921177691261,13831204267025119982,4607835391269440624,4607832230170344174,4607822884322915453,4607807353722650861,4607785569649123683,4607757738259110463,4607723859557114799,4607684002259059807,4607638235089875799,4607586764201835719,4607529727035792996,4607467123591747628,4607399297467329587,4607326248667042471,4607248252059082340,4607148608818448458,4606973923907670753,4606790442908374439,4606598715565958830,4606399291643837639,4606192446014710524,4605978728441991195,4605758826120939594,4605532876483401951,4605301841597337863,4605065996353461386,4604825890506179033,4604582211241743546,4604335370882715209,4604085919174493336,4603834405889498838,4603581518222991658,4603327668470510480,4603073543845329646,4602819419220148812,4602453144407808926,4601948743447300048,4601447641031244648,4600950936650441353,4600459454950010731,4599974295438765809,4599496007880120299,4599025691782887228,4598564171792187163,4598049325452918540,4597165867860844949,4596303850753675764,4595465473149037038,4594651834537727399,4593862934955775643,4592530326851652132,4591061379330454195,4589648506884821385,4587417597792626831,4584827148327780781,4579932122337993847,13785940670765290329,13803787944655768266,13807988078913994800,13809986991160252059,13811836369775592186,13813051330058419521,13813850675037145421,13814588447306169070,4591892610082772254,4592508336603334013,4593064689467848371,4593561668748372921,4593836546672205419,4594027861674046345,4594192238664932132,4594329677644862780,4594441278068608119,4594528139462995575,4594590261900082742,4594629844289409280,4594646886739061581,4594643038431194392,4594619398928663933,4594576517994883917,4594515495084624176,4594437429760740929,4594344521040860231,4594236219125539572,4594114723104462598,4593981132432399140,4593835996908791707,4593680965751823842,4593361557603970191,4593017410534845047,4592658969689020976,4592289533791095439,4591909102769010843,4591522074658019292,4591128449530178381,4590730426295027772,4590330204078279906,4589928882334704616,4589529759644784176,4589095452528731708,4588308202128934698,4587529747943757086,4586766686845933044,4586016819925922911,4585284545291036386,4584479702750230957,4583098716078190306,4581761709902785893,4580473082331327417,4578313641329993966,4575947492455638802,4571716571446244376,4559472414787189640,13792027568271565372,13797094117564126803,13799847294693588706,13801509756774685577,13803057868642191027,13804003448743409378,13804658757797412864,13805248096106461994,13805780259596945789,13806259646664404325,13806677461094218204,13807042499101006824,13807354760396539809,13807614244980817158,13807825351249378947,4584616042059218992,4584697406035642106,4584734789371313795,4584750182602782553,4584745784495472854,4584723794247154736,4584684211857828197,4584594051810900873,4584457712501912838,4584286188622677587,4584097072602433917,4583881568514792805,4583648471997912897,4583393385232714871,4583125104433818124,4582843629312992280,4582548960158467715,4582245495077554128,4581937631889330843,4581620972486488159,4581299914976335777,4580978857754413770,4580657800244261388,4580336743022339382,4579870549988579566,4579237231182894199,4578612708591828230,4578005778430001057,4577407643906332529,4576827101811902797,4576264151570251109,4575718794334298969,4574724835340904305,4573704488280112199,4572754510936275277,4571822124868755647,4570731410396851367,4569077742800991637,4567529632086407692,4565453755412188898,4562709373344424888,4558205769105368374,4539628486647221217,13780170436985313613,13784533297178773742,13786855463250649660,13788473948293874807,13789951689291503568,13790655377237683367,13791253512914273399,13791746094015430656,13792168305399632729,13792555334231200220,13792836808487334936,13793083100190835069,13793294204730014601,13793399759305447376,13793505311575037142,13793540496433514734,13793540496433514734,13793505311575037142,13793434944163924968,13793329389588492193,13793188652460424835,4569640693619104077,4569464771632559128,4569253664787536587,4569042560248357054,4568831453403334513,4568585161699834380,4568338872302177256,4568092580598677123,4567811106342542407,4567564816944885284,4567318525241385151,4567037050985250435,4566790759281750302,4566438917614503412,4565875964490547962,4565453755412188898,4564961172005188632,4564468593209874384,4564046379519829301,4563624165829784219,4563201952139739136,4562779743061380072,4562427899088290173,4562005687704088099,4561301999757908301,4560598311811728503,4560035363299459072,4559472414787189640,4558909457051548172,4558487247973189108,4558065038894830044,4557361339419435200,4556798400130537805,4555953981973819677,4555391024238178209,4554546606081460080,4553983648345818612,4553420690610177144,4553139230189100484,4552013321635346575,4551450363899705107,4550324485321910318,4549761527586268850,4549198569850627382,4548635600585770868,4547509758901464227,4547509758901464227,4546383843430181290,4545257927958898354,4545257927958898354,4544132000958400372,4544132000958400372,4541880170015834499,4541880170015834499,4539628486647221217,4539628486647221217,4539628486647221217,4539628486647221217,4535124887019850721,4535124887019850721,4535124887019850721,4535124887019850721,4535124887019850721,4535124887019850721";
 # sfb long indices, 3 sample rates x 23.
-var _MP3_SFBL_CSV = "0,4,8,12,16,20,24,30,36,44,52,62,74,90,110,134,162,196,238,288,342,418,576,0,4,8,12,16,20,24,30,36,42,50,60,72,88,106,128,156,190,230,276,330,384,576,0,4,8,12,16,20,24,30,36,44,54,66,82,102,126,156,194,240,296,364,448,550,576";
+var _MP3_SFBL_CSV = "0,6,12,18,24,30,36,44,54,66,80,96,116,140,168,200,238,284,336,396,464,522,576,0,12,24,36,48,60,72,88,108,132,160,192,232,280,336,400,476,566,568,570,572,574,576,0,6,12,18,24,30,36,44,54,66,80,96,116,140,168,200,238,284,336,396,464,522,576,0,6,12,18,24,30,36,44,54,66,80,96,114,136,162,194,232,278,332,394,464,540,576,0,6,12,18,24,30,36,44,54,66,80,96,116,140,168,200,238,284,336,396,464,522,576,0,4,8,12,16,20,24,30,36,44,52,62,74,90,110,134,162,196,238,288,342,418,576,0,4,8,12,16,20,24,30,36,42,50,60,72,88,106,128,156,190,230,276,330,384,576,0,4,8,12,16,20,24,30,36,44,54,66,82,102,126,156,194,240,296,364,448,550,576";  # 8 rows x 23 (unified: 2.5/2/1 sample rates, minimp3 sr_idx order)
 # sfb short indices, 3 x 14.
-var _MP3_SFBS_CSV = "0,4,8,12,16,22,30,40,52,66,84,106,136,192,0,4,8,12,16,22,28,38,50,64,80,100,126,192,0,4,8,12,16,22,30,42,58,78,104,138,180,192";
+var _MP3_SFBS_CSV = "0,4,8,12,18,26,36,48,62,80,104,134,174,192,0,8,16,24,36,52,72,96,124,160,162,164,166,192,0,4,8,12,18,24,32,42,56,74,100,132,174,192,0,4,8,12,18,26,36,48,62,80,104,136,180,192,0,4,8,12,18,26,36,48,62,80,104,134,174,192,0,4,8,12,16,22,30,40,52,66,84,106,136,192,0,4,8,12,16,22,28,38,50,64,80,100,126,192,0,4,8,12,16,22,30,42,58,78,104,138,180,192";  # 8 rows x 14
 # scalefac sizes 16 x (slen1,slen2).
 var _MP3_SCFSZ_CSV = "0,0,0,1,0,2,0,3,3,0,1,1,1,2,1,3,2,1,2,2,2,3,3,1,3,2,3,3,4,2,4,3";
 # pretab 21.
@@ -685,6 +685,7 @@ var _mp3_sfb_l = 0;       # [3][23]
 var _mp3_sfb_s = 0;       # [3][14]
 var _mp3_scf_size = 0;    # [16][2]
 var _mp3_pretab = 0;      # [21]
+var _mp3_stab_t = 0;      # LSF scalefactor partition counts [3][6][4]
 var _mp3_cs = 0;          # [8] f64
 var _mp3_ca = 0;          # [8] f64
 var _mp3_isr = 0;         # [6] f64 intensity ratios
@@ -756,10 +757,14 @@ fn _mp3_l3_init() {
     _mp3_parse_csv(_MP3_DTBL_CSV, _mp3_dtbl);
 
     # --- sfb indices, scalefac sizes, pretab ---
-    _mp3_sfb_l = alloc(3 * 23 * 8);   _mp3_parse_csv(_MP3_SFBL_CSV, _mp3_sfb_l);
-    _mp3_sfb_s = alloc(3 * 14 * 8);   _mp3_parse_csv(_MP3_SFBS_CSV, _mp3_sfb_s);
+    _mp3_sfb_l = alloc(8 * 23 * 8);   _mp3_parse_csv(_MP3_SFBL_CSV, _mp3_sfb_l);
+    _mp3_sfb_s = alloc(8 * 14 * 8);   _mp3_parse_csv(_MP3_SFBS_CSV, _mp3_sfb_s);
     _mp3_scf_size = alloc(16 * 2 * 8);_mp3_parse_csv(_MP3_SCFSZ_CSV, _mp3_scf_size);
     _mp3_pretab = alloc(21 * 8);      _mp3_parse_csv(_MP3_PRETAB_CSV, _mp3_pretab);
+    # LSF (MPEG-2/2.5) scalefactor partition counts stab[3 block-cat][6 blockindex][4]
+    # (mpg123). Index (n*6 + blockindex)*4 + k.
+    _mp3_stab_t = alloc(72 * 8);
+    _mp3_parse_csv("6,5,5,5,6,5,7,3,11,10,0,0,7,7,7,0,6,6,6,3,8,8,5,0,9,9,9,9,9,9,12,6,18,18,0,0,12,12,12,0,12,9,9,6,15,12,9,0,6,9,9,9,6,9,12,6,15,18,0,0,6,15,12,0,6,12,9,6,6,18,9,0", _mp3_stab_t);
 
     # --- antialias cs/ca from ci ---
     var ci = alloc(8 * 8);
@@ -867,9 +872,12 @@ fn test_mp3_l3_tables() {
     assert_eq(load64(_mp3_huff_lin + 16 * 8), 1, "tab16 linbits 1");
     assert_eq(load64(_mp3_huff_off + 33 * 8), 2261, "tab33 off 2261");
     # sfb long[0][ ] : 44100 band 6 = 24, band 22 = 576
-    assert_eq(load64(_mp3_sfb_l + 6 * 8), 24, "sfbl[0][6]=24");
-    assert_eq(load64(_mp3_sfb_l + 22 * 8), 576, "sfbl[0][22]=576");
-    assert_eq(load64(_mp3_sfb_s + (1*14 + 6) * 8), 28, "sfbs[1][6]=28");
+    # unified 8-row sfb tables (minimp3 sr_idx order): row 5 = MPEG1 44100, row 2 = MPEG2 22050, row 0 = MPEG2.5 11025
+    assert_eq(load64(_mp3_sfb_l + (5*23 + 6) * 8), 24, "sfbl[44100][6]=24");
+    assert_eq(load64(_mp3_sfb_l + (5*23 + 22) * 8), 576, "sfbl[44100][22]=576");
+    assert_eq(load64(_mp3_sfb_s + (5*14 + 6) * 8), 30, "sfbs[44100][6]=30");
+    assert_eq(load64(_mp3_sfb_l + (2*23 + 7) * 8), 44, "sfbl[22050][7]=44");
+    assert_eq(load64(_mp3_sfb_l + (0*23 + 7) * 8), 44, "sfbl[11025][7]=44");
     # scf sizes: index 4 -> (3,0)
     assert_eq(load64(_mp3_scf_size + (4*2 + 0) * 8), 3, "scfsz[4].slen1=3");
     assert_eq(load64(_mp3_scf_size + (14*2 + 0) * 8), 4, "scfsz[14].slen1=4");
@@ -895,7 +903,10 @@ fn test_mp3_l3_tables() {
 # ================================================================
 
 # --- per-frame header context (set by mp3_decode) ---
-var _mp3_sfreq = 0;     # sample-rate index 0/1/2
+var _mp3_sfreq = 0;     # unified scalefactor-band table index 0..7
+var _mp3_lsf = 0;       # 1 for MPEG-2/2.5 (LSF)
+var _mp3_kl = 0;        # intensity-stereo panning coeffs (scratch)
+var _mp3_kr = 0;
 var _mp3_mode = 0;      # channel mode (0..3)
 var _mp3_modext = 0;    # mode extension (joint stereo)
 var _mp3_nch = 1;
@@ -1030,28 +1041,39 @@ fn _mp3_get_main_data(main, size, begin) {
 # ================================================================
 # Side info parse (Read_Audio_L3)
 # ================================================================
-fn _mp3_read_side_info(sideptr, sideinfo_size, nch) {
+fn _mp3_read_side_info(sideptr, sideinfo_size, nch, lsf) {
     var br = bitreader_new(sideptr, sideinfo_size);
-    _si_mdb = bitreader_read(br, 9);
-    if (nch == 1) { bitreader_read(br, 5); } else { bitreader_read(br, 3); }
-    var ch = 0;
-    while (ch < nch) {
-        var b = 0;
-        while (b < 4) {
-            store64(_si_scfsi + (ch * 4 + b) * 8, bitreader_read(br, 1));
-            b = b + 1;
+    var ngr = 2;
+    if (lsf == 1) {
+        ngr = 1;
+        _si_mdb = bitreader_read(br, 8);
+        if (nch == 1) { bitreader_read(br, 1); } else { bitreader_read(br, 2); }
+    } else {
+        _si_mdb = bitreader_read(br, 9);
+        if (nch == 1) { bitreader_read(br, 5); } else { bitreader_read(br, 3); }
+        # scfsi (MPEG-1 only; LSF has one granule so no cross-granule copy)
+        var ch0 = 0;
+        while (ch0 < nch) {
+            var b = 0;
+            while (b < 4) {
+                store64(_si_scfsi + (ch0 * 4 + b) * 8, bitreader_read(br, 1));
+                b = b + 1;
+            }
+            ch0 = ch0 + 1;
         }
-        ch = ch + 1;
     }
     var gr = 0;
-    while (gr < 2) {
-        ch = 0;
+    while (gr < ngr) {
+        var ch = 0;
         while (ch < nch) {
             var gc = gr * 2 + ch;
             store64(_si_part23 + gc * 8, bitreader_read(br, 12));
             store64(_si_bigval + gc * 8, bitreader_read(br, 9));
             store64(_si_gain + gc * 8, bitreader_read(br, 8));
-            store64(_si_scfcomp + gc * 8, bitreader_read(br, 4));
+            # scalefac_compress is 4 bits for MPEG-1, 9 for LSF
+            var scfc_bits = 4;
+            if (lsf == 1) { scfc_bits = 9; }
+            store64(_si_scfcomp + gc * 8, bitreader_read(br, scfc_bits));
             var wsf = bitreader_read(br, 1);
             store64(_si_winsw + gc * 8, wsf);
             if (wsf == 1) {
@@ -1076,7 +1098,8 @@ fn _mp3_read_side_info(sideptr, sideinfo_size, nch) {
                 store64(_si_btype + gc * 8, 0);
                 store64(_si_mixed + gc * 8, 0);
             }
-            store64(_si_pre + gc * 8, bitreader_read(br, 1));
+            # preflag: a bit in MPEG-1; derived from scalefac_compress in LSF (set later)
+            if (lsf == 0) { store64(_si_pre + gc * 8, bitreader_read(br, 1)); }
             store64(_si_scfscale + gc * 8, bitreader_read(br, 1));
             store64(_si_c1tsel + gc * 8, bitreader_read(br, 1));
             ch = ch + 1;
@@ -1210,13 +1233,25 @@ fn _mp3_read_huffman(part_2_start, gr, ch) {
 # ================================================================
 # Read main data: scalefactors + Huffman for all granules/channels (Read_Main_L3)
 # ================================================================
-fn _mp3_read_main(nch) {
+fn _mp3_read_main(nch, lsf) {
+    var ngr = 2;
+    if (lsf == 1) { ngr = 1; }
+    var i_stereo = 0;
+    if ((_mp3_mode == 1) && ((_mp3_modext & 1) != 0)) { i_stereo = 1; }
     var gr = 0;
-    while (gr < 2) {
+    while (gr < ngr) {
         var ch = 0;
         while (ch < nch) {
             var gc = gr * 2 + ch;
             var part_2_start = _mp3_mpos();
+            if (lsf == 1) {
+                # LSF scalefactor decode; right channel uses intensity slen when i_stereo
+                var ist = 0;
+                if ((i_stereo == 1) && (ch == 1)) { ist = 1; }
+                _mp3_read_scf_lsf(ch, ist);
+                _mp3_read_huffman(part_2_start, gr, ch);
+                ch = ch + 1;
+            } else {
             var scfcomp = load64(_si_scfcomp + gc * 8);
             var slen1 = load64(_mp3_scf_size + (scfcomp * 2 + 0) * 8);
             var slen2 = load64(_mp3_scf_size + (scfcomp * 2 + 1) * 8);
@@ -1257,6 +1292,7 @@ fn _mp3_read_main(nch) {
             }
             _mp3_read_huffman(part_2_start, gr, ch);
             ch = ch + 1;
+            }
         }
         gr = gr + 1;
     }
@@ -1293,6 +1329,80 @@ fn _mp3_scf_group(gr, ch, lo, hi, slen, scfsi) {
     }
     return 0;
 }
+
+# ================================================================
+# MPEG-2/2.5 (LSF) scalefactor decode (mpg123 III_get_scale_factors_2)
+# ================================================================
+# LSF has one granule (gr=0); slens + block partition counts derive from the
+# 9-bit scalefac_compress. Reads band-major scalefactors into scalefac_l /
+# scalefac_s (same layout the MPEG-1 path uses), sets preflag for pretab.
+fn _mp3_stab(n, bi, k) { return load64(_mp3_stab_t + ((n * 6 + bi) * 4 + k) * 8); }
+
+# read `count` scalefactors of `bits` each into scf[idx..]; returns new idx
+fn _mp3_scf_part(scf, idx, count, bits) {
+    var j = 0;
+    while (j < count) {
+        var v = 0;
+        if (bits > 0) { v = _mp3_mbits(bits); }
+        store64(scf + idx * 8, v);
+        idx = idx + 1;
+        j = j + 1;
+    }
+    return idx;
+}
+
+fn _mp3_read_scf_lsf(ch, i_stereo) {
+    var gc = ch;                       # LSF: gr=0, so gc = 0*2+ch = ch
+    var sfc = load64(_si_scfcomp + gc * 8);
+    if (i_stereo == 1) { sfc = sfc >> 1; }
+    var s0 = 0; var s1 = 0; var s2 = 0; var s3 = 0;
+    var blockidx = 0; var pre = 0;
+    if (sfc < 400) {
+        s0 = (sfc >> 4) / 5; s1 = (sfc >> 4) % 5; s2 = (sfc % 16) >> 2; s3 = sfc % 4; blockidx = 0;
+    } else {
+        if (sfc < 500) {
+            var t = sfc - 400; s0 = (t >> 2) / 5; s1 = (t >> 2) % 5; s2 = t % 4; s3 = 0; blockidx = 1;
+        } else {
+            var t2 = sfc - 500; s0 = t2 / 3; s1 = t2 % 3; s2 = 0; s3 = 0; blockidx = 2; pre = 1;
+        }
+    }
+    if (i_stereo == 1) { blockidx = blockidx + 3; pre = 0; }
+    store64(_si_pre + gc * 8, pre);
+    var n = 0;
+    var btype = load64(_si_btype + gc * 8);
+    var mixed = load64(_si_mixed + gc * 8);
+    if (btype == 2) { n = 1; if (mixed != 0) { n = 2; } }
+    var scf = alloc(40 * 8);
+    memset(scf, 0, 40 * 8);
+    var idx = 0;
+    idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 0), s0);
+    idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 1), s1);
+    idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 2), s2);
+    idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 3), s3);
+    # map linear scf -> scalefac_l / scalefac_s
+    if (n == 0) {
+        # long: 21 bands
+        var i = 0;
+        while (i < 21) { store64(_md_scf_l + (gc * 21 + i) * 8, load64(scf + i * 8)); i = i + 1; }
+    } else {
+        if (n == 1) {
+            # pure short: bands 0..11 x 3 windows, band-major index sfb*3+win (36); band 12 = 0
+            var i = 0;
+            while (i < 36) { store64(_md_scf_s + (gc * 12 * 3 + i) * 8, load64(scf + i * 8)); i = i + 1; }
+        } else {
+            # mixed: first 6 long bands (LSF), then short bands 3..11 (9 bands x 3 = 27)
+            var i = 0;
+            while (i < 6) { store64(_md_scf_l + (gc * 21 + i) * 8, load64(scf + i * 8)); i = i + 1; }
+            var j = 0;
+            while (j < 27) {
+                store64(_md_scf_s + (gc * 12 * 3 + (3 * 3) + j) * 8, load64(scf + (6 + j) * 8));
+                j = j + 1;
+            }
+        }
+    }
+    return 0;
+}
+
 # ================================================================
 # MPEG-1 Layer III decoder — part B: requant, reorder, stereo,
 # antialias, IMDCT, hybrid + subband synthesis, dispatch  (2.5.11)
@@ -1482,13 +1592,10 @@ fn _mp3_reorder_fn(gr, ch) {
     return 0;
 }
 
-# Intensity stereo (long)
+# Intensity stereo (long) — retained (unused; superseded by _mp3_stereo band walk).
 fn _mp3_intensity_long(gr, sfb) {
     var sfreq = _mp3_sfreq;
-    var is_pos = _mp3_scfl(gr, 0, sfb);
-    # Valid intensity positions are 0..6 (7 = illegal, skip). A crafted 4-bit
-    # scalefactor can reach 8..15, which would index _mp3_isr (6 entries) OOB — so
-    # gate on `< 7`, not `!= 7`.
+    var is_pos = _mp3_scfl(gr, 1, sfb);
     if (is_pos < 7) {
         var sfb_start = load64(_mp3_sfb_l + (sfreq * 23 + sfb) * 8);
         var sfb_stop = load64(_mp3_sfb_l + (sfreq * 23 + (sfb + 1)) * 8);
@@ -1517,7 +1624,7 @@ fn _mp3_intensity_short(gr, sfb) {
     var win_len = load64(_mp3_sfb_s + (sfreq * 14 + (sfb + 1)) * 8) - load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8);
     var win = 0;
     while (win < 3) {
-        var is_pos = _mp3_scfs(gr, 0, sfb, win);
+        var is_pos = _mp3_scfs(gr, 1, sfb, win);
         if (is_pos < 7) {   # 0..6 valid; 7=illegal, 8..15 (crafted) would read _mp3_isr OOB
             var sfb_start = load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8) * 3 + win_len * win;
             var sfb_stop = sfb_start + win_len;
@@ -1542,53 +1649,161 @@ fn _mp3_intensity_short(gr, sfb) {
     return 0;
 }
 
-# L3_Stereo — MS + intensity (only for joint stereo)
-fn _mp3_stereo(gr) {
-    if (_mp3_mode != 1) { return 0; }
-    if (_mp3_modext == 0) { return 0; }
-    if ((_mp3_modext & 0x2) != 0) {
-        var c0 = load64(_si_count1 + (gr * 2 + 0) * 8);
-        var c1 = load64(_si_count1 + (gr * 2 + 1) * 8);
-        var max_pos = c0;
-        if (c0 > c1) { max_pos = c1; }
-        var i = 0;
-        while (i < max_pos) {
+# Process one stereo band [start,start+width): mode 1 = M/S, 2 = intensity(kl,kr).
+fn _mp3_stereo_band(gr, start, width, mode, kl, kr) {
+    var i = start;
+    var stop = start + width;
+    while (i < stop) {
+        if (mode == 1) {
             var l = _mp3_isv(gr, 0, i);
             var r = _mp3_isv(gr, 1, i);
             _mp3_iss(gr, 0, i, f64_mul(f64_add(l, r), _mp3_invsqrt2));
             _mp3_iss(gr, 1, i, f64_mul(f64_sub(l, r), _mp3_invsqrt2));
-            i = i + 1;
+        } else {
+            if (mode == 2) {
+                var m = _mp3_isv(gr, 0, i);
+                _mp3_iss(gr, 0, i, f64_mul(m, kl));
+                _mp3_iss(gr, 1, i, f64_mul(m, kr));
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Intensity panning coeffs for position ipos -> _mp3_kl/_mp3_kr.
+fn _mp3_intensity_pan(ipos, ishift) {
+    if (_mp3_lsf == 0) {
+        if (ipos == 6) { _mp3_kl = f64_from(1); _mp3_kr = f64_from(0); return 0; }
+        var r = load64(_mp3_isr + ipos * 8);
+        var one = f64_from(1);
+        _mp3_kl = f64_div(r, f64_add(one, r));
+        _mp3_kr = f64_div(one, f64_add(one, r));
+    } else {
+        # LSF: kl=1, kr=2^(-(((ipos+1)>>1)<<ishift)/4); swap if ipos odd
+        var e = ((ipos + 1) >> 1) << ishift;
+        var kr = f64_pow(f64_from(2), f64_div(f64_neg(f64_from(e)), f64_from(4)));
+        var kl = f64_from(1);
+        if ((ipos & 1) == 1) { kl = kr; kr = f64_from(1); }
+        _mp3_kl = kl; _mp3_kr = kr;
+    }
+    return 0;
+}
+
+# L3_Stereo — M/S + intensity (joint stereo only), operating in bitstream order
+# (before reorder), per minimp3's L3_stereo_process. Intensity applies to bands
+# above the top band where the right channel has data; M/S to the rest.
+fn _mp3_stereo(gr) {
+    if (_mp3_mode != 1) { return 0; }
+    if (_mp3_modext == 0) { return 0; }
+    var ms = _mp3_modext & 2;
+    var intensity = _mp3_modext & 1;
+    var sfreq = _mp3_sfreq;
+    var gc0 = gr * 2 + 0;
+    # Intensity off: plain M/S over all 576 lines (bitstream order).
+    if (intensity == 0) {
+        if (ms != 0) { _mp3_stereo_band(gr, 0, 576, 1, 0, 0); }
+        return 0;
+    }
+    # Build the bitstream-order band list for channel 0's block type.
+    var isshort = 0;
+    if ((load64(_si_winsw + gc0 * 8) == 1) && (load64(_si_btype + gc0 * 8) == 2)) { isshort = 1; }
+    var mixed = load64(_si_mixed + gc0 * 8);
+    var bstart = alloc(64 * 8);
+    var bwidth = alloc(64 * 8);
+    var bist = alloc(64 * 8);
+    var nb = 0;
+    var has_long = 0;
+    if (isshort == 0) {
+        has_long = 1;
+        var b = 0;
+        while (b < 22) {
+            store64(bstart + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
+            store64(bwidth + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + (b + 1)) * 8) - load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
+            var isv = 999;
+            if (b < 21) { isv = _mp3_scfl(gr, 1, b); }
+            store64(bist + nb * 8, isv);
+            nb = nb + 1; b = b + 1;
+        }
+    } else {
+        var startsfb = 0;
+        var base = 0;
+        if (mixed != 0) {
+            has_long = 1;
+            var nlong = 8;
+            if (_mp3_lsf == 1) { nlong = 6; }
+            var b = 0;
+            while (b < nlong) {
+                store64(bstart + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
+                store64(bwidth + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + (b + 1)) * 8) - load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
+                store64(bist + nb * 8, _mp3_scfl(gr, 1, b));
+                nb = nb + 1; b = b + 1;
+            }
+            startsfb = 3;
+            base = 36;
+        }
+        var pos = base;
+        var sfb = startsfb;
+        while (sfb < 13) {
+            var w = load64(_mp3_sfb_s + (sfreq * 14 + (sfb + 1)) * 8) - load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8);
+            var win = 0;
+            while (win < 3) {
+                store64(bstart + nb * 8, pos);
+                store64(bwidth + nb * 8, w);
+                var isv = 999;
+                if (sfb < 12) { isv = _mp3_scfs(gr, 1, sfb, win); }
+                store64(bist + nb * 8, isv);
+                pos = pos + w; nb = nb + 1;
+                win = win + 1;
+            }
+            sfb = sfb + 1;
         }
     }
-    if ((_mp3_modext & 0x1) != 0) {
-        var sfreq = _mp3_sfreq;
-        var c1 = load64(_si_count1 + (gr * 2 + 1) * 8);
-        if ((load64(_si_winsw + (gr * 2 + 0) * 8) == 1) && (load64(_si_btype + (gr * 2 + 0) * 8) == 2)) {
-            if (load64(_si_mixed + (gr * 2 + 0) * 8) != 0) {
-                var sfb = 0;
-                while (sfb < 8) {
-                    if (load64(_mp3_sfb_l + (sfreq * 23 + sfb) * 8) >= c1) { _mp3_intensity_long(gr, sfb); }
-                    sfb = sfb + 1;
-                }
-                sfb = 3;
-                while (sfb < 12) {
-                    if (load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8) * 3 >= c1) { _mp3_intensity_short(gr, sfb); }
-                    sfb = sfb + 1;
-                }
-            } else {
-                var sfb = 0;
-                while (sfb < 12) {
-                    if (load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8) * 3 >= c1) { _mp3_intensity_short(gr, sfb); }
-                    sfb = sfb + 1;
-                }
-            }
-        } else {
-            var sfb = 0;
-            while (sfb < 21) {
-                if (load64(_mp3_sfb_l + (sfreq * 23 + sfb) * 8) >= c1) { _mp3_intensity_long(gr, sfb); }
-                sfb = sfb + 1;
-            }
+    # max_band[3]: highest band (per window residue) where the right channel has data.
+    var mb0 = 0 - 1; var mb1 = 0 - 1; var mb2 = 0 - 1;
+    var bi = 0;
+    while (bi < nb) {
+        var st = load64(bstart + bi * 8);
+        var wd = load64(bwidth + bi * 8);
+        var k = st;
+        var found = 0;
+        while (k < st + wd) {
+            if (load64(_mp3_isp(gr, 1, k)) != 0) { found = 1; k = st + wd; } else { k = k + 1; }
         }
+        if (found == 1) {
+            var m = bi % 3;
+            if (m == 0) { mb0 = bi; }
+            if (m == 1) { mb1 = bi; }
+            if (m == 2) { mb2 = bi; }
+        }
+        bi = bi + 1;
+    }
+    if (has_long == 1) {
+        var mx = mb0;
+        if (mb1 > mx) { mx = mb1; }
+        if (mb2 > mx) { mx = mb2; }
+        mb0 = mx; mb1 = mx; mb2 = mx;
+    }
+    var max_pos = 7;
+    if (_mp3_lsf == 1) { max_pos = 64; }
+    var ishift = load64(_si_scfcomp + (gr * 2 + 1) * 8) & 1;
+    # process bands
+    bi = 0;
+    while (bi < nb) {
+        var ipos = load64(bist + bi * 8);
+        var r2 = bi % 3;
+        var mbv = mb0;
+        if (r2 == 1) { mbv = mb1; }
+        if (r2 == 2) { mbv = mb2; }
+        var st2 = load64(bstart + bi * 8);
+        var wd2 = load64(bwidth + bi * 8);
+        if ((bi > mbv) && (ipos < max_pos)) {
+            _mp3_intensity_pan(ipos, ishift);
+            _mp3_stereo_band(gr, st2, wd2, 2, _mp3_kl, _mp3_kr);
+        } else {
+            if (ms != 0) { _mp3_stereo_band(gr, st2, wd2, 1, 0, 0); }
+        }
+        bi = bi + 1;
     }
     return 0;
 }
@@ -1763,18 +1978,21 @@ fn _mp3_subband(gr, ch) {
 }
 
 # Decode one frame's granules into the sample vec (interleaved for stereo).
-fn _mp3_decode_l3(nch, samples) {
+fn _mp3_decode_l3(nch, lsf, samples) {
+    var ngr = 2;
+    if (lsf == 1) { ngr = 1; }
     var gr = 0;
-    while (gr < 2) {
+    while (gr < ngr) {
         var ch = 0;
         while (ch < nch) {
             _mp3_requantize(gr, ch);
-            _mp3_reorder_fn(gr, ch);
             ch = ch + 1;
         }
+        # Stereo (M/S + intensity) runs in bitstream order, BEFORE reorder (minimp3).
         _mp3_stereo(gr);
         ch = 0;
         while (ch < nch) {
+            _mp3_reorder_fn(gr, ch);
             _mp3_antialias(gr, ch);
             _mp3_hybrid(gr, ch);
             _mp3_freq_inv(gr, ch);
@@ -1809,20 +2027,37 @@ fn _mp3_decode_frame(data, pos, info, samples) {
     _mp3_nch = nch;
     _mp3_mode = cm;
     _mp3_modext = (load8(data + pos + 3) >> 4) & 3;
-    _mp3_sfreq = (load8(data + pos + 2) >> 2) & 3;
+    # LSF = MPEG-2 or 2.5 (version != V1); one granule, different side info + scalefactors.
+    var ver = mp3_frame_version(info);
+    var lsf = 0;
+    if (ver != MP3_VERSION_V1) { lsf = 1; }
+    _mp3_lsf = lsf;
+    # unified scalefactor-band table index (minimp3 sr_idx order): 2.5=0..2, 2=3..5, 1=6..8, then -1 if !=0
+    var sri = (load8(data + pos + 2) >> 2) & 3;
+    var my = sri;
+    if (ver == MP3_VERSION_V1) { my = sri + 6; }
+    if (ver == MP3_VERSION_V2) { my = sri + 3; }
+    var sfreq = my;
+    if (my != 0) { sfreq = my - 1; }
+    _mp3_sfreq = sfreq;
     var prot = load8(data + pos + 1) & 1;      # 1 = no CRC, 0 = CRC present
     var crc = 0;
     if (prot == 0) { crc = 2; }
+    # side info: MPEG-1 = 17/32, LSF = 9/17 (mono/stereo)
     var sinfo_size = 17;
     if (nch == 2) { sinfo_size = 32; }
+    if (lsf == 1) {
+        sinfo_size = 9;
+        if (nch == 2) { sinfo_size = 17; }
+    }
     var mds = fs - 4 - crc - sinfo_size;
     if (mds < 0) { return 0; }
     var sideptr = data + pos + 4 + crc;
-    _mp3_read_side_info(sideptr, sinfo_size, nch);
+    _mp3_read_side_info(sideptr, sinfo_size, nch, lsf);
     var ok = _mp3_get_main_data(sideptr + sinfo_size, mds, _si_mdb);
     if (ok != 1) { return 0; }
-    _mp3_read_main(nch);
-    _mp3_decode_l3(nch, samples);
+    _mp3_read_main(nch, lsf);
+    _mp3_decode_l3(nch, lsf, samples);
     return 1;
 }
 
@@ -1850,7 +2085,7 @@ fn mp3_decode_pcm(data, len) {
                         if (pos + fs > len) {
                             stop = 1;
                         } else {
-                            if ((mp3_frame_version(info) == MP3_VERSION_V1) && (mp3_frame_layer(info) == MP3_LAYER_III)) {
+                            if (mp3_frame_layer(info) == MP3_LAYER_III) {
                                 sr = mp3_frame_sample_rate(info);
                                 var cm = mp3_frame_channel_mode(info);
                                 nch = 2;
@@ -1917,8 +2152,8 @@ var _MP3_FIXTURE_B64 = "//sQxAAABEgBcVQQgDCvBm2nMJAAACAdOCRgAHw+UBBwYWD4PggcDEyJ
 
 # Correlate decoded mono samples (flat f64 buffer) against the source two-tone,
 # sweeping lag to absorb the decoder/filterbank delay. Returns corr*1000.
-fn _mp3_tone_corr(sbuf, nsamp) {
-    var M = 6000;
+fn _mp3_tone_corr(sbuf, nsamp, sr) {
+    var M = 2500;
     var maxlag = 1200;
     if (nsamp < M + maxlag) { return 0; }
     var two_pi = f64_mul(f64_from(2), _MP3_PI);
@@ -1927,10 +2162,10 @@ fn _mp3_tone_corr(sbuf, nsamp) {
     var tone = alloc(M * 8);
     var k = 0;
     while (k < M) {
-        var p440 = (440 * k) % 44100;
-        var p1200 = (1200 * k) % 44100;
-        var arg440 = f64_div(f64_mul(two_pi, f64_from(p440)), f64_from(44100));
-        var arg1200 = f64_div(f64_mul(two_pi, f64_from(p1200)), f64_from(44100));
+        var p440 = (440 * k) % sr;
+        var p1200 = (1200 * k) % sr;
+        var arg440 = f64_div(f64_mul(two_pi, f64_from(p440)), f64_from(sr));
+        var arg1200 = f64_div(f64_mul(two_pi, f64_from(p1200)), f64_from(sr));
         var v = f64_add(f64_mul(a04, f64_sin(arg440)), f64_mul(a03, f64_sin(arg1200)));
         store64(tone + k * 8, v);
         k = k + 1;
@@ -1978,7 +2213,7 @@ fn test_mp3_decode_audio() {
     var sbuf = alloc(m * 8);
     var i = 0;
     while (i < m) { store64(sbuf + i * 8, vec_get(sv, i)); i = i + 1; }
-    var c = _mp3_tone_corr(sbuf, m);
+    var c = _mp3_tone_corr(sbuf, m, 44100);
     syscall(1, 1, "  mp3 decode corr*1000 = ", 25); fmt_int(c); syscall(1, 1, "\n", 1);
     assert(c > 990, "mp3 decoded audio correlates with source two-tone (>0.99)");
     return 0;
@@ -2017,8 +2252,8 @@ fn test_mp3_decode_rejects_malformed() {
 var _MP3_ST_B64 = "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";
 
 # Correlate one channel of interleaved f64 PCM against a single source sine.
-fn _mp3_sine_corr(sbuf, ntotal, stride, offset, freq) {
-    var M = 6000;
+fn _mp3_sine_corr(sbuf, ntotal, stride, offset, freq, sr) {
+    var M = 2500;
     var maxlag = 1200;
     var npairs = ntotal / stride;
     if (npairs < M + maxlag) { return 0; }
@@ -2026,8 +2261,8 @@ fn _mp3_sine_corr(sbuf, ntotal, stride, offset, freq) {
     var tone = alloc(M * 8);
     var k = 0;
     while (k < M) {
-        var p = (freq * k) % 44100;
-        store64(tone + k * 8, f64_sin(f64_div(f64_mul(two_pi, f64_from(p)), f64_from(44100))));
+        var p = (freq * k) % sr;
+        store64(tone + k * 8, f64_sin(f64_div(f64_mul(two_pi, f64_from(p)), f64_from(sr))));
         k = k + 1;
     }
     var best = f64_from(0);
@@ -2074,11 +2309,75 @@ fn test_mp3_decode_stereo() {
     var sbuf = alloc(m * 8);
     var i = 0;
     while (i < m) { store64(sbuf + i * 8, vec_get(sv, i)); i = i + 1; }
-    var cl = _mp3_sine_corr(sbuf, m, 2, 0, 440);
-    var cr = _mp3_sine_corr(sbuf, m, 2, 1, 660);
+    var cl = _mp3_sine_corr(sbuf, m, 2, 0, 440, 44100);
+    var cr = _mp3_sine_corr(sbuf, m, 2, 1, 660, 44100);
     syscall(1, 1, "  mp3 stereo corr*1000 L=", 25); fmt_int(cl);
     syscall(1, 1, " R=", 3); fmt_int(cr); syscall(1, 1, "\n", 1);
     assert(cl > 990, "L channel correlates with 440Hz source (>0.99)");
     assert(cr > 990, "R channel correlates with 660Hz source (>0.99)");
+    return 0;
+}
+
+# --- 2.5.12: MPEG-2/2.5 (LSF) Layer III decode coverage ---
+var _M2_B64 = "//NAxAAQ0JLAP0lIAMPbbb8I0aNGjRzqCMVhcEwTDaOe5//6h/aMVgmCYbJ25Q5wf8MUef4EdoD/AjtAf4Edz/R7+j+D4EBAMSAPh/KHO/oVahZScAyDAYEAgEAACaReL4NydFFYYlj/80LEFxpZytY/maACYOpSDhBgJpNeI6pAcoEZlIQm/LoBwQc4pAZEabDpAyzQulEnS6l/jnDnEyRUiv/mReJoxLpdS//yLEWMS6XTIvF5H//8ul1IGhKEgaEv/8JB0qr7sZlLGDAJAMP/80DECRawolgB3vAAAPCsMDMH4whQJjBdEIMYkUo5DTTTGYEzJg8C0RgIgMCwAaKLDobgX+s6cpxy6IEAPCwBhgOglGImZEZDCsZiyBymGADyGAeGAWAoCgCWQF2n6v/errRjFCY0Jv/zQsQJFQimNADv+FSpkWuMAqAHTdQCVADAgosANLNe6TW89f8yX0EIAWFgBQkACSIA1MBXAJTA0AJowoEOnNorIXjDeQNU4AVjPI1MgCwwoHDA4NLqMr3V/etzTPTAbwrYQgACQoCACf/zQMQQFpCmMAD+/mwwDMAsOEXL+TmQISJUzm9g+cqb/5gKAIFEDDCUyUqMBNATDAeAHkwO0EGMKwFaTb3jEYw7IE3MELAajAcABsOATxkANBIAUWdXdpX/3q62IwFoINRtWGLjGAQA//NCxBATuKI4AP68bBCbKMUYAe6LDl+wNRW89f99LIeChCIzQswHAOzATCCMAwT0wJ2qjIv8fMC8YocCZBAIxgFgPgoBciAcKwA1PP/93IJMBJBiFbmspEmAJgCxppJEiDgmkIW2kNHh//NAxB0SAKJAAP+2cK3/1VhEMy3Cpy5BgSgWmDgEoYu5vZ/mv7GQeGOcglGgk5kAwYQEAYDUEd///W48YCECpsBa0oMYAYAJmheEDwP9TOeWRXu71/3GQozCAcwRjAZAQMDQB0weQSD/80LEMBIgokQA/nxsxfBxz/iQeMhAFUwjQDB4G0HAPl907mQxKv/93IJMBpBuE5l2oBTAFwCY1XstVOyAFgrNoFnrGt/+afSA0BFjLDTAgA1MCMG4wPhCzDDWkOH/NMxDRSjA4B7MAED/80DEQxNIojwA/rxsyEIBqEY8AakE3tX//V14jAcAbNL1dyAYwBYArNUwMEDBWADFgAmSwNO296/6qgiAcFAAFAAZUAQMBkE8wZA3DFdTdPtexYx7xHTiG40E5MkIjDgwDCaGjjreo//zQsRQE2iiPAD/tnCmArgoS5mspimAFgDhoCZOmBgHZLl1pba5r/+4xlJ4cABwaABGAJgAxgGQACYD6ADGDFANJoOwIQBhEkjKwc8GKgYNA0ZGqx7POpEF2MbMA4GUYAxMF8E8whgujP/zQMReEoCiRAAH9hwrgDzXkN4MLEAUwVAUjAmASBQDhe985K69Jz4f20YvgBQNGgSXSY0RYfQ8aaCkqY/i2Cg/R/ZWtNOuL7bCWhbWRLbbbbbaBQIH/JAQCYmlIO1H1umd2WUjdeNW//NCxG8TuKJgAV7oACLhBGVf5FykOAYQfgASNMUhjRyQF3SJHhgEWzmijQ8AcVAaDBxoXCjlG5YSc0KiaAjoXopEYwWetS6zRet3JsdhByJERKxFka117vvyZLBNFMmEDc0Nf6v2/mxq//NAxHwlUh7mX5qgAl0yOmJgZpmhuDP/+kGREJCIYDgLN///FmpVI18koER4FToMgqoOiUqdETw3UeiJ4lnqzqvhpR4riKdz35Gdqf0zv4KqDpVbhFO/8jO/+JQ1wVVMQU1FMy4xMDH/80LEQQ3gAgA3wQgCIChiZXRhIDMpVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=";     # MPEG-2 L3, 22050 Hz mono
+var _M25_B64 = "/+MwxAAV6QrIn0g4AAAChhyW7d3d3d3tEREStHuBQGgKAWA0Mf7/mGGGNp+3oYOCIDsH4lh/D/R0B/lPf0IyAPvwIc4f6Pfg+DgIAgCAYB8Hw+sCAgcwP0f/hgHwfB8+gQAg7LoAEQAIYYByQWheAKIL4+AIEDVevAiEANWkADOAfBoDwMZTMDB4HANBAGfHwAoVgbzA3cGriZtz/+MyxDcre3aYZZOoAH2IcQ0VqF/f/DkgBQkBi0EAaxDQGEQEDYOMxZgGDUqBl8EDMmzl0A1ugYQBAnE2E2hq0PhHKFzCtiG//45o5pNEWIsYkVIqZf//kWIsYl0umReLyJdNVf///kWLxiXTVReSWiykv////9FWvMkUTFJIyRRMUki9/////////waAHGAJgBQGAIjAKAB8wDoBTP/jMsQZJTEyNAHf+ADAHwIQwMkH4MQVFtDE8XLgz8AWLMSmCZzAdgDQwHUDSMCEAPTABgAwwFEBQMAdAFiIAKl3f//////////oIelLLU5VimACgIhgL4BwYAeAFGArAnpg6QOWYSAJTmOCLqJk8wCcYEkBbmBKAP5gKgA+ngDQAIulI2Av1uzx/7cOOu2qWooIGBnJlV8YIPq9G63/4zLEFCKpMiAABv5ogOIYDCAxmAOAEhgBYAaWbL0JrhYBCKAEL///////////5qrKn9YaoEhJAoAAYAUAJmATgIBgPAG6YOuJBGrFWGBj5BFeYfiE1GDQAlZgboFQYEEAymAngHhgFgA+YAmACJ8tyWK/Vnb//9Fm3/Z///RyH6bbf0KyQAAOACT//1h/P/9d/f/nYn52CVkCEAJM/+MwxBkfySo6XPz87ACAEQwHle6M8CAuDAIwB0AAACK4lMXAOMEqBef3/X9ZMEDJwcsG6gGVIHTBgVgZmCgDAYT4YZjIEVHkHYYcYpJxhLBDmA6B4YAADIVAERtYE+tBetO/+z3U9n//o9X/p/6aP/9/9dX//TLhByRF6FlgAIAyBgDwDcBgasOwBsMgIoBgJYBqBgCAAYBgAIAC/+MyxCgegTIsAL0+7Bc+HqCdwKMgYL///UTY4BtCXAPCgYAoBkVZgEgCcYCKBJmA7AoxgZIlaYLTJSmMrCGRhHQJaYHmBBGA+AIpgIoBIYBIAHmAIgAAcAAtXg2GqXL/////////UXMAUAUwBQCwsBkAgszA+BeMKgV4x+BejFt+UPDgU0wwhmjFUDIMHYCwwFAPjBGBKCAWBGAUx//jMsQ+H+EyQAFe8ACz7//////////+rsNtfS8RUQsMBcDMwKwKwwHow2BljIWOSOxKHQ3KgmzDNCdML0MEwcQD1KDAMAaFgFI248bzqcUOaUJtgWCYshQbDYbDb95KPkTX6VYSAK1S/smj9CpIKBqxIOECyANI/AaBk0OcT3gDEBPknA9ETqRFf9ZmbojHCOQuFFtqDOg8byCDmAL/4zLETjPL9upfj6AD4wEU4ZciazEZUxNUv5poIYs0XKQWYkBJr/jKEQFlk/GbHPK5oJ2JscoVsKCJk0HKID/+dNyCE4xcLhoX3YnxzSqYkyOaTRsUSaIsT3//l9OmmXEJcLiDqYvqJoxLqBiXS6k5iZF5JX//+m6aboaCDUGTemm6ReRRUiXUazFIqFHZKgfbkOQ5mu9i4fRdMSHG/+MwxA4biW5IBc9gAJKpci2hqUKRJOS4qGh/EGIUiEICQ7PnJ7RdW1vmcsu61vrWs5WuHQlE5DASACghKACB0swEoSidEdGR99a5bsta36yt8FRh4FR4K/g0oO/kus7///yv+Iuo8W/Wd5X/EVVMQU1FMy4xMDEgKGJldGEgMylVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";   # MPEG-2.5 L3, 11025 Hz mono
+var _M2ST_B64 = "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"; # MPEG-2 L3, 22050 Hz joint stereo
+
+# LSF (MPEG-2/2.5) Layer III mono decode: verified sample-exact vs minimp3
+# (corr 1.00000); committed as two-tone correlation of the decoded output.
+fn test_mp3_decode_lsf() {
+    test_group("mp3: decode MPEG-2/2.5 (LSF) Layer III -> PCM");
+    if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
+    var buf = alloc(8192);
+    # MPEG-2 (22050 Hz) mono
+    var n2 = _mp3_b64_decode(_M2_B64, buf);
+    var r2 = mp3_decode_pcm(buf, n2);
+    assert(res_ok(r2) == 1, "mpeg2 L3 decode ok");
+    var s2 = decode_result_samples(r2);
+    assert_eq(fmtinfo_sample_rate(load64(r2)), 22050, "mpeg2 sr 22050");
+    var m2 = vec_len(s2);
+    assert(m2 > 7000, "mpeg2 decoded enough samples");
+    var b2 = alloc(m2 * 8);
+    var i = 0;
+    while (i < m2) { store64(b2 + i * 8, vec_get(s2, i)); i = i + 1; }
+    var c2 = _mp3_tone_corr(b2, m2, 22050);
+    syscall(1, 1, "  mpeg2 corr*1000 = ", 20); fmt_int(c2); syscall(1, 1, "\n", 1);
+    assert(c2 > 985, "mpeg2 L3 audio correlates with source (>0.985)");
+    # MPEG-2.5 (11025 Hz) mono
+    var n25 = _mp3_b64_decode(_M25_B64, buf);
+    var r25 = mp3_decode_pcm(buf, n25);
+    assert(res_ok(r25) == 1, "mpeg2.5 L3 decode ok");
+    var s25 = decode_result_samples(r25);
+    assert_eq(fmtinfo_sample_rate(load64(r25)), 11025, "mpeg2.5 sr 11025");
+    var m25 = vec_len(s25);
+    var b25 = alloc(m25 * 8);
+    i = 0;
+    while (i < m25) { store64(b25 + i * 8, vec_get(s25, i)); i = i + 1; }
+    var c25 = _mp3_tone_corr(b25, m25, 11025);
+    syscall(1, 1, "  mpeg2.5 corr*1000 = ", 22); fmt_int(c25); syscall(1, 1, "\n", 1);
+    assert(c25 > 985, "mpeg2.5 L3 audio correlates with source (>0.985)");
+    return 0;
+}
+
+# LSF joint-stereo (M/S) decode: verified sample-exact vs minimp3 (L/R 1.00000).
+fn test_mp3_decode_lsf_stereo() {
+    test_group("mp3: decode MPEG-2 (LSF) joint stereo -> PCM");
+    if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
+    var buf = alloc(8192);
+    var n = _mp3_b64_decode(_M2ST_B64, buf);
+    var res = mp3_decode_pcm(buf, n);
+    assert(res_ok(res) == 1, "lsf stereo decode ok");
+    var sv = decode_result_samples(res);
+    assert_eq(fmtinfo_channels(load64(res)), 2, "lsf stereo 2 channels");
+    var m = vec_len(sv);
+    var sb = alloc(m * 8);
+    var i = 0;
+    while (i < m) { store64(sb + i * 8, vec_get(sv, i)); i = i + 1; }
+    var cl = _mp3_sine_corr(sb, m, 2, 0, 400, 22050);
+    var cr = _mp3_sine_corr(sb, m, 2, 1, 900, 22050);
+    syscall(1, 1, "  lsf stereo corr*1000 L=", 25); fmt_int(cl);
+    syscall(1, 1, " R=", 3); fmt_int(cr); syscall(1, 1, "\n", 1);
+    assert(cl > 985, "lsf stereo L correlates (400Hz)");
+    assert(cr > 985, "lsf stereo R correlates (900Hz)");
     return 0;
 }
