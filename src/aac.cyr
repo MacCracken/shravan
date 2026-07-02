@@ -732,6 +732,69 @@ fn _aac_parse_ics_ext(br, is_short, max_sfb, st) {
 }
 
 # ================================================================
+# Psychoacoustic model — simultaneous masking (AAC encoder)
+# ================================================================
+# Each scalefactor band's energy spreads to its neighbours (SFBs approximate
+# critical bands), so a loud band raises the level below which quantization noise
+# stays inaudible nearby. We derive a per-band coarseness offset (in scalefactor
+# units) = 2·log2(spread/energy): zero for an isolated band, positive where
+# neighbours mask it. Adding it to the baseline scale factor quantizes masked
+# bands coarser (fewer bits) while leaving unmasked bands unchanged. Spreading is
+# asymmetric — gentler toward higher frequency (the upward spread of masking).
+
+var PSY_SLOPE_UP = 10;      # dB attenuation per SFB toward higher frequency (gentle)
+var PSY_SLOPE_DOWN = 25;    # dB attenuation per SFB toward lower frequency (steep)
+var PSY_MAX_OFFSET = 24;    # cap on masking coarseness (scf units) — avoid over-culling
+var _aac_psy_up_gain = 0;   # up_gain[d]   = 10^(-PSY_SLOPE_UP*d/10)
+var _aac_psy_down_gain = 0; # down_gain[d] = 10^(-PSY_SLOPE_DOWN*d/10)
+
+fn _aac_psy_init() {
+    _aac_psy_up_gain = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_down_gain = alloc(_AAC_NUM_SWB * 8);
+    var ten = f64_from(10);
+    var d = 0;
+    while (d < _AAC_NUM_SWB) {
+        store64(_aac_psy_up_gain + d * 8, f64_pow(ten, f64_neg(f64_div(f64_from(PSY_SLOPE_UP * d), ten))));
+        store64(_aac_psy_down_gain + d * 8, f64_pow(ten, f64_neg(f64_div(f64_from(PSY_SLOPE_DOWN * d), ten))));
+        d = d + 1;
+    }
+    return 0;
+}
+
+# Per-band masking coarseness offset (scalefactor units, >= 0). energies[b] is the
+# linear band energy (sum of squared coefficients); offset_out[b] gets the extra
+# scale-factor coarseness that neighbour masking permits.
+fn _aac_psy_masking_offsets(energies, num_bands, offset_out) {
+    if (_aac_psy_up_gain == 0) { _aac_psy_init(); }
+    var floor_e = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
+    var b = 0;
+    while (b < num_bands) {
+        var e_self = load64(energies + b * 8);
+        var spread = F64_ZERO;
+        var bp = 0;
+        while (bp < num_bands) {
+            var e = load64(energies + bp * 8);
+            var gain = F64_ZERO;
+            if (b >= bp) { gain = load64(_aac_psy_up_gain + (b - bp) * 8); }
+            else { gain = load64(_aac_psy_down_gain + (bp - b) * 8); }
+            spread = f64_add(spread, f64_mul(e, gain));
+            bp = bp + 1;
+        }
+        var off = 0;
+        if (f64_gt(e_self, floor_e) == 1) {
+            if (f64_gt(spread, e_self) == 1) {
+                off = f64_to(f64_mul(F64_TWO, f64_log2(f64_div(spread, e_self))));
+            }
+        }
+        if (off < 0) { off = 0; }
+        if (off > PSY_MAX_OFFSET) { off = PSY_MAX_OFFSET; }
+        store64(offset_out + b * 8, off);
+        b = b + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # AAC-LC frame encoder
 # ================================================================
 
@@ -806,20 +869,33 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     var quant_spec = alloc(AAC_FRAME_SIZE * 8);
     memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
 
-    # Determine scale factors based on band energy
+    # Pass 1: per-band energies, then psychoacoustic masking coarseness offsets.
+    var energies = alloc(_AAC_NUM_SWB * 8);
+    var eb = 0;
+    while (eb < _AAC_NUM_SWB) {
+        var es = load64(_aac_swb_offset + eb * 8);
+        var ee = load64(_aac_swb_offset + (eb + 1) * 8);
+        var esum = F64_ZERO;
+        var ej = es;
+        while (ej < ee) {
+            var ec = load64(mdct_out + ej * 8);
+            esum = f64_add(esum, f64_mul(ec, ec));
+            ej = ej + 1;
+        }
+        store64(energies + eb * 8, esum);
+        eb = eb + 1;
+    }
+    var psy_off = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(energies, _AAC_NUM_SWB, psy_off);
+
+    # Determine scale factors based on band energy + masking
     var band = 0;
     var j = 0;
     while (band < _AAC_NUM_SWB) {
         var start = load64(_aac_swb_offset + band * 8);
         var end = load64(_aac_swb_offset + (band + 1) * 8);
 
-        j = start;
-        var energy = F64_ZERO;
-        while (j < end) {
-            var c2 = load64(mdct_out + j * 8);
-            energy = f64_add(energy, f64_mul(c2, c2));
-            j = j + 1;
-        }
+        var energy = load64(energies + band * 8);
 
         var band_size = end - start;
         if (band_size < 1) { band_size = 1; }
@@ -835,6 +911,8 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             var target_log = f64_log2(f64_div(target, F64_128));
             scf = f64_to(f64_add(f64_from(100), f64_mul(f64_from(4), f64_sub(log_rms, target_log))));
         }
+        # Psychoacoustic masking: coarsen bands that neighbours mask (0 if unmasked).
+        scf = scf + load64(psy_off + band * 8);
         if (scf < 0) { scf = 0; }
         if (scf > 200) { scf = 200; }
         store64(scale_factors + band * 8, scf);
@@ -3437,6 +3515,107 @@ fn test_aac_tns_frame_roundtrip() {
     return 0;
 }
 
+# An isolated band (no neighbours with energy) gets zero masking coarseness.
+fn test_aac_psy_isolated_no_masking() {
+    test_group("aac: psy isolated band, no masking");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var en = alloc(_AAC_NUM_SWB * 8);
+    memset(en, 0, _AAC_NUM_SWB * 8);
+    store64(en + 20 * 8, f64_from(1000));
+    var off = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en, _AAC_NUM_SWB, off);
+    assert_eq(load64(off + 20 * 8), 0, "isolated band has zero masking offset");
+    return 0;
+}
+
+# A loud band masks a quieter neighbour -> positive coarseness offset there.
+fn test_aac_psy_neighbor_masking() {
+    test_group("aac: psy neighbour masking");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var en = alloc(_AAC_NUM_SWB * 8);
+    memset(en, 0, _AAC_NUM_SWB * 8);
+    store64(en + 20 * 8, f64_from(100000));
+    store64(en + 21 * 8, f64_from(10));
+    var off = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en, _AAC_NUM_SWB, off);
+    assert(load64(off + 21 * 8) > 0, "masked neighbour gets positive offset");
+    return 0;
+}
+
+# Masking falls off with critical-band distance.
+fn test_aac_psy_masking_falloff() {
+    test_group("aac: psy masking distance falloff");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var en = alloc(_AAC_NUM_SWB * 8);
+    memset(en, 0, _AAC_NUM_SWB * 8);
+    store64(en + 20 * 8, f64_from(100000));
+    store64(en + 21 * 8, f64_from(10));
+    store64(en + 24 * 8, f64_from(10));
+    var off = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en, _AAC_NUM_SWB, off);
+    assert(load64(off + 21 * 8) > load64(off + 24 * 8), "nearer band masked more than farther");
+    return 0;
+}
+
+# A louder masker raises the offset on the same neighbour.
+fn test_aac_psy_louder_masks_more() {
+    test_group("aac: psy louder masker masks more");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var en1 = alloc(_AAC_NUM_SWB * 8);
+    memset(en1, 0, _AAC_NUM_SWB * 8);
+    store64(en1 + 20 * 8, f64_from(10000));
+    store64(en1 + 21 * 8, f64_from(10));
+    var off1 = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en1, _AAC_NUM_SWB, off1);
+    var en2 = alloc(_AAC_NUM_SWB * 8);
+    memset(en2, 0, _AAC_NUM_SWB * 8);
+    store64(en2 + 20 * 8, f64_from(1000000));
+    store64(en2 + 21 * 8, f64_from(10));
+    var off2 = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en2, _AAC_NUM_SWB, off2);
+    assert(load64(off2 + 21 * 8) > load64(off1 + 21 * 8), "louder masker -> larger offset");
+    return 0;
+}
+
+# Spreading is asymmetric: upward (toward higher freq) masks more than downward.
+fn test_aac_psy_asymmetric_spread() {
+    test_group("aac: psy asymmetric spreading");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var en = alloc(_AAC_NUM_SWB * 8);
+    memset(en, 0, _AAC_NUM_SWB * 8);
+    store64(en + 22 * 8, f64_from(100000));   # masker
+    store64(en + 21 * 8, f64_from(10));        # below masker (downward spread, steep)
+    store64(en + 23 * 8, f64_from(10));        # above masker (upward spread, gentle)
+    var off = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_masking_offsets(en, _AAC_NUM_SWB, off);
+    assert(load64(off + 23 * 8) > load64(off + 21 * 8), "upward spread masks more than downward");
+    assert(load64(off + 21 * 8) > 0, "downward masking still positive");
+    return 0;
+}
+
+# Full pipeline with the masking-driven scale factors still decodes a valid frame.
+fn test_aac_psy_frame_roundtrip() {
+    test_group("aac: psy mono frame encode/decode");
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var samples = vec_new();
+    var i = 0;
+    while (i < 1024) {
+        var lo = f64_sin(f64_div(f64_from(i * 3), f64_from(50)));
+        var hi = f64_mul(f64_sin(f64_div(f64_from(i * 40), f64_from(50))), f64_div(F64_ONE, f64_from(50)));
+        vec_push(samples, f64_add(lo, hi));
+        i = i + 1;
+    }
+    var out = alloc(131072);
+    var nbytes = aac_encode(samples, 44100, 1, 128000, out);
+    assert(is_err(nbytes) == 0, "psy-frame encode ok");
+    assert(nbytes > 7, "produced bytes");
+    var dec = aac_decode(out, nbytes);
+    assert(is_err(dec) == 0, "psy-frame decode ok");
+    assert(vec_len(decode_result_samples(dec)) == 1024, "one mono frame decoded");
+    return 0;
+}
+
 fn test_aac_all() {
     fft_init();
     aac_init();
@@ -3458,5 +3637,11 @@ fn test_aac_all() {
     test_aac_tns_bitstream();
     test_aac_tns_analyze_synth();
     test_aac_tns_frame_roundtrip();
+    test_aac_psy_isolated_no_masking();
+    test_aac_psy_neighbor_masking();
+    test_aac_psy_masking_falloff();
+    test_aac_psy_louder_masks_more();
+    test_aac_psy_asymmetric_spread();
+    test_aac_psy_frame_roundtrip();
     return 0;
 }

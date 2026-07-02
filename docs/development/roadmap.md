@@ -1,12 +1,11 @@
 # Development Roadmap
 
-> **v2.5.2** — 775 tests + fuzz (90K/0), Cyrius 6.3.25.
-> AAC TNS (Temporal Noise Shaping, AAC-LC long-window mono): exact-inverse
-> analysis-FIR/synthesis-IIR filter pair from shared quantized reflection coefs +
-> `tns_data()` bitstream. Toolchain 6.3.25 + serde Str-deserialize repair (derive
-> fixed upstream). (v2.5.1: first CELT decode — matched range coder + PVQ shape
-> decode + full-stream roundtrip. v2.5.0: full PVQ spectral shape. v2.4.4: Opus
-> encoder framework. v2.4.3: distlib bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
+> **v2.5.3** — 785 tests + fuzz (90K/0), Cyrius 6.3.25.
+> AAC psychoacoustic masking model: asymmetric critical-band spreading → per-band
+> coarseness offset drives scale-factor allocation (masked bands quantized coarser).
+> (v2.5.2: AAC TNS + toolchain 6.3.25 + serde repair. v2.5.1: first CELT decode —
+> matched range coder + PVQ shape decode. v2.5.0: full PVQ spectral shape. v2.4.4:
+> Opus encoder framework. v2.4.3: distlib bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -181,15 +180,21 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       reflection coefs; `tns_data()` bitstream; full mono encode→decode roundtrip.
       Stereo/CPE path untouched. (Short-window + stereo TNS = later refinement.)
 
+## v2.5.3 — AAC psychoacoustic model · shipped 2026-07-01
+
+- [x] Asymmetric critical-band spreading function (`_aac_psy_init`): gentle upward
+      (10 dB/SFB), steep downward (25 dB/SFB) — the upward spread of masking.
+- [x] `_aac_psy_masking_offsets`: per-band coarseness offset `2·log2(spread/energy)`
+      (0 isolated, positive when masked, capped at 24 scf units).
+- [x] Encoder adds the offset to the baseline scale factor — masked bands quantize
+      coarser; unmasked bands and the stereo/CPE path + decoder are untouched.
+- Deferred: absolute-threshold-of-hearing floor + tonality-adjusted SMR (needs SPL
+  calibration); closed-loop scale-factor DPCM (the ±60 diff-clamp is pre-existing).
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.3 — AAC psychoacoustic model · deferred (independent)
-
-- Per-SFB masking thresholds (bark-scale spreading function) driving scale-factor /
-  bit allocation so quantization noise stays under the mask. Builds on 2.5.2 TNS.
 
 ### v2.5.4 — Transient detection + short-window switching (CELT) · needs 2.5.0
 

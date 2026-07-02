@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.3] - 2026-07-01
+
+AAC psychoacoustic masking model driving scale-factor allocation. 785 assertions
+(was 775, +10).
+
+### Added
+
+- **AAC psychoacoustic model** (`src/aac.cyr`) — simultaneous-masking model that
+  coarsens the quantization of masked bands:
+  - `_aac_psy_init` precomputes an asymmetric spreading function over scalefactor
+    bands (which approximate critical bands): gentle toward higher frequency
+    (`PSY_SLOPE_UP` 10 dB/SFB), steep toward lower (`PSY_SLOPE_DOWN` 25 dB/SFB).
+  - `_aac_psy_masking_offsets` spreads each band's energy to its neighbours and
+    derives a per-band coarseness offset `2·log2(spread/energy)` (0 for an isolated
+    band, positive where neighbours mask it, capped at `PSY_MAX_OFFSET` 24).
+  - The encoder adds the offset to the baseline scale factor, so masked bands are
+    quantized coarser (fewer bits) while unmasked bands are unchanged. Conservative
+    by construction — no change to the stereo/CPE path or the decoder.
+- **Tests** (`+10` assertions): isolated band → no masking, neighbour masking,
+  distance falloff, louder-masker → larger offset, upward/downward asymmetry, and a
+  full mono encode→decode frame roundtrip through the masking-driven scale factors.
+
 ## [2.5.2] - 2026-07-01
 
 Toolchain modernization (cyrius 6.3.25), the serde Str-deserialize repair, and
