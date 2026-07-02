@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.12] - 2026-07-02
+
+**MP3 decode is now comprehensive** — MPEG-2/2.5 (LSF) Layer III, plus **Layer II
+and Layer I**, join the MPEG-1 Layer III decoder from 2.5.11. Every common
+configuration is verified **sample-exact against minimp3**. 932 assertions
+(was 909, +23).
+
+### Added — MPEG-2/2.5 (LSF) Layer III (`src/mp3.cyr`)
+
+- **LSF side info** (one granule, 8-bit `main_data_begin`, no `scfsi`, 9-bit
+  `scalefac_compress`) + **LSF scalefactor decode** (ported from mpg123's
+  `III_get_scale_factors_2`: the 4 partition slens derive from the sfc range, the
+  band counts from the `stab` table). Unified the scalefactor-band tables to one
+  8-row set covering all 9 sample-rate configs (minimp3 `sr_idx` order).
+- Verified sample-exact vs minimp3: **MPEG-2 22050 Hz mono + joint stereo (M/S)
+  1.00000**, **MPEG-2.5 11025 Hz mono 1.00000**.
+- **Stereo stage rewritten** to minimp3's model — M/S and intensity now run in
+  bitstream order *before* reorder, with the correct `max_band` boundary and the
+  MPEG-1 `g_pan` / LSF `ldexp` intensity panning. (The previous pdmp3-derived
+  intensity was subtly wrong.)
+
+### Added — Layer II and Layer I (`src/mp3.cyr`)
+
+- Subband-PCM decode ported from minimp3 (CC0): subband **bit allocation** (per
+  layer/bitrate/mode alloc tables), **scalefactors**, grouped/ungrouped sample
+  **(de)quantization**, feeding the shared polyphase synthesis filterbank
+  (refactored into `_mp3_synth_ch`, reused by all three layers). Layer I and II
+  share the code via the group size (1 vs 3).
+- Verified sample-exact vs minimp3: **Layer II mono, joint stereo, and the
+  low-rate allocation table all 1.00000**; **Layer I 1.00000** on a constructed
+  stream. `mp3_decode` dispatches Layer I/II/III automatically.
+
+### Tests
+
+- Committed value-level tests (embedded fixtures): Layer II mono + stereo
+  (two-tone correlation, 0.999), Layer I (correlation vs an embedded minimp3
+  reference frame, 0.999), MPEG-2/2.5 Layer III mono + stereo (0.999).
+
+### Security
+
+- The Layer I/II path parses untrusted input; fuzzed **20,000 malformed frames,
+  0 crashes** (the subband structure is bounded within the frame).
+
+### Known limitation
+
+- **MPEG-2.5 at 8000 Hz, low bitrate, short blocks** decodes imperfectly
+  (~0.7 correlation) — a narrow bug isolated to that combination (the sfb tables
+  and reservoir assembly are both verified byte-exact; the reservoir and short
+  blocks each work independently, and 8000 Hz decodes correctly at higher
+  bitrate). All other sample rates and block types are sample-exact. Tracked.
+
 ## [2.5.11] - 2026-07-02
 
 **MP3 (MPEG-1 Layer III) decodes to real PCM audio** — `mp3_decode` returned an

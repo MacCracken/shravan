@@ -1428,6 +1428,8 @@ test_mp3_decode_rejects_malformed();
 test_mp3_decode_stereo();
 test_mp3_decode_lsf();
 test_mp3_decode_lsf_stereo();
+test_mp3_decode_layer2();
+test_mp3_decode_layer1();
 test_tag_id3v2_parse();
 test_tag_id3v2_reject_non_id3();
 test_tag_id3v2_reject_short();

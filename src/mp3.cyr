@@ -1913,25 +1913,23 @@ fn _mp3_freq_inv(gr, ch) {
     return 0;
 }
 
-# L3_Subband_Synthesis — polyphase, writes 576 f64 samples to _mp3_outbuf[ch]
-fn _mp3_subband(gr, ch) {
-    var vbase = ch * 1024;
-    var obase = ch * 576;
+# Polyphase synthesis core (shared by Layer III + Layer I/II). Reads `ntime`
+# time-steps of 32 subband samples from src (src[subband*stride + ss]), runs the
+# matrixing + 512-tap window through the per-channel V FIFO, writes ntime*32 PCM
+# samples to out (out[32*ss + i]).
+fn _mp3_synth_ch(vbase, src, stride, ntime, out) {
     var ss = 0;
-    while (ss < 18) {
-        # shift V FIFO up by 64
+    while (ss < ntime) {
         var i = 1023;
         while (i > 63) {
             store64(_mp3_vvec + (vbase + i) * 8, load64(_mp3_vvec + (vbase + i - 64) * 8));
             i = i - 1;
         }
-        # gather 32 subband samples
         i = 0;
         while (i < 32) {
-            store64(_mp3_svec + i * 8, _mp3_isv(gr, ch, i * 18 + ss));
+            store64(_mp3_svec + i * 8, load64(src + (i * stride + ss) * 8));
             i = i + 1;
         }
-        # matrix: v[i] = sum_j nwin[i][j]*s[j]
         i = 0;
         while (i < 64) {
             var sum = f64_from(0);
@@ -1943,7 +1941,6 @@ fn _mp3_subband(gr, ch) {
             store64(_mp3_vvec + (vbase + i) * 8, sum);
             i = i + 1;
         }
-        # build U vector
         i = 0;
         while (i < 8) {
             var j = 0;
@@ -1954,13 +1951,11 @@ fn _mp3_subband(gr, ch) {
             }
             i = i + 1;
         }
-        # window by dtbl
         i = 0;
         while (i < 512) {
             store64(_mp3_uvec + i * 8, f64_mul(load64(_mp3_uvec + i * 8), load64(_mp3_dtbl + i * 8)));
             i = i + 1;
         }
-        # 32 output samples
         i = 0;
         while (i < 32) {
             var sum = f64_from(0);
@@ -1969,11 +1964,17 @@ fn _mp3_subband(gr, ch) {
                 sum = f64_add(sum, load64(_mp3_uvec + (j * 32 + i) * 8));
                 j = j + 1;
             }
-            store64(_mp3_outbuf + (obase + 32 * ss + i) * 8, sum);
+            store64(out + (32 * ss + i) * 8, sum);
             i = i + 1;
         }
         ss = ss + 1;
     }
+    return 0;
+}
+
+# L3_Subband_Synthesis — polyphase, writes 576 f64 samples to _mp3_outbuf[ch]
+fn _mp3_subband(gr, ch) {
+    _mp3_synth_ch(ch * 1024, _mp3_isp(gr, ch, 0), 18, 18, _mp3_outbuf + ch * 576 * 8);
     return 0;
 }
 
@@ -2085,12 +2086,16 @@ fn mp3_decode_pcm(data, len) {
                         if (pos + fs > len) {
                             stop = 1;
                         } else {
-                            if (mp3_frame_layer(info) == MP3_LAYER_III) {
-                                sr = mp3_frame_sample_rate(info);
-                                var cm = mp3_frame_channel_mode(info);
-                                nch = 2;
-                                if (cm == MP3_CHANNEL_MONO) { nch = 1; }
+                            var lyr = mp3_frame_layer(info);
+                            sr = mp3_frame_sample_rate(info);
+                            var cm = mp3_frame_channel_mode(info);
+                            nch = 2;
+                            if (cm == MP3_CHANNEL_MONO) { nch = 1; }
+                            if (lyr == MP3_LAYER_III) {
                                 if (_mp3_decode_frame(data, pos, info, samples) == 1) { got = 1; }
+                            } else {
+                                # Layer I / Layer II (subband PCM, no reservoir)
+                                if (_mp3_l12_frame(data, pos, info, samples) == 1) { got = 1; }
                             }
                             pos = pos + fs;
                             advanced = 1;
@@ -2379,5 +2384,359 @@ fn test_mp3_decode_lsf_stereo() {
     syscall(1, 1, " R=", 3); fmt_int(cr); syscall(1, 1, "\n", 1);
     assert(cl > 985, "lsf stereo L correlates (400Hz)");
     assert(cr > 985, "lsf stereo R correlates (900Hz)");
+    return 0;
+}
+
+# ================================================================
+# Layer I / Layer II decode (2.5.12)
+# ================================================================
+# ================================================================
+# MPEG Layer I & II decode (2.5.12) — ported from minimp3 (CC0).
+# Subband PCM: bit allocation + scalefactors + (de)quantization, then the
+# shared polyphase synthesis filterbank. Layer I = group_size 1 (384 samples/
+# frame), Layer II = group_size 3 (1152). No bit reservoir.
+# ================================================================
+
+var _MP3_DEQ_L12_CSV = "4509604426871098713,4508365639897422340,4506661601037654513,4504242998743642115,4502762735304771591,4501077205225351302,4499396267716237178,4497714448531466656,4496141287124007719,4494737705521109193,4492964861160770930,4491442446895488088,4490160314194806559,4488344124512769371,4486845875553284670,4485620690273469193,4483783339883201034,4482296888159617787,4481099290406726831,4479251484137097487,4477770861635959664,4476586842910862296,4474733839393957529,4473256114392821933,4472078832322658995,4470223237802713695,4468746957303045484,4467573030447134553,4465716142324303359,4464240583016867522,4463068330502371390,4461210796051944459,4459735597076451830,4458564180917803289,4456706323421939056,4455231304546431227,4454060306362187149,4452202287373181764,4450727358531176681,4449556569283279432,4447698469555096265,4446223585725721023,4445052900933286389,4443194760837362332,4441719899513271739,4509604426871098713,4508365639897422340,4506661601037654513,4506301787143848759,4504815242775437112,4503635371719842910,4502598827449891958,4500947111484990128,4499636143645441014";   # 54 f64 bit patterns (filled by generator include)
+var _MP3_BAT_CSV = "0,17,3,4,5,6,7,8,9,10,11,12,13,14,15,16,0,17,18,3,19,4,5,6,7,8,9,10,11,12,13,16,0,17,18,3,19,4,5,16,0,17,18,16,0,17,18,19,4,5,6,7,8,9,10,11,12,13,14,15,0,17,18,3,19,4,5,6,7,8,9,10,11,12,13,14,0,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16";       # bit-allocation code translation table
+var _mp3_deq12 = 0;          # [54] f64
+var _mp3_bat = 0;            # [92]
+var _mp3_alloc = 0;          # flat alloc tables, 4 sets, each triples {tab_offset,width,band_count}
+var _mp3_l12_ready = 0;
+
+# per-frame scale info
+var _l12_total = 0;
+var _l12_stereo = 0;
+var _l12_bitalloc = 0;       # [64]
+var _l12_scfcod = 0;         # [64]
+var _l12_scf = 0;            # [3*64] f64
+var _l12_grb = 0;            # [2*576] f64 subband samples (band*18+time, ch*576)
+var _l12_out = 0;            # [2*576] f64 synthesis output
+
+fn _mp3_l12_init() {
+    if (_mp3_l12_ready == 1) { return 0; }
+    _mp3_deq12 = alloc(54 * 8);
+    _mp3_parse_csv(_MP3_DEQ_L12_CSV, _mp3_deq12);
+    _mp3_bat = alloc(92 * 8);
+    _mp3_parse_csv(_MP3_BAT_CSV, _mp3_bat);
+    # alloc tables: index 0=L1, 1=L2M2, 2=L2M1, 3=L2M1_lowrate. Each: count then triples.
+    # stored as flat: offset table via _mp3_alloc_off. Simpler: 4 fixed-size rows of up to 4 triples.
+    # layout: _mp3_alloc[set*13 + 0]=nentries, then [set*13 + 1 + e*3 + {0,1,2}] = {tab_offset,width,band}
+    _mp3_alloc = alloc(4 * 13 * 8);
+    _mp3_l12_set(0, 1);  _mp3_l12_ent(0, 0, 76, 4, 32);
+    _mp3_l12_set(1, 3);  _mp3_l12_ent(1, 0, 60, 4, 4);  _mp3_l12_ent(1, 1, 44, 3, 7);  _mp3_l12_ent(1, 2, 44, 2, 19);
+    _mp3_l12_set(2, 4);  _mp3_l12_ent(2, 0, 0, 4, 3);   _mp3_l12_ent(2, 1, 16, 4, 8);  _mp3_l12_ent(2, 2, 32, 3, 12); _mp3_l12_ent(2, 3, 40, 2, 7);
+    _mp3_l12_set(3, 2);  _mp3_l12_ent(3, 0, 44, 4, 2);  _mp3_l12_ent(3, 1, 44, 3, 10);
+    _l12_bitalloc = alloc(64 * 8);
+    _l12_scfcod = alloc(64 * 8);
+    _l12_scf = alloc(3 * 64 * 8);
+    _l12_grb = alloc(2 * 576 * 8);
+    _l12_out = alloc(2 * 576 * 8);
+    _mp3_l12_ready = 1;
+    return 0;
+}
+fn _mp3_l12_set(s, n) { store64(_mp3_alloc + (s * 13) * 8, n); return 0; }
+fn _mp3_l12_ent(s, e, off, w, bc) {
+    store64(_mp3_alloc + (s * 13 + 1 + e * 3 + 0) * 8, off);
+    store64(_mp3_alloc + (s * 13 + 1 + e * 3 + 1) * 8, w);
+    store64(_mp3_alloc + (s * 13 + 1 + e * 3 + 2) * 8, bc);
+    return 0;
+}
+
+# Select the subband allocation table set (0..3) and set _l12_total/_l12_stereo.
+# l1: 1 if Layer I. mpeg1: 1 if MPEG-1. mode/modext: stereo mode. kbps: bitrate.
+# sridx: sample-rate index 0..2.
+fn _mp3_l12_alloc_select(l1, mpeg1, mode, modext, kbps, sridx) {
+    var stereo_bands = 32;
+    if (mode == 3) { stereo_bands = 0; }                 # mono
+    else { if (mode == 1) { stereo_bands = (modext << 2) + 4; } }  # joint stereo
+    var set = 2;
+    var nbands = 27;
+    if (l1 == 1) { set = 0; nbands = 32; }
+    else {
+        if (mpeg1 == 0) { set = 1; nbands = 30; }
+        else {
+            set = 2; nbands = 27;
+            var k = kbps;
+            if (mode != 3) { k = kbps >> 1; }
+            if (k == 0) { k = 192; }
+            if (k < 56) {
+                set = 3;
+                nbands = 8;
+                if (sridx == 2) { nbands = 12; }
+            } else {
+                if (k >= 96) { if (sridx != 1) { nbands = 30; } }
+            }
+        }
+    }
+    _l12_total = nbands;
+    _l12_stereo = stereo_bands;
+    if (stereo_bands > nbands) { _l12_stereo = nbands; }
+    return set;
+}
+
+# Read scalefactors (L12_read_scalefactors). bands = total*2.
+fn _mp3_l12_read_scf(br, bands) {
+    var i = 0;
+    while (i < bands) {
+        var ba = load64(_l12_bitalloc + i * 8);
+        var mask = 0;
+        if (ba != 0) { mask = 4 + ((19 >> load64(_l12_scfcod + i * 8)) & 3); }
+        var s = f64_from(0);
+        var m = 4;
+        var g = 0;
+        while (m > 0) {
+            if ((mask & m) != 0) {
+                var bb = bitreader_read(br, 6);
+                # g_deq_L12[ba*3 - 6 + b%3] * (1<<21 >> b/3)
+                var didx = ba * 3 - 6 + (bb % 3);
+                var mul = f64_from((1 << 21) >> (bb / 3));
+                s = f64_mul(load64(_mp3_deq12 + didx * 8), mul);
+            }
+            store64(_l12_scf + (i * 3 + g) * 8, s);
+            g = g + 1;
+            m = m >> 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Read scale info: alloc table, bit allocation, scfcod, scalefactors.
+fn _mp3_l12_read_scale_info(br, l1, mpeg1, mode, modext, kbps, sridx) {
+    var set = _mp3_l12_alloc_select(l1, mpeg1, mode, modext, kbps, sridx);
+    var setbase = set * 13;
+    var nent = load64(_mp3_alloc + setbase * 8);
+    var i = 0;
+    var k = 0;
+    var ei = 0;           # current alloc entry index
+    var ba_bits = 0;
+    var tab_off = 0;
+    while (i < _l12_total) {
+        if (i == k) {
+            k = k + load64(_mp3_alloc + (setbase + 1 + ei * 3 + 2) * 8);   # band_count
+            tab_off = load64(_mp3_alloc + (setbase + 1 + ei * 3 + 0) * 8); # tab_offset
+            ba_bits = load64(_mp3_alloc + (setbase + 1 + ei * 3 + 1) * 8); # width
+            ei = ei + 1;
+        }
+        var ba = load64(_mp3_bat + (tab_off + bitreader_read(br, ba_bits)) * 8);
+        store64(_l12_bitalloc + (2 * i) * 8, ba);
+        var ba1 = 0;
+        if (i < _l12_stereo) { ba1 = load64(_mp3_bat + (tab_off + bitreader_read(br, ba_bits)) * 8); }
+        if (_l12_stereo != 0) { store64(_l12_bitalloc + (2 * i + 1) * 8, ba1); }
+        else { store64(_l12_bitalloc + (2 * i + 1) * 8, 0); }
+        i = i + 1;
+    }
+    # scfcod
+    i = 0;
+    while (i < 2 * _l12_total) {
+        var sc = 6;
+        if (load64(_l12_bitalloc + i * 8) != 0) {
+            if (l1 == 1) { sc = 2; } else { sc = bitreader_read(br, 2); }
+        }
+        store64(_l12_scfcod + i * 8, sc);
+        i = i + 1;
+    }
+    _mp3_l12_read_scf(br, 2 * _l12_total);
+    # clear bitalloc for non-stereo bands (right channel)
+    i = _l12_stereo;
+    while (i < _l12_total) { store64(_l12_bitalloc + (2 * i + 1) * 8, 0); i = i + 1; }
+    return 0;
+}
+
+# Dequantize one granule of samples into _l12_grb at time base `tbase`.
+fn _mp3_l12_dequant(br, gs, tbase) {
+    var j = 0;
+    while (j < 4) {
+        var i = 0;
+        while (i < 2 * _l12_total) {
+            var band = i >> 1;
+            var ch = i & 1;
+            var ba = load64(_l12_bitalloc + i * 8);
+            if (ba != 0) {
+                var dbase = ch * 576 + band * 18 + tbase + j * gs;
+                if (ba < 17) {
+                    var half = (1 << (ba - 1)) - 1;
+                    var kk = 0;
+                    while (kk < gs) {
+                        store64(_l12_grb + (dbase + kk) * 8, f64_from(bitreader_read(br, ba) - half));
+                        kk = kk + 1;
+                    }
+                } else {
+                    var modv = (2 << (ba - 17)) + 1;
+                    var nbits = modv + 2 - (modv >> 3);
+                    var code = bitreader_read(br, nbits);
+                    var kk = 0;
+                    while (kk < gs) {
+                        store64(_l12_grb + (dbase + kk) * 8, f64_from((code % modv) - (modv / 2)));
+                        code = code / modv;
+                        kk = kk + 1;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# Apply scalefactors for sub-frame `igr` (L12_apply_scf_384).
+fn _mp3_l12_apply_scf(igr) {
+    # duplicate mono/shared bands to the right channel above stereo_bands
+    var band = _l12_stereo;
+    while (band < _l12_total) {
+        var t = 0;
+        while (t < 18) {
+            store64(_l12_grb + (576 + band * 18 + t) * 8, load64(_l12_grb + (band * 18 + t) * 8));
+            t = t + 1;
+        }
+        band = band + 1;
+    }
+    # The shared polyphase synthesis (_mp3_synth_ch) carries a 0.5x normalization
+    # that the Layer III IMDCT compensates for; Layer I/II have no IMDCT, so fold
+    # the compensating 2x into the scalefactor here (matches minimp3 amplitude).
+    var two = f64_from(2);
+    var i = 0;
+    while (i < _l12_total) {
+        var sf0 = f64_mul(load64(_l12_scf + ((2 * i + 0) * 3 + igr) * 8), two);
+        var sf1 = f64_mul(load64(_l12_scf + ((2 * i + 1) * 3 + igr) * 8), two);
+        var k = 0;
+        while (k < 12) {
+            store64(_l12_grb + (i * 18 + k) * 8, f64_mul(load64(_l12_grb + (i * 18 + k) * 8), sf0));
+            store64(_l12_grb + (576 + i * 18 + k) * 8, f64_mul(load64(_l12_grb + (576 + i * 18 + k) * 8), sf1));
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Decode a Layer I/II frame; append PCM (interleaved) to `samples`.
+fn _mp3_l12_frame(data, pos, info, samples) {
+    _mp3_l12_init();
+    var layer = mp3_frame_layer(info);         # 1 or 2
+    var l1 = 0;
+    if (layer == MP3_LAYER_I) { l1 = 1; }
+    var ver = mp3_frame_version(info);
+    var mpeg1 = 0;
+    if (ver == MP3_VERSION_V1) { mpeg1 = 1; }
+    var cm = mp3_frame_channel_mode(info);
+    var nch = 2;
+    if (cm == MP3_CHANNEL_MONO) { nch = 1; }
+    var modext = (load8(data + pos + 3) >> 4) & 3;
+    var sridx = (load8(data + pos + 2) >> 2) & 3;
+    var kbps = mp3_frame_bitrate(info);
+    var fs = mp3_frame_size(info);
+    var prot = load8(data + pos + 1) & 1;
+    var crc = 0;
+    if (prot == 0) { crc = 2; }
+    var br = bitreader_new(data + pos + 4 + crc, fs - 4 - crc);
+    _mp3_l12_read_scale_info(br, l1, mpeg1, cm, modext, kbps, sridx);
+    var gs = 3;
+    if (l1 == 1) { gs = 1; }
+    # clear grbuf
+    var z = 0;
+    while (z < 2 * 576) { store64(_l12_grb + z * 8, f64_from(0)); z = z + 1; }
+    var acc = 0;
+    var igr = 0;
+    while (igr < 3) {
+        _mp3_l12_dequant(br, gs, acc);
+        acc = acc + gs * 4;
+        if (acc == 12) {
+            acc = 0;
+            _mp3_l12_apply_scf(igr);
+            _mp3_synth_ch(0, _l12_grb, 18, 12, _l12_out);
+            if (nch == 2) { _mp3_synth_ch(1024, _l12_grb + 576 * 8, 18, 12, _l12_out + 576 * 8); }
+            # interleave 384 samples/channel
+            var t = 0;
+            while (t < 384) {
+                vec_push(samples, load64(_l12_out + t * 8));
+                if (nch == 2) { vec_push(samples, load64(_l12_out + (576 + t) * 8)); }
+                t = t + 1;
+            }
+            z = 0;
+            while (z < 2 * 576) { store64(_l12_grb + z * 8, f64_from(0)); z = z + 1; }
+        }
+        igr = igr + 1;
+    }
+    return 1;
+}
+
+# --- 2.5.12: Layer I / Layer II decode coverage ---
+var _L2MONO_B64 = "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";   # MPEG-1 Layer II 44100 mono
+var _L2ST_B64 = "//2gBGZEQ0QzVUQzMzNDbbbkbJAAAAAAAAAACvDMw/////z/GIPaPJXq2Vo0YsWtwcvbsxbzay1gz2exerdthshtg1f0kyj1ixhzlykxj1i0lzk2zlsksltksfv379+/e973ve97u62LY2227u7uti2NttttttttrY22222222221sWxtttrX798/fvnuk98Hug7uja2Nttu8O8LGtjbbbbbbbbaxtttttttttttbFsbbba1824OoOw3Vox1HepuqUpNIpDa7a9a1sw2HWMw83nTQOYjE2GwmUyeeOEKRUIhEs5LqIm14OIlGEw62LY2227vDuuq6tttttptttrq22222222221sWxtptrZY274DdttI+DPRhsO9b2iERP1x0mKYkEwyxFBTFK4a1q5VMhJKKM91ZZbDhCwMoiuJHcBUTdz3u7tGbSyijxT1BlNHBBQssawk0uuWazqKKSrueP8fmWWYXxD4mg3czMJske97u6ptqa1HTzVSX4W0OmHI1IKhsQqmplEkkrLa2eKyFNOENZVuonN7XFsfHve7uri1mtty9REog+tKMQzikSTLo12GOsssrKyU/QOYJSy7geVQIzGeRi4M6Z0cIWZBkblPPVQ/D/inELG4ymow6rikbLKa0kjL9D2S0st5KT1VHifsuyZWl6yJhv4ZFTbTN2WjWZGGiVRRAMuNHaXJAoUs1ZT+VmEpPLeDYqX2DV8Oa6Wrng6YYbmWHVEXFF8aNQFAmprKhbjSSpuolNLV2VAAciBatfXEH9BHhHVUZHIZjYmZHxdGNu95yHrFWcKHRSkHEv1zyeWCSZ1TsbQrogzMwAD//aIEZkREVDNVRDMzM0SRuSyQkgAAAAAAAAAKqqqqqqqqqq6GIaJ2ztwwx110xrtst1100yzzzz1z0stsuuzx0RgbwILxz2yaB9zWuCEgq466qdpD2zsIwK2GjSRheczgOMhpNgYPlWL8Jx2teFi6N5jtg9SVY7wRRNUyMfE443cbHLCG8gopONCiYtdJYb8EkoksEv8OoqBOqNoQmZiJfCkFiuC6i182ymyIhHVTqm7lD30lJpR1MbLah+ETgYUlMl2ZrljMgeDIteD7aZqMooa4HsUTzY+j2aJs1N3cUmIgRDpjbFTZRQULL+nC2kIExDFUKKDkCW9s2Y8UcFtQFHXBbrMqZLWzRKCuK7itlaX1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";   # MPEG-1 Layer II 44100 stereo
+var _L1_B64 = "//+AwDMzMzMAAAAAAAAAAAAAAABJNRVZdhlWeJVnZ4lWeHiVZ4mJVniVlWeJVlZ4lWdniVZ4eJVniYlWeJWVZ4lWVniVZ2eJVngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AwDMzMzMAAAAAAAAAAAAAAABNRVZdhlpniVZ4eJVniYlWeJWVZ4lWVniVZ2eJVnh4lWeJiVZ4lZVniVZWeJVnZ4lWeHiVZ4kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AwDMzMzMAAAAAAAAAAAAAAABRVZdhlpt4lWeJiVZ4lZVniVZWeJVnZ4lWeHiVZ4mJVniVlWeJVlZ4lWdniVZ4eJVniYlWeJUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AwDMzMzMAAAAAAAAAAAAAAABVZdhlptyJVniVlWeJVlZ4lWdniVZ4eJVniYlWeJWVZ4lWVniVZ2eJVnh4lWeJiVZ4lZVniVYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AwDMzMzMAAAAAAAAAAAAAAABZdhlptx2VZ4lWVniVZ2eJVnh4lWeJiVZ4lZVniVZWeJVnZ4lWeHiVZ4mJVniVlWeJVlZ4lWcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AwDMzMzMAAAAAAAAAAAAAAABdhlptx1JWeJVnZ4lWeHiVZ4mJVniVlWeJVlZ4lWdniVZ4eJVniYlWeJWVZ4lWVniVZ2eJVngAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";           # MPEG-1 Layer I 44100 mono (constructed)
+var _L1REF_CSV = "4580310354617171968,4577293294710554624,4572138784199540736,13774259460312662016,13792907177519742976,13794771949240451072,13793610864961519616,13790655377706057728,13786785096776286208,13786362884311220224,13790514640217702400,13794525658635829248,13796883011565780992,13798958889519022080,13799715353518931968,13800032012867731456,13800102381611909120,13800084789425864704,13800225526914220032,13800788476867641344,13801844008030306304,13803356936030126080,13804324506262568960,13805116154634567680,13805591143657766912,13805573551471722496,13804975417146212352,13803884701611458560,13801562533053595648,13799082034821332992,13795862664775204864,13795088608589250560,13796883011565780992,13799768130077065216,13801896784588439552,13803585634448703488,13804034235192836096,13803946274262614016,13803251382913859584,13801544940867551232,13799592208216621056,13796425614728626176,13791922015101255680,13782140759660560384,4561020522619469824,4564820434805063680,4564257484851642368,4558768722805784576,13782985184590692352,13790162796496814080,13791992383845433344,13791640540124545024,13787770259194773504,4554828073131835392,4566790759642038272,4568479609502302208,4566650022153682944,13781014859753717760,13794736764868362240,13799099627007377408,13800911622169952256,13801879192402395136,13801844008030306304,13800911622169952256,13799310733239910400,13795616374170583040,13786503621799575552,4567916659548880896,4573581343455182848,4576343316664156160,4577521993129132032,4577926613408153600,4577381255640776704,4576009065129312256,4572631365408784384,4567072234618748928,4552013323364728832,4539628424389459968,4564820434805063680,4571470281129852928,4574566505873670144,4576132210431623168,4576378501036244992,4575903512013045760,4574460952757403648,4572842471641317376,4571786940478652416,4571012884292698112,4569042559455723520,4563131584944799744,13789881321520103424,13797164486542491648,13800682923751374848,13802706025146482688,13803515265704525824,13802793986076704768,13800718108123463680,13796566352216981504,13779888959846875136,4571259174897319936,4574707243362025472,4576132210431623168,4576572015082733568,4576818305687355392,4577047004105932800,4577275702524510208,4577381255640776704,4577187741594288128,4576659976012955648,4575850735454912512,4574214662152781824,4572490627920429056,4570872146804342784,4568127765781413888,4564398222339997696,4555953973038678016,13776511260126347264,4539628424389459968,4565524122246840320,4572349890432073728,4576501646338555904,4579105289873129472,4580644606152015872,4581084410803126272,4580882100663615488,4580187209314861056,4578454378989486080,4577047004105932800,4576413685408333824,4576519238524600320,4576853490059444224,4576712752571088896,4575375746431713280,4570098090618388480,13790162796496814080,13798607045798133760,13801052359658307584,13801826415844261888,13801087544030396416,13799345917611999232,13795651558542671872,13790514640217702400,13783548134544113664,13780451909800296448,13779888959846875136,4552013323364728832,4566650022153682944,4571892493594918912,4575023902710824960,4576448869780422656,4576765529129222144,4576378501036244992,4575762774524690432,4575446115175890944,4576237763547889664,4577891429036064768,4580108044477661184,4581154779547303936,4581673749035614208,4581427458430992384,4580389519454371840,4577434032198909952,4572209152943718400,13778200109986611200,13793962708682407936,13795651558542671872,13795123792961339392,13792836808775565312,13790303533985169408,13789459109055037440,13791570171380367360,13794947871100895232,13797305224030846976,13799275548867821568,13800084789425864704,13800507001890930688,13800594962821152768,13800542186263019520,13800612555007197184,13801052359658307584,13802037522076794880,13803532857890570240,13804438855471857664,13805292076495011840,13805837434262388736,13805855026448433152,13805265688215945216,13804122196123058176,13801879192402395136,13799205180123643904,13795792296031027200,13794912686728806400,13796847827193692160,13799926459751464960,13802266220495372288,13803875905518436352,13804394875006746624,13804324506262568960,13803735168030081024,13802090298634928128,13799944051937509376,13796777458449514496,13791992383845433344,13779888959846875136,4563131584944799744,4566790759642038272,4566720390897860608,4562427897503023104,13781859284683849728,13791147958915301376,13794560843007918080,13795264530449694720,13794701580496273408,13791710908868722688,13785940671846154240,13763000461244235776,13775385360219504640,13789459109055037440,13795229346077605888,13798571861426044928,13800102381611909120,13800612555007197184,13800243119100264448,13799134811379466240,13796179324124004352,13791570171380367360,13776511260126347264,4565101909781774336,4569112928199901184,4571259174897319936,4571892493594918912,4571822124850741248,4570590671827632128,4566931497130393600,0,13790303533985169408,13793610864961519616,13794455289891651584,13792484965054676992,13786644359287930880,4562427897503023104,4569394403176611840,4572033231083274240,4572877656013406208,4572772102897139712,4571786940478652416,4568761084479012864,4557924297875652608,13791499802636189696,13797199670914580480,13800278303472353280,13802090298634928128,13803145829797593088,13803145829797593088,13802055114262839296,13800102381611909120,13796355245984448512,13787348046729707520,4566861128386215936,4571786940478652416,4573405421594738688,4574038740292337664,4573933187176071168,4573194315362205696,4571822124850741248,4568761084479012864,4562568634991378432,13779888959846875136,13786503621799575552,13784392559474245632,4557924297875652608,4567916659548880896,4571786940478652416,4573264684106383360,4573686896571449344,4573194315362205696,4572314706059984896,4571646202990297088,4571470281129852928,4571540649874030592,4571188806153142272,4568268503269769216,4539628424389459968,13794103446170763264,13798958889519022080,13800823661239730176,13801597717425684480,13800999583100174336,13799169995751555072,13793751602449874944,4562850109968089088,4572525812292517888,4575657221408423936,4576484054152511488,4576783121315266560,4576800713501310976,4576712752571088896,4576554422896689152,4576255355733934080,4575762774524690432,4574496137129492480,4573053577873850368,4571751756106563584,4570520303083454464,4569324034432434176,4568338872013946880,4567001865874571264,4563835272386576384,4559331672759205888,4558205772852363264,4564398222339997696,4570449934339276800,4574355399641137152,4576923858803621888,4578419194617397248,4579070105501040640,4578788630524329984,4577768283733753856,4576554422896689152,4575586852664246272,4574953533966647296,4575375746431713280,4575833143268868096,4575674813594468352,4573581343455182848,4567987028293058560,13790162796496814080,13797410777147113472,13799961644123553792,13800507001890930688,13799838498821242880,13797692252123824128,13794314552403296256,13788473946636550144,13781577809707139072,13778200109986611200,13778200109986611200,4549761523551043584,4564961172293419008,4570731409315987456,4573546159083094016,4575410930803802112,4575850735454912512,4575516483920068608,4574531321501581312,4574144293408604160,4575094271455002624,4576607199454822400,4578278457129041920,4579791385128861696,4580345538989260800,4580090452291616768,4578454378989486080,4576009065129312256,4571083253036875776,4544132024016830464,13790796115194413056,13792414596310499328,13791288696403656704,13788192471659839488,13784392559474245632,13784955509427666944,13789318371566682112,13793047915008098304,13795721927286849536,13797375592775024640,13798466308309778432,13798888520774844416,13798888520774844416,13798782967658577920,13798958889519022080,13799416286356176896,13800260711286308864,13801492164309417984,13802917131379015680,13803867109425414144,13804262933611413504,13804262933611413504,13803787944588214272,13802301404867461120,13800172750356086784,13797340408402935808,13794701580496273408,13793540496217341952";            # minimp3 reference, frame 1 (384 f64)
+
+# Layer II decode: verified sample-exact vs minimp3 (mono + stereo + low-rate).
+fn test_mp3_decode_layer2() {
+    test_group("mp3: decode Layer II -> PCM");
+    if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
+    var buf = alloc(16384);
+    var n = _mp3_b64_decode(_L2MONO_B64, buf);
+    var res = mp3_decode_pcm(buf, n);
+    assert(res_ok(res) == 1, "layer2 mono decode ok");
+    var sv = decode_result_samples(res);
+    assert_eq(fmtinfo_channels(load64(res)), 1, "layer2 mono");
+    var m = vec_len(sv);
+    var sb = alloc(m * 8);
+    var i = 0;
+    while (i < m) { store64(sb + i * 8, vec_get(sv, i)); i = i + 1; }
+    var c = _mp3_tone_corr(sb, m, 44100);
+    syscall(1, 1, "  layer2 mono corr*1000 = ", 26); fmt_int(c); syscall(1, 1, "\n", 1);
+    assert(c > 985, "layer2 mono correlates with source");
+    var n2 = _mp3_b64_decode(_L2ST_B64, buf);
+    var res2 = mp3_decode_pcm(buf, n2);
+    assert(res_ok(res2) == 1, "layer2 stereo decode ok");
+    var sv2 = decode_result_samples(res2);
+    assert_eq(fmtinfo_channels(load64(res2)), 2, "layer2 stereo 2 channels");
+    var m2 = vec_len(sv2);
+    var sb2 = alloc(m2 * 8);
+    i = 0;
+    while (i < m2) { store64(sb2 + i * 8, vec_get(sv2, i)); i = i + 1; }
+    var cl = _mp3_sine_corr(sb2, m2, 2, 0, 440, 44100);
+    var cr = _mp3_sine_corr(sb2, m2, 2, 1, 660, 44100);
+    syscall(1, 1, "  layer2 stereo corr*1000 L=", 28); fmt_int(cl);
+    syscall(1, 1, " R=", 3); fmt_int(cr); syscall(1, 1, "\n", 1);
+    assert(cl > 985, "layer2 stereo L correlates");
+    assert(cr > 985, "layer2 stereo R correlates");
+    return 0;
+}
+
+# Layer I decode: verified sample-exact vs minimp3 on a constructed stream;
+# committed as a value-level correlation against the embedded reference (frame 1).
+fn test_mp3_decode_layer1() {
+    test_group("mp3: decode Layer I -> PCM");
+    if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
+    var buf = alloc(8192);
+    var flen = _mp3_b64_decode(_L1_B64, buf);
+    var res = mp3_decode_pcm(buf, flen);
+    assert(res_ok(res) == 1, "layer1 decode ok");
+    var sv = decode_result_samples(res);
+    var m = vec_len(sv);
+    assert(m >= 768, "layer1 enough samples");
+    var ref = alloc(384 * 8);
+    _mp3_parse_csv(_L1REF_CSV, ref);
+    var sdx = f64_from(0);
+    var sd2 = f64_from(0);
+    var sr2 = f64_from(0);
+    var k = 0;
+    while (k < 384) {
+        var dv = vec_get(sv, 384 + k);
+        var rv = load64(ref + k * 8);
+        sdx = f64_add(sdx, f64_mul(dv, rv));
+        sd2 = f64_add(sd2, f64_mul(dv, dv));
+        sr2 = f64_add(sr2, f64_mul(rv, rv));
+        k = k + 1;
+    }
+    var c = 0;
+    if (f64_gt(sd2, f64_from(0)) == 1) {
+        if (f64_gt(sr2, f64_from(0)) == 1) {
+            c = f64_to(f64_mul(f64_div(sdx, f64_sqrt(f64_mul(sd2, sr2))), f64_from(1000)));
+        }
+    }
+    syscall(1, 1, "  layer1 corr*1000 = ", 21); fmt_int(c); syscall(1, 1, "\n", 1);
+    assert(c > 995, "layer1 decode matches reference (>0.995)");
     return 0;
 }

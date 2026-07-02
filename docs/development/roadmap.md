@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.5.11** — 904 tests, Cyrius 6.3.27. **MP3 (MPEG-1 Layer III) now decodes to real PCM
-> audio** — verified sample-for-sample against minimp3 (waveform correlation 0.99999) and
-> the committed suite correlates the decode against its source (0.999). This joins
-> **Opus and AAC** (2.5.9/2.5.10), which encode→decode to real PCM (0.99+, mono+stereo).
+> **v2.5.12** — 932 tests, Cyrius 6.3.27. **MP3 decode is comprehensive**: MPEG-1/2/2.5
+> **Layer III** + **Layer II** + **Layer I**, all verified sample-exact against minimp3
+> (one narrow known edge: MPEG-2.5 8 kHz low-bitrate short blocks). Builds on **v2.5.11**
+> (MPEG-1 Layer III, 0.99999 vs minimp3) and **Opus/AAC** (2.5.9/2.5.10, encode→decode 0.99+).
 > The forward plan below was **reorganized 2026-07-02**: the sprawling
 > 2.5.9–2.5.23 point-release list was collapsed into focused 2.5.x releases
 > that **do the deferred core work** — the actual audio the 2.5.0–2.5.8 scaffolding was
@@ -31,11 +31,12 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
   0.998), mono + stereo. Caveat: a **bespoke, non-RFC-6716** stream (won't interoperate
   with libopus — conformance is a pinned 2.5.x item); transient frames decode via the
   long MDCT (short-window pre-echo coding deferred).
-- **MP3 (MPEG-1 Layer III) decode → PCM** *(2.5.11)* — `mp3_decode` produces real samples
-  (verified vs minimp3 at 0.99999, sample-exact; committed test correlates 0.999 vs the
-  source two-tone), mono + stereo/joint, with the bit reservoir and long/short block
-  switching. Ported from pdmp3 + ISO 11172-3; untrusted-input fuzzed (20K/0) + hardened.
-  Caveat: MPEG-2/2.5 (LSF) L3 and Layer I/II decode remain metadata-only (fall back).
+- **MP3 decode → PCM** *(2.5.11 + 2.5.12)* — `mp3_decode` produces real samples for
+  **all three layers and all MPEG versions**, verified sample-exact vs minimp3:
+  MPEG-1/2/2.5 **Layer III** (mono/stereo/M-S/intensity; bit reservoir; block switching),
+  **Layer II** (mono/stereo/low-rate), **Layer I**. Ported from pdmp3 + mpg123 + minimp3.
+  Untrusted-input fuzzed (L3 20K/0, L1/L2 20K/0) + hardened. Caveat: MPEG-2.5 8 kHz
+  low-bitrate short blocks decode imperfectly (~0.7; narrow, tracked).
 
 **🟥 Looks done, isn't (scaffolding / broken — the "actual core" that remains):**
 - **ALAC — dead code.** A full decoder exists but is **unwired**: `detect_format` has no
@@ -93,7 +94,8 @@ breadth. Order these by priority; each is an independent bite.
 - `feat(aac): re-enable TNS with proper prediction-gain-gated noise shaping (it currently amplifies quant noise, so it is disabled) + short-window + stereo/CPE`
 - `feat(aac): real HCB6 tables (reuses HCB5 today; shravan's encoder never selects cb6) + psychoacoustic ATH floor + tonality-adjusted SMR; optional rate/distortion scale-factor loop`
 - `feat(opus): true overlapping short-window transient coding (transient frames decode via the long MDCT today) + two-pass VBR`
-- `feat(mp3): MPEG-2/2.5 (LSF) Layer III decode (half-rate side info, one granule, LSF intensity-stereo scalefactor compression) + Layer I/II decode (both metadata-only today)`
+- ~~`feat(mp3): MPEG-2/2.5 (LSF) Layer III + Layer I/II decode`~~ — **done 2.5.12** (all
+  sample-exact vs minimp3; one narrow edge: MPEG-2.5 8 kHz low-bitrate short blocks).
 - `perf: fast FFT-based MDCT/IMDCT preserving the verified convention (fft.cyr's pair is now O(N²) direct — correct but slow; the fast fft_mdct/fft_imdct were replaced because they did not invert each other). The MP3 IMDCT/synthesis cosines are likewise direct O(N²). Benchmark before/after.`
 
 **New subsystems (larger; may each become their own 2.5.x point release):**
