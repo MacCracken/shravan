@@ -160,30 +160,33 @@ fn opus_parse_tags(data, len) {
 }
 
 # ================================================================
-# Range encoder (RFC 6716 Section 4.1)
+# Range coder (byte-oriented, LZMA-style carry) — encoder + decoder
 # ================================================================
-# State layout (48 bytes):
-#   +0:  buf (pointer to output bytes)
-#   +8:  buf_len (current length)
-#   +16: buf_cap (capacity)
-#   +24: low (u32)
-#   +32: range (u32)
-#   +40: carry_count (u32)
-#   +48: cache (i32, -1 initially)
-#   +56: bits_used (u32)
+# A standard, provably-invertible range coder. The encoder emits bytes
+# MSB-first with a one-byte cache plus a run counter to propagate carries;
+# the decoder consumes the identical stream. RFC 6716's CELT layer uses an
+# ec_enc/ec_dec pair with the same algebra; this implementation keeps the
+# public opus_range_* names so existing call sites are unchanged.
+#
+# Encoder state (64 bytes):
+#   +0:  buf (output byte pointer)   +8:  buf_len       +16: buf_cap
+#   +24: low (up to 2^33, carry in bit 32)              +32: range (<= 2^32-1)
+#   +40: cache (pending byte)         +48: cache_size (deferred 0xFF run + 1)
+# Decoder state (48 bytes):
+#   +0: data   +8: len   +16: pos   +24: range   +32: code
+
+var RC_TOP = 0x1000000;   # 2^24 renormalization threshold (kTopValue)
 
 fn opus_range_enc_init() {
     var rc = alloc(64);
     memset(rc, 0, 64);
-    var buf = alloc(4096);
-    store64(rc,      buf);
-    store64(rc + 8,  0);
-    store64(rc + 16, 4096);
-    store64(rc + 24, 0);            # low
-    store64(rc + 32, 0x80000000);   # range
-    store64(rc + 40, 0);            # carry_count
-    store64(rc + 48, 0 - 1);       # cache = -1
-    store64(rc + 56, 0);            # bits_used
+    store64(rc,      alloc(4096));   # buf
+    store64(rc + 8,  0);             # buf_len
+    store64(rc + 16, 4096);          # buf_cap
+    store64(rc + 24, 0);             # low
+    store64(rc + 32, 0xFFFFFFFF);    # range
+    store64(rc + 40, 0);             # cache
+    store64(rc + 48, 1);             # cache_size (leading byte pending)
     return rc;
 }
 
@@ -204,61 +207,48 @@ fn _rc_push_byte(rc, byte) {
     return 0;
 }
 
-fn _rc_carry_out(rc) {
+# LZMA ShiftLow: resolve carry, emit cache + any deferred 0xFF run, shift low.
+fn _rc_shift_low(rc) {
     var low = load64(rc + 24);
-    var carry = (low >> 23) & 0xFFFFFFFF;
-    var cache = load64(rc + 48);
-    var carry_count = load64(rc + 40);
-
-    if ((carry & 0xFF) != 0xFF) {
-        if (cache >= 0) {
-            _rc_push_byte(rc, (cache + ((carry >> 8) & 0xFFFFFFFF)) & 0xFF);
+    var carry = (low >> 32) & 0x1;          # 0 or 1
+    if ((carry != 0) | (low < 0xFF000000)) {
+        var temp = load64(rc + 40);         # cache
+        var cs = load64(rc + 48);           # cache_size (>= 1)
+        var i = 0;
+        while (i < cs) {
+            _rc_push_byte(rc, (temp + carry) & 0xFF);
+            temp = 0xFF;
+            i = i + 1;
         }
-        var ci = 0;
-        while (ci < carry_count) {
-            _rc_push_byte(rc, (((carry >> 8) & 0xFFFFFFFF) + 0xFF) & 0xFF);
-            ci = ci + 1;
-        }
-        store64(rc + 40, 0);
-        store64(rc + 48, carry & 0xFF);
-    } else {
-        store64(rc + 40, carry_count + 1);
+        store64(rc + 48, 0);
+        store64(rc + 40, (low >> 24) & 0xFF);   # new cache
     }
-    store64(rc + 24, low & 0x007FFFFF);
+    store64(rc + 48, load64(rc + 48) + 1);      # cache_size++
+    store64(rc + 24, (low << 8) & 0xFFFFFFFF);
     return 0;
 }
 
-fn _rc_normalize(rc) {
-    var range = load64(rc + 32);
-    while (range <= 0x00800000) {
-        _rc_carry_out(rc);
-        var low = load64(rc + 24);
-        store64(rc + 24, (low << 8) & 0xFFFFFFFF);
-        range = (range << 8) & 0xFFFFFFFF;
-        store64(rc + 32, range);
-        store64(rc + 56, load64(rc + 56) + 8);
-    }
-    return 0;
-}
-
-# Encode a symbol with probability [fl, fh) out of total.
+# Encode a symbol occupying [fl, fh) out of total.
 fn opus_range_enc_encode(rc, fl, fh, total) {
     if (total == 0) { return 0; }
     var range = load64(rc + 32);
-    var low = load64(rc + 24);
     var r = range / total;
-    var new_low = (low + r * fl) & 0xFFFFFFFF;
+    store64(rc + 24, load64(rc + 24) + r * fl);   # low += r*fl (carry into bit 32)
     if (fh < total) {
-        store64(rc + 32, (r * (fh - fl)) & 0xFFFFFFFF);
+        store64(rc + 32, r * (fh - fl));
     } else {
-        store64(rc + 32, (range - r * fl) & 0xFFFFFFFF);
+        store64(rc + 32, range - r * fl);         # top symbol keeps the remainder
     }
-    store64(rc + 24, new_low);
-    _rc_normalize(rc);
+    var rng = load64(rc + 32);
+    while (rng < RC_TOP) {
+        _rc_shift_low(rc);
+        rng = (rng << 8) & 0xFFFFFFFF;
+        store64(rc + 32, rng);
+    }
     return 0;
 }
 
-# Encode a single bit (equal probability).
+# Encode a single equiprobable bit.
 fn opus_range_enc_bit(rc, val) {
     if (val != 0) {
         opus_range_enc_encode(rc, 1, 2, 2);
@@ -275,56 +265,103 @@ fn opus_range_enc_uint(rc, val, total) {
     return 0;
 }
 
-# Get approximate bytes used so far.
+# Approximate bytes emitted so far (committed + pending cache run).
 fn opus_range_enc_bytes_used(rc) {
-    return load64(rc + 8) + 1 + load64(rc + 40);
+    return load64(rc + 8) + load64(rc + 48);
 }
 
-# Finalize and return Str (data, len).
+# Finalize: flush the 5 low bytes and return Str(data, len).
 fn opus_range_enc_flush(rc) {
-    var cache = load64(rc + 48);
-    var low = load64(rc + 24);
-    var carry_count = load64(rc + 40);
-
-    if (cache >= 0) {
-        var carry = (low >> 23) & 0xFFFFFFFF;
-        _rc_push_byte(rc, (cache + carry) & 0xFF);
-        var ci = 0;
-        while (ci < carry_count) {
-            _rc_push_byte(rc, (carry + 0xFF - 1) & 0xFF);
-            ci = ci + 1;
-        }
+    var i = 0;
+    while (i < 5) {
+        _rc_shift_low(rc);
+        i = i + 1;
     }
+    return str_new(load64(rc), load64(rc + 8));
+}
 
-    # Flush final bytes from low
-    var range = load64(rc + 32);
-    var nbits = 1;
-    if (range > 0) {
-        # Count bits needed: 32 - leading_zeros(range), min 1
-        var tmp = range;
-        var lz = 0;
-        while (tmp < 0x80000000) {
-            if (tmp == 0) { break; }
-            tmp = tmp << 1;
-            lz = lz + 1;
-        }
-        nbits = 32 - lz;
-        if (nbits < 1) { nbits = 1; }
+# ---------------- decoder (exact mirror of the encoder) ----------------
+
+fn _rd_next_byte(rd) {
+    var pos = load64(rd + 16);
+    var b = 0;
+    if (pos < load64(rd + 8)) { b = load8(load64(rd) + pos); }
+    store64(rd + 16, pos + 1);
+    return b;
+}
+
+# Initialize from a byte buffer: prime code with 5 bytes (leading cache
+# byte shifts out of the 32-bit window, mirroring the encoder's leading byte).
+fn opus_range_dec_init(data, len) {
+    var rd = alloc(48);
+    store64(rd, data);
+    store64(rd + 8, len);
+    store64(rd + 16, 0);
+    store64(rd + 24, 0xFFFFFFFF);
+    var code = 0;
+    var i = 0;
+    while (i < 5) {
+        code = ((code << 8) | _rd_next_byte(rd)) & 0xFFFFFFFF;
+        i = i + 1;
     }
-    var nbytes = (nbits + 7) / 8;
-    var shift = nbytes * 8 - 8;
-    var val = low >> (23 - nbits);
+    store64(rd + 32, code);
+    return rd;
+}
 
-    var bi = 0;
-    while (bi < nbytes) {
-        _rc_push_byte(rc, (val >> shift) & 0xFF);
-        val = val << 8;
-        bi = bi + 1;
+# Decode a value uniformly in [0, total) — inverse of opus_range_enc_uint.
+fn opus_range_dec_uint(rd, total) {
+    if (total <= 1) { return 0; }
+    var range = load64(rd + 24);
+    var code = load64(rd + 32);
+    var r = range / total;
+    var v = code / r;
+    if (v >= total) { v = total - 1; }
+    code = code - r * v;
+    if (v + 1 < total) {
+        range = r;
+    } else {
+        range = range - r * v;
     }
+    while (range < RC_TOP) {
+        code = ((code << 8) | _rd_next_byte(rd)) & 0xFFFFFFFF;
+        range = (range << 8) & 0xFFFFFFFF;
+    }
+    store64(rd + 24, range);
+    store64(rd + 32, code);
+    return v;
+}
 
-    var buf = load64(rc);
-    var blen = load64(rc + 8);
-    return str_new(buf, blen);
+# Decode a single equiprobable bit.
+fn opus_range_dec_bit(rd) {
+    return opus_range_dec_uint(rd, 2);
+}
+
+fn test_opus_range_roundtrip() {
+    test_group("opus: range coder roundtrip");
+    var rc = opus_range_enc_init();
+    opus_range_enc_uint(rc, 5, 10);
+    opus_range_enc_uint(rc, 100, 128);
+    opus_range_enc_uint(rc, 3, 7);
+    opus_range_enc_uint(rc, 42, 256);
+    opus_range_enc_bit(rc, 1);
+    opus_range_enc_bit(rc, 0);
+    opus_range_enc_uint(rc, 1000, 4096);
+    opus_range_enc_uint(rc, 0, 3);
+    opus_range_enc_uint(rc, 65535, 65536);
+    var coded = opus_range_enc_flush(rc);
+    assert(str_len(coded) > 0, "range coder produces output");
+
+    var rd = opus_range_dec_init(str_data(coded), str_len(coded));
+    assert_eq(opus_range_dec_uint(rd, 10), 5, "rc roundtrip uint 5/10");
+    assert_eq(opus_range_dec_uint(rd, 128), 100, "rc roundtrip uint 100/128");
+    assert_eq(opus_range_dec_uint(rd, 7), 3, "rc roundtrip uint 3/7");
+    assert_eq(opus_range_dec_uint(rd, 256), 42, "rc roundtrip uint 42/256");
+    assert_eq(opus_range_dec_bit(rd), 1, "rc roundtrip bit 1");
+    assert_eq(opus_range_dec_bit(rd), 0, "rc roundtrip bit 0");
+    assert_eq(opus_range_dec_uint(rd, 4096), 1000, "rc roundtrip uint 1000/4096");
+    assert_eq(opus_range_dec_uint(rd, 3), 0, "rc roundtrip uint 0/3");
+    assert_eq(opus_range_dec_uint(rd, 65536), 65535, "rc roundtrip uint 65535/65536");
+    return 0;
 }
 
 # ================================================================
@@ -435,7 +472,7 @@ fn _opus_encode_band_energies(rc, quant) {
         if (diff > 63) { diff = 63; }
         var val = diff + 64;
         opus_range_enc_uint(rc, val, 128);
-        prev = q;
+        prev = prev + diff;   # closed-loop DPCM: track the reconstructed (clamped) value so the decoder stays in sync
         i = i + 1;
     }
     return 0;
@@ -824,11 +861,214 @@ fn test_pvq_v_counting() {
     return 0;
 }
 
+# Symbol-exact proof at the band level: encode a band's shape through the range
+# coder, then decode the *identical* pulse vector back. Covers narrow/wide N and
+# a spread of K — the CWRS bijection composed with the matched range coder.
+fn test_opus_pvq_band_roundtrip() {
+    test_group("opus: PVQ band symbol-exact roundtrip");
+    var cfg_n = alloc(5 * 8);
+    var cfg_k = alloc(5 * 8);
+    store64(cfg_n + 0,  4);  store64(cfg_k + 0,  4);
+    store64(cfg_n + 8,  8);  store64(cfg_k + 8,  3);
+    store64(cfg_n + 16, 16); store64(cfg_k + 16, 5);
+    store64(cfg_n + 24, 3);  store64(cfg_k + 24, 2);
+    store64(cfg_n + 32, 32); store64(cfg_k + 32, 6);
+    var seven_tenths = f64_div(f64_from(7), f64_from(10));
+    var t = 0;
+    while (t < 5) {
+        var n = load64(cfg_n + t * 8);
+        var k = load64(cfg_k + t * 8);
+        # Clamp K to the legal range V(n,k) <= PVQ_V_SAFE — exactly the invariant
+        # _pvq_choose_k enforces in real encoding (the range coder needs idx < total).
+        while (k > 1) {
+            if (_pvq_v(n, k) <= PVQ_V_SAFE) { break; }
+            k = k - 1;
+        }
+        var x = alloc(n * 8);
+        var j = 0;
+        while (j < n) {
+            var ang = f64_add(f64_mul(f64_from(j + 1), seven_tenths), f64_from(t));
+            store64(x + j * 8, f64_sin(ang));
+            j = j + 1;
+        }
+        var yref = alloc(n * 8);
+        _pvq_search(x, n, k, yref);
+        var rc = opus_range_enc_init();
+        _pvq_encode_band(rc, x, n, k);
+        var coded = opus_range_enc_flush(rc);
+        var rd = opus_range_dec_init(str_data(coded), str_len(coded));
+        var ydec = alloc(n * 8);
+        _pvq_decode_band(rd, n, k, ydec);
+        var ok = 1;
+        j = 0;
+        while (j < n) {
+            if (load64(ydec + j * 8) != load64(yref + j * 8)) { ok = 0; }
+            j = j + 1;
+        }
+        assert(ok == 1, "PVQ band y roundtrip exact");
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Band-energy DPCM roundtrip: encode a quant array, decode it, and match the
+# closed-loop reconstruction (encoder + decoder track the same clamped predictor).
+fn test_opus_energy_roundtrip() {
+    test_group("opus: band-energy DPCM roundtrip");
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var quant = alloc(_CELT_NUM_BANDS * 8);
+    var expect = alloc(_CELT_NUM_BANDS * 8);
+    var i = 0;
+    var v = 0;
+    while (i < _CELT_NUM_BANDS) {
+        v = v + ((i * 7) % 23) - 5;
+        store64(quant + i * 8, v);
+        i = i + 1;
+    }
+    var prev = 0;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var q = load64(quant + i * 8);
+        var d = q - prev;
+        if (d < 0 - 64) { d = 0 - 64; }
+        if (d > 63) { d = 63; }
+        prev = prev + d;
+        store64(expect + i * 8, prev);
+        i = i + 1;
+    }
+    var rc = opus_range_enc_init();
+    _opus_encode_band_energies(rc, quant);
+    var coded = opus_range_enc_flush(rc);
+    var rd = opus_range_dec_init(str_data(coded), str_len(coded));
+    var dquant = alloc(_CELT_NUM_BANDS * 8);
+    _opus_decode_band_energies(rd, dquant);
+    var ok = 1;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        if (load64(dquant + i * 8) != load64(expect + i * 8)) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, "energy DPCM roundtrip exact");
+    return 0;
+}
+
+# Full-stream CELT roundtrip: window+MDCT+quantize a signal, encode energies+shape
+# into one range coder, then decode the packet and assert BOTH sub-streams invert
+# exactly — quantized energies bit-for-bit, and every K>0 sub-block's unit shape
+# equal to the encoder's own PVQ output (proving lock-step traversal + coder).
+fn test_opus_celt_frame_roundtrip() {
+    test_group("opus: CELT frame decode roundtrip");
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var fs = 960;              # OPUS_FRAME_SIZE (20ms @ 48 kHz)
+    var n2 = fs / 2;           # 480 MDCT bins
+    var f6 = f64_div(f64_from(6), f64_from(10));
+    var f3 = f64_div(f64_from(3), f64_from(10));
+    var sig = alloc(fs * 8);
+    var i = 0;
+    while (i < fs) {
+        var t = f64_from(i);
+        var a = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, t)), f64_from(64))), f6);
+        var b = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, t)), f64_from(17))), f3);
+        store64(sig + i * 8, f64_add(a, b));
+        i = i + 1;
+    }
+    var bytes = 80;           # 32 kbit/s @ 50 fps
+    # Encoder front end (identical to _opus_encode_celt_frame's mono path).
+    var ref = alloc(fs * 8);
+    memcpy(ref, sig, fs * 8);
+    _opus_sine_window(ref, fs);
+    var refmdct = alloc(n2 * 8);
+    memset(refmdct, 0, n2 * 8);
+    fft_mdct(ref, fs, refmdct);
+    var refen = alloc(_CELT_NUM_BANDS * 8);
+    _opus_compute_band_energies(refmdct, n2, refen);
+    var refq = alloc(_CELT_NUM_BANDS * 8);
+    _opus_quantize_energies(refen, refq);
+    # Expected closed-loop quantized energies.
+    var expq = alloc(_CELT_NUM_BANDS * 8);
+    var prev = 0;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var q = load64(refq + i * 8);
+        var d = q - prev;
+        if (d < 0 - 64) { d = 0 - 64; }
+        if (d > 63) { d = 63; }
+        prev = prev + d;
+        store64(expq + i * 8, prev);
+        i = i + 1;
+    }
+    # Build payload (energies + shape) and pad to the target size, like the frame encoder.
+    var rc = opus_range_enc_init();
+    _opus_encode_band_energies(rc, refq);
+    _opus_encode_spectral_shape(rc, refmdct, n2, bytes);
+    var coded = opus_range_enc_flush(rc);
+    var clen = str_len(coded);
+    assert(1 + clen <= bytes, "frame payload fits target size (no truncation)");
+    var pkt = alloc(bytes);
+    memset(pkt, 0, bytes);
+    store8(pkt, 31 << 3);     # TOC: CELT/FB 20ms mono (config 31)
+    memcpy(pkt + 1, str_data(coded), clen);
+    # Decode and verify both sub-streams.
+    var dquant = alloc(_CELT_NUM_BANDS * 8);
+    var dshape = alloc(n2 * 8);
+    var r = _opus_decode_celt_frame(pkt, bytes, n2, dquant, dshape);
+    assert(r == 0, "CELT frame decode ok");
+    var energy_ok = 1;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        if (load64(dquant + i * 8) != load64(expq + i * 8)) { energy_ok = 0; }
+        i = i + 1;
+    }
+    assert(energy_ok == 1, "frame energy roundtrip exact");
+    var shape_bits = (bytes - 1) * 8 - PVQ_ENERGY_RSVD_BITS;
+    if (shape_bits < 0) { shape_bits = 0; }
+    var shape_ok = 1;
+    var checked = 0;
+    var band = 0;
+    while (band < _CELT_NUM_BANDS) {
+        var start = load64(_celt_band_edges + band * 8);
+        var end = load64(_celt_band_edges + (band + 1) * 8);
+        if (end > n2) { end = n2; }
+        var bn = end - start;
+        if (bn > 0) {
+            var band_bits = shape_bits * bn / n2;
+            var off = start;
+            while (off < end) {
+                var ns = end - off;
+                if (ns > PVQ_MAX_N) { ns = PVQ_MAX_N; }
+                var sub_bits = band_bits * ns / bn;
+                var kk = _pvq_choose_k(ns, sub_bits);
+                if (kk > 0) {
+                    var yref = alloc(ns * 8);
+                    var rr = _pvq_search(refmdct + off * 8, ns, kk, yref);
+                    var sref = alloc(ns * 8);
+                    _pvq_denormalize(yref, ns, rr, sref);
+                    var j = 0;
+                    while (j < ns) {
+                        if (load64(dshape + (off + j) * 8) != load64(sref + j * 8)) { shape_ok = 0; }
+                        j = j + 1;
+                    }
+                    checked = checked + 1;
+                }
+                off = off + ns;
+            }
+        }
+        band = band + 1;
+    }
+    assert(shape_ok == 1, "frame shape roundtrip exact");
+    assert(checked > 0, "frame had at least one shaped sub-block");
+    return 0;
+}
+
 fn test_opus_pvq_all() {
+    test_opus_range_roundtrip();
     test_pvq_v_counting();
     test_pvq_cwrs_roundtrip();
     test_pvq_search_sanity();
     test_pvq_spectral_shape_roundtrip();
+    test_opus_pvq_band_roundtrip();
+    test_opus_energy_roundtrip();
+    test_opus_celt_frame_roundtrip();
     return 0;
 }
 
@@ -842,6 +1082,19 @@ fn _pvq_encode_band(rc, x, n, k) {
     var idx = _pvq_index_encode(y, n, k);
     opus_range_enc_uint(rc, idx, _pvq_v(n, k));
     return 0;
+}
+
+# Decode one band's PVQ shape from the range coder (inverse of _pvq_encode_band).
+# Reads the CWRS index over [0, V(n,k)) and expands it to the pulse vector y_out[n];
+# returns Ryy (0 when k<=0, or err(ERR_DECODE) if the index is out of range).
+fn _pvq_decode_band(rd, n, k, y_out) {
+    if (k <= 0) {                          # V=1: band folded/zero, y is all zeros
+        var z = 0;
+        while (z < n) { store64(y_out + z * 8, 0); z = z + 1; }
+        return 0;
+    }
+    var idx = opus_range_dec_uint(rd, _pvq_v(n, k));
+    return _pvq_index_decode(idx, n, k, y_out);
 }
 
 # Encode spectral shape via PVQ (2.5.0 — replaces sign-only). Per band: split into
@@ -871,6 +1124,81 @@ fn _opus_encode_spectral_shape(rc, mdct, n2, packet_bytes) {
         }
         band = band + 1;
     }
+    return 0;
+}
+
+# ================================================================
+# CELT decode (2.5.1) — inverse of the encode path above
+# ================================================================
+# The decoder mirrors the encoder symbol-for-symbol: band energies via inverse
+# DPCM, then per-band/per-sub-block PVQ shapes using the SAME data-independent
+# K budget so every opus_range_dec_uint reads the identical `total` the encoder
+# wrote. Correctness rests on the matched range coder (invertible) plus this
+# lock-step traversal.
+
+# Decode band energies (inverse of _opus_encode_band_energies): read 21 deltas
+# in [0,128), recover the closed-loop quantized log2 energies into quant_out[21].
+fn _opus_decode_band_energies(rd, quant_out) {
+    var prev = 0;
+    var i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var val = opus_range_dec_uint(rd, 128);
+        var diff = val - 64;
+        prev = prev + diff;
+        store64(quant_out + i * 8, prev);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Decode spectral shape (inverse of _opus_encode_spectral_shape). Walks bands and
+# sub-blocks in the same order with the same K budget; each sub-block is rebuilt as
+# a unit-L2 shape (direction) in shape_out. Energy scaling is applied separately by
+# the caller from the decoded band energies (full magnitude synthesis is a 2.5.x
+# refinement — this reconstructs the CELT direction, which is what PVQ carries).
+fn _opus_decode_spectral_shape(rd, n2, packet_bytes, shape_out) {
+    var z = 0;
+    while (z < n2) { store64(shape_out + z * 8, F64_ZERO); z = z + 1; }
+    var shape_bits = (packet_bytes - 1) * 8 - PVQ_ENERGY_RSVD_BITS;
+    if (shape_bits < 0) { shape_bits = 0; }
+    var band = 0;
+    while (band < _CELT_NUM_BANDS) {
+        var start = load64(_celt_band_edges + band * 8);
+        var end = load64(_celt_band_edges + (band + 1) * 8);
+        if (end > n2) { end = n2; }
+        var bn = end - start;
+        if (bn > 0) {
+            var band_bits = shape_bits * bn / n2;
+            var off = start;
+            while (off < end) {
+                var ns = end - off;
+                if (ns > PVQ_MAX_N) { ns = PVQ_MAX_N; }
+                var sub_bits = band_bits * ns / bn;
+                var kk = _pvq_choose_k(ns, sub_bits);
+                var y = alloc(ns * 8);
+                var ryy = _pvq_decode_band(rd, ns, kk, y);
+                _pvq_denormalize(y, ns, ryy, shape_out + off * 8);
+                off = off + ns;
+            }
+        }
+        band = band + 1;
+    }
+    return 0;
+}
+
+# Decode a CELT frame packet (TOC byte + range-coded payload) into per-band
+# quantized energies (quant_out[21]) and unit spectral shape (shape_out[n2]).
+# packet_len must equal the encoder's target packet size so the K budget matches.
+# Returns 0, or err() on a truncated packet / unsupported TOC config.
+fn _opus_decode_celt_frame(packet, packet_len, n2, quant_out, shape_out) {
+    if (packet_len < 1) { return err(ERR_DECODE); }
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var toc = load8(packet);
+    var config = (toc >> 3) & 0x1F;
+    if (config != 31) { return err(ERR_UNSUPPORTED_FMT); }   # only CELT/FB 20ms mono for now
+    var rd = opus_range_dec_init(packet + 1, packet_len - 1);
+    _opus_decode_band_energies(rd, quant_out);
+    _opus_decode_spectral_shape(rd, n2, packet_len, shape_out);
     return 0;
 }
 

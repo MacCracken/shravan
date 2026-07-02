@@ -1,8 +1,10 @@
 # Development Roadmap
 
-> **v2.5.0** — 727 tests + fuzz (90K/0), Cyrius 6.3.19.
-> Full PVQ spectral shape (CELT): V(N,K)/CWRS quantizer + pulse search replace
-> sign-only (cosine 0.98 vs 0.80). (v2.4.4: Opus encoder framework. v2.4.3:
+> **v2.5.1** — 748 tests + fuzz (90K/0), Cyrius 6.3.19.
+> First CELT decode: matched (invertible) range coder + PVQ shape decode +
+> full-stream encode→decode roundtrip (energies bit-exact, shapes bit-exact).
+> (v2.5.0: full PVQ spectral shape — V(N,K)/CWRS quantizer + pulse search replace
+> sign-only, cosine 0.98 vs 0.80. v2.4.4: Opus encoder framework. v2.4.3:
 > distlib bundle. v2.4.1: serde full coverage. v2.4.0: cyrius.cyml modernize.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
@@ -148,19 +150,30 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       shape cosine 0.9798 vs sign-only 0.800 — **PVQ beats sign-only**.
 - [x] Wired into `_opus_encode_spectral_shape` (per-band split ≤ N=32, data-independent
       K budget so the future decoder computes identical K); TOC config 30→31 fix.
-- [ ] Full packet encode→decode stream roundtrip — deferred to **2.5.1** (needs a
-      CELT decoder; shravan has none today — `opus_decode_from_packets` is header-only).
+- [x] Full packet encode→decode stream roundtrip — shipped in **2.5.1**.
+
+## v2.5.1 — CELT decode + full-stream PVQ roundtrip · shipped 2026-07-01
+
+- [x] Replaced the custom range coder with a matched, provably-invertible LZMA-style
+      pair (`opus_range_enc_*` + new `opus_range_dec_*`); 9-symbol mixed uint/bit
+      roundtrip incl. edge cases (0/3, 65535/65536).
+- [x] `_pvq_decode_band` — inverse of `_pvq_encode_band` (CWRS index → pulse vector);
+      band-level symbol-exact roundtrip across narrow/wide N and a spread of K.
+- [x] `_opus_decode_band_energies` (inverse DPCM) + closed-loop encoder fix so the
+      predictor tracks the reconstructed value (encoder/decoder stay in sync).
+- [x] `_opus_decode_spectral_shape` — lock-step band/sub-block traversal with the
+      same data-independent K budget as the encoder; unit-L2 shape reconstruction.
+- [x] `_opus_decode_celt_frame` — TOC parse (config 31) → energies + shape decode.
+- [x] Full-stream roundtrip test: energies bit-exact, every K>0 sub-block's shape
+      bit-exact vs the encoder's own PVQ output.
+- Deferred: full magnitude synthesis (shape × band energy) + IMDCT→PCM with
+  inter-frame TDAC overlap-add — a later 2.5.x refinement (this ships CELT
+  *direction* decode, which is what PVQ carries).
 
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.1 — CELT decode + full-stream PVQ roundtrip · needs 2.5.0
-
-- Mirrored range decoder + `_opus_decode_spectral_shape`; full encode→decode
-  roundtrip test. shravan's first CELT audio decode (verify range-coder
-  invertibility first — flagged not-bit-exact).
 
 ### v2.5.2 — AAC TNS + psychoacoustic model · deferred (independent)
 

@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] - 2026-07-01
+
+shravan's first CELT decode: a matched, provably-invertible range coder, PVQ
+shape decode, and a full-stream encode→decode roundtrip proving the entropy
+stream inverts exactly (band energies bit-exact, spectral shapes bit-exact).
+748 assertions (was 727, +21).
+
+### Added
+
+- **CELT decode path** (`src/opus.cyr`) — inverse of the 2.5.0 encode path:
+  - `opus_range_dec_init` / `opus_range_dec_uint` / `opus_range_dec_bit` — a
+    byte-oriented range decoder matched to a rewritten LZMA-style encoder.
+  - `_pvq_decode_band` — reads a CWRS index over `[0, V(N,K))` and expands it to
+    the pulse vector (inverse of `_pvq_encode_band`).
+  - `_opus_decode_band_energies` — inverse DPCM of the band-energy sub-stream.
+  - `_opus_decode_spectral_shape` — walks bands/sub-blocks in lock-step with the
+    encoder (same data-independent K budget) and reconstructs each unit-L2 shape.
+  - `_opus_decode_celt_frame` — TOC parse (CELT/FB config 31) → energies + shape.
+- **Tests** (`+21` assertions): range-coder roundtrip (mixed uint/bit incl.
+  edge cases 0/3 and 65535/65536), PVQ band symbol-exact roundtrip, band-energy
+  DPCM roundtrip, and a full-stream CELT frame roundtrip asserting bit-exact
+  energies and bit-exact per-sub-block shapes.
+
+### Changed
+
+- **Range coder rewrite** (`src/opus.cyr`) — replaced the custom forward coder
+  (which was not bit-exact invertible) with a standard LZMA-style carry coder
+  (one-byte cache + deferred `0xFF` run), keeping the public `opus_range_enc_*`
+  names so existing call sites are unchanged. Opus encoder output bytes change.
+- **Band-energy DPCM is now closed-loop** — the encoder's predictor tracks the
+  reconstructed (clamped) value instead of the raw quantized energy, so the
+  decoder stays in sync even when a delta saturates.
+
 ## [2.5.0] - 2026-07-01
 
 Full PVQ (Pyramid Vector Quantization) spectral shape for the CELT encoder,
