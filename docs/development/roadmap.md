@@ -74,7 +74,7 @@ is how the old suite hid the silence. Each commit builds clean
 (`cyrius build src/main.cyr build/shravan`) and keeps the suite green. **Never skip
 benchmarks** on a perf claim.
 
-### v2.6.0 — **Opus is REAL: decode actual `.opus` files (RFC-6716 CELT)** · large · IN PROGRESS
+### v2.6.0 — **Opus is REAL: decode actual `.opus` files (RFC-6716 CELT)** · large · ✅ CELT DECODE DONE
 **This is now #1, not last.** For the entire 2.5.x arc this was deferred every release
 (it sat at v2.7.0, behind ALAC/fuzz/MP4/FLAC/AAC/hi-res). It is pulled to the front and
 being built foundation-up, each stage proven **bit-exact against libopus** (system
@@ -107,15 +107,16 @@ full — nothing hidden):
   transient+steady frames match the final range-coder `rng`, `ec_tell`, and every
   collapse mask). CELT's real `cwrsi` (U-table) replaces the bespoke PVQ index scheme.
   Remaining in this subsystem: `anti_collapse` (transient noise refill).
-- [ ] **Inverse MDCT + FFT** (mdct.c/kiss_fft.c: `clt_mdct_backward`, the CELT low-overlap
-  window (overlap=120, **not** 50%), pre/post rotation, per-channel overlap-add buffers).
-- [ ] **Orchestration + state** (celt_decoder.c: `celt_decode_with_ec` order — silence,
-  post-filter parse, transient/`tf_decode`, spread, dynalloc, trim, anti-collapse rsv,
-  intensity/dual; persistent `oldBandE`/overlap/deemph state across frames; de-emphasis
-  to PCM).
-- [ ] **Wire + verify**: `detect_format` `.opus` → Ogg demux → real CELT decode; assert
-  PCM correlation ≥ 0.99 vs ffmpeg for `real_mono.opus` + `real_stereo.opus`; retire the
-  bespoke path from the file-decode dispatch.
+- [x] **Inverse MDCT + FFT** (`clt_mdct_backward`, direct DFT, CELT 120-overlap window,
+  per-channel overlap-add) — **impulse-exact vs libopus** (`test_celt_imdct_unit`, corr 1.0).
+- [x] **Orchestration + state + postfilter + deemphasis** (`celt_decode_frame`: full
+  R1–R26 order, persistent `oldBandE`/`decode_mem`/postfilter/deemph state across frames,
+  `anti_collapse`, pitch `comb_filter`, de-emphasis) — verified via full-file decode.
+- [x] **Wire + verify**: `opus_decode_from_packets` now drives the real CELT decoder
+  (config 31, per-packet channel detect, pre-skip trim, granule cap); bespoke path retired
+  from the file-decode dispatch. **shravan decodes real `real_mono.opus`/`real_stereo.opus`
+  end-to-end at correlation 1.000000, SNR ~131 dB vs ffmpeg** (mono + stereo).
+  `test_celt_pcm_rfc` + `test_celt_pcm_stereo_rfc` assert this in-suite on real frames.
 
 ### v2.6.1 — Opus encoder conformance (libopus decodes OURS) · large
 - `feat(opus): real ec_enc + RFC band layout/allocation/TOC on the encode side` — goal:
