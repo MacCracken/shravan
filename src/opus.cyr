@@ -997,8 +997,9 @@ fn test_opus_celt_frame_roundtrip() {
         store64(expq + i * 8, prev);
         i = i + 1;
     }
-    # Build payload (energies + shape) and pad to the target size, like the frame encoder.
+    # Build payload (isTransient + energies + shape) and pad to target size, like the encoder.
     var rc = opus_range_enc_init();
+    opus_range_enc_bit(rc, 0);   # steady frame
     _opus_encode_band_energies(rc, refq);
     _opus_encode_spectral_shape(rc, refmdct, n2, bytes);
     var coded = opus_range_enc_flush(rc);
@@ -1009,10 +1010,12 @@ fn test_opus_celt_frame_roundtrip() {
     store8(pkt, 31 << 3);     # TOC: CELT/FB 20ms mono (config 31)
     memcpy(pkt + 1, str_data(coded), clen);
     # Decode and verify both sub-streams.
+    var dtrans = alloc(8);
     var dquant = alloc(_CELT_NUM_BANDS * 8);
     var dshape = alloc(n2 * 8);
-    var r = _opus_decode_celt_frame(pkt, bytes, n2, dquant, dshape);
+    var r = _opus_decode_celt_frame(pkt, bytes, n2, dquant, dshape, dtrans);
     assert(r == 0, "CELT frame decode ok");
+    assert_eq(load64(dtrans), 0, "isTransient=0 roundtrips");
     var energy_ok = 1;
     i = 0;
     while (i < _CELT_NUM_BANDS) {
@@ -1060,6 +1063,137 @@ fn test_opus_celt_frame_roundtrip() {
     return 0;
 }
 
+# Transient detector: steady tone is not transient; an onset after silence is.
+fn test_opus_transient_detect() {
+    test_group("opus: transient detection");
+    var fs = 960;
+    var steady = alloc(fs * 8);
+    var i = 0;
+    while (i < fs) {
+        store64(steady + i * 8, f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(32))));
+        i = i + 1;
+    }
+    assert_eq(_opus_detect_transient(steady, fs), 0, "steady tone is not transient");
+    var trans = alloc(fs * 8);
+    memset(trans, 0, fs * 8);
+    i = fs / 2;
+    while (i < fs) {
+        store64(trans + i * 8, f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(20))));
+        i = i + 1;
+    }
+    assert_eq(_opus_detect_transient(trans, fs), 1, "onset after silence is transient");
+    # a click confined to the first sub-block (samples 0..fs/8), then silence
+    var click = alloc(fs * 8);
+    memset(click, 0, fs * 8);
+    i = 0;
+    while (i < fs / 8) {
+        store64(click + i * 8, f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(15))));
+        i = i + 1;
+    }
+    assert_eq(_opus_detect_transient(click, fs), 1, "block-0 click is transient");
+    return 0;
+}
+
+# Transient CELT frame: short-block MDCT + isTransient bit, full-stream roundtrip
+# (flag + energies + every K>0 sub-block shape bit-exact vs the encoder's PVQ).
+fn test_opus_transient_roundtrip() {
+    test_group("opus: transient CELT frame roundtrip");
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var fs = 960;
+    var n2 = fs / 2;
+    var sig = alloc(fs * 8);
+    memset(sig, 0, fs * 8);
+    var i = fs / 2;
+    while (i < fs) {
+        store64(sig + i * 8, f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(20))), f64_div(f64_from(7), f64_from(10))));
+        i = i + 1;
+    }
+    assert_eq(_opus_detect_transient(sig, fs), 1, "signal is transient");
+    var bytes = 80;
+    # Reference: short-block MDCT (the encoder's transient path) → energies → quant.
+    var refmdct = alloc(n2 * 8);
+    memset(refmdct, 0, n2 * 8);
+    _opus_short_mdct(sig, fs, CELT_SHORT_BLOCKS, refmdct);
+    var refen = alloc(_CELT_NUM_BANDS * 8);
+    _opus_compute_band_energies(refmdct, n2, refen);
+    var refq = alloc(_CELT_NUM_BANDS * 8);
+    _opus_quantize_energies(refen, refq);
+    var expq = alloc(_CELT_NUM_BANDS * 8);
+    var prev = 0;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        var q = load64(refq + i * 8);
+        var d = q - prev;
+        if (d < 0 - 64) { d = 0 - 64; }
+        if (d > 63) { d = 63; }
+        prev = prev + d;
+        store64(expq + i * 8, prev);
+        i = i + 1;
+    }
+    var rc = opus_range_enc_init();
+    opus_range_enc_bit(rc, 1);   # transient
+    _opus_encode_band_energies(rc, refq);
+    _opus_encode_spectral_shape(rc, refmdct, n2, bytes);
+    var coded = opus_range_enc_flush(rc);
+    var clen = str_len(coded);
+    assert(1 + clen <= bytes, "transient payload fits target size");
+    var pkt = alloc(bytes);
+    memset(pkt, 0, bytes);
+    store8(pkt, 31 << 3);
+    memcpy(pkt + 1, str_data(coded), clen);
+    var dtrans = alloc(8);
+    var dquant = alloc(_CELT_NUM_BANDS * 8);
+    var dshape = alloc(n2 * 8);
+    var r = _opus_decode_celt_frame(pkt, bytes, n2, dquant, dshape, dtrans);
+    assert(r == 0, "transient frame decode ok");
+    assert_eq(load64(dtrans), 1, "isTransient=1 roundtrips");
+    var energy_ok = 1;
+    i = 0;
+    while (i < _CELT_NUM_BANDS) {
+        if (load64(dquant + i * 8) != load64(expq + i * 8)) { energy_ok = 0; }
+        i = i + 1;
+    }
+    assert(energy_ok == 1, "transient-frame energies roundtrip exact");
+    var shape_bits = (bytes - 1) * 8 - PVQ_ENERGY_RSVD_BITS;
+    if (shape_bits < 0) { shape_bits = 0; }
+    var shape_ok = 1;
+    var checked = 0;
+    var band = 0;
+    while (band < _CELT_NUM_BANDS) {
+        var start = load64(_celt_band_edges + band * 8);
+        var end = load64(_celt_band_edges + (band + 1) * 8);
+        if (end > n2) { end = n2; }
+        var bn = end - start;
+        if (bn > 0) {
+            var band_bits = shape_bits * bn / n2;
+            var off = start;
+            while (off < end) {
+                var ns = end - off;
+                if (ns > PVQ_MAX_N) { ns = PVQ_MAX_N; }
+                var sub_bits = band_bits * ns / bn;
+                var kk = _pvq_choose_k(ns, sub_bits);
+                if (kk > 0) {
+                    var yref = alloc(ns * 8);
+                    var rr = _pvq_search(refmdct + off * 8, ns, kk, yref);
+                    var sref = alloc(ns * 8);
+                    _pvq_denormalize(yref, ns, rr, sref);
+                    var j = 0;
+                    while (j < ns) {
+                        if (load64(dshape + (off + j) * 8) != load64(sref + j * 8)) { shape_ok = 0; }
+                        j = j + 1;
+                    }
+                    checked = checked + 1;
+                }
+                off = off + ns;
+            }
+        }
+        band = band + 1;
+    }
+    assert(shape_ok == 1, "transient-frame shape roundtrips exact");
+    assert(checked > 0, "transient frame had a shaped sub-block");
+    return 0;
+}
+
 fn test_opus_pvq_all() {
     test_opus_range_roundtrip();
     test_pvq_v_counting();
@@ -1069,6 +1203,8 @@ fn test_opus_pvq_all() {
     test_opus_pvq_band_roundtrip();
     test_opus_energy_roundtrip();
     test_opus_celt_frame_roundtrip();
+    test_opus_transient_detect();
+    test_opus_transient_roundtrip();
     return 0;
 }
 
@@ -1190,15 +1326,100 @@ fn _opus_decode_spectral_shape(rd, n2, packet_bytes, shape_out) {
 # quantized energies (quant_out[21]) and unit spectral shape (shape_out[n2]).
 # packet_len must equal the encoder's target packet size so the K budget matches.
 # Returns 0, or err() on a truncated packet / unsupported TOC config.
-fn _opus_decode_celt_frame(packet, packet_len, n2, quant_out, shape_out) {
+fn _opus_decode_celt_frame(packet, packet_len, n2, quant_out, shape_out, transient_out) {
     if (packet_len < 1) { return err(ERR_DECODE); }
     if (_celt_band_edges == 0) { _opus_init_bands(); }
     var toc = load8(packet);
     var config = (toc >> 3) & 0x1F;
     if (config != 31) { return err(ERR_UNSUPPORTED_FMT); }   # only CELT/FB 20ms mono for now
     var rd = opus_range_dec_init(packet + 1, packet_len - 1);
+    store64(transient_out, opus_range_dec_bit(rd));
     _opus_decode_band_energies(rd, quant_out);
     _opus_decode_spectral_shape(rd, n2, packet_len, shape_out);
+    return 0;
+}
+
+# ================================================================
+# Transient detection + short-block MDCT (CELT, 2.5.4)
+# ================================================================
+# A frame with a sudden onset ("transient") is better represented by several
+# short MDCTs than one long one — short blocks localize energy in time and cut
+# pre-echo. We detect transients from time-domain sub-block energy, and when one
+# is present replace the long MDCT with CELT_SHORT_BLOCKS short MDCTs whose
+# coefficients are interleaved into the same n2-coefficient buffer (block b,
+# frequency f -> index f*M + b), so the band-energy + PVQ-shape path is unchanged.
+# The `isTransient` flag is coded as one range-coder bit at the head of the frame.
+
+var CELT_SHORT_BLOCKS = 8;      # short MDCTs per 20ms frame when transient
+var TRANSIENT_RATIO = 8;        # sub-block energy > 8x the preceding average => transient
+
+# Detect a transient: 1 if some sub-block's energy sharply exceeds the running
+# average of the preceding sub-blocks (or rises out of near-silence), else 0.
+fn _opus_detect_transient(samples, frame_size) {
+    var nsub = 8;
+    var sub = frame_size / nsub;
+    if (sub < 1) { return 0; }
+    var tiny = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
+    var en = alloc(nsub * 8);
+    var b = 0;
+    while (b < nsub) {
+        var e = F64_ZERO;
+        var i = 0;
+        while (i < sub) {
+            var s = load64(samples + (b * sub + i) * 8);
+            e = f64_add(e, f64_mul(s, s));
+            i = i + 1;
+        }
+        store64(en + b * 8, e);
+        b = b + 1;
+    }
+    # Compare adjacent sub-block energies in BOTH directions: a rise (onset) or a
+    # drop (decay/offset) sharper than TRANSIENT_RATIO flags a transient. Testing
+    # pair (0,1) makes sub-block 0 a candidate, so a click confined to the first
+    # sub-block — or an energy decay — is caught, not just mid-frame onsets.
+    var transient = 0;
+    b = 1;
+    while (b < nsub) {
+        var prev = load64(en + (b - 1) * 8);
+        var cur = load64(en + b * 8);
+        var lo = prev;
+        var hi = cur;
+        if (f64_gt(prev, cur) == 1) { lo = cur; hi = prev; }
+        if (f64_gt(lo, tiny) == 1) {
+            if (f64_gt(hi, f64_mul(lo, f64_from(TRANSIENT_RATIO))) == 1) { transient = 1; }
+        } else {
+            if (f64_gt(hi, tiny) == 1) { transient = 1; }
+        }
+        b = b + 1;
+    }
+    return transient;
+}
+
+# Short-block MDCT: num_blocks windowed MDCTs over the frame, coefficients
+# interleaved as out[f*num_blocks + b] = block_b[f]. Fills n2 = frame_size/2 slots.
+fn _opus_short_mdct(mono, frame_size, num_blocks, out) {
+    var bsize = frame_size / num_blocks;
+    var bcoefs = bsize / 2;
+    var wblock = alloc(bsize * 8);
+    var bout = alloc(bcoefs * 8);
+    var b = 0;
+    while (b < num_blocks) {
+        var i = 0;
+        while (i < bsize) {
+            var s = load64(mono + (b * bsize + i) * 8);
+            var angle = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)), f64_from(bsize));
+            store64(wblock + i * 8, f64_mul(s, f64_sin(angle)));
+            i = i + 1;
+        }
+        memset(bout, 0, bcoefs * 8);
+        fft_mdct(wblock, bsize, bout);
+        var f = 0;
+        while (f < bcoefs) {
+            store64(out + (f * num_blocks + b) * 8, load64(bout + f * 8));
+            f = f + 1;
+        }
+        b = b + 1;
+    }
     return 0;
 }
 
@@ -1235,13 +1456,18 @@ fn _opus_encode_celt_frame(samples, frame_size, channels, target_bytes) {
         i = i + 1;
     }
 
-    # Apply sine window
-    _opus_sine_window(mono, frame_size);
+    # Transient detection (on the time-domain frame, before windowing).
+    var is_transient = _opus_detect_transient(mono, frame_size);
 
-    # Forward MDCT
+    # Forward MDCT: short blocks for transients, one long block otherwise.
     var mdct = alloc(n2 * 8);
     memset(mdct, 0, n2 * 8);
-    fft_mdct(mono, frame_size, mdct);
+    if (is_transient == 1) {
+        _opus_short_mdct(mono, frame_size, CELT_SHORT_BLOCKS, mdct);
+    } else {
+        _opus_sine_window(mono, frame_size);
+        fft_mdct(mono, frame_size, mdct);
+    }
 
     # Compute and quantize band energies
     var energies = alloc(_CELT_NUM_BANDS * 8);
@@ -1252,6 +1478,9 @@ fn _opus_encode_celt_frame(samples, frame_size, channels, target_bytes) {
 
     # Build Opus packet with range coder
     var rc = opus_range_enc_init();
+
+    # isTransient flag (one bit at the head of the CELT frame)
+    opus_range_enc_bit(rc, is_transient);
 
     # Encode band energies
     _opus_encode_band_energies(rc, quant);

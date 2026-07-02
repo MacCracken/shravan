@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.4] - 2026-07-01
+
+CELT transient detection + short-block MDCT. 796 assertions (was 785, +11).
+
+### Added
+
+- **CELT transient detection + short-window switching** (`src/opus.cyr`):
+  - `_opus_detect_transient` — flags a frame whose sub-block energy sharply exceeds
+    the running average of the preceding sub-blocks (or rises out of near-silence).
+  - `_opus_short_mdct` — on a transient, replaces the single long MDCT with
+    `CELT_SHORT_BLOCKS` (8) windowed short MDCTs whose coefficients interleave into
+    the same 480-coefficient buffer (`out[f*M + b]`), localizing energy in time and
+    cutting pre-echo. The band-energy + PVQ-shape path is unchanged (layout-agnostic).
+  - `isTransient` coded as one range-coder bit at the head of the CELT frame; the
+    decoder reads it back (new `transient_out` on `_opus_decode_celt_frame`).
+- **Tests** (`+11` assertions): detector (steady tone → not transient, onset after
+  silence → transient, block-0 click → transient — via a symmetric adjacent-pair
+  test that catches onsets *and* decays anywhere in the frame) and a full
+  transient-frame roundtrip (isTransient bit + energies bit-exact + every K>0
+  sub-block shape bit-exact vs the encoder's PVQ).
+
 ## [2.5.3] - 2026-07-01
 
 AAC psychoacoustic masking model driving scale-factor allocation. 785 assertions

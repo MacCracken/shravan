@@ -1,11 +1,12 @@
 # Development Roadmap
 
-> **v2.5.3** — 785 tests + fuzz (90K/0), Cyrius 6.3.25.
-> AAC psychoacoustic masking model: asymmetric critical-band spreading → per-band
-> coarseness offset drives scale-factor allocation (masked bands quantized coarser).
-> (v2.5.2: AAC TNS + toolchain 6.3.25 + serde repair. v2.5.1: first CELT decode —
-> matched range coder + PVQ shape decode. v2.5.0: full PVQ spectral shape. v2.4.4:
-> Opus encoder framework. v2.4.3: distlib bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
+> **v2.5.4** — 796 tests + fuzz (90K/0), Cyrius 6.3.25.
+> CELT transient detection + short-block MDCT: onset/decay detector switches a
+> transient frame to 8 interleaved short MDCTs; `isTransient` bit at the frame head.
+> (v2.5.3: AAC psychoacoustic masking model. v2.5.2: AAC TNS + toolchain 6.3.25 +
+> serde repair. v2.5.1: first CELT decode — matched range coder + PVQ shape decode.
+> v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework. v2.4.3: distlib
+> bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -191,14 +192,21 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - Deferred: absolute-threshold-of-hearing floor + tonality-adjusted SMR (needs SPL
   calibration); closed-loop scale-factor DPCM (the ±60 diff-clamp is pre-existing).
 
+## v2.5.4 — Transient detection + short-window switching (CELT) · shipped 2026-07-01
+
+- [x] `_opus_detect_transient` — symmetric adjacent-sub-block energy test catches
+      onsets and decays anywhere in the frame (incl. the first sub-block).
+- [x] `_opus_short_mdct` — 8 windowed short MDCTs, coefficients interleaved
+      (`out[f*M+b]`) into the 480-bin buffer so band-energy + PVQ code is unchanged.
+- [x] `isTransient` coded as one range-coder bit at the frame head; decoder reads it
+      back; full transient-frame roundtrip (flag + energies + shape all bit-exact).
+- Deferred: proper CELT overlapping short-window shapes + per-band time-frequency
+  resolution + cross-frame transient memory (need full IMDCT→PCM synthesis).
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.4 — Transient detection + short-window switching (CELT) · needs 2.5.0
-
-- Transient detector → 2/4/8 short MDCTs; `transient` flag; per-band tf resolution.
 
 ### v2.5.5 — Stereo coupling (CELT) · needs 2.5.0
 
