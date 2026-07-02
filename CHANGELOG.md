@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-07-01
+
+Full PVQ (Pyramid Vector Quantization) spectral shape for the CELT encoder,
+replacing the sign-only stub — the CELT quality root the rest of the Opus
+encoder work (2.5.x) allocates bits against. 727 assertions (was 610, +117).
+
+### Added
+
+- **PVQ spectral shape** (`src/opus.cyr`) — each band's unit-L2 shape is
+  quantized to an integer pulse vector `y` (`sum|y_i| = K`) coded by its CWRS
+  index:
+  - `V(N,K)` pyramid-count grid (saturating, range-coder-safe) + `_pvq_bits` /
+    `_pvq_choose_k` (K from a bit budget).
+  - `_pvq_index_encode` / `_pvq_index_decode` — bijective CWRS index ↔ vector,
+    roundtrip-tested (exhaustive N=2,K=2 + (3,2)/(4,3)/(2,10)/(1,3); out-of-range
+    decode rejected).
+  - `_pvq_search` — greedy `Rxy²/Ryy` pulse search; `_pvq_denormalize` shape
+    reconstruction. Reconstructed shape cosine **0.9798 vs sign-only's 0.800**.
+  - Wired into `_opus_encode_spectral_shape`: per-band split to `N ≤ 32`,
+    data-independent K budget (derived from packet size + band geometry so a
+    future decoder computes identical K).
+  - 4 test functions (+117 assertions → 727).
+
+### Fixed
+
+- **TOC config 30 → 31.** `_opus_encode_celt_frame` labeled its 20 ms CELT/FB
+  frames as config 30 (which is 10 ms); corrected to config 31.
+
+### Deferred
+
+- **Full packet encode→decode stream roundtrip → 2.5.1.** Needs a CELT decoder
+  (mirrored range decoder + `_opus_decode_spectral_shape`); shravan has no CELT
+  audio decode today (`opus_decode_from_packets` is header-only). The PVQ
+  quantizer itself is self-consistently roundtrip-validated at the CWRS/shape
+  level (above).
+
 ## [2.4.4] - 2026-07-01
 
 Opus encoder **framework** — the opening/foundational work for a full Opus
@@ -33,7 +69,7 @@ existing CELT-mode encoder. 610 assertions (was 563, +47).
 ### Known issues
 
 - `_opus_encode_celt_frame` hardcodes TOC config 30 (CELT/FB 10ms) for its 20ms
-  frames (should be config 31, which `opus_toc_byte` computes); logged as a 2.5.1
+  frames (should be config 31, which `opus_toc_byte` computes); logged as a 2.5.0
   cleanup — it needs a decode round-trip guard, so it's kept out of this additive
   release.
 

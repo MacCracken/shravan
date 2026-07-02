@@ -62,7 +62,7 @@ suite are untouched. Delivered:
 `_opus_encode_celt_frame` hardcodes TOC **config 30** (= CELT/FB 10 ms) but its
 frames are 20 ms (= config **31**, which `opus_toc_byte` computes correctly).
 Swapping the hardcode for `opus_toc_byte(...)` needs a decode round-trip guard,
-so it rides with the CELT/PVQ work (2.5.1), not the additive framework.
+so it rides with the CELT/PVQ work (2.5.0), not the additive framework.
 
 ## 2.5.x roadmap (Opus spine, deferred items interleaved)
 

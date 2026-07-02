@@ -1,9 +1,9 @@
 # Development Roadmap
 
-> **v2.4.4** — 610 tests + fuzz (90K/0), Cyrius 6.3.19.
-> Opus encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch);
-> full Opus features roadmapped as 2.5.x. (v2.4.3: `dist/shravan.cyr` bundle,
-> codecs → src/. v2.4.2: fuzz + CI vet. v2.4.1: serde full coverage. v2.4.0: modernize.)
+> **v2.5.0** — 727 tests + fuzz (90K/0), Cyrius 6.3.19.
+> Full PVQ spectral shape (CELT): V(N,K)/CWRS quantizer + pulse search replace
+> sign-only (cosine 0.98 vs 0.80). (v2.4.4: Opus encoder framework. v2.4.3:
+> distlib bundle. v2.4.1: serde full coverage. v2.4.0: cyrius.cyml modernize.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -133,33 +133,45 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       `OpusEncoder` config/state, mode + bandwidth selection, RFC 6716 TOC byte
       (config 0–31), `opus_encode_frame` dispatch (CELT wired; SILK/HYBRID = 2.5.x seams).
 - [x] Design doc: `docs/adr/0001-opus-encoder-framework.md`.
-- [ ] CLEANUP (do in 2.5.1): `_opus_encode_celt_frame` hardcodes TOC config 30
+- [ ] CLEANUP (do in 2.5.0): `_opus_encode_celt_frame` hardcodes TOC config 30
       (CELT/FB 10ms) for 20ms frames — should be config 31 (`opus_toc_byte` computes
       it); swap the hardcode with a decode round-trip guard.
 
 ---
 
-## v2.5.x — Opus encoder (spine) + deferred items
+## v2.5.0 — Full PVQ spectral shape (CELT) · shipped 2026-07-01
 
-The 2.4.4 framework gates every Opus item. Order = dependency order; the 2.3.x
-deferrals + hi-res/DSD are dependency-independent breathers between Opus vertebrae.
+- [x] `V(N,K)` pyramid count grid + `_pvq_bits`/`_pvq_choose_k` (K from bit budget).
+- [x] CWRS index encode/decode — quantizer roundtrip `decode(encode(y))==y`
+      (exhaustive N=2,K=2 + roundtrips across (3,2),(4,3),(2,10),(1,3); out-of-range rejected).
+- [x] PVQ pulse search (`Rxy²/Ryy` greedy) + `_pvq_denormalize`; reconstructed
+      shape cosine 0.9798 vs sign-only 0.800 — **PVQ beats sign-only**.
+- [x] Wired into `_opus_encode_spectral_shape` (per-band split ≤ N=32, data-independent
+      K budget so the future decoder computes identical K); TOC config 30→31 fix.
+- [ ] Full packet encode→decode stream roundtrip — deferred to **2.5.1** (needs a
+      CELT decoder; shravan has none today — `opus_decode_from_packets` is header-only).
 
-### v2.5.1 — Full PVQ spectral shape (CELT) · root
+## v2.5.x — remaining
 
-- Magnitude + K-pulse pyramid vector quant with CWRS index (replaces sign-only).
-- Spreading/folding for zero-bit bands; anti-collapse. Everything below allocates bits against this.
-- Includes the TOC config 30→31 cleanup.
+Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
+breathers between Opus vertebrae.
+
+### v2.5.1 — CELT decode + full-stream PVQ roundtrip · needs 2.5.0
+
+- Mirrored range decoder + `_opus_decode_spectral_shape`; full encode→decode
+  roundtrip test. shravan's first CELT audio decode (verify range-coder
+  invertibility first — flagged not-bit-exact).
 
 ### v2.5.2 — AAC TNS + psychoacoustic model · deferred (independent)
 
 - TNS: IIR filter before IMDCT (decoder) + TNS encoding.
 - Psychoacoustic masking thresholds for the AAC encoder.
 
-### v2.5.3 — Transient detection + short-window switching (CELT) · needs 2.5.1
+### v2.5.3 — Transient detection + short-window switching (CELT) · needs 2.5.0
 
 - Transient detector → 2/4/8 short MDCTs; `transient` flag; per-band tf resolution.
 
-### v2.5.4 — Stereo coupling (CELT) · needs 2.5.1
+### v2.5.4 — Stereo coupling (CELT) · needs 2.5.0
 
 - Per-band mid/side + intensity stereo; coupled-vs-dual decision. Replaces mono downmix.
 
@@ -168,7 +180,7 @@ deferrals + hi-res/DSD are dependency-independent breathers between Opus vertebr
 - MP4 box parsing (moov/trak/mdia/stbl), AAC extraction; enables real `.m4a`.
   `sankoch` already a dep for payloads.
 
-### v2.5.6 — Rate control + VBR (CELT/Opus) · needs 2.5.1/3/4
+### v2.5.6 — Rate control + VBR (CELT/Opus) · needs 2.5.0/3/4
 
 - Bit-reservoir rate-control state; unconstrained + constrained VBR. Completes CELT mode.
 
