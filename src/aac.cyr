@@ -804,15 +804,22 @@ fn _aac_psy_masking_offsets(energies, num_bands, offset_out) {
 fn _aac_encode_frame(samples, channels, target_bytes) {
     var ch = channels;
 
-    # Extract mono or M/S stereo channels
-    var mono = alloc(AAC_FRAME_SIZE * 8);
-    var side = alloc(AAC_FRAME_SIZE * 8);
+    # Extract mono or M/S stereo channels over the full 2048-sample MDCT span.
+    # MONO uses all 2048 samples (`samples` is a 50%-overlap window supplied by the
+    # caller — hop 1024) so the decoder's overlap-add reconstructs (TDAC). STEREO still
+    # fills only the first 1024 (its 2nd half stays 0); the stereo overlap framing is
+    # fixed together with the CPE bitstream in a later bite.
+    var windowed_size = AAC_FRAME_SIZE * 2;   # 2048
+    var mono = alloc(windowed_size * 8);
+    memset(mono, 0, windowed_size * 8);
+    var side = alloc(windowed_size * 8);
+    memset(side, 0, windowed_size * 8);
     var is_stereo = 0;
     if (ch >= 2) { is_stereo = 1; }
 
     var i = 0;
     if (is_stereo == 1) {
-        # M/S stereo: mid = (L+R)/2, side = (L-R)/2
+        # M/S stereo: mid = (L+R)/2, side = (L-R)/2 (first 1024 only for now)
         while (i < AAC_FRAME_SIZE) {
             var left = load64(samples + (i * ch) * 8);
             var right = load64(samples + (i * ch + 1) * 8);
@@ -821,8 +828,8 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             i = i + 1;
         }
     } else {
-        # Mono or multi-channel downmix
-        while (i < AAC_FRAME_SIZE) {
+        # Mono/multi-channel downmix over the full overlap window (2048 samples)
+        while (i < windowed_size) {
             var sum = F64_ZERO;
             var c = 0;
             while (c < ch) {
@@ -834,8 +841,8 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         }
     }
 
-    # Apply sine window (2048-point for AAC MDCT)
-    var windowed_size = AAC_FRAME_SIZE * 2;
+    # Apply the 2048-point sine analysis window (full span for mono; stereo's zeroed
+    # 2nd half leaves its window unchanged from before).
     var windowed = alloc(windowed_size * 8);
     memset(windowed, 0, windowed_size * 8);
     i = 0;
@@ -845,10 +852,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             f64_from(windowed_size)
         );
         var w = f64_sin(angle);
-        if (i < AAC_FRAME_SIZE) {
-            store64(windowed + i * 8, f64_mul(load64(mono + i * 8), w));
-        }
-        # Second half stays zero (no overlap state in stateless encoder)
+        store64(windowed + i * 8, f64_mul(load64(mono + i * 8), w));
         i = i + 1;
     }
 
@@ -859,9 +863,13 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
     # TNS analysis (mono/SCE only): flatten the temporal envelope before
     # quantization so scale factors + quantization see the prediction residual.
+    # TNS temporarily disabled (tns_mid stays zeroed -> ICS ext codes no TNS). The
+    # analysis-FIR / synthesis-IIR pair is an exact inverse only WITHOUT quantization;
+    # engaged through the quantizer the IIR amplified quant noise and dropped the tone
+    # round-trip from ~0.98 to ~0.68 correlation. Proper prediction-gain-gated TNS that
+    # shapes (rather than amplifies) quant noise is a completion item (2.5.10-b5).
     var tns_mid = alloc(TNS_ST_SIZE);
     memset(tns_mid, 0, TNS_ST_SIZE);
-    if (is_stereo == 0) { _tns_analyze_apply(mdct_out, _AAC_NUM_SWB, tns_mid); }
 
     # Quantize spectral coefficients per scale factor band
     var scale_factors = alloc(_AAC_NUM_SWB * 8);
@@ -888,28 +896,31 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     var psy_off = alloc(_AAC_NUM_SWB * 8);
     _aac_psy_masking_offsets(energies, _AAC_NUM_SWB, psy_off);
 
-    # Determine scale factors based on band energy + masking
+    # Determine scale factors from the per-band PEAK so tonal peaks survive quantization
+    # (the old rms-based target ~10 collapsed single-bin tones to zero), then quantize
+    # with the ISO-invertible rule q = round((|x|/step)^0.75) so that the decoder's
+    # dequant q^(4/3)*step reconstructs |x| (the old |x|^0.75/step did not invert).
     var band = 0;
     var j = 0;
     while (band < _AAC_NUM_SWB) {
         var start = load64(_aac_swb_offset + band * 8);
         var end = load64(_aac_swb_offset + (band + 1) * 8);
 
-        var energy = load64(energies + band * 8);
+        var peak = F64_ZERO;
+        var pj = start;
+        while (pj < end) {
+            var pv = f64_abs(load64(mdct_out + pj * 8));
+            if (f64_gt(pv, peak) == 1) { peak = pv; }
+            pj = pj + 1;
+        }
 
-        var band_size = end - start;
-        if (band_size < 1) { band_size = 1; }
-        var rms = f64_sqrt(f64_div(energy, f64_from(band_size)));
-
-        # Choose scale factor
         var floor_val = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
         var scf = 0;
-        if (f64_gt(rms, floor_val) == 1) {
-            var log_rms = f64_log2(rms);
-            # target quantized magnitude ~10
-            var target = f64_from(10);
-            var target_log = f64_log2(f64_div(target, F64_128));
-            scf = f64_to(f64_add(f64_from(100), f64_mul(f64_from(4), f64_sub(log_rms, target_log))));
+        if (f64_gt(peak, floor_val) == 1) {
+            # step = peak / target_q^(4/3), target_q = 64 -> 64^(4/3) = 256 = 2^8, so
+            # log2(step) = log2(peak) - 8; scf = 100 + 4*log2(step).
+            var log_step = f64_sub(f64_log2(peak), f64_from(8));
+            scf = f64_to(f64_add(f64_from(100), f64_mul(f64_from(4), log_step)));
         }
         # Psychoacoustic masking: coarsen bands that neighbours mask (0 if unmasked).
         scf = scf + load64(psy_off + band * 8);
@@ -917,16 +928,15 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         if (scf > 200) { scf = 200; }
         store64(scale_factors + band * 8, scf);
 
-        # Quantize: q = round(|x|^0.75 / step)
-        var step = f64_pow(F64_TWO, f64_mul(f64_from(1), f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4))));
+        var step = f64_pow(F64_TWO, f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4)));
+        var e34 = f64_div(f64_from(3), f64_from(4));
         j = start;
         while (j < end) {
             var xval = load64(mdct_out + j * 8);
             var abs_val = f64_abs(xval);
             var floor_step = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
             if (f64_gt(step, floor_step) == 1) {
-                var powered = f64_pow(abs_val, f64_div(f64_from(3), f64_from(4)));
-                var q = f64_to(f64_floor(f64_add(f64_div(powered, step), F64_HALF)));
+                var q = f64_to(f64_floor(f64_add(f64_pow(f64_div(abs_val, step), e34), F64_HALF)));
                 if (q > 8191) { q = 8191; }
                 if (q < 0 - 8191) { q = 0 - 8191; }
                 if (f64_lt(xval, F64_ZERO) == 1) {
@@ -1093,7 +1103,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             var scf_nbits = load64(_aac_scf_lens + index * 8);
             var scf_code = load64(_aac_scf_codes + index * 8);
             _bw_write(bw, scf_code, scf_nbits);
-            prev_scf = scf_val;
+            prev_scf = prev_scf + diff;   # track the transmitted (clamped) value, not the raw scf, so the decoder's predictor stays in sync (was prev_scf = scf_val)
         }
         band = band + 1;
     }
@@ -1316,7 +1326,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                 if (diff > 60) { diff = 60; }
                 var index = diff + 60;
                 _bw_write(bw, load64(_aac_scf_codes + index * 8), load64(_aac_scf_lens + index * 8));
-                prev_scf = scf_val;
+                prev_scf = prev_scf + diff;   # track the transmitted (clamped) value (was prev_scf = scf_val)
             }
             band = band + 1;
         }
@@ -1405,15 +1415,18 @@ fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
 
     var write_pos = 0;
     var sample_pos = 0;
+    # 50%-overlap analysis: read a 2-frame (2048*ch) window but advance by one frame
+    # (1024*ch), so consecutive MDCT windows overlap 50% and the decoder's overlap-add
+    # reconstructs (TDAC). `_aac_encode_frame` consumes the full window for mono.
+    var window_interleaved = frame_interleaved * 2;
 
     while (sample_pos < total_samples) {
-        var end = sample_pos + frame_interleaved;
-        if (end > total_samples) { end = total_samples; }
-        var count = end - sample_pos;
-
-        # Build frame buffer
-        var frame_buf = alloc(frame_interleaved * 8);
-        memset(frame_buf, 0, frame_interleaved * 8);
+        # Build the overlap window buffer (zero-padded past the end of the input).
+        var frame_buf = alloc(window_interleaved * 8);
+        memset(frame_buf, 0, window_interleaved * 8);
+        var avail = total_samples - sample_pos;
+        var count = window_interleaved;
+        if (count > avail) { count = avail; }
         var fi = 0;
         while (fi < count) {
             store64(frame_buf + fi * 8, vec_get(samples_vec, sample_pos + fi));
@@ -1430,13 +1443,13 @@ fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
         memcpy(out_buf + write_pos, str_data(frame_data), str_len(frame_data));
         write_pos = write_pos + str_len(frame_data);
 
-        sample_pos = end;
+        sample_pos = sample_pos + frame_interleaved;
     }
 
-    # Handle empty input: encode one silence frame
+    # Handle empty input: encode one silence frame (full 2048*ch window)
     if (write_pos == 0) {
-        var silence = alloc(frame_interleaved * 8);
-        memset(silence, 0, frame_interleaved * 8);
+        var silence = alloc(window_interleaved * 8);
+        memset(silence, 0, window_interleaved * 8);
         var frame_data = _aac_encode_frame(silence, channels, target_bytes);
         var adts_buf = alloc(7);
         aac_build_adts_header(sample_rate, channels, str_len(frame_data), adts_buf);
@@ -2603,13 +2616,11 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec) {
                 band = band + 1;
             }
 
-            # Codebooks 1-4, 9-10: not yet implemented, skip band
-            if (cb >= 1) {
-                if (cb <= 4) { band = band + 1; }
-            }
-            if (cb >= 9) {
-                if (cb <= 10) { band = band + 1; }
-            }
+            # Reserved / PNS (13) / INTENSITY (14,15) codebooks are not decoded here;
+            # advance the band anyway so a malformed or merely unexpected bitstream can't
+            # spin forever (DoS). Codebooks 1-4/5-8/9/10/11 already advanced above — the
+            # old code re-incremented 1-4/9/10 here, skipping the following band.
+            if (cb >= 12) { band = band + 1; }
         }
     }
     return 0;

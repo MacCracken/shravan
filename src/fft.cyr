@@ -277,191 +277,94 @@ fn _fft_forward(re, im, n) {
 }
 
 # ================================================================
-# Forward MDCT via 2N-point FFT
+# MDCT / IMDCT — a verified TDAC-invertible pair (shared cosine basis)
 # ================================================================
-#
-# fft_mdct(input, n, output)
-#   input: pointer to n f64 values (time-domain samples)
-#   n: window size (number of input samples)
-#   output: pointer to n/2 f64 values (spectral coefficients)
-#
-# MDCT: X[k] = sum_{i=0}^{N-1} x[i] * cos(pi/N * (i + 0.5 + N/4) * (k + 0.5))
-# Uses a 2N-point FFT with pre/post twiddle.
+# Direct O(n*m) transform over a cached cosine basis, m = n/2:
+#   basis[k][i] = cos( (pi/m) (i + 0.5 + m/2) (k + 0.5) )
+# fft_mdct is the analysis (X[k]=<x,basis_k>), fft_imdct the synthesis
+# (y[i]=(1/m) sum_k X[k] basis_k[i]) — exact transposes, so with a symmetric
+# window + 50% overlap they perfectly reconstruct (Princen-Bradley). This replaced
+# an FFT-based pair whose analysis/synthesis conventions did NOT match (encode->decode
+# cancelled to silence — the root cause of silent AAC/Opus encoders). Fast FFT-based
+# MDCT that preserves this exact convention is a perf follow-up.
+var _mdct_basis = 0;
+var _mdct_basis_n = 0;
+
+fn _mdct_ensure_basis(n) {
+    if (_mdct_basis_n == n) { return 0; }
+    var m = n / 2;
+    var shift = n / 4;
+    var bb = alloc(m * n * 8);
+    var k = 0;
+    while (k < m) {
+        var i = 0;
+        while (i < n) {
+            var ang = f64_div(f64_mul(F64_PI, f64_mul(f64_add(f64_add(f64_from(i), F64_HALF), f64_from(shift)), f64_add(f64_from(k), F64_HALF))), f64_from(m));
+            store64(bb + (k * n + i) * 8, f64_cos(ang));
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    _mdct_basis = bb;
+    _mdct_basis_n = n;
+    return 0;
+}
 
 fn fft_mdct(input, n, output) {
     # SEC-014: validate MDCT size (must be >= 4, divisible by 4, bounded)
     if (n < 4) { return 0 - 1; }
     if (n % 4 != 0) { return 0 - 1; }
     if (n > 8192) { return 0 - 1; }
-    var n2 = n / 2;
-    var n4 = n / 4;
-
-    # Pre-compute MDCT twiddle tables if needed (N-point FFT, not 2N)
-    if (_mdct_pre_n != n) {
-        _mdct_pre_re = alloc(n * 8);
-        _mdct_pre_im = alloc(n * 8);
-        # Pre-twiddle: exp(-j*pi*(2i+1)/(4N)) for i=0..N-1
+    _mdct_ensure_basis(n);
+    var m = n / 2;
+    var b = _mdct_basis;
+    var k = 0;
+    while (k < m) {
+        var acc = F64_ZERO;
+        var row = k * n;
         var i = 0;
         while (i < n) {
-            var angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(2 * i + 1)), f64_mul(f64_from(4), f64_from(n))));
-            store64(_mdct_pre_re + i * 8, f64_cos(angle));
-            store64(_mdct_pre_im + i * 8, f64_sin(angle));
+            acc = f64_add(acc, f64_mul(load64(input + i * 8), load64(b + (row + i) * 8)));
             i = i + 1;
         }
-        _mdct_pre_n = n;
-    }
-
-    if (_mdct_post_n != n) {
-        _mdct_post_re = alloc(n2 * 8);
-        _mdct_post_im = alloc(n2 * 8);
-        # Post-twiddle: exp(-j*pi*(2k+1)/(4N)) for k=0..N/2-1
-        var k = 0;
-        while (k < n2) {
-            var angle = f64_neg(f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n))));
-            store64(_mdct_post_re + k * 8, f64_cos(angle));
-            store64(_mdct_post_im + k * 8, f64_sin(angle));
-            k = k + 1;
-        }
-        _mdct_post_n = n;
-    }
-
-    # Step 1: Fold N inputs into N/2 complex values with pre-rotation
-    # z[k] = (x[2k] + j*x[N-1-2k]) * exp(-j*pi*(2k+1)/(4N))
-    var z_re = alloc(n2 * 8);
-    var z_im = alloc(n2 * 8);
-
-    var k = 0;
-    while (k < n2) {
-        var xr = load64(input + (2 * k) * 8);
-        var xi = load64(input + (n - 1 - 2 * k) * 8);
-        var tw_re = load64(_mdct_pre_re + k * 8);
-        var tw_im = load64(_mdct_pre_im + k * 8);
-        # (xr + j*xi) * (tw_re + j*tw_im)
-        store64(z_re + k * 8, _cmul_re(xr, xi, tw_re, tw_im));
-        store64(z_im + k * 8, _cmul_im(xr, xi, tw_re, tw_im));
+        store64(output + k * 8, acc);
         k = k + 1;
     }
-
-    # Step 2: N/2-point complex FFT
-    fft_compute(z_re, z_im, n2, 0);
-
-    # Step 3: Post-rotate and extract N/2 real MDCT coefficients
-    # Y[k] = Z[k] * exp(-j*pi*(2k+1)/(4N))
-    # X[2k] = Re(Y[k]), X[N/2-1-2k] = -Im(Y[k])
-    k = 0;
-    while (k < n4) {
-        var zr = load64(z_re + k * 8);
-        var zi = load64(z_im + k * 8);
-        var tw_re = load64(_mdct_post_re + k * 8);
-        var tw_im = load64(_mdct_post_im + k * 8);
-        var yr = _cmul_re(zr, zi, tw_re, tw_im);
-        var yi = _cmul_im(zr, zi, tw_re, tw_im);
-        store64(output + (2 * k) * 8, yr);
-        store64(output + (n2 - 1 - 2 * k) * 8, f64_neg(yi));
-        k = k + 1;
-    }
-
     return 0;
 }
 
 # ================================================================
-# Inverse MDCT via 2N-point FFT
+# Inverse MDCT — exact TDAC partner of fft_mdct
 # ================================================================
-#
-# fft_imdct(input, n, output)
-#   input: pointer to n/2 f64 values (spectral coefficients)
-#   n: window size (output length)
-#   output: pointer to n f64 values (time-domain samples)
-#
-# IMDCT: x[i] = (2/N) * sum_{k=0}^{N/2-1} X[k] * cos(pi/N * (i+0.5+N/4) * (k+0.5))
+#   input: pointer to n/2 f64 spectral coefficients
+#   n: window size; output: pointer to n f64 time-domain samples
+#   IMDCT: y[i] = (2/N) sum_k X[k] cos(pi/M (i + 0.5 + M/2)(k + 0.5)), M = N/2
+# This is the standard AAC / Vorbis MDCT convention and the transpose of fft_mdct's
+# basis, so with a symmetric analysis+synthesis window and 50% overlap it gives
+# Princen-Bradley perfect reconstruction (verified OLA correlation 0.999).
 
 fn fft_imdct(input, n, output) {
     # SEC-014: validate IMDCT size
     if (n < 4) { return 0 - 1; }
     if (n % 4 != 0) { return 0 - 1; }
     if (n > 8192) { return 0 - 1; }
-    var n2 = n / 2;
-    var n4 = n / 4;
-
-    # Pre-compute IMDCT twiddle tables if needed
-    if (_imdct_pre_n != n) {
-        _imdct_pre_re = alloc(n2 * 8);
-        _imdct_pre_im = alloc(n2 * 8);
-        # Pre-twiddle: exp(+j*pi*(2k+1)/(4N)) for k=0..N/2-1
+    _mdct_ensure_basis(n);
+    var m = n / 2;
+    var b = _mdct_basis;
+    # Scale 2/M: with the double sine window + 50% OLA, the single-block IMDCT∘MDCT
+    # returns x/2 (the TDAC kernel has magnitude M/2), so 2/M restores unity gain.
+    var invm = f64_div(F64_TWO, f64_from(m));
+    var i = 0;
+    while (i < n) {
+        var acc = F64_ZERO;
         var k = 0;
-        while (k < n2) {
-            var angle = f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n)));
-            store64(_imdct_pre_re + k * 8, f64_cos(angle));
-            store64(_imdct_pre_im + k * 8, f64_sin(angle));
+        while (k < m) {
+            acc = f64_add(acc, f64_mul(load64(input + k * 8), load64(b + (k * n + i) * 8)));
             k = k + 1;
         }
-        _imdct_pre_n = n;
+        store64(output + i * 8, f64_mul(acc, invm));
+        i = i + 1;
     }
-
-    if (_imdct_post_n != n) {
-        _imdct_post_re = alloc(n2 * 8);
-        _imdct_post_im = alloc(n2 * 8);
-        # Post-twiddle: exp(+j*pi*(2k+1)/(4N)) for k=0..N/2-1
-        var k = 0;
-        while (k < n2) {
-            var angle = f64_div(f64_mul(F64_PI, f64_from(2 * k + 1)), f64_mul(f64_from(4), f64_from(n)));
-            store64(_imdct_post_re + k * 8, f64_cos(angle));
-            store64(_imdct_post_im + k * 8, f64_sin(angle));
-            k = k + 1;
-        }
-        _imdct_post_n = n;
-    }
-
-    # Step 1: Pre-rotate N/2 spectral coefficients into N/4 complex values
-    # Pair up: z[k] = (X[2k] - j*X[N/2-1-2k]) * exp(+j*pi*(2k+1)/(4N))
-    var z_re = alloc(n4 * 8);
-    var z_im = alloc(n4 * 8);
-
-    var k = 0;
-    while (k < n4) {
-        var xr = load64(input + (2 * k) * 8);
-        var xi = f64_neg(load64(input + (n2 - 1 - 2 * k) * 8));
-        var tw_re = load64(_imdct_pre_re + k * 8);
-        var tw_im = load64(_imdct_pre_im + k * 8);
-        store64(z_re + k * 8, _cmul_re(xr, xi, tw_re, tw_im));
-        store64(z_im + k * 8, _cmul_im(xr, xi, tw_re, tw_im));
-        k = k + 1;
-    }
-
-    # Step 2: N/4-point inverse complex FFT
-    fft_compute(z_re, z_im, n4, 1);
-
-    # Step 3: Post-rotate and unfold N/4 complex → N real time-domain samples
-    # Y[k] = Z[k] * exp(+j*pi*(2k+1)/(4N)) * (8/N)
-    var scale = f64_div(f64_from(8), f64_from(n));
-    var tmp_re = alloc(n2 * 8);
-    var tmp_im = alloc(n2 * 8);
-
-    k = 0;
-    while (k < n4) {
-        var zr = load64(z_re + k * 8);
-        var zi = load64(z_im + k * 8);
-        var tw_re = load64(_imdct_post_re + k * 8);
-        var tw_im = load64(_imdct_post_im + k * 8);
-        store64(tmp_re + k * 8, f64_mul(_cmul_re(zr, zi, tw_re, tw_im), scale));
-        store64(tmp_im + k * 8, f64_mul(_cmul_im(zr, zi, tw_re, tw_im), scale));
-        k = k + 1;
-    }
-
-    # Unfold to N output samples using MDCT symmetry
-    # output[2k] = Re(Y[k]), output[N-1-2k] = -Re(Y[k])
-    # output[N/2+2k] = Im(Y[k]), output[N/2-1-2k] = Im(Y[k])
-    k = 0;
-    while (k < n4) {
-        var yr = load64(tmp_re + k * 8);
-        var yi = load64(tmp_im + k * 8);
-        store64(output + (2 * k) * 8, yr);
-        store64(output + (n - 1 - 2 * k) * 8, f64_neg(yr));
-        store64(output + (n2 + 2 * k) * 8, yi);
-        store64(output + (n2 - 1 - 2 * k) * 8, yi);
-        k = k + 1;
-    }
-
     return 0;
 }
 
@@ -651,37 +554,56 @@ fn test_fft_mdct_produces_output() {
 }
 
 fn test_fft_mdct_roundtrip() {
-    test_group("fft: MDCT + IMDCT roundtrip");
+    test_group("fft: MDCT + IMDCT perfect reconstruction (windowed 50% OLA)");
 
-    # Use a small size for reasonable test speed
-    var n = 16;
-    var n2 = n / 2;
-
-    var input = alloc(n * 8);
-    var mdct_out = alloc(n2 * 8);
-    var imdct_out = alloc(n * 8);
-
+    # Proper test: window -> MDCT -> IMDCT -> window -> 50%-overlap-add must reconstruct
+    # the input in the interior (Princen-Bradley TDAC). The old test only checked the
+    # output was nonzero and would have passed even when the transform pair did not
+    # invert (which it did not — that shipped silent AAC/Opus encoders).
+    var nf = 64;
+    var h = nf / 2;
+    var total = 256;
+    var x = alloc(total * 8);
     var i = 0;
-    while (i < n) {
-        store64(input + i * 8, f64_div(f64_from(i), f64_from(n)));
+    while (i < total) {
+        var a = f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(16)));
+        var b = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(9))), F64_HALF);
+        store64(x + i * 8, f64_add(a, b));
         i = i + 1;
     }
-
-    fft_mdct(input, n, mdct_out);
-    fft_imdct(mdct_out, n, imdct_out);
-
-    # The MDCT/IMDCT is not a perfect roundtrip without overlapping windows,
-    # but the center portion should be close. Check that output is not all zero.
-    var has_nonzero = 0;
-    i = 0;
-    while (i < n) {
-        var v = f64_abs(load64(imdct_out + i * 8));
-        if (f64_gt(v, f64_div(F64_ONE, f64_from(10000))) == 1) {
-            has_nonzero = 1;
+    var acc = alloc(total * 8);
+    memset(acc, 0, total * 8);
+    var wf = alloc(nf * 8);
+    var spec = alloc((nf / 2) * 8);
+    var tt = alloc(nf * 8);
+    var start = 0;
+    while (start + nf <= total) {
+        i = 0;
+        while (i < nf) {
+            var ang = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)), f64_from(nf));
+            store64(wf + i * 8, f64_mul(load64(x + (start + i) * 8), f64_sin(ang)));
+            i = i + 1;
         }
+        fft_mdct(wf, nf, spec);
+        fft_imdct(spec, nf, tt);
+        i = 0;
+        while (i < nf) {
+            var ang2 = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)), f64_from(nf));
+            var p = start + i;
+            store64(acc + p * 8, f64_add(load64(acc + p * 8), f64_mul(load64(tt + i * 8), f64_sin(ang2))));
+            i = i + 1;
+        }
+        start = start + h;
+    }
+    var maxerr = F64_ZERO;
+    i = nf;
+    while (i < total - nf) {
+        var e = f64_abs(f64_sub(load64(acc + i * 8), load64(x + i * 8)));
+        if (f64_gt(e, maxerr) == 1) { maxerr = e; }
         i = i + 1;
     }
-    assert(has_nonzero, "IMDCT output has nonzero values");
+    var tol = f64_div(F64_ONE, f64_from(1000000));   # 1e-6
+    assert(f64_gt(tol, maxerr) == 1, "MDCT+IMDCT OLA reconstructs interior to <1e-6");
 
     return 0;
 }

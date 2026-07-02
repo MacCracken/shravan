@@ -95,22 +95,31 @@ is wired. Stream stays shravan-internal (RFC-6716 conformance is its own item be
 matched pair (unblocks the AAC encoder + lets Opus drop the O(N²) direct transform), and
 add a real MDCT↔IMDCT reconstruction test (today's only asserts "output nonzero").
 
-### v2.5.10 — AAC produces audio + all AAC bugs/completions · medium–large
+### v2.5.10 — AAC produces audio + all AAC bugs/completions · medium–large · IN PROGRESS
 
 **Goal:** `aac_encode` → `aac_decode` faithfully round-trips (SNR-verified), **mono and
-stereo**, and every AAC correctness/safety bug the audit found is closed. Folds in the
-deferred TNS + psychoacoustic completions.
+stereo**, and every AAC correctness/safety bug the audit found is closed.
 
-**Commit plan:**
-1. `fix(aac): quantizer step/scale-factor so encode and decode invert (consistent 0.75-power placement) + single-band roundtrip test` *(the silent-encoder root cause)*
-2. `feat(aac): rate/distortion scale-factor loop to hit a bit budget (replaces the fixed heuristic) + bitrate-tracks-target test`
-3. `fix(aac): encoder MDCT framing — 50% overlap, stop zeroing the 2nd half so TDAC cancels aliasing + windowed-SNR test`
-4. `fix(aac): scale-factor DPCM predictor tracks transmitted (clamped) value (mono + CPE) + large-delta roundtrip test` *(confirmed desync bug)*
-5. `fix(aac): CPE stereo bitstream — drop the stray side ICS, make side section codebooks match the coding + stereo SNR test`
-6. `fix(aac): guard reserved section codebooks 12–15 (DoS infinite-loop) + remove decoder band double-increment for cb 1–4/9/10 + reject-not-hang test`
-7. `feat(aac): real HCB6 tables; TNS short-window + stereo/CPE; psychoacoustic ATH floor + tonality-adjusted SMR` *(completes the 2.5.2/2.5.3 deferrals)*
-8. `test(aac): content-based SNR roundtrip — sine/sweep/noise, mono + stereo`
-9. `docs/CHANGELOG/VERSION: 2.5.10 — AAC produces audio`
+**Status (mono audio + correctness bugs done; stereo + completions remain):**
+- [x] **Matched MDCT/IMDCT transform** — replaced the mismatched `fft_mdct`/`fft_imdct`
+      with a verified TDAC pair (machine-precision reconstruction test; unity gain). This
+      was the deepest root cause (silent AAC *and* Opus encoders) — pulled forward from
+      the 2.5.12 tail. Also made Opus decode unity-gain.
+- [x] **AAC encoder 50%-overlap framing** (window 2048, hop 1024, stop zeroing the 2nd
+      half) + **invertible quantizer** (`q=round((|x|/step)^0.75)`) + **peak-based scale
+      factors** so tonal peaks survive. Mono round-trip **0.975 correlation** (was silence).
+- [x] **Scale-factor DPCM predictor** tracks the transmitted (clamped) value (mono + CPE).
+- [x] **Decoder robustness**: guard reserved section codebooks 12–15 (was a DoS
+      infinite-loop) + removed the band double-increment for cb 1–4/9/10 + reject-not-hang test.
+- [~] **TNS temporarily disabled** — its FIR/IIR pair amplified quant noise through the
+      quantizer (dropped the tone round-trip to 0.68); proper prediction-gain-gated noise
+      shaping is folded into the completion below.
+- [ ] **CPE stereo**: 50%-overlap framing for mid/side + fix the bitstream (stray side
+      ICS, side codebook/escape disagreement) + stereo SNR test.
+- [ ] **Completions**: real HCB6 tables; TNS (correct noise shaping, short-window,
+      stereo/CPE); psychoacoustic ATH floor + tonality-adjusted SMR.
+- [ ] Optional: rate/distortion scale-factor loop (replaces the peak heuristic).
+- [ ] `docs/CHANGELOG/VERSION: 2.5.10`.
 
 ### v2.5.11 — MP3 decode → PCM · large
 

@@ -1014,6 +1014,65 @@ fn test_opus_decode_transient_roundtrip() {
     return 0;
 }
 
+# 2.5.10: real end-to-end AAC audio. Encode a tone, decode, and assert the decoded PCM
+# correlates with the input (value-level, not just a sample count — the old AAC tests
+# asserted only vec_len==1024 and passed on silence). Skips the first 1024 samples of
+# MDCT overlap priming.
+fn test_aac_audio_roundtrip() {
+    syscall(1, 1, "test: aac audio roundtrip\n", 26);
+    var n = 4096;
+    var half = f64_div(F64_ONE, F64_TWO);
+    var samples = vec_new();
+    var xin = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        var v = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(40))), half);
+        vec_push(samples, v);
+        store64(xin + i * 8, v);
+        i = i + 1;
+    }
+    var out = alloc(262144);
+    var sz = aac_encode(samples, 44100, 1, 128000, out);
+    assert(res_ok(sz) == 1, "aac encode ok");
+    var result = aac_decode(out, sz);
+    assert(res_ok(result) == 1, "aac decode ok");
+    var sout = decode_result_samples(result);
+    var len_out = vec_len(sout);
+    assert(len_out > 0, "aac decode produced PCM samples");
+    assert(len_out > 1024, "aac decode long enough to skip priming");
+    var dd_len = len_out - 1024;
+    var dd = alloc(dd_len * 8);
+    i = 0;
+    while (i < dd_len) {
+        store64(dd + i * 8, vec_get(sout, 1024 + i));
+        i = i + 1;
+    }
+    var c = _best_lag_corr(dd, dd_len, xin, n, 1024);
+    syscall(1, 1, "  aac roundtrip corr*1000 = ", 28);
+    fmt_int(c);
+    syscall(1, 1, "\n", 1);
+    assert(c > 900, "aac decoded audio correlates with input (>0.9)");
+    return 0;
+}
+
+# 2.5.10: a section codebook in {12..15} (reserved/PNS/intensity) must not spin the
+# spectral decoder forever (it never advanced `band` before). Reject-not-hang guard.
+fn test_aac_reserved_cb_no_hang() {
+    syscall(1, 1, "test: aac reserved codebook no hang\n", 36);
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var sect_cb = alloc(2 * 8);
+    store64(sect_cb, 13);       # band 0: reserved codebook
+    store64(sect_cb + 8, 0);    # band 1: zero
+    var data = alloc(16);
+    memset(data, 0, 16);
+    var br = _br_new(data, 16);
+    var quant = alloc(AAC_FRAME_SIZE * 8);
+    memset(quant, 0, AAC_FRAME_SIZE * 8);
+    var r = _aac_decode_spectral(br, sect_cb, 2, quant);
+    assert(r == 0, "reserved codebook (13) returns instead of hanging");
+    return 0;
+}
+
 fn test_stream_aiff_chunking() {
     syscall(1, 1, "test: aiff stream chunking\n", 27);
 
@@ -1333,6 +1392,8 @@ test_ogg_opus_dispatch();
 test_opus_decode_audio_roundtrip();
 test_opus_decode_stereo_roundtrip();
 test_opus_decode_transient_roundtrip();
+test_aac_audio_roundtrip();
+test_aac_reserved_cb_no_hang();
 test_aac_encode_decode_roundtrip();
 test_tag_write_id3v2_roundtrip();
 test_tag_write_vorbis_roundtrip();

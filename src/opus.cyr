@@ -475,7 +475,9 @@ fn _opus_imdct(coeffs, nf, out) {
     if (_opus_mdct_basis_n != nf) { _opus_mdct_init(nf); }
     var m = nf / 2;
     var b = _opus_mdct_basis;
-    var invm = f64_div(F64_ONE, f64_from(m));
+    # Scale 2/M restores unity gain (single-block IMDCT∘MDCT returns x/2 under the
+    # double sine window + 50% OLA).
+    var invm = f64_div(F64_TWO, f64_from(m));
     var n = 0;
     while (n < nf) {
         var acc = F64_ZERO;
