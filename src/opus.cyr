@@ -1733,6 +1733,1303 @@ fn test_celt_allocation_rfc() {
     return 0;
 }
 
+# ================================================================
+# CELT CWRS: codeword index -> pulse vector (RFC 6716 §4.3.4) — cwrs.c port
+# ================================================================
+# U(N,K) counts sign-annotated pulse combos; V(N,K)=U(N,K)+U(N,K+1) is the range
+# coder `ft`. Table U[row][col] built by the recurrence U(n,k)=U(n-1,k)+U(n,k-1)+
+# U(n-1,k-1). Only rows 0..15 are needed (allocation guarantees the smaller of
+# (N,K) is <=14 for any codeword that fits uint32); cells >= 2^32 are saturated so
+# i64 never overflows (saturated cells are never used as a real `ft`).
+
+var _celt_pvqU = 0;
+var CELT_U_NC = 178;
+
+fn _celt_pvq_u_init() {
+    var NROW = 16;
+    var NC = CELT_U_NC;
+    var CAP = 4294967296;     # 2^32
+    _celt_pvqU = alloc(NROW * NC * 8);
+    var k = 0;
+    while (k < NC) { store64(_celt_pvqU + (0 * NC + k) * 8, 0); k = k + 1; }
+    store64(_celt_pvqU + 0, 1);              # U[0][0] = 1
+    var n = 1;
+    while (n < NROW) {
+        store64(_celt_pvqU + (n * NC + 0) * 8, 0);   # U[n][0] = 0
+        k = 1;
+        while (k < NC) {
+            var a = load64(_celt_pvqU + ((n - 1) * NC + k) * 8);
+            var b = load64(_celt_pvqU + (n * NC + (k - 1)) * 8);
+            var c = load64(_celt_pvqU + ((n - 1) * NC + (k - 1)) * 8);
+            var v = a + b + c;
+            if (v >= CAP) { v = CAP; }
+            store64(_celt_pvqU + (n * NC + k) * 8, v);
+            k = k + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+# Direct row access U_ROW[a][b] (a<=15, b<=177).
+fn _u(a, b) {
+    return load64(_celt_pvqU + (a * CELT_U_NC + b) * 8);
+}
+
+# U(n,k) with symmetry U(n,k)=U(k,n): row=min, col=max.
+fn celt_pvq_u(n, k) {
+    if (_celt_pvqU == 0) { _celt_pvq_u_init(); }
+    if (n <= k) { return _u(n, k); }
+    return _u(k, n);
+}
+
+fn celt_pvq_v(n, k) {
+    return celt_pvq_u(n, k) + celt_pvq_u(n, k + 1);
+}
+
+# cwrsi (cwrs.c:467): index i -> pulse vector y[0..n-1]; returns yy = sum(y[j]^2).
+fn celt_cwrsi(n, k, i, y) {
+    if (_celt_pvqU == 0) { _celt_pvq_u_init(); }
+    var NC = CELT_U_NC;
+    var yy = 0;
+    var N = n;
+    var K = k;
+    var ii = i;
+    var yp = 0;
+    while (N > 2) {
+        var val = 0;
+        if (K >= N) {
+            # lots of pulses: row = N (N<=14 here)
+            var p = load64(_celt_pvqU + (N * NC + (K + 1)) * 8);
+            var s = 0;
+            if (ii >= p) { s = 0 - 1; ii = ii - (p & s); }
+            var k0 = K;
+            var q = load64(_celt_pvqU + (N * NC + N) * 8);
+            if (q > ii) {
+                K = N;
+                var cont = 1;
+                while (cont == 1) {
+                    K = K - 1;
+                    p = load64(_celt_pvqU + (K * NC + N) * 8);
+                    if (p > ii) { cont = 1; } else { cont = 0; }
+                }
+            } else {
+                p = load64(_celt_pvqU + (N * NC + K) * 8);
+                while (p > ii) { K = K - 1; p = load64(_celt_pvqU + (N * NC + K) * 8); }
+            }
+            ii = ii - p;
+            val = (k0 - K + s) ^ s;
+        } else {
+            # lots of dimensions: row = K (K<=14 here)
+            var p = load64(_celt_pvqU + (K * NC + N) * 8);
+            var q = load64(_celt_pvqU + ((K + 1) * NC + N) * 8);
+            if ((p <= ii) & (ii < q)) {
+                ii = ii - p;
+                val = 0;
+            } else {
+                var s = 0;
+                if (ii >= q) { s = 0 - 1; ii = ii - (q & s); }
+                var k0 = K;
+                var cont = 1;
+                while (cont == 1) {
+                    K = K - 1;
+                    p = load64(_celt_pvqU + (K * NC + N) * 8);
+                    if (p > ii) { cont = 1; } else { cont = 0; }
+                }
+                ii = ii - p;
+                val = (k0 - K + s) ^ s;
+            }
+        }
+        store64(y + yp * 8, val);
+        yp = yp + 1;
+        yy = yy + val * val;
+        N = N - 1;
+    }
+    # N == 2
+    var p2 = 2 * K + 1;
+    var s2 = 0;
+    if (ii >= p2) { s2 = 0 - 1; ii = ii - (p2 & s2); }
+    var k02 = K;
+    K = (ii + 1) >> 1;
+    if (K != 0) { ii = ii - (2 * K - 1); }
+    var val2 = (k02 - K + s2) ^ s2;
+    store64(y + yp * 8, val2);
+    yp = yp + 1;
+    yy = yy + val2 * val2;
+    # N == 1
+    var s1 = 0 - ii;
+    var val1 = (K + s1) ^ s1;
+    store64(y + yp * 8, val1);
+    yy = yy + val1 * val1;
+    return yy;
+}
+
+# decode_pulses (cwrs.c:543): read codeword index, then cwrsi. Returns yy.
+fn celt_decode_pulses(ec, n, k, y) {
+    var v = celt_pvq_v(n, k);
+    var i = ec_dec_uint(ec, v);
+    return celt_cwrsi(n, k, i, y);
+}
+
+fn test_celt_cwrs_rfc() {
+    test_group("opus: CWRS decode_pulses bit-exact vs libopus");
+    # CFG 0: N=2 K=1 Ryy=1
+    var c0_b = alloc(128);
+    store8(c0_b + 0, 128); store8(c0_b + 1, 0); store8(c0_b + 2, 0); store8(c0_b + 3, 0); store8(c0_b + 4, 0); store8(c0_b + 5, 0); store8(c0_b + 6, 0); store8(c0_b + 7, 0); store8(c0_b + 8, 0); store8(c0_b + 9, 0); store8(c0_b + 10, 0); store8(c0_b + 11, 0); store8(c0_b + 12, 0); store8(c0_b + 13, 0);
+    store8(c0_b + 14, 0); store8(c0_b + 15, 0); store8(c0_b + 16, 0); store8(c0_b + 17, 0); store8(c0_b + 18, 0); store8(c0_b + 19, 0); store8(c0_b + 20, 0); store8(c0_b + 21, 0); store8(c0_b + 22, 0); store8(c0_b + 23, 0); store8(c0_b + 24, 0); store8(c0_b + 25, 0); store8(c0_b + 26, 0); store8(c0_b + 27, 0);
+    store8(c0_b + 28, 0); store8(c0_b + 29, 0); store8(c0_b + 30, 0); store8(c0_b + 31, 0); store8(c0_b + 32, 0); store8(c0_b + 33, 0); store8(c0_b + 34, 0); store8(c0_b + 35, 0); store8(c0_b + 36, 0); store8(c0_b + 37, 0); store8(c0_b + 38, 0); store8(c0_b + 39, 0); store8(c0_b + 40, 0); store8(c0_b + 41, 0);
+    store8(c0_b + 42, 0); store8(c0_b + 43, 0); store8(c0_b + 44, 0); store8(c0_b + 45, 0); store8(c0_b + 46, 0); store8(c0_b + 47, 0); store8(c0_b + 48, 0); store8(c0_b + 49, 0); store8(c0_b + 50, 0); store8(c0_b + 51, 0); store8(c0_b + 52, 0); store8(c0_b + 53, 0); store8(c0_b + 54, 0); store8(c0_b + 55, 0);
+    store8(c0_b + 56, 0); store8(c0_b + 57, 0); store8(c0_b + 58, 0); store8(c0_b + 59, 0); store8(c0_b + 60, 0); store8(c0_b + 61, 0); store8(c0_b + 62, 0); store8(c0_b + 63, 0); store8(c0_b + 64, 0); store8(c0_b + 65, 0); store8(c0_b + 66, 0); store8(c0_b + 67, 0); store8(c0_b + 68, 0); store8(c0_b + 69, 0);
+    store8(c0_b + 70, 0); store8(c0_b + 71, 0); store8(c0_b + 72, 0); store8(c0_b + 73, 0); store8(c0_b + 74, 0); store8(c0_b + 75, 0); store8(c0_b + 76, 0); store8(c0_b + 77, 0); store8(c0_b + 78, 0); store8(c0_b + 79, 0); store8(c0_b + 80, 0); store8(c0_b + 81, 0); store8(c0_b + 82, 0); store8(c0_b + 83, 0);
+    store8(c0_b + 84, 0); store8(c0_b + 85, 0); store8(c0_b + 86, 0); store8(c0_b + 87, 0); store8(c0_b + 88, 0); store8(c0_b + 89, 0); store8(c0_b + 90, 0); store8(c0_b + 91, 0); store8(c0_b + 92, 0); store8(c0_b + 93, 0); store8(c0_b + 94, 0); store8(c0_b + 95, 0); store8(c0_b + 96, 0); store8(c0_b + 97, 0);
+    store8(c0_b + 98, 0); store8(c0_b + 99, 0); store8(c0_b + 100, 0); store8(c0_b + 101, 0); store8(c0_b + 102, 0); store8(c0_b + 103, 0); store8(c0_b + 104, 0); store8(c0_b + 105, 0); store8(c0_b + 106, 0); store8(c0_b + 107, 0); store8(c0_b + 108, 0); store8(c0_b + 109, 0); store8(c0_b + 110, 0); store8(c0_b + 111, 0);
+    store8(c0_b + 112, 0); store8(c0_b + 113, 0); store8(c0_b + 114, 0); store8(c0_b + 115, 0); store8(c0_b + 116, 0); store8(c0_b + 117, 0); store8(c0_b + 118, 0); store8(c0_b + 119, 0); store8(c0_b + 120, 0); store8(c0_b + 121, 0); store8(c0_b + 122, 0); store8(c0_b + 123, 0); store8(c0_b + 124, 0); store8(c0_b + 125, 0);
+    store8(c0_b + 126, 0); store8(c0_b + 127, 0);
+    var c0_y = alloc(2 * 8);
+    var c0_ec = ec_dec_new(c0_b, 128);
+    var c0_ryy = celt_decode_pulses(c0_ec, 2, 1, c0_y);
+    assert_eq(c0_ryy, 1, "cwrs c0 Ryy");
+    var c0_ey = alloc(2 * 8);
+    store64(c0_ey + 0 * 8, 0); store64(c0_ey + 1 * 8, 0 - 1);
+    _celt_assert_arr(c0_y, c0_ey, 2, "cwrs c0 y");
+    # CFG 1: N=2 K=5 Ryy=13
+    var c1_b = alloc(128);
+    store8(c1_b + 0, 56); store8(c1_b + 1, 0); store8(c1_b + 2, 0); store8(c1_b + 3, 0); store8(c1_b + 4, 0); store8(c1_b + 5, 0); store8(c1_b + 6, 0); store8(c1_b + 7, 0); store8(c1_b + 8, 0); store8(c1_b + 9, 0); store8(c1_b + 10, 0); store8(c1_b + 11, 0); store8(c1_b + 12, 0); store8(c1_b + 13, 0);
+    store8(c1_b + 14, 0); store8(c1_b + 15, 0); store8(c1_b + 16, 0); store8(c1_b + 17, 0); store8(c1_b + 18, 0); store8(c1_b + 19, 0); store8(c1_b + 20, 0); store8(c1_b + 21, 0); store8(c1_b + 22, 0); store8(c1_b + 23, 0); store8(c1_b + 24, 0); store8(c1_b + 25, 0); store8(c1_b + 26, 0); store8(c1_b + 27, 0);
+    store8(c1_b + 28, 0); store8(c1_b + 29, 0); store8(c1_b + 30, 0); store8(c1_b + 31, 0); store8(c1_b + 32, 0); store8(c1_b + 33, 0); store8(c1_b + 34, 0); store8(c1_b + 35, 0); store8(c1_b + 36, 0); store8(c1_b + 37, 0); store8(c1_b + 38, 0); store8(c1_b + 39, 0); store8(c1_b + 40, 0); store8(c1_b + 41, 0);
+    store8(c1_b + 42, 0); store8(c1_b + 43, 0); store8(c1_b + 44, 0); store8(c1_b + 45, 0); store8(c1_b + 46, 0); store8(c1_b + 47, 0); store8(c1_b + 48, 0); store8(c1_b + 49, 0); store8(c1_b + 50, 0); store8(c1_b + 51, 0); store8(c1_b + 52, 0); store8(c1_b + 53, 0); store8(c1_b + 54, 0); store8(c1_b + 55, 0);
+    store8(c1_b + 56, 0); store8(c1_b + 57, 0); store8(c1_b + 58, 0); store8(c1_b + 59, 0); store8(c1_b + 60, 0); store8(c1_b + 61, 0); store8(c1_b + 62, 0); store8(c1_b + 63, 0); store8(c1_b + 64, 0); store8(c1_b + 65, 0); store8(c1_b + 66, 0); store8(c1_b + 67, 0); store8(c1_b + 68, 0); store8(c1_b + 69, 0);
+    store8(c1_b + 70, 0); store8(c1_b + 71, 0); store8(c1_b + 72, 0); store8(c1_b + 73, 0); store8(c1_b + 74, 0); store8(c1_b + 75, 0); store8(c1_b + 76, 0); store8(c1_b + 77, 0); store8(c1_b + 78, 0); store8(c1_b + 79, 0); store8(c1_b + 80, 0); store8(c1_b + 81, 0); store8(c1_b + 82, 0); store8(c1_b + 83, 0);
+    store8(c1_b + 84, 0); store8(c1_b + 85, 0); store8(c1_b + 86, 0); store8(c1_b + 87, 0); store8(c1_b + 88, 0); store8(c1_b + 89, 0); store8(c1_b + 90, 0); store8(c1_b + 91, 0); store8(c1_b + 92, 0); store8(c1_b + 93, 0); store8(c1_b + 94, 0); store8(c1_b + 95, 0); store8(c1_b + 96, 0); store8(c1_b + 97, 0);
+    store8(c1_b + 98, 0); store8(c1_b + 99, 0); store8(c1_b + 100, 0); store8(c1_b + 101, 0); store8(c1_b + 102, 0); store8(c1_b + 103, 0); store8(c1_b + 104, 0); store8(c1_b + 105, 0); store8(c1_b + 106, 0); store8(c1_b + 107, 0); store8(c1_b + 108, 0); store8(c1_b + 109, 0); store8(c1_b + 110, 0); store8(c1_b + 111, 0);
+    store8(c1_b + 112, 0); store8(c1_b + 113, 0); store8(c1_b + 114, 0); store8(c1_b + 115, 0); store8(c1_b + 116, 0); store8(c1_b + 117, 0); store8(c1_b + 118, 0); store8(c1_b + 119, 0); store8(c1_b + 120, 0); store8(c1_b + 121, 0); store8(c1_b + 122, 0); store8(c1_b + 123, 0); store8(c1_b + 124, 0); store8(c1_b + 125, 0);
+    store8(c1_b + 126, 0); store8(c1_b + 127, 0);
+    var c1_y = alloc(2 * 8);
+    var c1_ec = ec_dec_new(c1_b, 128);
+    var c1_ryy = celt_decode_pulses(c1_ec, 2, 5, c1_y);
+    assert_eq(c1_ryy, 13, "cwrs c1 Ryy");
+    var c1_ey = alloc(2 * 8);
+    store64(c1_ey + 0 * 8, 3); store64(c1_ey + 1 * 8, 0 - 2);
+    _celt_assert_arr(c1_y, c1_ey, 2, "cwrs c1 y");
+    # CFG 2: N=3 K=2 Ryy=2
+    var c2_b = alloc(128);
+    store8(c2_b + 0, 16); store8(c2_b + 1, 0); store8(c2_b + 2, 0); store8(c2_b + 3, 0); store8(c2_b + 4, 0); store8(c2_b + 5, 0); store8(c2_b + 6, 0); store8(c2_b + 7, 0); store8(c2_b + 8, 0); store8(c2_b + 9, 0); store8(c2_b + 10, 0); store8(c2_b + 11, 0); store8(c2_b + 12, 0); store8(c2_b + 13, 0);
+    store8(c2_b + 14, 0); store8(c2_b + 15, 0); store8(c2_b + 16, 0); store8(c2_b + 17, 0); store8(c2_b + 18, 0); store8(c2_b + 19, 0); store8(c2_b + 20, 0); store8(c2_b + 21, 0); store8(c2_b + 22, 0); store8(c2_b + 23, 0); store8(c2_b + 24, 0); store8(c2_b + 25, 0); store8(c2_b + 26, 0); store8(c2_b + 27, 0);
+    store8(c2_b + 28, 0); store8(c2_b + 29, 0); store8(c2_b + 30, 0); store8(c2_b + 31, 0); store8(c2_b + 32, 0); store8(c2_b + 33, 0); store8(c2_b + 34, 0); store8(c2_b + 35, 0); store8(c2_b + 36, 0); store8(c2_b + 37, 0); store8(c2_b + 38, 0); store8(c2_b + 39, 0); store8(c2_b + 40, 0); store8(c2_b + 41, 0);
+    store8(c2_b + 42, 0); store8(c2_b + 43, 0); store8(c2_b + 44, 0); store8(c2_b + 45, 0); store8(c2_b + 46, 0); store8(c2_b + 47, 0); store8(c2_b + 48, 0); store8(c2_b + 49, 0); store8(c2_b + 50, 0); store8(c2_b + 51, 0); store8(c2_b + 52, 0); store8(c2_b + 53, 0); store8(c2_b + 54, 0); store8(c2_b + 55, 0);
+    store8(c2_b + 56, 0); store8(c2_b + 57, 0); store8(c2_b + 58, 0); store8(c2_b + 59, 0); store8(c2_b + 60, 0); store8(c2_b + 61, 0); store8(c2_b + 62, 0); store8(c2_b + 63, 0); store8(c2_b + 64, 0); store8(c2_b + 65, 0); store8(c2_b + 66, 0); store8(c2_b + 67, 0); store8(c2_b + 68, 0); store8(c2_b + 69, 0);
+    store8(c2_b + 70, 0); store8(c2_b + 71, 0); store8(c2_b + 72, 0); store8(c2_b + 73, 0); store8(c2_b + 74, 0); store8(c2_b + 75, 0); store8(c2_b + 76, 0); store8(c2_b + 77, 0); store8(c2_b + 78, 0); store8(c2_b + 79, 0); store8(c2_b + 80, 0); store8(c2_b + 81, 0); store8(c2_b + 82, 0); store8(c2_b + 83, 0);
+    store8(c2_b + 84, 0); store8(c2_b + 85, 0); store8(c2_b + 86, 0); store8(c2_b + 87, 0); store8(c2_b + 88, 0); store8(c2_b + 89, 0); store8(c2_b + 90, 0); store8(c2_b + 91, 0); store8(c2_b + 92, 0); store8(c2_b + 93, 0); store8(c2_b + 94, 0); store8(c2_b + 95, 0); store8(c2_b + 96, 0); store8(c2_b + 97, 0);
+    store8(c2_b + 98, 0); store8(c2_b + 99, 0); store8(c2_b + 100, 0); store8(c2_b + 101, 0); store8(c2_b + 102, 0); store8(c2_b + 103, 0); store8(c2_b + 104, 0); store8(c2_b + 105, 0); store8(c2_b + 106, 0); store8(c2_b + 107, 0); store8(c2_b + 108, 0); store8(c2_b + 109, 0); store8(c2_b + 110, 0); store8(c2_b + 111, 0);
+    store8(c2_b + 112, 0); store8(c2_b + 113, 0); store8(c2_b + 114, 0); store8(c2_b + 115, 0); store8(c2_b + 116, 0); store8(c2_b + 117, 0); store8(c2_b + 118, 0); store8(c2_b + 119, 0); store8(c2_b + 120, 0); store8(c2_b + 121, 0); store8(c2_b + 122, 0); store8(c2_b + 123, 0); store8(c2_b + 124, 0); store8(c2_b + 125, 0);
+    store8(c2_b + 126, 0); store8(c2_b + 127, 0);
+    var c2_y = alloc(3 * 8);
+    var c2_ec = ec_dec_new(c2_b, 128);
+    var c2_ryy = celt_decode_pulses(c2_ec, 3, 2, c2_y);
+    assert_eq(c2_ryy, 2, "cwrs c2 Ryy");
+    var c2_ey = alloc(3 * 8);
+    store64(c2_ey + 0 * 8, 1); store64(c2_ey + 1 * 8, 1); store64(c2_ey + 2 * 8, 0);
+    _celt_assert_arr(c2_y, c2_ey, 3, "cwrs c2 y");
+    # CFG 3: N=4 K=3 Ryy=5
+    var c3_b = alloc(128);
+    store8(c3_b + 0, 15); store8(c3_b + 1, 0); store8(c3_b + 2, 0); store8(c3_b + 3, 0); store8(c3_b + 4, 0); store8(c3_b + 5, 0); store8(c3_b + 6, 0); store8(c3_b + 7, 0); store8(c3_b + 8, 0); store8(c3_b + 9, 0); store8(c3_b + 10, 0); store8(c3_b + 11, 0); store8(c3_b + 12, 0); store8(c3_b + 13, 0);
+    store8(c3_b + 14, 0); store8(c3_b + 15, 0); store8(c3_b + 16, 0); store8(c3_b + 17, 0); store8(c3_b + 18, 0); store8(c3_b + 19, 0); store8(c3_b + 20, 0); store8(c3_b + 21, 0); store8(c3_b + 22, 0); store8(c3_b + 23, 0); store8(c3_b + 24, 0); store8(c3_b + 25, 0); store8(c3_b + 26, 0); store8(c3_b + 27, 0);
+    store8(c3_b + 28, 0); store8(c3_b + 29, 0); store8(c3_b + 30, 0); store8(c3_b + 31, 0); store8(c3_b + 32, 0); store8(c3_b + 33, 0); store8(c3_b + 34, 0); store8(c3_b + 35, 0); store8(c3_b + 36, 0); store8(c3_b + 37, 0); store8(c3_b + 38, 0); store8(c3_b + 39, 0); store8(c3_b + 40, 0); store8(c3_b + 41, 0);
+    store8(c3_b + 42, 0); store8(c3_b + 43, 0); store8(c3_b + 44, 0); store8(c3_b + 45, 0); store8(c3_b + 46, 0); store8(c3_b + 47, 0); store8(c3_b + 48, 0); store8(c3_b + 49, 0); store8(c3_b + 50, 0); store8(c3_b + 51, 0); store8(c3_b + 52, 0); store8(c3_b + 53, 0); store8(c3_b + 54, 0); store8(c3_b + 55, 0);
+    store8(c3_b + 56, 0); store8(c3_b + 57, 0); store8(c3_b + 58, 0); store8(c3_b + 59, 0); store8(c3_b + 60, 0); store8(c3_b + 61, 0); store8(c3_b + 62, 0); store8(c3_b + 63, 0); store8(c3_b + 64, 0); store8(c3_b + 65, 0); store8(c3_b + 66, 0); store8(c3_b + 67, 0); store8(c3_b + 68, 0); store8(c3_b + 69, 0);
+    store8(c3_b + 70, 0); store8(c3_b + 71, 0); store8(c3_b + 72, 0); store8(c3_b + 73, 0); store8(c3_b + 74, 0); store8(c3_b + 75, 0); store8(c3_b + 76, 0); store8(c3_b + 77, 0); store8(c3_b + 78, 0); store8(c3_b + 79, 0); store8(c3_b + 80, 0); store8(c3_b + 81, 0); store8(c3_b + 82, 0); store8(c3_b + 83, 0);
+    store8(c3_b + 84, 0); store8(c3_b + 85, 0); store8(c3_b + 86, 0); store8(c3_b + 87, 0); store8(c3_b + 88, 0); store8(c3_b + 89, 0); store8(c3_b + 90, 0); store8(c3_b + 91, 0); store8(c3_b + 92, 0); store8(c3_b + 93, 0); store8(c3_b + 94, 0); store8(c3_b + 95, 0); store8(c3_b + 96, 0); store8(c3_b + 97, 0);
+    store8(c3_b + 98, 0); store8(c3_b + 99, 0); store8(c3_b + 100, 0); store8(c3_b + 101, 0); store8(c3_b + 102, 0); store8(c3_b + 103, 0); store8(c3_b + 104, 0); store8(c3_b + 105, 0); store8(c3_b + 106, 0); store8(c3_b + 107, 0); store8(c3_b + 108, 0); store8(c3_b + 109, 0); store8(c3_b + 110, 0); store8(c3_b + 111, 0);
+    store8(c3_b + 112, 0); store8(c3_b + 113, 0); store8(c3_b + 114, 0); store8(c3_b + 115, 0); store8(c3_b + 116, 0); store8(c3_b + 117, 0); store8(c3_b + 118, 0); store8(c3_b + 119, 0); store8(c3_b + 120, 0); store8(c3_b + 121, 0); store8(c3_b + 122, 0); store8(c3_b + 123, 0); store8(c3_b + 124, 0); store8(c3_b + 125, 0);
+    store8(c3_b + 126, 0); store8(c3_b + 127, 0);
+    var c3_y = alloc(4 * 8);
+    var c3_ec = ec_dec_new(c3_b, 128);
+    var c3_ryy = celt_decode_pulses(c3_ec, 4, 3, c3_y);
+    assert_eq(c3_ryy, 5, "cwrs c3 Ryy");
+    var c3_ey = alloc(4 * 8);
+    store64(c3_ey + 0 * 8, 2); store64(c3_ey + 1 * 8, 0); store64(c3_ey + 2 * 8, 0 - 1); store64(c3_ey + 3 * 8, 0);
+    _celt_assert_arr(c3_y, c3_ey, 4, "cwrs c3 y");
+    # CFG 4: N=8 K=4 Ryy=4
+    var c4_b = alloc(128);
+    store8(c4_b + 0, 47); store8(c4_b + 1, 0); store8(c4_b + 2, 0); store8(c4_b + 3, 0); store8(c4_b + 4, 0); store8(c4_b + 5, 0); store8(c4_b + 6, 0); store8(c4_b + 7, 0); store8(c4_b + 8, 0); store8(c4_b + 9, 0); store8(c4_b + 10, 0); store8(c4_b + 11, 0); store8(c4_b + 12, 0); store8(c4_b + 13, 0);
+    store8(c4_b + 14, 0); store8(c4_b + 15, 0); store8(c4_b + 16, 0); store8(c4_b + 17, 0); store8(c4_b + 18, 0); store8(c4_b + 19, 0); store8(c4_b + 20, 0); store8(c4_b + 21, 0); store8(c4_b + 22, 0); store8(c4_b + 23, 0); store8(c4_b + 24, 0); store8(c4_b + 25, 0); store8(c4_b + 26, 0); store8(c4_b + 27, 0);
+    store8(c4_b + 28, 0); store8(c4_b + 29, 0); store8(c4_b + 30, 0); store8(c4_b + 31, 0); store8(c4_b + 32, 0); store8(c4_b + 33, 0); store8(c4_b + 34, 0); store8(c4_b + 35, 0); store8(c4_b + 36, 0); store8(c4_b + 37, 0); store8(c4_b + 38, 0); store8(c4_b + 39, 0); store8(c4_b + 40, 0); store8(c4_b + 41, 0);
+    store8(c4_b + 42, 0); store8(c4_b + 43, 0); store8(c4_b + 44, 0); store8(c4_b + 45, 0); store8(c4_b + 46, 0); store8(c4_b + 47, 0); store8(c4_b + 48, 0); store8(c4_b + 49, 0); store8(c4_b + 50, 0); store8(c4_b + 51, 0); store8(c4_b + 52, 0); store8(c4_b + 53, 0); store8(c4_b + 54, 0); store8(c4_b + 55, 0);
+    store8(c4_b + 56, 0); store8(c4_b + 57, 0); store8(c4_b + 58, 0); store8(c4_b + 59, 0); store8(c4_b + 60, 0); store8(c4_b + 61, 0); store8(c4_b + 62, 0); store8(c4_b + 63, 0); store8(c4_b + 64, 0); store8(c4_b + 65, 0); store8(c4_b + 66, 0); store8(c4_b + 67, 0); store8(c4_b + 68, 0); store8(c4_b + 69, 0);
+    store8(c4_b + 70, 0); store8(c4_b + 71, 0); store8(c4_b + 72, 0); store8(c4_b + 73, 0); store8(c4_b + 74, 0); store8(c4_b + 75, 0); store8(c4_b + 76, 0); store8(c4_b + 77, 0); store8(c4_b + 78, 0); store8(c4_b + 79, 0); store8(c4_b + 80, 0); store8(c4_b + 81, 0); store8(c4_b + 82, 0); store8(c4_b + 83, 0);
+    store8(c4_b + 84, 0); store8(c4_b + 85, 0); store8(c4_b + 86, 0); store8(c4_b + 87, 0); store8(c4_b + 88, 0); store8(c4_b + 89, 0); store8(c4_b + 90, 0); store8(c4_b + 91, 0); store8(c4_b + 92, 0); store8(c4_b + 93, 0); store8(c4_b + 94, 0); store8(c4_b + 95, 0); store8(c4_b + 96, 0); store8(c4_b + 97, 0);
+    store8(c4_b + 98, 0); store8(c4_b + 99, 0); store8(c4_b + 100, 0); store8(c4_b + 101, 0); store8(c4_b + 102, 0); store8(c4_b + 103, 0); store8(c4_b + 104, 0); store8(c4_b + 105, 0); store8(c4_b + 106, 0); store8(c4_b + 107, 0); store8(c4_b + 108, 0); store8(c4_b + 109, 0); store8(c4_b + 110, 0); store8(c4_b + 111, 0);
+    store8(c4_b + 112, 0); store8(c4_b + 113, 0); store8(c4_b + 114, 0); store8(c4_b + 115, 0); store8(c4_b + 116, 0); store8(c4_b + 117, 0); store8(c4_b + 118, 0); store8(c4_b + 119, 0); store8(c4_b + 120, 0); store8(c4_b + 121, 0); store8(c4_b + 122, 0); store8(c4_b + 123, 0); store8(c4_b + 124, 0); store8(c4_b + 125, 0);
+    store8(c4_b + 126, 0); store8(c4_b + 127, 8);
+    var c4_y = alloc(8 * 8);
+    var c4_ec = ec_dec_new(c4_b, 128);
+    var c4_ryy = celt_decode_pulses(c4_ec, 8, 4, c4_y);
+    assert_eq(c4_ryy, 4, "cwrs c4 Ryy");
+    var c4_ey = alloc(8 * 8);
+    store64(c4_ey + 0 * 8, 1); store64(c4_ey + 1 * 8, 0 - 1); store64(c4_ey + 2 * 8, 0); store64(c4_ey + 3 * 8, 1); store64(c4_ey + 4 * 8, 0); store64(c4_ey + 5 * 8, 0); store64(c4_ey + 6 * 8, 0 - 1); store64(c4_ey + 7 * 8, 0);
+    _celt_assert_arr(c4_y, c4_ey, 8, "cwrs c4 y");
+    # CFG 5: N=16 K=6 Ryy=8
+    var c5_b = alloc(128);
+    store8(c5_b + 0, 44); store8(c5_b + 1, 128); store8(c5_b + 2, 0); store8(c5_b + 3, 0); store8(c5_b + 4, 0); store8(c5_b + 5, 0); store8(c5_b + 6, 0); store8(c5_b + 7, 0); store8(c5_b + 8, 0); store8(c5_b + 9, 0); store8(c5_b + 10, 0); store8(c5_b + 11, 0); store8(c5_b + 12, 0); store8(c5_b + 13, 0);
+    store8(c5_b + 14, 0); store8(c5_b + 15, 0); store8(c5_b + 16, 0); store8(c5_b + 17, 0); store8(c5_b + 18, 0); store8(c5_b + 19, 0); store8(c5_b + 20, 0); store8(c5_b + 21, 0); store8(c5_b + 22, 0); store8(c5_b + 23, 0); store8(c5_b + 24, 0); store8(c5_b + 25, 0); store8(c5_b + 26, 0); store8(c5_b + 27, 0);
+    store8(c5_b + 28, 0); store8(c5_b + 29, 0); store8(c5_b + 30, 0); store8(c5_b + 31, 0); store8(c5_b + 32, 0); store8(c5_b + 33, 0); store8(c5_b + 34, 0); store8(c5_b + 35, 0); store8(c5_b + 36, 0); store8(c5_b + 37, 0); store8(c5_b + 38, 0); store8(c5_b + 39, 0); store8(c5_b + 40, 0); store8(c5_b + 41, 0);
+    store8(c5_b + 42, 0); store8(c5_b + 43, 0); store8(c5_b + 44, 0); store8(c5_b + 45, 0); store8(c5_b + 46, 0); store8(c5_b + 47, 0); store8(c5_b + 48, 0); store8(c5_b + 49, 0); store8(c5_b + 50, 0); store8(c5_b + 51, 0); store8(c5_b + 52, 0); store8(c5_b + 53, 0); store8(c5_b + 54, 0); store8(c5_b + 55, 0);
+    store8(c5_b + 56, 0); store8(c5_b + 57, 0); store8(c5_b + 58, 0); store8(c5_b + 59, 0); store8(c5_b + 60, 0); store8(c5_b + 61, 0); store8(c5_b + 62, 0); store8(c5_b + 63, 0); store8(c5_b + 64, 0); store8(c5_b + 65, 0); store8(c5_b + 66, 0); store8(c5_b + 67, 0); store8(c5_b + 68, 0); store8(c5_b + 69, 0);
+    store8(c5_b + 70, 0); store8(c5_b + 71, 0); store8(c5_b + 72, 0); store8(c5_b + 73, 0); store8(c5_b + 74, 0); store8(c5_b + 75, 0); store8(c5_b + 76, 0); store8(c5_b + 77, 0); store8(c5_b + 78, 0); store8(c5_b + 79, 0); store8(c5_b + 80, 0); store8(c5_b + 81, 0); store8(c5_b + 82, 0); store8(c5_b + 83, 0);
+    store8(c5_b + 84, 0); store8(c5_b + 85, 0); store8(c5_b + 86, 0); store8(c5_b + 87, 0); store8(c5_b + 88, 0); store8(c5_b + 89, 0); store8(c5_b + 90, 0); store8(c5_b + 91, 0); store8(c5_b + 92, 0); store8(c5_b + 93, 0); store8(c5_b + 94, 0); store8(c5_b + 95, 0); store8(c5_b + 96, 0); store8(c5_b + 97, 0);
+    store8(c5_b + 98, 0); store8(c5_b + 99, 0); store8(c5_b + 100, 0); store8(c5_b + 101, 0); store8(c5_b + 102, 0); store8(c5_b + 103, 0); store8(c5_b + 104, 0); store8(c5_b + 105, 0); store8(c5_b + 106, 0); store8(c5_b + 107, 0); store8(c5_b + 108, 0); store8(c5_b + 109, 0); store8(c5_b + 110, 0); store8(c5_b + 111, 0);
+    store8(c5_b + 112, 0); store8(c5_b + 113, 0); store8(c5_b + 114, 0); store8(c5_b + 115, 0); store8(c5_b + 116, 0); store8(c5_b + 117, 0); store8(c5_b + 118, 0); store8(c5_b + 119, 0); store8(c5_b + 120, 0); store8(c5_b + 121, 0); store8(c5_b + 122, 0); store8(c5_b + 123, 0); store8(c5_b + 124, 0); store8(c5_b + 125, 0);
+    store8(c5_b + 126, 2); store8(c5_b + 127, 160);
+    var c5_y = alloc(16 * 8);
+    var c5_ec = ec_dec_new(c5_b, 128);
+    var c5_ryy = celt_decode_pulses(c5_ec, 16, 6, c5_y);
+    assert_eq(c5_ryy, 8, "cwrs c5 Ryy");
+    var c5_ey = alloc(16 * 8);
+    store64(c5_ey + 0 * 8, 0); store64(c5_ey + 1 * 8, 2); store64(c5_ey + 2 * 8, 0); store64(c5_ey + 3 * 8, 0 - 1); store64(c5_ey + 4 * 8, 0); store64(c5_ey + 5 * 8, 0); store64(c5_ey + 6 * 8, 1); store64(c5_ey + 7 * 8, 0);
+    store64(c5_ey + 8 * 8, 0); store64(c5_ey + 9 * 8, 0); store64(c5_ey + 10 * 8, 0 - 1); store64(c5_ey + 11 * 8, 0); store64(c5_ey + 12 * 8, 0); store64(c5_ey + 13 * 8, 0); store64(c5_ey + 14 * 8, 1); store64(c5_ey + 15 * 8, 0);
+    _celt_assert_arr(c5_y, c5_ey, 16, "cwrs c5 y");
+    # CFG 6: N=24 K=3 Ryy=5
+    var c6_b = alloc(128);
+    store8(c6_b + 0, 212); store8(c6_b + 1, 0); store8(c6_b + 2, 0); store8(c6_b + 3, 0); store8(c6_b + 4, 0); store8(c6_b + 5, 0); store8(c6_b + 6, 0); store8(c6_b + 7, 0); store8(c6_b + 8, 0); store8(c6_b + 9, 0); store8(c6_b + 10, 0); store8(c6_b + 11, 0); store8(c6_b + 12, 0); store8(c6_b + 13, 0);
+    store8(c6_b + 14, 0); store8(c6_b + 15, 0); store8(c6_b + 16, 0); store8(c6_b + 17, 0); store8(c6_b + 18, 0); store8(c6_b + 19, 0); store8(c6_b + 20, 0); store8(c6_b + 21, 0); store8(c6_b + 22, 0); store8(c6_b + 23, 0); store8(c6_b + 24, 0); store8(c6_b + 25, 0); store8(c6_b + 26, 0); store8(c6_b + 27, 0);
+    store8(c6_b + 28, 0); store8(c6_b + 29, 0); store8(c6_b + 30, 0); store8(c6_b + 31, 0); store8(c6_b + 32, 0); store8(c6_b + 33, 0); store8(c6_b + 34, 0); store8(c6_b + 35, 0); store8(c6_b + 36, 0); store8(c6_b + 37, 0); store8(c6_b + 38, 0); store8(c6_b + 39, 0); store8(c6_b + 40, 0); store8(c6_b + 41, 0);
+    store8(c6_b + 42, 0); store8(c6_b + 43, 0); store8(c6_b + 44, 0); store8(c6_b + 45, 0); store8(c6_b + 46, 0); store8(c6_b + 47, 0); store8(c6_b + 48, 0); store8(c6_b + 49, 0); store8(c6_b + 50, 0); store8(c6_b + 51, 0); store8(c6_b + 52, 0); store8(c6_b + 53, 0); store8(c6_b + 54, 0); store8(c6_b + 55, 0);
+    store8(c6_b + 56, 0); store8(c6_b + 57, 0); store8(c6_b + 58, 0); store8(c6_b + 59, 0); store8(c6_b + 60, 0); store8(c6_b + 61, 0); store8(c6_b + 62, 0); store8(c6_b + 63, 0); store8(c6_b + 64, 0); store8(c6_b + 65, 0); store8(c6_b + 66, 0); store8(c6_b + 67, 0); store8(c6_b + 68, 0); store8(c6_b + 69, 0);
+    store8(c6_b + 70, 0); store8(c6_b + 71, 0); store8(c6_b + 72, 0); store8(c6_b + 73, 0); store8(c6_b + 74, 0); store8(c6_b + 75, 0); store8(c6_b + 76, 0); store8(c6_b + 77, 0); store8(c6_b + 78, 0); store8(c6_b + 79, 0); store8(c6_b + 80, 0); store8(c6_b + 81, 0); store8(c6_b + 82, 0); store8(c6_b + 83, 0);
+    store8(c6_b + 84, 0); store8(c6_b + 85, 0); store8(c6_b + 86, 0); store8(c6_b + 87, 0); store8(c6_b + 88, 0); store8(c6_b + 89, 0); store8(c6_b + 90, 0); store8(c6_b + 91, 0); store8(c6_b + 92, 0); store8(c6_b + 93, 0); store8(c6_b + 94, 0); store8(c6_b + 95, 0); store8(c6_b + 96, 0); store8(c6_b + 97, 0);
+    store8(c6_b + 98, 0); store8(c6_b + 99, 0); store8(c6_b + 100, 0); store8(c6_b + 101, 0); store8(c6_b + 102, 0); store8(c6_b + 103, 0); store8(c6_b + 104, 0); store8(c6_b + 105, 0); store8(c6_b + 106, 0); store8(c6_b + 107, 0); store8(c6_b + 108, 0); store8(c6_b + 109, 0); store8(c6_b + 110, 0); store8(c6_b + 111, 0);
+    store8(c6_b + 112, 0); store8(c6_b + 113, 0); store8(c6_b + 114, 0); store8(c6_b + 115, 0); store8(c6_b + 116, 0); store8(c6_b + 117, 0); store8(c6_b + 118, 0); store8(c6_b + 119, 0); store8(c6_b + 120, 0); store8(c6_b + 121, 0); store8(c6_b + 122, 0); store8(c6_b + 123, 0); store8(c6_b + 124, 0); store8(c6_b + 125, 0);
+    store8(c6_b + 126, 0); store8(c6_b + 127, 51);
+    var c6_y = alloc(24 * 8);
+    var c6_ec = ec_dec_new(c6_b, 128);
+    var c6_ryy = celt_decode_pulses(c6_ec, 24, 3, c6_y);
+    assert_eq(c6_ryy, 5, "cwrs c6 Ryy");
+    var c6_ey = alloc(24 * 8);
+    store64(c6_ey + 0 * 8, 0); store64(c6_ey + 1 * 8, 0); store64(c6_ey + 2 * 8, 0 - 2); store64(c6_ey + 3 * 8, 0); store64(c6_ey + 4 * 8, 0); store64(c6_ey + 5 * 8, 0); store64(c6_ey + 6 * 8, 0); store64(c6_ey + 7 * 8, 0);
+    store64(c6_ey + 8 * 8, 1); store64(c6_ey + 9 * 8, 0); store64(c6_ey + 10 * 8, 0); store64(c6_ey + 11 * 8, 0); store64(c6_ey + 12 * 8, 0); store64(c6_ey + 13 * 8, 0); store64(c6_ey + 14 * 8, 0); store64(c6_ey + 15 * 8, 0);
+    store64(c6_ey + 16 * 8, 0); store64(c6_ey + 17 * 8, 0); store64(c6_ey + 18 * 8, 0); store64(c6_ey + 19 * 8, 0); store64(c6_ey + 20 * 8, 0); store64(c6_ey + 21 * 8, 0); store64(c6_ey + 22 * 8, 0); store64(c6_ey + 23 * 8, 0);
+    _celt_assert_arr(c6_y, c6_ey, 24, "cwrs c6 y");
+    # CFG 8: N=5 K=10 Ryy=50
+    var c8_b = alloc(128);
+    store8(c8_b + 0, 9); store8(c8_b + 1, 128); store8(c8_b + 2, 0); store8(c8_b + 3, 0); store8(c8_b + 4, 0); store8(c8_b + 5, 0); store8(c8_b + 6, 0); store8(c8_b + 7, 0); store8(c8_b + 8, 0); store8(c8_b + 9, 0); store8(c8_b + 10, 0); store8(c8_b + 11, 0); store8(c8_b + 12, 0); store8(c8_b + 13, 0);
+    store8(c8_b + 14, 0); store8(c8_b + 15, 0); store8(c8_b + 16, 0); store8(c8_b + 17, 0); store8(c8_b + 18, 0); store8(c8_b + 19, 0); store8(c8_b + 20, 0); store8(c8_b + 21, 0); store8(c8_b + 22, 0); store8(c8_b + 23, 0); store8(c8_b + 24, 0); store8(c8_b + 25, 0); store8(c8_b + 26, 0); store8(c8_b + 27, 0);
+    store8(c8_b + 28, 0); store8(c8_b + 29, 0); store8(c8_b + 30, 0); store8(c8_b + 31, 0); store8(c8_b + 32, 0); store8(c8_b + 33, 0); store8(c8_b + 34, 0); store8(c8_b + 35, 0); store8(c8_b + 36, 0); store8(c8_b + 37, 0); store8(c8_b + 38, 0); store8(c8_b + 39, 0); store8(c8_b + 40, 0); store8(c8_b + 41, 0);
+    store8(c8_b + 42, 0); store8(c8_b + 43, 0); store8(c8_b + 44, 0); store8(c8_b + 45, 0); store8(c8_b + 46, 0); store8(c8_b + 47, 0); store8(c8_b + 48, 0); store8(c8_b + 49, 0); store8(c8_b + 50, 0); store8(c8_b + 51, 0); store8(c8_b + 52, 0); store8(c8_b + 53, 0); store8(c8_b + 54, 0); store8(c8_b + 55, 0);
+    store8(c8_b + 56, 0); store8(c8_b + 57, 0); store8(c8_b + 58, 0); store8(c8_b + 59, 0); store8(c8_b + 60, 0); store8(c8_b + 61, 0); store8(c8_b + 62, 0); store8(c8_b + 63, 0); store8(c8_b + 64, 0); store8(c8_b + 65, 0); store8(c8_b + 66, 0); store8(c8_b + 67, 0); store8(c8_b + 68, 0); store8(c8_b + 69, 0);
+    store8(c8_b + 70, 0); store8(c8_b + 71, 0); store8(c8_b + 72, 0); store8(c8_b + 73, 0); store8(c8_b + 74, 0); store8(c8_b + 75, 0); store8(c8_b + 76, 0); store8(c8_b + 77, 0); store8(c8_b + 78, 0); store8(c8_b + 79, 0); store8(c8_b + 80, 0); store8(c8_b + 81, 0); store8(c8_b + 82, 0); store8(c8_b + 83, 0);
+    store8(c8_b + 84, 0); store8(c8_b + 85, 0); store8(c8_b + 86, 0); store8(c8_b + 87, 0); store8(c8_b + 88, 0); store8(c8_b + 89, 0); store8(c8_b + 90, 0); store8(c8_b + 91, 0); store8(c8_b + 92, 0); store8(c8_b + 93, 0); store8(c8_b + 94, 0); store8(c8_b + 95, 0); store8(c8_b + 96, 0); store8(c8_b + 97, 0);
+    store8(c8_b + 98, 0); store8(c8_b + 99, 0); store8(c8_b + 100, 0); store8(c8_b + 101, 0); store8(c8_b + 102, 0); store8(c8_b + 103, 0); store8(c8_b + 104, 0); store8(c8_b + 105, 0); store8(c8_b + 106, 0); store8(c8_b + 107, 0); store8(c8_b + 108, 0); store8(c8_b + 109, 0); store8(c8_b + 110, 0); store8(c8_b + 111, 0);
+    store8(c8_b + 112, 0); store8(c8_b + 113, 0); store8(c8_b + 114, 0); store8(c8_b + 115, 0); store8(c8_b + 116, 0); store8(c8_b + 117, 0); store8(c8_b + 118, 0); store8(c8_b + 119, 0); store8(c8_b + 120, 0); store8(c8_b + 121, 0); store8(c8_b + 122, 0); store8(c8_b + 123, 0); store8(c8_b + 124, 0); store8(c8_b + 125, 0);
+    store8(c8_b + 126, 0); store8(c8_b + 127, 40);
+    var c8_y = alloc(5 * 8);
+    var c8_ec = ec_dec_new(c8_b, 128);
+    var c8_ryy = celt_decode_pulses(c8_ec, 5, 10, c8_y);
+    assert_eq(c8_ryy, 50, "cwrs c8 Ryy");
+    var c8_ey = alloc(5 * 8);
+    store64(c8_ey + 0 * 8, 5); store64(c8_ey + 1 * 8, 0 - 5); store64(c8_ey + 2 * 8, 0); store64(c8_ey + 3 * 8, 0); store64(c8_ey + 4 * 8, 0);
+    _celt_assert_arr(c8_y, c8_ey, 5, "cwrs c8 y");
+    # CFG 9: N=10 K=1 Ryy=1
+    var c9_b = alloc(128);
+    store8(c9_b + 0, 156); store8(c9_b + 1, 0); store8(c9_b + 2, 0); store8(c9_b + 3, 0); store8(c9_b + 4, 0); store8(c9_b + 5, 0); store8(c9_b + 6, 0); store8(c9_b + 7, 0); store8(c9_b + 8, 0); store8(c9_b + 9, 0); store8(c9_b + 10, 0); store8(c9_b + 11, 0); store8(c9_b + 12, 0); store8(c9_b + 13, 0);
+    store8(c9_b + 14, 0); store8(c9_b + 15, 0); store8(c9_b + 16, 0); store8(c9_b + 17, 0); store8(c9_b + 18, 0); store8(c9_b + 19, 0); store8(c9_b + 20, 0); store8(c9_b + 21, 0); store8(c9_b + 22, 0); store8(c9_b + 23, 0); store8(c9_b + 24, 0); store8(c9_b + 25, 0); store8(c9_b + 26, 0); store8(c9_b + 27, 0);
+    store8(c9_b + 28, 0); store8(c9_b + 29, 0); store8(c9_b + 30, 0); store8(c9_b + 31, 0); store8(c9_b + 32, 0); store8(c9_b + 33, 0); store8(c9_b + 34, 0); store8(c9_b + 35, 0); store8(c9_b + 36, 0); store8(c9_b + 37, 0); store8(c9_b + 38, 0); store8(c9_b + 39, 0); store8(c9_b + 40, 0); store8(c9_b + 41, 0);
+    store8(c9_b + 42, 0); store8(c9_b + 43, 0); store8(c9_b + 44, 0); store8(c9_b + 45, 0); store8(c9_b + 46, 0); store8(c9_b + 47, 0); store8(c9_b + 48, 0); store8(c9_b + 49, 0); store8(c9_b + 50, 0); store8(c9_b + 51, 0); store8(c9_b + 52, 0); store8(c9_b + 53, 0); store8(c9_b + 54, 0); store8(c9_b + 55, 0);
+    store8(c9_b + 56, 0); store8(c9_b + 57, 0); store8(c9_b + 58, 0); store8(c9_b + 59, 0); store8(c9_b + 60, 0); store8(c9_b + 61, 0); store8(c9_b + 62, 0); store8(c9_b + 63, 0); store8(c9_b + 64, 0); store8(c9_b + 65, 0); store8(c9_b + 66, 0); store8(c9_b + 67, 0); store8(c9_b + 68, 0); store8(c9_b + 69, 0);
+    store8(c9_b + 70, 0); store8(c9_b + 71, 0); store8(c9_b + 72, 0); store8(c9_b + 73, 0); store8(c9_b + 74, 0); store8(c9_b + 75, 0); store8(c9_b + 76, 0); store8(c9_b + 77, 0); store8(c9_b + 78, 0); store8(c9_b + 79, 0); store8(c9_b + 80, 0); store8(c9_b + 81, 0); store8(c9_b + 82, 0); store8(c9_b + 83, 0);
+    store8(c9_b + 84, 0); store8(c9_b + 85, 0); store8(c9_b + 86, 0); store8(c9_b + 87, 0); store8(c9_b + 88, 0); store8(c9_b + 89, 0); store8(c9_b + 90, 0); store8(c9_b + 91, 0); store8(c9_b + 92, 0); store8(c9_b + 93, 0); store8(c9_b + 94, 0); store8(c9_b + 95, 0); store8(c9_b + 96, 0); store8(c9_b + 97, 0);
+    store8(c9_b + 98, 0); store8(c9_b + 99, 0); store8(c9_b + 100, 0); store8(c9_b + 101, 0); store8(c9_b + 102, 0); store8(c9_b + 103, 0); store8(c9_b + 104, 0); store8(c9_b + 105, 0); store8(c9_b + 106, 0); store8(c9_b + 107, 0); store8(c9_b + 108, 0); store8(c9_b + 109, 0); store8(c9_b + 110, 0); store8(c9_b + 111, 0);
+    store8(c9_b + 112, 0); store8(c9_b + 113, 0); store8(c9_b + 114, 0); store8(c9_b + 115, 0); store8(c9_b + 116, 0); store8(c9_b + 117, 0); store8(c9_b + 118, 0); store8(c9_b + 119, 0); store8(c9_b + 120, 0); store8(c9_b + 121, 0); store8(c9_b + 122, 0); store8(c9_b + 123, 0); store8(c9_b + 124, 0); store8(c9_b + 125, 0);
+    store8(c9_b + 126, 0); store8(c9_b + 127, 0);
+    var c9_y = alloc(10 * 8);
+    var c9_ec = ec_dec_new(c9_b, 128);
+    var c9_ryy = celt_decode_pulses(c9_ec, 10, 1, c9_y);
+    assert_eq(c9_ryy, 1, "cwrs c9 Ryy");
+    var c9_ey = alloc(10 * 8);
+    store64(c9_ey + 0 * 8, 0); store64(c9_ey + 1 * 8, 0); store64(c9_ey + 2 * 8, 0); store64(c9_ey + 3 * 8, 0); store64(c9_ey + 4 * 8, 0); store64(c9_ey + 5 * 8, 0); store64(c9_ey + 6 * 8, 0); store64(c9_ey + 7 * 8, 0 - 1);
+    store64(c9_ey + 8 * 8, 0); store64(c9_ey + 9 * 8, 0);
+    _celt_assert_arr(c9_y, c9_ey, 10, "cwrs c9 y");
+    return 0;
+}
+
+# ================================================================
+# CELT bands / VQ (RFC 6716 §4.3.4) — bands.c + vq.c port (decode path)
+# ================================================================
+# Integer-exact pieces (bitexact_cos/log2tan, compute_qn, the recursion split
+# bookkeeping, collapse masks, LCG) MUST match libopus or the range coder desyncs;
+# the float pieces (normalise/rotation/denormalise/merge) only affect sample values.
+
+var _celt_eMeans = 0;      # 21 f64
+var _celt_spreadF = 0;     # {15,10,5}
+var _celt_exp2_8 = 0;      # 8 int
+var _celt_ordery = 0;      # ordery_table (offsets: stride-2)
+var _celt_bitil = 0;       # bit_interleave_table[16]
+var _celt_bitdeil = 0;     # bit_deinterleave_table[16]
+var F64_SQRT1_2 = 0;       # 0.70710678
+
+fn _celt_bands_tables_init() {
+    var em = alloc(21 * 8);
+    var m16 = alloc(21 * 8);
+    store64(m16+0,103); store64(m16+8,100); store64(m16+16,92); store64(m16+24,85);
+    store64(m16+32,81); store64(m16+40,77); store64(m16+48,72); store64(m16+56,70);
+    store64(m16+64,78); store64(m16+72,75); store64(m16+80,73); store64(m16+88,71);
+    store64(m16+96,78); store64(m16+104,74); store64(m16+112,69); store64(m16+120,72);
+    store64(m16+128,70); store64(m16+136,74); store64(m16+144,76); store64(m16+152,71);
+    store64(m16+160,60);
+    var i = 0;
+    while (i < 21) { store64(em + i * 8, f64_div(f64_from(load64(m16 + i * 8)), f64_from(16))); i = i + 1; }
+    _celt_eMeans = em;
+    _celt_spreadF = alloc(3 * 8);
+    store64(_celt_spreadF + 0, 15); store64(_celt_spreadF + 8, 10); store64(_celt_spreadF + 16, 5);
+    _celt_exp2_8 = alloc(8 * 8);
+    store64(_celt_exp2_8+0,16384); store64(_celt_exp2_8+8,17866); store64(_celt_exp2_8+16,19483);
+    store64(_celt_exp2_8+24,21247); store64(_celt_exp2_8+32,23170); store64(_celt_exp2_8+40,25267);
+    store64(_celt_exp2_8+48,27554); store64(_celt_exp2_8+56,30048);
+    _celt_ordery = alloc(30 * 8);
+    var od = alloc(30 * 8);
+    store64(od+0,1); store64(od+8,0);
+    store64(od+16,3); store64(od+24,0); store64(od+32,2); store64(od+40,1);
+    store64(od+48,7); store64(od+56,0); store64(od+64,4); store64(od+72,3); store64(od+80,6); store64(od+88,1); store64(od+96,5); store64(od+104,2);
+    store64(od+112,15); store64(od+120,0); store64(od+128,8); store64(od+136,7); store64(od+144,12); store64(od+152,3); store64(od+160,11); store64(od+168,4);
+    store64(od+176,14); store64(od+184,1); store64(od+192,9); store64(od+200,6); store64(od+208,13); store64(od+216,2); store64(od+224,10); store64(od+232,5);
+    i = 0; while (i < 30) { store64(_celt_ordery + i * 8, load64(od + i * 8)); i = i + 1; }
+    _celt_bitil = alloc(16);
+    store8(_celt_bitil+0,0); store8(_celt_bitil+1,1); store8(_celt_bitil+2,1); store8(_celt_bitil+3,1);
+    store8(_celt_bitil+4,2); store8(_celt_bitil+5,3); store8(_celt_bitil+6,3); store8(_celt_bitil+7,3);
+    store8(_celt_bitil+8,2); store8(_celt_bitil+9,3); store8(_celt_bitil+10,3); store8(_celt_bitil+11,3);
+    store8(_celt_bitil+12,2); store8(_celt_bitil+13,3); store8(_celt_bitil+14,3); store8(_celt_bitil+15,3);
+    _celt_bitdeil = alloc(16);
+    store8(_celt_bitdeil+0,0); store8(_celt_bitdeil+1,3); store8(_celt_bitdeil+2,12); store8(_celt_bitdeil+3,15);
+    store8(_celt_bitdeil+4,48); store8(_celt_bitdeil+5,51); store8(_celt_bitdeil+6,60); store8(_celt_bitdeil+7,63);
+    store8(_celt_bitdeil+8,192); store8(_celt_bitdeil+9,195); store8(_celt_bitdeil+10,204); store8(_celt_bitdeil+11,207);
+    store8(_celt_bitdeil+12,240); store8(_celt_bitdeil+13,243); store8(_celt_bitdeil+14,252); store8(_celt_bitdeil+15,255);
+    F64_SQRT1_2 = f64_div(f64_from(70710678), f64_from(100000000));
+    return 0;
+}
+
+fn celt_lcg_rand(seed) {
+    return (1664525 * seed + 1013904223) & 0xFFFFFFFF;
+}
+
+# sign-extend low 16 bits to signed
+fn _i16(x) { return ((x & 0xFFFF) ^ 0x8000) - 0x8000; }
+
+fn frac_mul16(a, b) {
+    return sar(16384 + _i16(a) * _i16(b), 15);
+}
+
+fn bitexact_cos(x) {
+    var tmp = (4096 + x * x) >> 13;
+    var x2 = _i16(tmp);
+    var inner = 8277 + frac_mul16(0 - 626, x2);
+    inner = (0 - 7651) + frac_mul16(x2, inner);
+    x2 = (32767 - x2) + frac_mul16(x2, inner);
+    return 1 + x2;
+}
+
+fn bitexact_log2tan(isin, icos) {
+    var lc = ec_ilog(icos);
+    var ls = ec_ilog(isin);
+    icos = icos << (15 - lc);
+    isin = isin << (15 - ls);
+    return (ls - lc) * 2048
+         + frac_mul16(isin, frac_mul16(isin, 0 - 2597) + 7932)
+         - frac_mul16(icos, frac_mul16(icos, 0 - 2597) + 7932);
+}
+
+# isqrt32: floor(sqrt(v)) for v>=0 (exact).
+fn isqrt32(v) {
+    if (v <= 0) { return 0; }
+    var r = 0;
+    var b = 1;
+    while (b * 4 <= v) { b = b * 4; }
+    var x = v;
+    while (b != 0) {
+        if (x >= r + b) {
+            x = x - (r + b);
+            r = (r >> 1) + b;
+        } else {
+            r = r >> 1;
+        }
+        b = b >> 2;
+    }
+    return r;
+}
+
+fn compute_qn(N, b, offset, pulse_cap, stereo) {
+    var N2 = 2 * N - 1;
+    if ((stereo != 0) & (N == 2)) { N2 = N2 - 1; }
+    # celt_sudiv(b + N2*offset, N2) — signed truncating division
+    var num = b + N2 * offset;
+    var qb = 0;
+    if (num >= 0) { qb = num / N2; } else { qb = 0 - ((0 - num) / N2); }
+    var lim = b - pulse_cap - 32;
+    if (lim < qb) { qb = lim; }
+    if (64 < qb) { qb = 64; }
+    var qn = 1;
+    if (qb >= 4) {
+        qn = load64(_celt_exp2_8 + (qb & 7) * 8) >> (14 - (qb >> 3));
+        qn = ((qn + 1) >> 1) << 1;
+    }
+    return qn;
+}
+
+# 2^x for f64 x
+fn _celt_exp2(x) { return f64_pow(F64_TWO, x); }
+
+# normalise_residual: X[i] = iy[i] * gain / sqrt(Ryy)   (float path)
+fn normalise_residual(iy, X, N, ryy, gain) {
+    var g = f64_div(gain, f64_sqrt(f64_from(ryy)));
+    var i = 0;
+    while (i < N) {
+        store64(X + i * 8, f64_mul(f64_from(load64(iy + i * 8)), g));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn exp_rotation1(X, len, stride, c, s) {
+    var ms = f64_neg(s);
+    var i = 0;
+    var lim = len - stride;
+    while (i < lim) {
+        var x1 = load64(X + i * 8);
+        var x2 = load64(X + (i + stride) * 8);
+        store64(X + (i + stride) * 8, f64_add(f64_mul(c, x2), f64_mul(s, x1)));
+        store64(X + i * 8, f64_add(f64_mul(c, x1), f64_mul(ms, x2)));
+        i = i + 1;
+    }
+    i = len - 2 * stride - 1;
+    while (i >= 0) {
+        var x1b = load64(X + i * 8);
+        var x2b = load64(X + (i + stride) * 8);
+        store64(X + (i + stride) * 8, f64_add(f64_mul(c, x2b), f64_mul(s, x1b)));
+        store64(X + i * 8, f64_add(f64_mul(c, x1b), f64_mul(ms, x2b)));
+        i = i - 1;
+    }
+    return 0;
+}
+
+# exp_rotation for decode (dir<0).
+fn exp_rotation(X, len, stride, K, spread) {
+    if ((2 * K >= len) | (spread == 0)) { return 0; }
+    var factor = load64(_celt_spreadF + (spread - 1) * 8);
+    var gain = f64_div(f64_from(len), f64_from(len + factor * K));
+    var theta = f64_mul(F64_HALF, f64_mul(gain, gain));
+    var halfpi = f64_mul(F64_HALF, F64_PI);
+    var c = f64_cos(f64_mul(halfpi, theta));
+    var s = f64_cos(f64_mul(halfpi, f64_sub(F64_ONE, theta)));
+    var stride2 = 0;
+    if (len >= 8 * stride) {
+        stride2 = 1;
+        while ((stride2 * stride2 + stride2) * stride + (stride >> 2) < len) { stride2 = stride2 + 1; }
+    }
+    var blocklen = len / stride;
+    var b = 0;
+    while (b < stride) {
+        var Xb = X + b * blocklen * 8;
+        if (stride2 != 0) { exp_rotation1(Xb, blocklen, stride2, s, c); }
+        exp_rotation1(Xb, blocklen, 1, c, s);
+        b = b + 1;
+    }
+    return 0;
+}
+
+fn renormalise_vector(X, N, gain) {
+    var E = f64_div(f64_from(1), f64_from(1000000000000000));   # EPSILON 1e-15
+    var i = 0;
+    while (i < N) {
+        var x = load64(X + i * 8);
+        E = f64_add(E, f64_mul(x, x));
+        i = i + 1;
+    }
+    var g = f64_div(gain, f64_sqrt(E));
+    i = 0;
+    while (i < N) { store64(X + i * 8, f64_mul(g, load64(X + i * 8))); i = i + 1; }
+    return 0;
+}
+
+fn extract_collapse_mask(iy, N, B) {
+    if (B <= 1) { return 1; }
+    var N0 = N / B;
+    var mask = 0;
+    var i = 0;
+    while (i < B) {
+        var tmp = 0;
+        var j = 0;
+        while (j < N0) { tmp = tmp | load64(iy + (i * N0 + j) * 8); j = j + 1; }
+        if (tmp != 0) { mask = mask | (1 << i); }
+        i = i + 1;
+    }
+    return mask;
+}
+
+# alg_unquant (decode): decode_pulses -> normalise -> rotation -> collapse mask.
+fn alg_unquant(ec, X, N, K, spread, B, gain) {
+    var iy = alloc(N * 8);
+    var ryy = celt_decode_pulses(ec, N, K, iy);
+    normalise_residual(iy, X, N, ryy, gain);
+    exp_rotation(X, N, B, K, spread);
+    return extract_collapse_mask(iy, N, B);
+}
+
+fn haar1(X, N0, stride) {
+    var n0 = N0 >> 1;
+    var i = 0;
+    while (i < stride) {
+        var j = 0;
+        while (j < n0) {
+            var a = load64(X + (stride * 2 * j + i) * 8);
+            var bb = load64(X + (stride * (2 * j + 1) + i) * 8);
+            var t1 = f64_mul(F64_SQRT1_2, a);
+            var t2 = f64_mul(F64_SQRT1_2, bb);
+            store64(X + (stride * 2 * j + i) * 8, f64_add(t1, t2));
+            store64(X + (stride * (2 * j + 1) + i) * 8, f64_sub(t1, t2));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn deinterleave_hadamard(X, N0, stride, hadamard) {
+    var N = N0 * stride;
+    var tmp = alloc(N * 8);
+    if (hadamard != 0) {
+        var ordery = _celt_ordery + (stride - 2) * 8;
+        var i = 0;
+        while (i < stride) {
+            var oi = load64(ordery + i * 8);
+            var j = 0;
+            while (j < N0) {
+                store64(tmp + (oi * N0 + j) * 8, load64(X + (j * stride + i) * 8));
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    } else {
+        var i2 = 0;
+        while (i2 < stride) {
+            var j2 = 0;
+            while (j2 < N0) {
+                store64(tmp + (i2 * N0 + j2) * 8, load64(X + (j2 * stride + i2) * 8));
+                j2 = j2 + 1;
+            }
+            i2 = i2 + 1;
+        }
+    }
+    var c = 0;
+    while (c < N) { store64(X + c * 8, load64(tmp + c * 8)); c = c + 1; }
+    return 0;
+}
+
+fn interleave_hadamard(X, N0, stride, hadamard) {
+    var N = N0 * stride;
+    var tmp = alloc(N * 8);
+    if (hadamard != 0) {
+        var ordery = _celt_ordery + (stride - 2) * 8;
+        var i = 0;
+        while (i < stride) {
+            var oi = load64(ordery + i * 8);
+            var j = 0;
+            while (j < N0) {
+                store64(tmp + (j * stride + i) * 8, load64(X + (oi * N0 + j) * 8));
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    } else {
+        var i2 = 0;
+        while (i2 < stride) {
+            var j2 = 0;
+            while (j2 < N0) {
+                store64(tmp + (j2 * stride + i2) * 8, load64(X + (i2 * N0 + j2) * 8));
+                j2 = j2 + 1;
+            }
+            i2 = i2 + 1;
+        }
+    }
+    var c = 0;
+    while (c < N) { store64(X + c * 8, load64(tmp + c * 8)); c = c + 1; }
+    return 0;
+}
+
+# stereo_merge (bands.c:418) — reconstruct L/R from mid(X)/side(Y).
+fn stereo_merge(X, Y, mid, N) {
+    var xp = F64_ZERO;
+    var sside = F64_ZERO;
+    var j = 0;
+    while (j < N) {
+        xp = f64_add(xp, f64_mul(load64(Y + j * 8), load64(X + j * 8)));
+        sside = f64_add(sside, f64_mul(load64(Y + j * 8), load64(Y + j * 8)));
+        j = j + 1;
+    }
+    xp = f64_mul(xp, mid);
+    var mid2 = f64_mul(mid, mid);
+    var El = f64_sub(f64_add(mid2, sside), f64_mul(F64_TWO, xp));
+    var Er = f64_add(f64_add(mid2, sside), f64_mul(F64_TWO, xp));
+    var thr = f64_div(f64_from(6), f64_from(10000));
+    if ((f64_lt(Er, thr) == 1) | (f64_lt(El, thr) == 1)) {
+        j = 0;
+        while (j < N) { store64(Y + j * 8, load64(X + j * 8)); j = j + 1; }
+        return 0;
+    }
+    var lgain = f64_div(F64_ONE, f64_sqrt(El));
+    var rgain = f64_div(F64_ONE, f64_sqrt(Er));
+    j = 0;
+    while (j < N) {
+        var l = f64_mul(mid, load64(X + j * 8));
+        var r = load64(Y + j * 8);
+        store64(X + j * 8, f64_mul(lgain, f64_sub(l, r)));
+        store64(Y + j * 8, f64_mul(rgain, f64_add(l, r)));
+        j = j + 1;
+    }
+    return 0;
+}
+
+# compute_theta (bands.c:700) — decode angle, fill sctx[0..7]:
+#  imid,iside,delta,itheta,qalloc,inv,new_b,new_fill
+fn compute_theta(ctx, N, b, B, B0, LM, stereo, fill, sctx) {
+    var ec = load64(ctx + 0);
+    var ii = load64(ctx + 24);
+    var intensity = load64(ctx + 48);
+    var pulse_cap = load64(_celt_logN + ii * 8) + LM * 8;
+    var qoff = 4;
+    if ((stereo != 0) & (N == 2)) { qoff = 16; }
+    var offset = (pulse_cap >> 1) - qoff;
+    var qn = compute_qn(N, b, offset, pulse_cap, stereo);
+    if ((stereo != 0) & (ii >= intensity)) { qn = 1; }
+    var tell = ec_tell_frac(ec);
+    var itheta = 0;
+    var inv = 0;
+    if (qn != 1) {
+        if ((stereo != 0) & (N > 2)) {
+            var p0 = 3;
+            var x0 = qn / 2;
+            var ft = p0 * (x0 + 1) + x0;
+            var fs = ec_decode(ec, ft);
+            var x = 0;
+            if (fs < (x0 + 1) * p0) { x = fs / p0; } else { x = x0 + 1 + (fs - (x0 + 1) * p0); }
+            var fl = 0;
+            var fh = 0;
+            if (x <= x0) { fl = p0 * x; fh = p0 * (x + 1); }
+            else { fl = (x - 1 - x0) + (x0 + 1) * p0; fh = (x - x0) + (x0 + 1) * p0; }
+            ec_dec_update(ec, fl, fh, ft);
+            itheta = x;
+        } else {
+            if ((B0 > 1) | (stereo != 0)) {
+                itheta = ec_dec_uint(ec, qn + 1);
+            } else {
+                var ft2 = ((qn >> 1) + 1) * ((qn >> 1) + 1);
+                var fm = ec_decode(ec, ft2);
+                var fl2 = 0;
+                var fs2 = 0;
+                var thr = ((qn >> 1) * ((qn >> 1) + 1)) >> 1;
+                if (fm < thr) {
+                    itheta = (isqrt32(8 * fm + 1) - 1) >> 1;
+                    fs2 = itheta + 1;
+                    fl2 = (itheta * (itheta + 1)) >> 1;
+                } else {
+                    itheta = (2 * (qn + 1) - isqrt32(8 * (ft2 - fm - 1) + 1)) >> 1;
+                    fs2 = qn + 1 - itheta;
+                    fl2 = ft2 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                }
+                ec_dec_update(ec, fl2, fl2 + fs2, ft2);
+            }
+        }
+        itheta = (itheta * 16384) / qn;
+    } else {
+        if (stereo != 0) {
+            if ((b > 16) & (load64(ctx + 16) > 16)) { inv = ec_dec_bit_logp(ec, 2); } else { inv = 0; }
+            if (load64(ctx + 56) != 0) { inv = 0; }
+            itheta = 0;
+        }
+    }
+    var qalloc = ec_tell_frac(ec) - tell;
+    b = b - qalloc;
+    var imid = 0;
+    var iside = 0;
+    var delta = 0;
+    if (itheta == 0) {
+        imid = 32767; iside = 0;
+        fill = fill & ((1 << B) - 1);
+        delta = 0 - 16384;
+    } else {
+        if (itheta == 16384) {
+            imid = 0; iside = 32767;
+            fill = fill & (((1 << B) - 1) << B);
+            delta = 16384;
+        } else {
+            imid = bitexact_cos(itheta);
+            iside = bitexact_cos(16384 - itheta);
+            delta = frac_mul16((N - 1) << 7, bitexact_log2tan(iside, imid));
+        }
+    }
+    store64(sctx + 0, imid);
+    store64(sctx + 8, iside);
+    store64(sctx + 16, delta);
+    store64(sctx + 24, itheta);
+    store64(sctx + 32, qalloc);
+    store64(sctx + 40, inv);
+    store64(sctx + 48, b);
+    store64(sctx + 56, fill);
+    return 0;
+}
+
+fn quant_band_n1(ctx, X, Y, lowband_out) {
+    var ec = load64(ctx + 0);
+    var stereo = 0;
+    if (Y != 0) { stereo = 1; }
+    var x = X;
+    var c = 0;
+    while (c < 1 + stereo) {
+        var sign = 0;
+        if (load64(ctx + 16) >= 8) {
+            sign = ec_dec_bits(ec, 1);
+            store64(ctx + 16, load64(ctx + 16) - 8);
+        }
+        if (sign != 0) { store64(x + 0, f64_neg(F64_ONE)); } else { store64(x + 0, F64_ONE); }
+        x = Y;
+        c = c + 1;
+    }
+    if (lowband_out != 0) { store64(lowband_out + 0, load64(X + 0)); }
+    return 1;
+}
+
+fn quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill) {
+    var ec = load64(ctx + 0);
+    var ii = load64(ctx + 24);
+    var spread = load64(ctx + 32);
+    var B0 = B;
+    var cm = 0;
+    var cache = _celt_cacheBits + load64(_celt_cacheIdx + ((LM + 1) * 21 + ii) * 8);
+    var cache0 = load8(cache);
+    if ((LM != (0 - 1)) & (b > load8(cache + cache0) + 12) & (N > 2)) {
+        var Nh = N >> 1;
+        var Y = X + Nh * 8;
+        var LMn = LM - 1;
+        if (B == 1) { fill = (fill & 1) | (fill << 1); }
+        var Bn = (B + 1) >> 1;
+        var sctx = alloc(64);
+        compute_theta(ctx, Nh, b, Bn, B0, LMn, 0, fill, sctx);
+        var imid = load64(sctx + 0);
+        var iside = load64(sctx + 8);
+        var delta = load64(sctx + 16);
+        var itheta = load64(sctx + 24);
+        b = load64(sctx + 48);
+        fill = load64(sctx + 56);
+        var mid = f64_div(f64_from(imid), f64_from(32768));
+        var side = f64_div(f64_from(iside), f64_from(32768));
+        if ((B0 > 1) & ((itheta & 0x3fff) != 0)) {
+            if (itheta > 8192) { delta = delta - sar(delta, 4 - LMn); }
+            else {
+                var dd = delta + ((Nh << 3) >> (5 - LMn));
+                if (dd > 0) { dd = 0; }
+                delta = dd;
+            }
+        }
+        var mbits = (b - delta) / 2;
+        if (mbits > b) { mbits = b; }
+        if (mbits < 0) { mbits = 0; }
+        var sbits = b - mbits;
+        store64(ctx + 16, load64(ctx + 16) - load64(sctx + 32));
+        var next_lb = 0;
+        if (lowband != 0) { next_lb = lowband + Nh * 8; }
+        var rebalance = load64(ctx + 16);
+        if (mbits >= sbits) {
+            cm = quant_partition(ctx, X, Nh, mbits, Bn, lowband, LMn, f64_mul(gain, mid), fill);
+            rebalance = mbits - (rebalance - load64(ctx + 16));
+            if ((rebalance > 24) & (itheta != 0)) { sbits = sbits + rebalance - 24; }
+            cm = cm | (quant_partition(ctx, Y, Nh, sbits, Bn, next_lb, LMn, f64_mul(gain, side), fill >> Bn) << (B0 >> 1));
+        } else {
+            cm = quant_partition(ctx, Y, Nh, sbits, Bn, next_lb, LMn, f64_mul(gain, side), fill >> Bn) << (B0 >> 1);
+            rebalance = sbits - (rebalance - load64(ctx + 16));
+            if ((rebalance > 24) & (itheta != 16384)) { mbits = mbits + rebalance - 24; }
+            cm = cm | quant_partition(ctx, X, Nh, mbits, Bn, lowband, LMn, f64_mul(gain, mid), fill);
+        }
+    } else {
+        var q = celt_bits2pulses(ii, LM, b);
+        var curr_bits = celt_pulses2bits(ii, LM, q);
+        store64(ctx + 16, load64(ctx + 16) - curr_bits);
+        while ((load64(ctx + 16) < 0) & (q > 0)) {
+            store64(ctx + 16, load64(ctx + 16) + curr_bits);
+            q = q - 1;
+            curr_bits = celt_pulses2bits(ii, LM, q);
+            store64(ctx + 16, load64(ctx + 16) - curr_bits);
+        }
+        if (q != 0) {
+            var K = celt_get_pulses(q);
+            cm = alg_unquant(ec, X, N, K, spread, B, gain);
+        } else {
+            var cm_mask = (1 << B) - 1;
+            fill = fill & cm_mask;
+            if (fill == 0) {
+                var z = 0;
+                while (z < N) { store64(X + z * 8, F64_ZERO); z = z + 1; }
+                cm = 0;
+            } else {
+                if (lowband == 0) {
+                    var j = 0;
+                    while (j < N) {
+                        var seed = celt_lcg_rand(load64(ctx + 8));
+                        store64(ctx + 8, seed);
+                        var sv = seed;
+                        if (sv >= 2147483648) { sv = sv - 4294967296; }
+                        store64(X + j * 8, f64_from(sar(sv, 20)));
+                        j = j + 1;
+                    }
+                    cm = cm_mask;
+                    renormalise_vector(X, N, gain);
+                } else {
+                    var tmpv = f64_div(F64_ONE, f64_from(256));
+                    var j2 = 0;
+                    while (j2 < N) {
+                        var seed2 = celt_lcg_rand(load64(ctx + 8));
+                        store64(ctx + 8, seed2);
+                        var t = tmpv;
+                        if ((seed2 & 0x8000) == 0) { t = f64_neg(tmpv); }
+                        store64(X + j2 * 8, f64_add(load64(lowband + j2 * 8), t));
+                        j2 = j2 + 1;
+                    }
+                    cm = fill;
+                    renormalise_vector(X, N, gain);
+                }
+            }
+        }
+    }
+    return cm;
+}
+
+fn quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain, lowband_scratch, fill) {
+    var tf_change = load64(ctx + 40);
+    var N0 = N;
+    var N_B = N;
+    var B0 = B;
+    var time_divide = 0;
+    var recombine = 0;
+    var longBlocks = 0;
+    if (B0 == 1) { longBlocks = 1; }
+    N_B = N_B / B;
+    if (N == 1) { return quant_band_n1(ctx, X, 0, lowband_out); }
+    if (tf_change > 0) { recombine = tf_change; }
+    if ((lowband_scratch != 0) & (lowband != 0) & ((recombine != 0) | ((((N_B & 1) == 0) & (tf_change < 0)) != 0) | (B0 > 1))) {
+        var cpi = 0;
+        while (cpi < N) { store64(lowband_scratch + cpi * 8, load64(lowband + cpi * 8)); cpi = cpi + 1; }
+        lowband = lowband_scratch;
+    }
+    var k = 0;
+    while (k < recombine) {
+        if (lowband != 0) { haar1(lowband, N >> k, 1 << k); }
+        fill = load8(_celt_bitil + (fill & 0xF)) | (load8(_celt_bitil + (fill >> 4)) << 2);
+        k = k + 1;
+    }
+    B = B >> recombine;
+    N_B = N_B << recombine;
+    while (((N_B & 1) == 0) & (tf_change < 0)) {
+        if (lowband != 0) { haar1(lowband, N_B, B); }
+        fill = fill | (fill << B);
+        B = B << 1;
+        N_B = N_B >> 1;
+        time_divide = time_divide + 1;
+        tf_change = tf_change + 1;
+    }
+    B0 = B;
+    var N_B0 = N_B;
+    if (B0 > 1) {
+        if (lowband != 0) { deinterleave_hadamard(lowband, N_B >> recombine, B0 << recombine, longBlocks); }
+    }
+    var cm = quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill);
+    if (B0 > 1) { interleave_hadamard(X, N_B >> recombine, B0 << recombine, longBlocks); }
+    N_B = N_B0;
+    B = B0;
+    k = 0;
+    while (k < time_divide) {
+        B = B >> 1;
+        N_B = N_B << 1;
+        cm = cm | (cm >> B);
+        haar1(X, N_B, B);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < recombine) {
+        cm = load8(_celt_bitdeil + cm);
+        haar1(X, N0 >> k, 1 << k);
+        k = k + 1;
+    }
+    B = B << recombine;
+    if (lowband_out != 0) {
+        var nn = f64_sqrt(f64_from(N0));
+        var j = 0;
+        while (j < N0) { store64(lowband_out + j * 8, f64_mul(nn, load64(X + j * 8))); j = j + 1; }
+    }
+    cm = cm & ((1 << B) - 1);
+    return cm;
+}
+
+fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scratch, fill) {
+    var ec = load64(ctx + 0);
+    if (N == 1) { return quant_band_n1(ctx, X, Y, lowband_out); }
+    var orig_fill = fill;
+    var sctx = alloc(64);
+    compute_theta(ctx, N, b, B, B, LM, 1, fill, sctx);
+    var inv = load64(sctx + 40);
+    var imid = load64(sctx + 0);
+    var iside = load64(sctx + 8);
+    var delta = load64(sctx + 16);
+    var itheta = load64(sctx + 24);
+    b = load64(sctx + 48);
+    fill = load64(sctx + 56);
+    var mid = f64_div(f64_from(imid), f64_from(32768));
+    var side = f64_div(f64_from(iside), f64_from(32768));
+    var cm = 0;
+    if (N == 2) {
+        var mbits = b;
+        var sbits = 0;
+        if ((itheta != 0) & (itheta != 16384)) { sbits = 8; }
+        mbits = mbits - sbits;
+        var cc = 0;
+        if (itheta > 8192) { cc = 1; }
+        store64(ctx + 16, load64(ctx + 16) - (load64(sctx + 32) + sbits));
+        var x2 = X;
+        var y2 = Y;
+        if (cc != 0) { x2 = Y; y2 = X; }
+        var sign = 0;
+        if (sbits != 0) { sign = ec_dec_bits(ec, 1); }
+        sign = 1 - 2 * sign;
+        cm = quant_band(ctx, x2, N, mbits, B, lowband, LM, lowband_out, F64_ONE, lowband_scratch, orig_fill);
+        store64(y2 + 0, f64_mul(f64_from(0 - sign), load64(x2 + 8)));
+        store64(y2 + 8, f64_mul(f64_from(sign), load64(x2 + 0)));
+        store64(X + 0, f64_mul(mid, load64(X + 0)));
+        store64(X + 8, f64_mul(mid, load64(X + 8)));
+        store64(Y + 0, f64_mul(side, load64(Y + 0)));
+        store64(Y + 8, f64_mul(side, load64(Y + 8)));
+        var t0 = load64(X + 0);
+        store64(X + 0, f64_sub(t0, load64(Y + 0)));
+        store64(Y + 0, f64_add(t0, load64(Y + 0)));
+        var t1 = load64(X + 8);
+        store64(X + 8, f64_sub(t1, load64(Y + 8)));
+        store64(Y + 8, f64_add(t1, load64(Y + 8)));
+    } else {
+        var mbits = (b - delta) / 2;
+        if (mbits > b) { mbits = b; }
+        if (mbits < 0) { mbits = 0; }
+        var sbits = b - mbits;
+        store64(ctx + 16, load64(ctx + 16) - load64(sctx + 32));
+        var rebalance = load64(ctx + 16);
+        if (mbits >= sbits) {
+            cm = quant_band(ctx, X, N, mbits, B, lowband, LM, lowband_out, F64_ONE, lowband_scratch, fill);
+            rebalance = mbits - (rebalance - load64(ctx + 16));
+            if ((rebalance > 24) & (itheta != 0)) { sbits = sbits + rebalance - 24; }
+            cm = cm | quant_band(ctx, Y, N, sbits, B, 0, LM, 0, side, 0, fill >> B);
+        } else {
+            cm = quant_band(ctx, Y, N, sbits, B, 0, LM, 0, side, 0, fill >> B);
+            rebalance = sbits - (rebalance - load64(ctx + 16));
+            if ((rebalance > 24) & (itheta != 16384)) { mbits = mbits + rebalance - 24; }
+            cm = cm | quant_band(ctx, X, N, mbits, B, lowband, LM, lowband_out, F64_ONE, lowband_scratch, fill);
+        }
+        stereo_merge(X, Y, mid, N);
+        if (inv != 0) {
+            var j = 0;
+            while (j < N) { store64(Y + j * 8, f64_neg(load64(Y + j * 8))); j = j + 1; }
+        }
+    }
+    return cm;
+}
+
+# quant_all_bands driver (decode). X_/Y_ byte pointers; collapse_masks byte array.
+fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_stereo, intensity, tf_res, total_bits, balance, ec, LM, codedBands, seed_ptr, disable_inv, C) {
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    var M = 1 << LM;
+    var Bf = 1;
+    if (shortBlocks != 0) { Bf = M; }
+    var normsz = M * load64(_celt_eBands + 20 * 8);
+    var norm = alloc(C * normsz * 8);
+    var norm2 = norm + normsz * 8;
+    var lowband_scratch_base = X_ + M * load64(_celt_eBands + 20 * 8) * 8;
+    var ctx = alloc(72);
+    store64(ctx + 0, ec);
+    store64(ctx + 8, load64(seed_ptr));
+    store64(ctx + 32, spread);
+    store64(ctx + 48, intensity);
+    store64(ctx + 56, disable_inv);
+    var avoid = 0;
+    if (Bf > 1) { avoid = 1; }
+    store64(ctx + 64, avoid);
+    var lowband_offset = 0;
+    var update_lowband = 1;
+    var i = 0;
+    while (i < 21) {
+        store64(ctx + 24, i);
+        var last = 0;
+        if (i == 20) { last = 1; }
+        var Mei = M * load64(_celt_eBands + i * 8);
+        var X = X_ + Mei * 8;
+        var Y = 0;
+        if (Y_ != 0) { Y = Y_ + Mei * 8; }
+        var N = M * load64(_celt_eBands + (i + 1) * 8) - Mei;
+        var tell = ec_tell_frac(ec);
+        if (i != 0) { balance = balance - tell; }
+        var remaining_bits = total_bits - tell - 1;
+        store64(ctx + 16, remaining_bits);
+        var b = 0;
+        if (i <= codedBands - 1) {
+            var mn = codedBands - i;
+            if (mn > 3) { mn = 3; }
+            var curr_balance = balance / mn;
+            if (balance < 0) { curr_balance = 0 - ((0 - balance) / mn); }
+            b = load64(pulses + i * 8) + curr_balance;
+            if (remaining_bits + 1 < b) { b = remaining_bits + 1; }
+            if (16383 < b) { b = 16383; }
+            if (b < 0) { b = 0; }
+        }
+        if ((Mei - N >= 0) | (i == 1)) {
+            if ((update_lowband != 0) | (lowband_offset == 0)) { lowband_offset = i; }
+        }
+        var tf_change = load64(tf_res + i * 8);
+        store64(ctx + 40, tf_change);
+        var lbscr = lowband_scratch_base;
+        if (last != 0) { lbscr = 0; }
+        var effective_lowband = 0 - 1;
+        var x_cm = 0;
+        var y_cm = 0;
+        if ((lowband_offset != 0) & ((spread != 3) | (Bf > 1) | (tf_change < 0))) {
+            effective_lowband = M * load64(_celt_eBands + lowband_offset * 8) - N;
+            if (effective_lowband < 0) { effective_lowband = 0; }
+            var fold_start = lowband_offset;
+            var cs = 1;
+            while (cs == 1) {
+                fold_start = fold_start - 1;
+                if (M * load64(_celt_eBands + fold_start * 8) > effective_lowband) { cs = 1; } else { cs = 0; }
+            }
+            var fold_end = lowband_offset - 1;
+            var ce = 1;
+            while (ce == 1) {
+                fold_end = fold_end + 1;
+                if ((fold_end < i) & (M * load64(_celt_eBands + fold_end * 8) < effective_lowband + N)) { ce = 1; } else { ce = 0; }
+            }
+            var fi = fold_start;
+            var cf = 1;
+            while (cf == 1) {
+                x_cm = x_cm | load8(collapse_masks + (fi * C + 0));
+                y_cm = y_cm | load8(collapse_masks + (fi * C + C - 1));
+                fi = fi + 1;
+                if (fi < fold_end) { cf = 1; } else { cf = 0; }
+            }
+        } else {
+            x_cm = (1 << Bf) - 1;
+            y_cm = (1 << Bf) - 1;
+        }
+        if ((dual_stereo != 0) & (i == intensity)) {
+            dual_stereo = 0;
+            var jj = 0;
+            while (jj < Mei) {
+                store64(norm + jj * 8, f64_mul(F64_HALF, f64_add(load64(norm + jj * 8), load64(norm2 + jj * 8))));
+                jj = jj + 1;
+            }
+        }
+        var lb = 0;
+        if (effective_lowband != (0 - 1)) { lb = norm + effective_lowband * 8; }
+        var out = 0;
+        if (last == 0) { out = norm + Mei * 8; }
+        if (dual_stereo != 0) {
+            var lbx = 0;
+            var lby = 0;
+            if (effective_lowband != (0 - 1)) { lbx = norm + effective_lowband * 8; lby = norm2 + effective_lowband * 8; }
+            var outx = 0;
+            var outy = 0;
+            if (last == 0) { outx = norm + Mei * 8; outy = norm2 + Mei * 8; }
+            x_cm = quant_band(ctx, X, N, b / 2, Bf, lbx, LM, outx, F64_ONE, lbscr, x_cm);
+            y_cm = quant_band(ctx, Y, N, b / 2, Bf, lby, LM, outy, F64_ONE, lbscr, y_cm);
+        } else {
+            if (Y != 0) {
+                x_cm = quant_band_stereo(ctx, X, Y, N, b, Bf, lb, LM, out, lbscr, x_cm | y_cm);
+                y_cm = x_cm;
+            } else {
+                x_cm = quant_band(ctx, X, N, b, Bf, lb, LM, out, F64_ONE, lbscr, x_cm | y_cm);
+                y_cm = x_cm;
+            }
+        }
+        store8(collapse_masks + (i * C + 0), x_cm & 0xFF);
+        store8(collapse_masks + (i * C + C - 1), y_cm & 0xFF);
+        balance = balance + load64(pulses + i * 8) + tell;
+        update_lowband = 0;
+        if (b > (N << 3)) { update_lowband = 1; }
+        store64(ctx + 64, 0);
+        i = i + 1;
+    }
+    store64(seed_ptr, load64(ctx + 8));
+    return 0;
+}
+
+# denormalise_bands (bands.c:188): freq[j] = X[j]*2^(bandLogE[i]+eMeans[i]).
+fn denormalise_bands(X, freq, bandLogE, silence) {
+    var M = 8;
+    var N = 960;
+    var bound = M * load64(_celt_eBands + 21 * 8);
+    if (silence != 0) { bound = 0; }
+    if (silence == 0) {
+        var i = 0;
+        while (i < 21) {
+            var j = M * load64(_celt_eBands + i * 8);
+            var band_end = M * load64(_celt_eBands + (i + 1) * 8);
+            var lg = f64_add(load64(bandLogE + i * 8), load64(_celt_eMeans + i * 8));
+            if (f64_gt(lg, f64_from(32)) == 1) { lg = f64_from(32); }
+            var g = _celt_exp2(lg);
+            while (j < band_end) {
+                store64(freq + j * 8, f64_mul(load64(X + j * 8), g));
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+    }
+    var z = bound;
+    while (z < N) { store64(freq + z * 8, F64_ZERO); z = z + 1; }
+    return 0;
+}
+
+fn _celt_assert_bytes(got, exp, n, msg) {
+    var i = 0; var ok = 1;
+    while (i < n) { if (load8(got + i) != load8(exp + i)) { ok = 0; } i = i + 1; }
+    assert(ok == 1, msg); return 0;
+}
+
+fn _celt_run_qab(payload, plen, C, oldBandE, seed_in, exp_rng, exp_tell, exp_cm, tag) {
+    var tf = alloc(21 * 8); var off = alloc(21 * 8); var pul = alloc(21 * 8);
+    var fq = alloc(21 * 8); var fp = alloc(21 * 8); var cap = alloc(21 * 8); var scal = alloc(16 * 8);
+    var ec = celt_decode_frame_prefix(payload, plen, C, oldBandE, tf, off, pul, fq, fp, cap, scal);
+    var N = 960; var M = 8;
+    var X = alloc(C * N * 8); var z = 0; while (z < C * N) { store64(X + z * 8, F64_ZERO); z = z + 1; }
+    var Y = 0; if (C == 2) { Y = X + N * 8; }
+    var cm = alloc(C * 21);
+    var shortBlocks = 0; if (load64(scal + 8) != 0) { shortBlocks = M; }
+    var total_bits = plen * 64 - load64(scal + 40);
+    var seedp = alloc(8); store64(seedp, seed_in);
+    var di = 0;
+    quant_all_bands(X, Y, cm, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, 3, load64(scal + 48), seedp, di, C);
+    assert_eq(load64(ec + 56), exp_rng, tag);
+    assert_eq(ec_tell(ec), exp_tell, tag);
+    _celt_assert_bytes(cm, exp_cm, C * 21, tag);
+    return 0;
+}
+
+fn test_celt_bands_rfc() {
+    test_group("opus: quant_all_bands bit-exact vs libopus");
+    var oldBandE = alloc(42 * 8); var k = 0;
+    # bm0
+    k = 0; while (k < 42) { store64(oldBandE + k * 8, F64_ZERO); k = k + 1; }
+    var bm0_p = alloc(319);
+    store8(bm0_p + 0, 159); store8(bm0_p + 1, 235); store8(bm0_p + 2, 54); store8(bm0_p + 3, 134); store8(bm0_p + 4, 64); store8(bm0_p + 5, 12); store8(bm0_p + 6, 87); store8(bm0_p + 7, 248); store8(bm0_p + 8, 109); store8(bm0_p + 9, 162); store8(bm0_p + 10, 157); store8(bm0_p + 11, 77); store8(bm0_p + 12, 244); store8(bm0_p + 13, 47);
+    store8(bm0_p + 14, 116); store8(bm0_p + 15, 111); store8(bm0_p + 16, 33); store8(bm0_p + 17, 227); store8(bm0_p + 18, 252); store8(bm0_p + 19, 46); store8(bm0_p + 20, 13); store8(bm0_p + 21, 93); store8(bm0_p + 22, 65); store8(bm0_p + 23, 184); store8(bm0_p + 24, 133); store8(bm0_p + 25, 86); store8(bm0_p + 26, 110); store8(bm0_p + 27, 6);
+    store8(bm0_p + 28, 121); store8(bm0_p + 29, 137); store8(bm0_p + 30, 74); store8(bm0_p + 31, 153); store8(bm0_p + 32, 116); store8(bm0_p + 33, 71); store8(bm0_p + 34, 227); store8(bm0_p + 35, 45); store8(bm0_p + 36, 30); store8(bm0_p + 37, 25); store8(bm0_p + 38, 135); store8(bm0_p + 39, 20); store8(bm0_p + 40, 120); store8(bm0_p + 41, 57);
+    store8(bm0_p + 42, 122); store8(bm0_p + 43, 223); store8(bm0_p + 44, 126); store8(bm0_p + 45, 49); store8(bm0_p + 46, 75); store8(bm0_p + 47, 131); store8(bm0_p + 48, 1); store8(bm0_p + 49, 170); store8(bm0_p + 50, 165); store8(bm0_p + 51, 159); store8(bm0_p + 52, 40); store8(bm0_p + 53, 245); store8(bm0_p + 54, 217); store8(bm0_p + 55, 80);
+    store8(bm0_p + 56, 195); store8(bm0_p + 57, 225); store8(bm0_p + 58, 241); store8(bm0_p + 59, 127); store8(bm0_p + 60, 213); store8(bm0_p + 61, 238); store8(bm0_p + 62, 223); store8(bm0_p + 63, 14); store8(bm0_p + 64, 112); store8(bm0_p + 65, 179); store8(bm0_p + 66, 85); store8(bm0_p + 67, 141); store8(bm0_p + 68, 173); store8(bm0_p + 69, 10);
+    store8(bm0_p + 70, 230); store8(bm0_p + 71, 6); store8(bm0_p + 72, 107); store8(bm0_p + 73, 86); store8(bm0_p + 74, 243); store8(bm0_p + 75, 207); store8(bm0_p + 76, 97); store8(bm0_p + 77, 12); store8(bm0_p + 78, 167); store8(bm0_p + 79, 208); store8(bm0_p + 80, 184); store8(bm0_p + 81, 117); store8(bm0_p + 82, 12); store8(bm0_p + 83, 112);
+    store8(bm0_p + 84, 115); store8(bm0_p + 85, 202); store8(bm0_p + 86, 141); store8(bm0_p + 87, 105); store8(bm0_p + 88, 243); store8(bm0_p + 89, 135); store8(bm0_p + 90, 251); store8(bm0_p + 91, 72); store8(bm0_p + 92, 132); store8(bm0_p + 93, 132); store8(bm0_p + 94, 184); store8(bm0_p + 95, 23); store8(bm0_p + 96, 49); store8(bm0_p + 97, 182);
+    store8(bm0_p + 98, 240); store8(bm0_p + 99, 69); store8(bm0_p + 100, 184); store8(bm0_p + 101, 61); store8(bm0_p + 102, 137); store8(bm0_p + 103, 74); store8(bm0_p + 104, 188); store8(bm0_p + 105, 202); store8(bm0_p + 106, 68); store8(bm0_p + 107, 224); store8(bm0_p + 108, 102); store8(bm0_p + 109, 94); store8(bm0_p + 110, 178); store8(bm0_p + 111, 207);
+    store8(bm0_p + 112, 52); store8(bm0_p + 113, 129); store8(bm0_p + 114, 21); store8(bm0_p + 115, 55); store8(bm0_p + 116, 14); store8(bm0_p + 117, 35); store8(bm0_p + 118, 60); store8(bm0_p + 119, 164); store8(bm0_p + 120, 122); store8(bm0_p + 121, 17); store8(bm0_p + 122, 224); store8(bm0_p + 123, 105); store8(bm0_p + 124, 45); store8(bm0_p + 125, 51);
+    store8(bm0_p + 126, 186); store8(bm0_p + 127, 216); store8(bm0_p + 128, 114); store8(bm0_p + 129, 75); store8(bm0_p + 130, 96); store8(bm0_p + 131, 84); store8(bm0_p + 132, 122); store8(bm0_p + 133, 255); store8(bm0_p + 134, 122); store8(bm0_p + 135, 174); store8(bm0_p + 136, 52); store8(bm0_p + 137, 123); store8(bm0_p + 138, 224); store8(bm0_p + 139, 88);
+    store8(bm0_p + 140, 139); store8(bm0_p + 141, 56); store8(bm0_p + 142, 10); store8(bm0_p + 143, 0); store8(bm0_p + 144, 0); store8(bm0_p + 145, 0); store8(bm0_p + 146, 0); store8(bm0_p + 147, 0); store8(bm0_p + 148, 0); store8(bm0_p + 149, 0); store8(bm0_p + 150, 0); store8(bm0_p + 151, 0); store8(bm0_p + 152, 0); store8(bm0_p + 153, 0);
+    store8(bm0_p + 154, 0); store8(bm0_p + 155, 0); store8(bm0_p + 156, 0); store8(bm0_p + 157, 0); store8(bm0_p + 158, 0); store8(bm0_p + 159, 0); store8(bm0_p + 160, 0); store8(bm0_p + 161, 0); store8(bm0_p + 162, 0); store8(bm0_p + 163, 0); store8(bm0_p + 164, 0); store8(bm0_p + 165, 0); store8(bm0_p + 166, 0); store8(bm0_p + 167, 0);
+    store8(bm0_p + 168, 0); store8(bm0_p + 169, 0); store8(bm0_p + 170, 0); store8(bm0_p + 171, 0); store8(bm0_p + 172, 0); store8(bm0_p + 173, 0); store8(bm0_p + 174, 0); store8(bm0_p + 175, 60); store8(bm0_p + 176, 247); store8(bm0_p + 177, 187); store8(bm0_p + 178, 23); store8(bm0_p + 179, 158); store8(bm0_p + 180, 144); store8(bm0_p + 181, 153);
+    store8(bm0_p + 182, 240); store8(bm0_p + 183, 133); store8(bm0_p + 184, 207); store8(bm0_p + 185, 11); store8(bm0_p + 186, 92); store8(bm0_p + 187, 87); store8(bm0_p + 188, 80); store8(bm0_p + 189, 229); store8(bm0_p + 190, 139); store8(bm0_p + 191, 168); store8(bm0_p + 192, 114); store8(bm0_p + 193, 198); store8(bm0_p + 194, 137); store8(bm0_p + 195, 241);
+    store8(bm0_p + 196, 243); store8(bm0_p + 197, 126); store8(bm0_p + 198, 118); store8(bm0_p + 199, 76); store8(bm0_p + 200, 18); store8(bm0_p + 201, 20); store8(bm0_p + 202, 138); store8(bm0_p + 203, 136); store8(bm0_p + 204, 115); store8(bm0_p + 205, 232); store8(bm0_p + 206, 61); store8(bm0_p + 207, 63); store8(bm0_p + 208, 20); store8(bm0_p + 209, 89);
+    store8(bm0_p + 210, 107); store8(bm0_p + 211, 117); store8(bm0_p + 212, 106); store8(bm0_p + 213, 136); store8(bm0_p + 214, 132); store8(bm0_p + 215, 196); store8(bm0_p + 216, 136); store8(bm0_p + 217, 3); store8(bm0_p + 218, 91); store8(bm0_p + 219, 175); store8(bm0_p + 220, 40); store8(bm0_p + 221, 70); store8(bm0_p + 222, 212); store8(bm0_p + 223, 177);
+    store8(bm0_p + 224, 67); store8(bm0_p + 225, 184); store8(bm0_p + 226, 48); store8(bm0_p + 227, 159); store8(bm0_p + 228, 184); store8(bm0_p + 229, 203); store8(bm0_p + 230, 26); store8(bm0_p + 231, 54); store8(bm0_p + 232, 23); store8(bm0_p + 233, 124); store8(bm0_p + 234, 37); store8(bm0_p + 235, 252); store8(bm0_p + 236, 139); store8(bm0_p + 237, 84);
+    store8(bm0_p + 238, 28); store8(bm0_p + 239, 86); store8(bm0_p + 240, 221); store8(bm0_p + 241, 240); store8(bm0_p + 242, 97); store8(bm0_p + 243, 243); store8(bm0_p + 244, 136); store8(bm0_p + 245, 104); store8(bm0_p + 246, 150); store8(bm0_p + 247, 9); store8(bm0_p + 248, 19); store8(bm0_p + 249, 155); store8(bm0_p + 250, 39); store8(bm0_p + 251, 54);
+    store8(bm0_p + 252, 92); store8(bm0_p + 253, 39); store8(bm0_p + 254, 213); store8(bm0_p + 255, 208); store8(bm0_p + 256, 41); store8(bm0_p + 257, 35); store8(bm0_p + 258, 113); store8(bm0_p + 259, 222); store8(bm0_p + 260, 71); store8(bm0_p + 261, 160); store8(bm0_p + 262, 21); store8(bm0_p + 263, 57); store8(bm0_p + 264, 96); store8(bm0_p + 265, 10);
+    store8(bm0_p + 266, 190); store8(bm0_p + 267, 211); store8(bm0_p + 268, 101); store8(bm0_p + 269, 65); store8(bm0_p + 270, 240); store8(bm0_p + 271, 233); store8(bm0_p + 272, 36); store8(bm0_p + 273, 243); store8(bm0_p + 274, 44); store8(bm0_p + 275, 251); store8(bm0_p + 276, 136); store8(bm0_p + 277, 111); store8(bm0_p + 278, 118); store8(bm0_p + 279, 127);
+    store8(bm0_p + 280, 23); store8(bm0_p + 281, 127); store8(bm0_p + 282, 197); store8(bm0_p + 283, 33); store8(bm0_p + 284, 91); store8(bm0_p + 285, 233); store8(bm0_p + 286, 47); store8(bm0_p + 287, 172); store8(bm0_p + 288, 190); store8(bm0_p + 289, 181); store8(bm0_p + 290, 223); store8(bm0_p + 291, 66); store8(bm0_p + 292, 237); store8(bm0_p + 293, 60);
+    store8(bm0_p + 294, 112); store8(bm0_p + 295, 216); store8(bm0_p + 296, 193); store8(bm0_p + 297, 90); store8(bm0_p + 298, 30); store8(bm0_p + 299, 244); store8(bm0_p + 300, 171); store8(bm0_p + 301, 27); store8(bm0_p + 302, 33); store8(bm0_p + 303, 230); store8(bm0_p + 304, 246); store8(bm0_p + 305, 100); store8(bm0_p + 306, 111); store8(bm0_p + 307, 211);
+    store8(bm0_p + 308, 67); store8(bm0_p + 309, 136); store8(bm0_p + 310, 115); store8(bm0_p + 311, 71); store8(bm0_p + 312, 248); store8(bm0_p + 313, 81); store8(bm0_p + 314, 123); store8(bm0_p + 315, 58); store8(bm0_p + 316, 164); store8(bm0_p + 317, 227); store8(bm0_p + 318, 201);
+    var bm0_cm = alloc(21);
+    store8(bm0_cm + 0, 255); store8(bm0_cm + 1, 255); store8(bm0_cm + 2, 255); store8(bm0_cm + 3, 255); store8(bm0_cm + 4, 255); store8(bm0_cm + 5, 255); store8(bm0_cm + 6, 255); store8(bm0_cm + 7, 254); store8(bm0_cm + 8, 254); store8(bm0_cm + 9, 238); store8(bm0_cm + 10, 198); store8(bm0_cm + 11, 6); store8(bm0_cm + 12, 254); store8(bm0_cm + 13, 254);
+    store8(bm0_cm + 14, 254); store8(bm0_cm + 15, 255); store8(bm0_cm + 16, 254); store8(bm0_cm + 17, 14); store8(bm0_cm + 18, 14); store8(bm0_cm + 19, 14); store8(bm0_cm + 20, 14);
+    _celt_run_qab(bm0_p, 319, 1, oldBandE, 0, 40723456, 2272, bm0_cm, "bm0");
+    # bm1
+    var bm1_p = alloc(319);
+    store8(bm1_p + 0, 154); store8(bm1_p + 1, 249); store8(bm1_p + 2, 82); store8(bm1_p + 3, 78); store8(bm1_p + 4, 96); store8(bm1_p + 5, 170); store8(bm1_p + 6, 224); store8(bm1_p + 7, 187); store8(bm1_p + 8, 19); store8(bm1_p + 9, 227); store8(bm1_p + 10, 125); store8(bm1_p + 11, 18); store8(bm1_p + 12, 146); store8(bm1_p + 13, 122);
+    store8(bm1_p + 14, 251); store8(bm1_p + 15, 252); store8(bm1_p + 16, 206); store8(bm1_p + 17, 63); store8(bm1_p + 18, 132); store8(bm1_p + 19, 218); store8(bm1_p + 20, 123); store8(bm1_p + 21, 242); store8(bm1_p + 22, 111); store8(bm1_p + 23, 113); store8(bm1_p + 24, 183); store8(bm1_p + 25, 110); store8(bm1_p + 26, 231); store8(bm1_p + 27, 13);
+    store8(bm1_p + 28, 31); store8(bm1_p + 29, 193); store8(bm1_p + 30, 4); store8(bm1_p + 31, 212); store8(bm1_p + 32, 160); store8(bm1_p + 33, 136); store8(bm1_p + 34, 98); store8(bm1_p + 35, 70); store8(bm1_p + 36, 34); store8(bm1_p + 37, 119); store8(bm1_p + 38, 95); store8(bm1_p + 39, 221); store8(bm1_p + 40, 220); store8(bm1_p + 41, 134);
+    store8(bm1_p + 42, 31); store8(bm1_p + 43, 231); store8(bm1_p + 44, 61); store8(bm1_p + 45, 214); store8(bm1_p + 46, 91); store8(bm1_p + 47, 243); store8(bm1_p + 48, 51); store8(bm1_p + 49, 93); store8(bm1_p + 50, 237); store8(bm1_p + 51, 222); store8(bm1_p + 52, 125); store8(bm1_p + 53, 26); store8(bm1_p + 54, 195); store8(bm1_p + 55, 76);
+    store8(bm1_p + 56, 253); store8(bm1_p + 57, 218); store8(bm1_p + 58, 40); store8(bm1_p + 59, 41); store8(bm1_p + 60, 73); store8(bm1_p + 61, 163); store8(bm1_p + 62, 205); store8(bm1_p + 63, 103); store8(bm1_p + 64, 204); store8(bm1_p + 65, 148); store8(bm1_p + 66, 77); store8(bm1_p + 67, 81); store8(bm1_p + 68, 74); store8(bm1_p + 69, 195);
+    store8(bm1_p + 70, 170); store8(bm1_p + 71, 244); store8(bm1_p + 72, 70); store8(bm1_p + 73, 39); store8(bm1_p + 74, 75); store8(bm1_p + 75, 173); store8(bm1_p + 76, 137); store8(bm1_p + 77, 214); store8(bm1_p + 78, 50); store8(bm1_p + 79, 74); store8(bm1_p + 80, 208); store8(bm1_p + 81, 248); store8(bm1_p + 82, 219); store8(bm1_p + 83, 125);
+    store8(bm1_p + 84, 140); store8(bm1_p + 85, 192); store8(bm1_p + 86, 92); store8(bm1_p + 87, 76); store8(bm1_p + 88, 59); store8(bm1_p + 89, 189); store8(bm1_p + 90, 33); store8(bm1_p + 91, 239); store8(bm1_p + 92, 135); store8(bm1_p + 93, 94); store8(bm1_p + 94, 49); store8(bm1_p + 95, 40); store8(bm1_p + 96, 106); store8(bm1_p + 97, 145);
+    store8(bm1_p + 98, 237); store8(bm1_p + 99, 147); store8(bm1_p + 100, 249); store8(bm1_p + 101, 160); store8(bm1_p + 102, 187); store8(bm1_p + 103, 70); store8(bm1_p + 104, 236); store8(bm1_p + 105, 49); store8(bm1_p + 106, 253); store8(bm1_p + 107, 154); store8(bm1_p + 108, 49); store8(bm1_p + 109, 208); store8(bm1_p + 110, 106); store8(bm1_p + 111, 11);
+    store8(bm1_p + 112, 61); store8(bm1_p + 113, 6); store8(bm1_p + 114, 10); store8(bm1_p + 115, 3); store8(bm1_p + 116, 139); store8(bm1_p + 117, 78); store8(bm1_p + 118, 127); store8(bm1_p + 119, 156); store8(bm1_p + 120, 32); store8(bm1_p + 121, 179); store8(bm1_p + 122, 217); store8(bm1_p + 123, 235); store8(bm1_p + 124, 119); store8(bm1_p + 125, 62);
+    store8(bm1_p + 126, 129); store8(bm1_p + 127, 97); store8(bm1_p + 128, 112); store8(bm1_p + 129, 203); store8(bm1_p + 130, 201); store8(bm1_p + 131, 243); store8(bm1_p + 132, 255); store8(bm1_p + 133, 170); store8(bm1_p + 134, 16); store8(bm1_p + 135, 146); store8(bm1_p + 136, 102); store8(bm1_p + 137, 152); store8(bm1_p + 138, 149); store8(bm1_p + 139, 140);
+    store8(bm1_p + 140, 188); store8(bm1_p + 141, 124); store8(bm1_p + 142, 229); store8(bm1_p + 143, 177); store8(bm1_p + 144, 209); store8(bm1_p + 145, 70); store8(bm1_p + 146, 151); store8(bm1_p + 147, 101); store8(bm1_p + 148, 94); store8(bm1_p + 149, 115); store8(bm1_p + 150, 74); store8(bm1_p + 151, 154); store8(bm1_p + 152, 181); store8(bm1_p + 153, 123);
+    store8(bm1_p + 154, 2); store8(bm1_p + 155, 9); store8(bm1_p + 156, 94); store8(bm1_p + 157, 207); store8(bm1_p + 158, 119); store8(bm1_p + 159, 28); store8(bm1_p + 160, 65); store8(bm1_p + 161, 219); store8(bm1_p + 162, 39); store8(bm1_p + 163, 103); store8(bm1_p + 164, 1); store8(bm1_p + 165, 26); store8(bm1_p + 166, 7); store8(bm1_p + 167, 228);
+    store8(bm1_p + 168, 114); store8(bm1_p + 169, 95); store8(bm1_p + 170, 121); store8(bm1_p + 171, 118); store8(bm1_p + 172, 61); store8(bm1_p + 173, 120); store8(bm1_p + 174, 244); store8(bm1_p + 175, 208); store8(bm1_p + 176, 58); store8(bm1_p + 177, 212); store8(bm1_p + 178, 163); store8(bm1_p + 179, 103); store8(bm1_p + 180, 242); store8(bm1_p + 181, 19);
+    store8(bm1_p + 182, 97); store8(bm1_p + 183, 107); store8(bm1_p + 184, 22); store8(bm1_p + 185, 137); store8(bm1_p + 186, 71); store8(bm1_p + 187, 254); store8(bm1_p + 188, 244); store8(bm1_p + 189, 121); store8(bm1_p + 190, 33); store8(bm1_p + 191, 223); store8(bm1_p + 192, 220); store8(bm1_p + 193, 29); store8(bm1_p + 194, 193); store8(bm1_p + 195, 154);
+    store8(bm1_p + 196, 28); store8(bm1_p + 197, 0); store8(bm1_p + 198, 59); store8(bm1_p + 199, 50); store8(bm1_p + 200, 200); store8(bm1_p + 201, 6); store8(bm1_p + 202, 12); store8(bm1_p + 203, 61); store8(bm1_p + 204, 50); store8(bm1_p + 205, 224); store8(bm1_p + 206, 168); store8(bm1_p + 207, 245); store8(bm1_p + 208, 176); store8(bm1_p + 209, 80);
+    store8(bm1_p + 210, 31); store8(bm1_p + 211, 39); store8(bm1_p + 212, 152); store8(bm1_p + 213, 53); store8(bm1_p + 214, 123); store8(bm1_p + 215, 56); store8(bm1_p + 216, 2); store8(bm1_p + 217, 194); store8(bm1_p + 218, 56); store8(bm1_p + 219, 32); store8(bm1_p + 220, 47); store8(bm1_p + 221, 196); store8(bm1_p + 222, 143); store8(bm1_p + 223, 182);
+    store8(bm1_p + 224, 182); store8(bm1_p + 225, 168); store8(bm1_p + 226, 248); store8(bm1_p + 227, 65); store8(bm1_p + 228, 51); store8(bm1_p + 229, 202); store8(bm1_p + 230, 121); store8(bm1_p + 231, 137); store8(bm1_p + 232, 122); store8(bm1_p + 233, 74); store8(bm1_p + 234, 139); store8(bm1_p + 235, 25); store8(bm1_p + 236, 194); store8(bm1_p + 237, 150);
+    store8(bm1_p + 238, 122); store8(bm1_p + 239, 55); store8(bm1_p + 240, 79); store8(bm1_p + 241, 228); store8(bm1_p + 242, 181); store8(bm1_p + 243, 255); store8(bm1_p + 244, 219); store8(bm1_p + 245, 253); store8(bm1_p + 246, 216); store8(bm1_p + 247, 168); store8(bm1_p + 248, 134); store8(bm1_p + 249, 182); store8(bm1_p + 250, 170); store8(bm1_p + 251, 225);
+    store8(bm1_p + 252, 114); store8(bm1_p + 253, 42); store8(bm1_p + 254, 144); store8(bm1_p + 255, 167); store8(bm1_p + 256, 215); store8(bm1_p + 257, 181); store8(bm1_p + 258, 243); store8(bm1_p + 259, 177); store8(bm1_p + 260, 88); store8(bm1_p + 261, 228); store8(bm1_p + 262, 249); store8(bm1_p + 263, 210); store8(bm1_p + 264, 107); store8(bm1_p + 265, 206);
+    store8(bm1_p + 266, 139); store8(bm1_p + 267, 202); store8(bm1_p + 268, 197); store8(bm1_p + 269, 82); store8(bm1_p + 270, 253); store8(bm1_p + 271, 232); store8(bm1_p + 272, 193); store8(bm1_p + 273, 62); store8(bm1_p + 274, 36); store8(bm1_p + 275, 235); store8(bm1_p + 276, 102); store8(bm1_p + 277, 104); store8(bm1_p + 278, 151); store8(bm1_p + 279, 17);
+    store8(bm1_p + 280, 20); store8(bm1_p + 281, 46); store8(bm1_p + 282, 76); store8(bm1_p + 283, 118); store8(bm1_p + 284, 115); store8(bm1_p + 285, 82); store8(bm1_p + 286, 7); store8(bm1_p + 287, 157); store8(bm1_p + 288, 230); store8(bm1_p + 289, 165); store8(bm1_p + 290, 157); store8(bm1_p + 291, 66); store8(bm1_p + 292, 48); store8(bm1_p + 293, 138);
+    store8(bm1_p + 294, 163); store8(bm1_p + 295, 35); store8(bm1_p + 296, 178); store8(bm1_p + 297, 203); store8(bm1_p + 298, 62); store8(bm1_p + 299, 16); store8(bm1_p + 300, 216); store8(bm1_p + 301, 187); store8(bm1_p + 302, 109); store8(bm1_p + 303, 55); store8(bm1_p + 304, 191); store8(bm1_p + 305, 102); store8(bm1_p + 306, 68); store8(bm1_p + 307, 245);
+    store8(bm1_p + 308, 6); store8(bm1_p + 309, 58); store8(bm1_p + 310, 161); store8(bm1_p + 311, 181); store8(bm1_p + 312, 171); store8(bm1_p + 313, 22); store8(bm1_p + 314, 79); store8(bm1_p + 315, 79); store8(bm1_p + 316, 51); store8(bm1_p + 317, 234); store8(bm1_p + 318, 201);
+    var bm1_cm = alloc(21);
+    store8(bm1_cm + 0, 1); store8(bm1_cm + 1, 1); store8(bm1_cm + 2, 1); store8(bm1_cm + 3, 1); store8(bm1_cm + 4, 1); store8(bm1_cm + 5, 1); store8(bm1_cm + 6, 1); store8(bm1_cm + 7, 1); store8(bm1_cm + 8, 1); store8(bm1_cm + 9, 1); store8(bm1_cm + 10, 1); store8(bm1_cm + 11, 1); store8(bm1_cm + 12, 1); store8(bm1_cm + 13, 1);
+    store8(bm1_cm + 14, 1); store8(bm1_cm + 15, 1); store8(bm1_cm + 16, 1); store8(bm1_cm + 17, 1); store8(bm1_cm + 18, 1); store8(bm1_cm + 19, 1); store8(bm1_cm + 20, 1);
+    _celt_run_qab(bm1_p, 319, 1, oldBandE, 40723456, 591498240, 2548, bm1_cm, "bm1");
+    # bs0
+    k = 0; while (k < 42) { store64(oldBandE + k * 8, F64_ZERO); k = k + 1; }
+    var bs0_p = alloc(639);
+    store8(bs0_p + 0, 159); store8(bs0_p + 1, 233); store8(bs0_p + 2, 42); store8(bs0_p + 3, 131); store8(bs0_p + 4, 63); store8(bs0_p + 5, 137); store8(bs0_p + 6, 106); store8(bs0_p + 7, 61); store8(bs0_p + 8, 234); store8(bs0_p + 9, 40); store8(bs0_p + 10, 33); store8(bs0_p + 11, 225); store8(bs0_p + 12, 239); store8(bs0_p + 13, 82);
+    store8(bs0_p + 14, 253); store8(bs0_p + 15, 41); store8(bs0_p + 16, 51); store8(bs0_p + 17, 183); store8(bs0_p + 18, 192); store8(bs0_p + 19, 121); store8(bs0_p + 20, 234); store8(bs0_p + 21, 149); store8(bs0_p + 22, 224); store8(bs0_p + 23, 154); store8(bs0_p + 24, 127); store8(bs0_p + 25, 210); store8(bs0_p + 26, 67); store8(bs0_p + 27, 132);
+    store8(bs0_p + 28, 3); store8(bs0_p + 29, 34); store8(bs0_p + 30, 238); store8(bs0_p + 31, 147); store8(bs0_p + 32, 101); store8(bs0_p + 33, 21); store8(bs0_p + 34, 214); store8(bs0_p + 35, 8); store8(bs0_p + 36, 202); store8(bs0_p + 37, 144); store8(bs0_p + 38, 151); store8(bs0_p + 39, 152); store8(bs0_p + 40, 236); store8(bs0_p + 41, 37);
+    store8(bs0_p + 42, 167); store8(bs0_p + 43, 205); store8(bs0_p + 44, 47); store8(bs0_p + 45, 162); store8(bs0_p + 46, 75); store8(bs0_p + 47, 51); store8(bs0_p + 48, 238); store8(bs0_p + 49, 52); store8(bs0_p + 50, 180); store8(bs0_p + 51, 129); store8(bs0_p + 52, 46); store8(bs0_p + 53, 161); store8(bs0_p + 54, 150); store8(bs0_p + 55, 139);
+    store8(bs0_p + 56, 243); store8(bs0_p + 57, 216); store8(bs0_p + 58, 249); store8(bs0_p + 59, 142); store8(bs0_p + 60, 213); store8(bs0_p + 61, 223); store8(bs0_p + 62, 145); store8(bs0_p + 63, 206); store8(bs0_p + 64, 106); store8(bs0_p + 65, 175); store8(bs0_p + 66, 30); store8(bs0_p + 67, 210); store8(bs0_p + 68, 113); store8(bs0_p + 69, 68);
+    store8(bs0_p + 70, 167); store8(bs0_p + 71, 118); store8(bs0_p + 72, 214); store8(bs0_p + 73, 131); store8(bs0_p + 74, 213); store8(bs0_p + 75, 78); store8(bs0_p + 76, 11); store8(bs0_p + 77, 173); store8(bs0_p + 78, 25); store8(bs0_p + 79, 220); store8(bs0_p + 80, 21); store8(bs0_p + 81, 112); store8(bs0_p + 82, 141); store8(bs0_p + 83, 197);
+    store8(bs0_p + 84, 183); store8(bs0_p + 85, 192); store8(bs0_p + 86, 164); store8(bs0_p + 87, 132); store8(bs0_p + 88, 143); store8(bs0_p + 89, 91); store8(bs0_p + 90, 27); store8(bs0_p + 91, 116); store8(bs0_p + 92, 225); store8(bs0_p + 93, 110); store8(bs0_p + 94, 100); store8(bs0_p + 95, 7); store8(bs0_p + 96, 186); store8(bs0_p + 97, 64);
+    store8(bs0_p + 98, 191); store8(bs0_p + 99, 196); store8(bs0_p + 100, 240); store8(bs0_p + 101, 199); store8(bs0_p + 102, 30); store8(bs0_p + 103, 81); store8(bs0_p + 104, 72); store8(bs0_p + 105, 74); store8(bs0_p + 106, 194); store8(bs0_p + 107, 98); store8(bs0_p + 108, 60); store8(bs0_p + 109, 85); store8(bs0_p + 110, 227); store8(bs0_p + 111, 218);
+    store8(bs0_p + 112, 209); store8(bs0_p + 113, 202); store8(bs0_p + 114, 14); store8(bs0_p + 115, 11); store8(bs0_p + 116, 2); store8(bs0_p + 117, 201); store8(bs0_p + 118, 86); store8(bs0_p + 119, 152); store8(bs0_p + 120, 159); store8(bs0_p + 121, 34); store8(bs0_p + 122, 245); store8(bs0_p + 123, 238); store8(bs0_p + 124, 61); store8(bs0_p + 125, 49);
+    store8(bs0_p + 126, 164); store8(bs0_p + 127, 177); store8(bs0_p + 128, 255); store8(bs0_p + 129, 89); store8(bs0_p + 130, 194); store8(bs0_p + 131, 97); store8(bs0_p + 132, 152); store8(bs0_p + 133, 237); store8(bs0_p + 134, 87); store8(bs0_p + 135, 199); store8(bs0_p + 136, 124); store8(bs0_p + 137, 44); store8(bs0_p + 138, 246); store8(bs0_p + 139, 56);
+    store8(bs0_p + 140, 122); store8(bs0_p + 141, 234); store8(bs0_p + 142, 243); store8(bs0_p + 143, 220); store8(bs0_p + 144, 190); store8(bs0_p + 145, 117); store8(bs0_p + 146, 92); store8(bs0_p + 147, 63); store8(bs0_p + 148, 41); store8(bs0_p + 149, 29); store8(bs0_p + 150, 102); store8(bs0_p + 151, 2); store8(bs0_p + 152, 173); store8(bs0_p + 153, 224);
+    store8(bs0_p + 154, 151); store8(bs0_p + 155, 154); store8(bs0_p + 156, 2); store8(bs0_p + 157, 179); store8(bs0_p + 158, 59); store8(bs0_p + 159, 237); store8(bs0_p + 160, 82); store8(bs0_p + 161, 201); store8(bs0_p + 162, 182); store8(bs0_p + 163, 77); store8(bs0_p + 164, 68); store8(bs0_p + 165, 39); store8(bs0_p + 166, 18); store8(bs0_p + 167, 143);
+    store8(bs0_p + 168, 80); store8(bs0_p + 169, 118); store8(bs0_p + 170, 183); store8(bs0_p + 171, 144); store8(bs0_p + 172, 75); store8(bs0_p + 173, 168); store8(bs0_p + 174, 121); store8(bs0_p + 175, 58); store8(bs0_p + 176, 236); store8(bs0_p + 177, 112); store8(bs0_p + 178, 21); store8(bs0_p + 179, 190); store8(bs0_p + 180, 53); store8(bs0_p + 181, 169);
+    store8(bs0_p + 182, 219); store8(bs0_p + 183, 254); store8(bs0_p + 184, 172); store8(bs0_p + 185, 184); store8(bs0_p + 186, 77); store8(bs0_p + 187, 86); store8(bs0_p + 188, 8); store8(bs0_p + 189, 34); store8(bs0_p + 190, 217); store8(bs0_p + 191, 132); store8(bs0_p + 192, 107); store8(bs0_p + 193, 187); store8(bs0_p + 194, 61); store8(bs0_p + 195, 112);
+    store8(bs0_p + 196, 44); store8(bs0_p + 197, 42); store8(bs0_p + 198, 113); store8(bs0_p + 199, 54); store8(bs0_p + 200, 186); store8(bs0_p + 201, 189); store8(bs0_p + 202, 189); store8(bs0_p + 203, 9); store8(bs0_p + 204, 186); store8(bs0_p + 205, 225); store8(bs0_p + 206, 237); store8(bs0_p + 207, 132); store8(bs0_p + 208, 192); store8(bs0_p + 209, 145);
+    store8(bs0_p + 210, 212); store8(bs0_p + 211, 84); store8(bs0_p + 212, 119); store8(bs0_p + 213, 242); store8(bs0_p + 214, 95); store8(bs0_p + 215, 212); store8(bs0_p + 216, 224); store8(bs0_p + 217, 174); store8(bs0_p + 218, 30); store8(bs0_p + 219, 130); store8(bs0_p + 220, 164); store8(bs0_p + 221, 22); store8(bs0_p + 222, 204); store8(bs0_p + 223, 129);
+    store8(bs0_p + 224, 5); store8(bs0_p + 225, 90); store8(bs0_p + 226, 196); store8(bs0_p + 227, 231); store8(bs0_p + 228, 175); store8(bs0_p + 229, 174); store8(bs0_p + 230, 39); store8(bs0_p + 231, 51); store8(bs0_p + 232, 0); store8(bs0_p + 233, 192); store8(bs0_p + 234, 29); store8(bs0_p + 235, 40); store8(bs0_p + 236, 11); store8(bs0_p + 237, 189);
+    store8(bs0_p + 238, 16); store8(bs0_p + 239, 204); store8(bs0_p + 240, 42); store8(bs0_p + 241, 126); store8(bs0_p + 242, 91); store8(bs0_p + 243, 225); store8(bs0_p + 244, 52); store8(bs0_p + 245, 157); store8(bs0_p + 246, 228); store8(bs0_p + 247, 249); store8(bs0_p + 248, 67); store8(bs0_p + 249, 110); store8(bs0_p + 250, 103); store8(bs0_p + 251, 12);
+    store8(bs0_p + 252, 133); store8(bs0_p + 253, 123); store8(bs0_p + 254, 122); store8(bs0_p + 255, 12); store8(bs0_p + 256, 224); store8(bs0_p + 257, 39); store8(bs0_p + 258, 229); store8(bs0_p + 259, 157); store8(bs0_p + 260, 215); store8(bs0_p + 261, 33); store8(bs0_p + 262, 183); store8(bs0_p + 263, 31); store8(bs0_p + 264, 214); store8(bs0_p + 265, 63);
+    store8(bs0_p + 266, 10); store8(bs0_p + 267, 75); store8(bs0_p + 268, 192); store8(bs0_p + 269, 100); store8(bs0_p + 270, 4); store8(bs0_p + 271, 7); store8(bs0_p + 272, 187); store8(bs0_p + 273, 233); store8(bs0_p + 274, 120); store8(bs0_p + 275, 95); store8(bs0_p + 276, 144); store8(bs0_p + 277, 9); store8(bs0_p + 278, 178); store8(bs0_p + 279, 60);
+    store8(bs0_p + 280, 49); store8(bs0_p + 281, 225); store8(bs0_p + 282, 237); store8(bs0_p + 283, 154); store8(bs0_p + 284, 246); store8(bs0_p + 285, 239); store8(bs0_p + 286, 211); store8(bs0_p + 287, 226); store8(bs0_p + 288, 114); store8(bs0_p + 289, 81); store8(bs0_p + 290, 201); store8(bs0_p + 291, 125); store8(bs0_p + 292, 90); store8(bs0_p + 293, 35);
+    store8(bs0_p + 294, 191); store8(bs0_p + 295, 187); store8(bs0_p + 296, 35); store8(bs0_p + 297, 149); store8(bs0_p + 298, 43); store8(bs0_p + 299, 3); store8(bs0_p + 300, 69); store8(bs0_p + 301, 51); store8(bs0_p + 302, 108); store8(bs0_p + 303, 193); store8(bs0_p + 304, 193); store8(bs0_p + 305, 129); store8(bs0_p + 306, 160); store8(bs0_p + 307, 54);
+    store8(bs0_p + 308, 68); store8(bs0_p + 309, 255); store8(bs0_p + 310, 111); store8(bs0_p + 311, 44); store8(bs0_p + 312, 144); store8(bs0_p + 313, 0); store8(bs0_p + 314, 0); store8(bs0_p + 315, 0); store8(bs0_p + 316, 0); store8(bs0_p + 317, 0); store8(bs0_p + 318, 0); store8(bs0_p + 319, 0); store8(bs0_p + 320, 0); store8(bs0_p + 321, 0);
+    store8(bs0_p + 322, 0); store8(bs0_p + 323, 0); store8(bs0_p + 324, 0); store8(bs0_p + 325, 0); store8(bs0_p + 326, 0); store8(bs0_p + 327, 0); store8(bs0_p + 328, 0); store8(bs0_p + 329, 0); store8(bs0_p + 330, 0); store8(bs0_p + 331, 0); store8(bs0_p + 332, 0); store8(bs0_p + 333, 0); store8(bs0_p + 334, 0); store8(bs0_p + 335, 0);
+    store8(bs0_p + 336, 0); store8(bs0_p + 337, 0); store8(bs0_p + 338, 0); store8(bs0_p + 339, 0); store8(bs0_p + 340, 0); store8(bs0_p + 341, 0); store8(bs0_p + 342, 0); store8(bs0_p + 343, 0); store8(bs0_p + 344, 0); store8(bs0_p + 345, 0); store8(bs0_p + 346, 0); store8(bs0_p + 347, 0); store8(bs0_p + 348, 0); store8(bs0_p + 349, 0);
+    store8(bs0_p + 350, 0); store8(bs0_p + 351, 0); store8(bs0_p + 352, 0); store8(bs0_p + 353, 0); store8(bs0_p + 354, 0); store8(bs0_p + 355, 0); store8(bs0_p + 356, 0); store8(bs0_p + 357, 0); store8(bs0_p + 358, 0); store8(bs0_p + 359, 0); store8(bs0_p + 360, 0); store8(bs0_p + 361, 0); store8(bs0_p + 362, 0); store8(bs0_p + 363, 0);
+    store8(bs0_p + 364, 0); store8(bs0_p + 365, 0); store8(bs0_p + 366, 0); store8(bs0_p + 367, 0); store8(bs0_p + 368, 0); store8(bs0_p + 369, 0); store8(bs0_p + 370, 0); store8(bs0_p + 371, 0); store8(bs0_p + 372, 0); store8(bs0_p + 373, 0); store8(bs0_p + 374, 0); store8(bs0_p + 375, 0); store8(bs0_p + 376, 0); store8(bs0_p + 377, 0);
+    store8(bs0_p + 378, 0); store8(bs0_p + 379, 0); store8(bs0_p + 380, 0); store8(bs0_p + 381, 0); store8(bs0_p + 382, 0); store8(bs0_p + 383, 0); store8(bs0_p + 384, 0); store8(bs0_p + 385, 0); store8(bs0_p + 386, 0); store8(bs0_p + 387, 0); store8(bs0_p + 388, 0); store8(bs0_p + 389, 0); store8(bs0_p + 390, 0); store8(bs0_p + 391, 0);
+    store8(bs0_p + 392, 0); store8(bs0_p + 393, 0); store8(bs0_p + 394, 0); store8(bs0_p + 395, 0); store8(bs0_p + 396, 0); store8(bs0_p + 397, 0); store8(bs0_p + 398, 0); store8(bs0_p + 399, 0); store8(bs0_p + 400, 0); store8(bs0_p + 401, 0); store8(bs0_p + 402, 0); store8(bs0_p + 403, 0); store8(bs0_p + 404, 0); store8(bs0_p + 405, 0);
+    store8(bs0_p + 406, 0); store8(bs0_p + 407, 0); store8(bs0_p + 408, 0); store8(bs0_p + 409, 0); store8(bs0_p + 410, 0); store8(bs0_p + 411, 0); store8(bs0_p + 412, 0); store8(bs0_p + 413, 0); store8(bs0_p + 414, 0); store8(bs0_p + 415, 0); store8(bs0_p + 416, 0); store8(bs0_p + 417, 0); store8(bs0_p + 418, 0); store8(bs0_p + 419, 0);
+    store8(bs0_p + 420, 0); store8(bs0_p + 421, 0); store8(bs0_p + 422, 0); store8(bs0_p + 423, 0); store8(bs0_p + 424, 0); store8(bs0_p + 425, 0); store8(bs0_p + 426, 0); store8(bs0_p + 427, 0); store8(bs0_p + 428, 0); store8(bs0_p + 429, 0); store8(bs0_p + 430, 0); store8(bs0_p + 431, 0); store8(bs0_p + 432, 0); store8(bs0_p + 433, 0);
+    store8(bs0_p + 434, 0); store8(bs0_p + 435, 0); store8(bs0_p + 436, 0); store8(bs0_p + 437, 0); store8(bs0_p + 438, 0); store8(bs0_p + 439, 0); store8(bs0_p + 440, 0); store8(bs0_p + 441, 0); store8(bs0_p + 442, 1); store8(bs0_p + 443, 95); store8(bs0_p + 444, 230); store8(bs0_p + 445, 116); store8(bs0_p + 446, 197); store8(bs0_p + 447, 107);
+    store8(bs0_p + 448, 145); store8(bs0_p + 449, 177); store8(bs0_p + 450, 133); store8(bs0_p + 451, 74); store8(bs0_p + 452, 24); store8(bs0_p + 453, 220); store8(bs0_p + 454, 169); store8(bs0_p + 455, 179); store8(bs0_p + 456, 167); store8(bs0_p + 457, 175); store8(bs0_p + 458, 204); store8(bs0_p + 459, 196); store8(bs0_p + 460, 109); store8(bs0_p + 461, 7);
+    store8(bs0_p + 462, 118); store8(bs0_p + 463, 244); store8(bs0_p + 464, 207); store8(bs0_p + 465, 132); store8(bs0_p + 466, 46); store8(bs0_p + 467, 120); store8(bs0_p + 468, 90); store8(bs0_p + 469, 227); store8(bs0_p + 470, 93); store8(bs0_p + 471, 67); store8(bs0_p + 472, 150); store8(bs0_p + 473, 46); store8(bs0_p + 474, 161); store8(bs0_p + 475, 203);
+    store8(bs0_p + 476, 12); store8(bs0_p + 477, 199); store8(bs0_p + 478, 188); store8(bs0_p + 479, 241); store8(bs0_p + 480, 191); store8(bs0_p + 481, 59); store8(bs0_p + 482, 38); store8(bs0_p + 483, 9); store8(bs0_p + 484, 10); store8(bs0_p + 485, 69); store8(bs0_p + 486, 34); store8(bs0_p + 487, 28); store8(bs0_p + 488, 250); store8(bs0_p + 489, 15);
+    store8(bs0_p + 490, 79); store8(bs0_p + 491, 197); store8(bs0_p + 492, 2); store8(bs0_p + 493, 32); store8(bs0_p + 494, 46); store8(bs0_p + 495, 251); store8(bs0_p + 496, 84); store8(bs0_p + 497, 68); store8(bs0_p + 498, 38); store8(bs0_p + 499, 36); store8(bs0_p + 500, 64); store8(bs0_p + 501, 26); store8(bs0_p + 502, 185); store8(bs0_p + 503, 209);
+    store8(bs0_p + 504, 213); store8(bs0_p + 505, 76); store8(bs0_p + 506, 133); store8(bs0_p + 507, 228); store8(bs0_p + 508, 44); store8(bs0_p + 509, 90); store8(bs0_p + 510, 190); store8(bs0_p + 511, 22); store8(bs0_p + 512, 123); store8(bs0_p + 513, 149); store8(bs0_p + 514, 157); store8(bs0_p + 515, 215); store8(bs0_p + 516, 148); store8(bs0_p + 517, 35);
+    store8(bs0_p + 518, 106); store8(bs0_p + 519, 88); store8(bs0_p + 520, 160); store8(bs0_p + 521, 151); store8(bs0_p + 522, 56); store8(bs0_p + 523, 71); store8(bs0_p + 524, 14); store8(bs0_p + 525, 225); store8(bs0_p + 526, 236); store8(bs0_p + 527, 45); store8(bs0_p + 528, 93); store8(bs0_p + 529, 193); store8(bs0_p + 530, 130); store8(bs0_p + 531, 126);
+    store8(bs0_p + 532, 224); store8(bs0_p + 533, 16); store8(bs0_p + 534, 56); store8(bs0_p + 535, 253); store8(bs0_p + 536, 83); store8(bs0_p + 537, 78); store8(bs0_p + 538, 89); store8(bs0_p + 539, 85); store8(bs0_p + 540, 32); store8(bs0_p + 541, 200); store8(bs0_p + 542, 210); store8(bs0_p + 543, 120); store8(bs0_p + 544, 75); store8(bs0_p + 545, 237);
+    store8(bs0_p + 546, 46); store8(bs0_p + 547, 28); store8(bs0_p + 548, 41); store8(bs0_p + 549, 60); store8(bs0_p + 550, 142); store8(bs0_p + 551, 0); store8(bs0_p + 552, 253); store8(bs0_p + 553, 37); store8(bs0_p + 554, 188); store8(bs0_p + 555, 132); store8(bs0_p + 556, 178); store8(bs0_p + 557, 88); store8(bs0_p + 558, 102); store8(bs0_p + 559, 188);
+    store8(bs0_p + 560, 152); store8(bs0_p + 561, 123); store8(bs0_p + 562, 141); store8(bs0_p + 563, 239); store8(bs0_p + 564, 51); store8(bs0_p + 565, 24); store8(bs0_p + 566, 120); store8(bs0_p + 567, 247); store8(bs0_p + 568, 191); store8(bs0_p + 569, 104); store8(bs0_p + 570, 72); store8(bs0_p + 571, 19); store8(bs0_p + 572, 205); store8(bs0_p + 573, 132);
+    store8(bs0_p + 574, 243); store8(bs0_p + 575, 97); store8(bs0_p + 576, 243); store8(bs0_p + 577, 24); store8(bs0_p + 578, 9); store8(bs0_p + 579, 133); store8(bs0_p + 580, 196); store8(bs0_p + 581, 13); store8(bs0_p + 582, 117); store8(bs0_p + 583, 23); store8(bs0_p + 584, 32); store8(bs0_p + 585, 49); store8(bs0_p + 586, 24); store8(bs0_p + 587, 136);
+    store8(bs0_p + 588, 161); store8(bs0_p + 589, 152); store8(bs0_p + 590, 42); store8(bs0_p + 591, 142); store8(bs0_p + 592, 219); store8(bs0_p + 593, 152); store8(bs0_p + 594, 99); store8(bs0_p + 595, 54); store8(bs0_p + 596, 217); store8(bs0_p + 597, 164); store8(bs0_p + 598, 173); store8(bs0_p + 599, 142); store8(bs0_p + 600, 168); store8(bs0_p + 601, 172);
+    store8(bs0_p + 602, 195); store8(bs0_p + 603, 48); store8(bs0_p + 604, 158); store8(bs0_p + 605, 127); store8(bs0_p + 606, 130); store8(bs0_p + 607, 30); store8(bs0_p + 608, 61); store8(bs0_p + 609, 33); store8(bs0_p + 610, 199); store8(bs0_p + 611, 134); store8(bs0_p + 612, 54); store8(bs0_p + 613, 130); store8(bs0_p + 614, 85); store8(bs0_p + 615, 73);
+    store8(bs0_p + 616, 102); store8(bs0_p + 617, 11); store8(bs0_p + 618, 210); store8(bs0_p + 619, 17); store8(bs0_p + 620, 122); store8(bs0_p + 621, 26); store8(bs0_p + 622, 146); store8(bs0_p + 623, 68); store8(bs0_p + 624, 236); store8(bs0_p + 625, 240); store8(bs0_p + 626, 135); store8(bs0_p + 627, 245); store8(bs0_p + 628, 252); store8(bs0_p + 629, 171);
+    store8(bs0_p + 630, 204); store8(bs0_p + 631, 159); store8(bs0_p + 632, 52); store8(bs0_p + 633, 69); store8(bs0_p + 634, 226); store8(bs0_p + 635, 170); store8(bs0_p + 636, 163); store8(bs0_p + 637, 237); store8(bs0_p + 638, 201);
+    var bs0_cm = alloc(42);
+    store8(bs0_cm + 0, 255); store8(bs0_cm + 1, 255); store8(bs0_cm + 2, 255); store8(bs0_cm + 3, 255); store8(bs0_cm + 4, 255); store8(bs0_cm + 5, 255); store8(bs0_cm + 6, 255); store8(bs0_cm + 7, 255); store8(bs0_cm + 8, 255); store8(bs0_cm + 9, 255); store8(bs0_cm + 10, 255); store8(bs0_cm + 11, 255); store8(bs0_cm + 12, 255); store8(bs0_cm + 13, 255);
+    store8(bs0_cm + 14, 254); store8(bs0_cm + 15, 254); store8(bs0_cm + 16, 254); store8(bs0_cm + 17, 254); store8(bs0_cm + 18, 254); store8(bs0_cm + 19, 254); store8(bs0_cm + 20, 254); store8(bs0_cm + 21, 254); store8(bs0_cm + 22, 254); store8(bs0_cm + 23, 254); store8(bs0_cm + 24, 254); store8(bs0_cm + 25, 254); store8(bs0_cm + 26, 254); store8(bs0_cm + 27, 254);
+    store8(bs0_cm + 28, 254); store8(bs0_cm + 29, 254); store8(bs0_cm + 30, 255); store8(bs0_cm + 31, 255); store8(bs0_cm + 32, 254); store8(bs0_cm + 33, 254); store8(bs0_cm + 34, 254); store8(bs0_cm + 35, 254); store8(bs0_cm + 36, 254); store8(bs0_cm + 37, 254); store8(bs0_cm + 38, 14); store8(bs0_cm + 39, 14); store8(bs0_cm + 40, 254); store8(bs0_cm + 41, 254);
+    _celt_run_qab(bs0_p, 639, 2, oldBandE, 0, 164431360, 4028, bs0_cm, "bs0");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -3176,6 +4473,8 @@ fn test_opus_pvq_all() {
     test_ec_dec_rfc_vectors();
     test_ec_laplace_rfc_vectors();
     test_celt_allocation_rfc();
+    test_celt_cwrs_rfc();
+    test_celt_bands_rfc();
     test_opus_range_roundtrip();
     test_pvq_v_counting();
     test_pvq_cwrs_roundtrip();

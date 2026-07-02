@@ -99,10 +99,14 @@ full — nothing hidden):
   stereo/intensity, and a low-rate frame that actually skips bands). Large tables
   (`band_allocation`, `cache_index50/bits50/caps50`, `eBands`, `logN`) extracted
   verbatim from the runtime mode; signed-shift (`sar`) handles the negative-tilt sites.
-- [ ] **Bands + PVQ + CWRS** (bands.c/vq.c/cwrs.c: `quant_all_bands` decode, `alg_unquant`
-  → `cwrsi`, `exp_rotation` spreading, θ/split, intensity+dual stereo, `renormalise`,
-  `denormalise_bands`, `anti_collapse`). Note: CELT's `cwrsi`/`icwrs` ordering must
-  replace the bespoke PVQ index scheme for interop.
+- [x] **Bands + PVQ + CWRS** (bands.c/vq.c/cwrs.c: `quant_all_bands`, `quant_band`/
+  `quant_partition`/`quant_band_stereo`, `compute_theta`/`compute_qn`, `alg_unquant` →
+  `cwrsi`/`decode_pulses`, `exp_rotation` spreading, θ/split rebalance, intensity+dual
+  stereo, `bitexact_cos`/`log2tan`, `renormalise`, `denormalise_bands`) — **bit-exact vs
+  libopus**: `test_celt_cwrs_rfc` (9 CWRS vectors) + `test_celt_bands_rfc` (mono+stereo,
+  transient+steady frames match the final range-coder `rng`, `ec_tell`, and every
+  collapse mask). CELT's real `cwrsi` (U-table) replaces the bespoke PVQ index scheme.
+  Remaining in this subsystem: `anti_collapse` (transient noise refill).
 - [ ] **Inverse MDCT + FFT** (mdct.c/kiss_fft.c: `clt_mdct_backward`, the CELT low-overlap
   window (overlap=120, **not** 50%), pre/post rotation, per-channel overlap-add buffers).
 - [ ] **Orchestration + state** (celt_decoder.c: `celt_decode_with_ec` order — silence,
