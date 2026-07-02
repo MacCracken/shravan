@@ -652,3 +652,379 @@ fn silk_nlsf_decode(nlsf_idx, fs_kHz, pNLSF_out) {
     silk_nlsf_stabilize(pNLSF_out, dmin, order);
     return 0;
 }
+
+# ---- LSF cosine table (Q12, table_LSF_cos.c) ----
+var _silk_lsfcos_q12 = 0;
+
+fn _silk_lsfcos_init() {
+    _silk_lsfcos_q12 = alloc(129 * 8);
+    store64(_silk_lsfcos_q12 + 0 * 8, 8192); store64(_silk_lsfcos_q12 + 1 * 8, 8190); store64(_silk_lsfcos_q12 + 2 * 8, 8182); store64(_silk_lsfcos_q12 + 3 * 8, 8170); store64(_silk_lsfcos_q12 + 4 * 8, 8152); store64(_silk_lsfcos_q12 + 5 * 8, 8130); store64(_silk_lsfcos_q12 + 6 * 8, 8104); store64(_silk_lsfcos_q12 + 7 * 8, 8072);
+    store64(_silk_lsfcos_q12 + 8 * 8, 8034); store64(_silk_lsfcos_q12 + 9 * 8, 7994); store64(_silk_lsfcos_q12 + 10 * 8, 7946); store64(_silk_lsfcos_q12 + 11 * 8, 7896); store64(_silk_lsfcos_q12 + 12 * 8, 7840); store64(_silk_lsfcos_q12 + 13 * 8, 7778); store64(_silk_lsfcos_q12 + 14 * 8, 7714); store64(_silk_lsfcos_q12 + 15 * 8, 7644);
+    store64(_silk_lsfcos_q12 + 16 * 8, 7568); store64(_silk_lsfcos_q12 + 17 * 8, 7490); store64(_silk_lsfcos_q12 + 18 * 8, 7406); store64(_silk_lsfcos_q12 + 19 * 8, 7318); store64(_silk_lsfcos_q12 + 20 * 8, 7226); store64(_silk_lsfcos_q12 + 21 * 8, 7128); store64(_silk_lsfcos_q12 + 22 * 8, 7026); store64(_silk_lsfcos_q12 + 23 * 8, 6922);
+    store64(_silk_lsfcos_q12 + 24 * 8, 6812); store64(_silk_lsfcos_q12 + 25 * 8, 6698); store64(_silk_lsfcos_q12 + 26 * 8, 6580); store64(_silk_lsfcos_q12 + 27 * 8, 6458); store64(_silk_lsfcos_q12 + 28 * 8, 6332); store64(_silk_lsfcos_q12 + 29 * 8, 6204); store64(_silk_lsfcos_q12 + 30 * 8, 6070); store64(_silk_lsfcos_q12 + 31 * 8, 5934);
+    store64(_silk_lsfcos_q12 + 32 * 8, 5792); store64(_silk_lsfcos_q12 + 33 * 8, 5648); store64(_silk_lsfcos_q12 + 34 * 8, 5502); store64(_silk_lsfcos_q12 + 35 * 8, 5352); store64(_silk_lsfcos_q12 + 36 * 8, 5198); store64(_silk_lsfcos_q12 + 37 * 8, 5040); store64(_silk_lsfcos_q12 + 38 * 8, 4880); store64(_silk_lsfcos_q12 + 39 * 8, 4718);
+    store64(_silk_lsfcos_q12 + 40 * 8, 4552); store64(_silk_lsfcos_q12 + 41 * 8, 4382); store64(_silk_lsfcos_q12 + 42 * 8, 4212); store64(_silk_lsfcos_q12 + 43 * 8, 4038); store64(_silk_lsfcos_q12 + 44 * 8, 3862); store64(_silk_lsfcos_q12 + 45 * 8, 3684); store64(_silk_lsfcos_q12 + 46 * 8, 3502); store64(_silk_lsfcos_q12 + 47 * 8, 3320);
+    store64(_silk_lsfcos_q12 + 48 * 8, 3136); store64(_silk_lsfcos_q12 + 49 * 8, 2948); store64(_silk_lsfcos_q12 + 50 * 8, 2760); store64(_silk_lsfcos_q12 + 51 * 8, 2570); store64(_silk_lsfcos_q12 + 52 * 8, 2378); store64(_silk_lsfcos_q12 + 53 * 8, 2186); store64(_silk_lsfcos_q12 + 54 * 8, 1990); store64(_silk_lsfcos_q12 + 55 * 8, 1794);
+    store64(_silk_lsfcos_q12 + 56 * 8, 1598); store64(_silk_lsfcos_q12 + 57 * 8, 1400); store64(_silk_lsfcos_q12 + 58 * 8, 1202); store64(_silk_lsfcos_q12 + 59 * 8, 1002); store64(_silk_lsfcos_q12 + 60 * 8, 802); store64(_silk_lsfcos_q12 + 61 * 8, 602); store64(_silk_lsfcos_q12 + 62 * 8, 402); store64(_silk_lsfcos_q12 + 63 * 8, 202);
+    store64(_silk_lsfcos_q12 + 64 * 8, 0); store64(_silk_lsfcos_q12 + 65 * 8, 0 - 202); store64(_silk_lsfcos_q12 + 66 * 8, 0 - 402); store64(_silk_lsfcos_q12 + 67 * 8, 0 - 602); store64(_silk_lsfcos_q12 + 68 * 8, 0 - 802); store64(_silk_lsfcos_q12 + 69 * 8, 0 - 1002); store64(_silk_lsfcos_q12 + 70 * 8, 0 - 1202); store64(_silk_lsfcos_q12 + 71 * 8, 0 - 1400);
+    store64(_silk_lsfcos_q12 + 72 * 8, 0 - 1598); store64(_silk_lsfcos_q12 + 73 * 8, 0 - 1794); store64(_silk_lsfcos_q12 + 74 * 8, 0 - 1990); store64(_silk_lsfcos_q12 + 75 * 8, 0 - 2186); store64(_silk_lsfcos_q12 + 76 * 8, 0 - 2378); store64(_silk_lsfcos_q12 + 77 * 8, 0 - 2570); store64(_silk_lsfcos_q12 + 78 * 8, 0 - 2760); store64(_silk_lsfcos_q12 + 79 * 8, 0 - 2948);
+    store64(_silk_lsfcos_q12 + 80 * 8, 0 - 3136); store64(_silk_lsfcos_q12 + 81 * 8, 0 - 3320); store64(_silk_lsfcos_q12 + 82 * 8, 0 - 3502); store64(_silk_lsfcos_q12 + 83 * 8, 0 - 3684); store64(_silk_lsfcos_q12 + 84 * 8, 0 - 3862); store64(_silk_lsfcos_q12 + 85 * 8, 0 - 4038); store64(_silk_lsfcos_q12 + 86 * 8, 0 - 4212); store64(_silk_lsfcos_q12 + 87 * 8, 0 - 4382);
+    store64(_silk_lsfcos_q12 + 88 * 8, 0 - 4552); store64(_silk_lsfcos_q12 + 89 * 8, 0 - 4718); store64(_silk_lsfcos_q12 + 90 * 8, 0 - 4880); store64(_silk_lsfcos_q12 + 91 * 8, 0 - 5040); store64(_silk_lsfcos_q12 + 92 * 8, 0 - 5198); store64(_silk_lsfcos_q12 + 93 * 8, 0 - 5352); store64(_silk_lsfcos_q12 + 94 * 8, 0 - 5502); store64(_silk_lsfcos_q12 + 95 * 8, 0 - 5648);
+    store64(_silk_lsfcos_q12 + 96 * 8, 0 - 5792); store64(_silk_lsfcos_q12 + 97 * 8, 0 - 5934); store64(_silk_lsfcos_q12 + 98 * 8, 0 - 6070); store64(_silk_lsfcos_q12 + 99 * 8, 0 - 6204); store64(_silk_lsfcos_q12 + 100 * 8, 0 - 6332); store64(_silk_lsfcos_q12 + 101 * 8, 0 - 6458); store64(_silk_lsfcos_q12 + 102 * 8, 0 - 6580); store64(_silk_lsfcos_q12 + 103 * 8, 0 - 6698);
+    store64(_silk_lsfcos_q12 + 104 * 8, 0 - 6812); store64(_silk_lsfcos_q12 + 105 * 8, 0 - 6922); store64(_silk_lsfcos_q12 + 106 * 8, 0 - 7026); store64(_silk_lsfcos_q12 + 107 * 8, 0 - 7128); store64(_silk_lsfcos_q12 + 108 * 8, 0 - 7226); store64(_silk_lsfcos_q12 + 109 * 8, 0 - 7318); store64(_silk_lsfcos_q12 + 110 * 8, 0 - 7406); store64(_silk_lsfcos_q12 + 111 * 8, 0 - 7490);
+    store64(_silk_lsfcos_q12 + 112 * 8, 0 - 7568); store64(_silk_lsfcos_q12 + 113 * 8, 0 - 7644); store64(_silk_lsfcos_q12 + 114 * 8, 0 - 7714); store64(_silk_lsfcos_q12 + 115 * 8, 0 - 7778); store64(_silk_lsfcos_q12 + 116 * 8, 0 - 7840); store64(_silk_lsfcos_q12 + 117 * 8, 0 - 7896); store64(_silk_lsfcos_q12 + 118 * 8, 0 - 7946); store64(_silk_lsfcos_q12 + 119 * 8, 0 - 7994);
+    store64(_silk_lsfcos_q12 + 120 * 8, 0 - 8034); store64(_silk_lsfcos_q12 + 121 * 8, 0 - 8072); store64(_silk_lsfcos_q12 + 122 * 8, 0 - 8104); store64(_silk_lsfcos_q12 + 123 * 8, 0 - 8130); store64(_silk_lsfcos_q12 + 124 * 8, 0 - 8152); store64(_silk_lsfcos_q12 + 125 * 8, 0 - 8170); store64(_silk_lsfcos_q12 + 126 * 8, 0 - 8182); store64(_silk_lsfcos_q12 + 127 * 8, 0 - 8190);
+    store64(_silk_lsfcos_q12 + 128 * 8, 0 - 8192);
+    return 0;
+}
+
+# ---- NLSF -> LPC (NLSF2A.c): fixed-point AR filter coefficients ----
+# Additional integer-width helpers (verbatim libopus macro semantics).
+fn silk_smull(a, b) { return a * b; }                       # int64 product
+fn silk_smmul(a, b) { return sar(a * b, 32); }              # RSHIFT64(SMULL,32)
+fn silk_smulww(a, b) { return sar(a * b, 16); }             # RSHIFT64(SMULL,16)
+fn silk_smlaww(a, b, c) { return silk_sx32(a + sar(b * c, 16)); }
+fn silk_abs64(a) { if (a < 0) { return 0 - a; } return a; }
+fn silk_sat32(v) {
+    if (v > 2147483647) { return 2147483647; }
+    if (v < 0 - 2147483648) { return 0 - 2147483648; }
+    return v;
+}
+fn silk_sub_sat32(a, b) { return silk_sat32(a - b); }
+fn silk_sat16(a) {
+    if (a > 32767) { return 32767; }
+    if (a < 0 - 32768) { return 0 - 32768; }
+    return a;
+}
+# silk_CLZ32: count leading zeros of a 32-bit value (reuses ec_ilog from opus.cyr).
+fn silk_clz32(v) { return 32 - ec_ilog(v & 0xFFFFFFFF); }
+# silk_LSHIFT_SAT32(a, shift): clamp then shift left (shift >= 0).
+fn silk_lshift_sat32(a, shift) {
+    var lo = sar(0 - 2147483648, shift);
+    var hi = sar(2147483647, shift);
+    if (a < lo) { a = lo; }
+    if (a > hi) { a = hi; }
+    return a << shift;
+}
+# silk_INVERSE32_varQ: ~(1<<Qres)/b32, b32 != 0, Qres > 0.
+fn silk_inverse32_varq(b32, Qres) {
+    var b_headrm = silk_clz32(silk_abs64(b32)) - 1;
+    var b32_nrm = b32 << b_headrm;
+    var b32_inv = silk_div_trunc(sar(2147483647, 2), sar(b32_nrm, 16));
+    var result = b32_inv << 16;
+    var err_Q32 = ((1 << 29) - silk_smulwb(b32_nrm, b32_inv)) << 3;
+    result = silk_smlaww(result, err_Q32, b32_inv);
+    var lshift = 61 - b_headrm - Qres;
+    if (lshift <= 0) { return silk_lshift_sat32(result, 0 - lshift); }
+    if (lshift < 32) { return sar(result, lshift); }
+    return 0;
+}
+
+# silk_NLSF2A_find_poly: intermediate polynomial out[dd+1] (QA=16) from
+# interleaved 2*cos(LSF) values at clsf (stride 2), order dd.
+fn silk_nlsf2a_find_poly(out, clsf, dd) {
+    store64(out + 0 * 8, 1 << 16);
+    store64(out + 1 * 8, 0 - load64(clsf + 0 * 8));
+    var k = 1;
+    while (k < dd) {
+        var ftmp = load64(clsf + (2 * k) * 8);
+        store64(out + (k + 1) * 8,
+            (load64(out + (k - 1) * 8) << 1) - silk_rshift_round(silk_smull(ftmp, load64(out + k * 8)), 16));
+        var n = k;
+        while (n > 1) {
+            store64(out + n * 8,
+                load64(out + n * 8) + load64(out + (n - 2) * 8) - silk_rshift_round(silk_smull(ftmp, load64(out + (n - 1) * 8)), 16));
+            n = n - 1;
+        }
+        store64(out + 1 * 8, load64(out + 1 * 8) - ftmp);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# silk_bwexpander_32: chirp (bandwidth-expand) AR filter ar[d] in place, Q-domain preserved.
+fn silk_bwexpander_32(ar, d, chirp_Q16) {
+    var chirp_minus_one = chirp_Q16 - 65536;
+    var i = 0;
+    while (i < d - 1) {
+        store64(ar + i * 8, silk_smulww(chirp_Q16, load64(ar + i * 8)));
+        chirp_Q16 = chirp_Q16 + silk_rshift_round(silk_mul(chirp_Q16, chirp_minus_one), 16);
+        i = i + 1;
+    }
+    store64(ar + (d - 1) * 8, silk_smulww(chirp_Q16, load64(ar + (d - 1) * 8)));
+    return 0;
+}
+
+# silk_LPC_fit: limit a_QIN[d] to fit int16, output a_QOUT[d] in QOUT (QIN>QOUT).
+fn silk_lpc_fit(a_QOUT, a_QIN, QOUT, QIN, d) {
+    var idx = 0;
+    var i = 0;
+    var broke = 0;
+    while (i < 10) {
+        var maxabs = 0;
+        var k = 0;
+        while (k < d) {
+            var absval = silk_abs64(load64(a_QIN + k * 8));
+            if (absval > maxabs) { maxabs = absval; idx = k; }
+            k = k + 1;
+        }
+        maxabs = silk_rshift_round(maxabs, QIN - QOUT);
+        if (maxabs > 32767) {
+            if (maxabs > 163838) { maxabs = 163838; }
+            var denom = sar(silk_mul(maxabs, idx + 1), 2);
+            var chirp_Q16 = 65470 - silk_div_trunc((maxabs - 32767) << 14, denom);
+            silk_bwexpander_32(a_QIN, d, chirp_Q16);
+        } else { i = 10; broke = 1; }
+        i = i + 1;
+    }
+    var k2 = 0;
+    if (broke == 0) {
+        # ran all 10 iterations: clip
+        while (k2 < d) {
+            var v = silk_sat16(silk_rshift_round(load64(a_QIN + k2 * 8), QIN - QOUT));
+            store64(a_QOUT + k2 * 8, v);
+            store64(a_QIN + k2 * 8, v << (QIN - QOUT));
+            k2 = k2 + 1;
+        }
+    } else {
+        while (k2 < d) {
+            store64(a_QOUT + k2 * 8, silk_rshift_round(load64(a_QIN + k2 * 8), QIN - QOUT));
+            k2 = k2 + 1;
+        }
+    }
+    return 0;
+}
+
+# silk_LPC_inverse_pred_gain (Q12 input): returns inverse pred gain (Q30), 0 if unstable.
+# Works on a scratch QA=24 copy; A_QA is caller scratch of `order` i64 slots.
+fn silk_lpc_inv_pred_gain(A_Q12, order, A_QA) {
+    var DC_resp = 0;
+    var k = 0;
+    while (k < order) {
+        DC_resp = DC_resp + load64(A_Q12 + k * 8);
+        store64(A_QA + k * 8, load64(A_Q12 + k * 8) << 12);   # Q12 -> QA(24)
+        k = k + 1;
+    }
+    if (DC_resp >= 4096) { return 0; }
+    var invGain = 1 << 30;
+    k = order - 1;
+    while (k > 0) {
+        var ak = load64(A_QA + k * 8);
+        if (ak > 16773022) { return 0; }
+        if (ak < 0 - 16773022) { return 0; }
+        var rc_Q31 = 0 - (ak << 7);
+        var rc_mult1 = (1 << 30) - silk_smmul(rc_Q31, rc_Q31);
+        invGain = silk_smmul(invGain, rc_mult1) << 2;
+        if (invGain < 107374) { return 0; }
+        var mult2Q = 32 - silk_clz32(silk_abs64(rc_mult1));
+        var rc_mult2 = silk_inverse32_varq(rc_mult1, mult2Q + 30);
+        var n = 0;
+        var half = (k + 1) >> 1;
+        while (n < half) {
+            var tmp1 = load64(A_QA + n * 8);
+            var tmp2 = load64(A_QA + (k - n - 1) * 8);
+            var t1 = silk_rshift_round(silk_smull(silk_sub_sat32(tmp1, silk_rshift_round(silk_smull(tmp2, rc_Q31), 31)), rc_mult2), mult2Q);
+            if (t1 > 2147483647) { return 0; }
+            if (t1 < 0 - 2147483648) { return 0; }
+            store64(A_QA + n * 8, t1);
+            var t2 = silk_rshift_round(silk_smull(silk_sub_sat32(tmp2, silk_rshift_round(silk_smull(tmp1, rc_Q31), 31)), rc_mult2), mult2Q);
+            if (t2 > 2147483647) { return 0; }
+            if (t2 < 0 - 2147483648) { return 0; }
+            store64(A_QA + (k - n - 1) * 8, t2);
+            n = n + 1;
+        }
+        k = k - 1;
+    }
+    var a0 = load64(A_QA + 0);
+    if (a0 > 16773022) { return 0; }
+    if (a0 < 0 - 16773022) { return 0; }
+    var rc0 = 0 - (a0 << 7);
+    var rcm = (1 << 30) - silk_smmul(rc0, rc0);
+    invGain = silk_smmul(invGain, rcm) << 2;
+    if (invGain < 107374) { return 0; }
+    return invGain;
+}
+
+# silk_NLSF2A: NLSF[d] (Q15) -> a_Q12[d] monic whitening filter coefficients.
+fn silk_nlsf2a(a_Q12, NLSF, d) {
+    if (_silk_lsfcos_q12 == 0) { _silk_lsfcos_init(); }
+    # ordering tables (inline; d is 10 or 16).
+    var ordering = alloc(d * 8);
+    if (d == 16) {
+        var o16 = alloc(16 * 8);
+        store64(o16 + 0, 0); store64(o16 + 8, 15); store64(o16 + 16, 8); store64(o16 + 24, 7);
+        store64(o16 + 32, 4); store64(o16 + 40, 11); store64(o16 + 48, 12); store64(o16 + 56, 3);
+        store64(o16 + 64, 2); store64(o16 + 72, 13); store64(o16 + 80, 10); store64(o16 + 88, 5);
+        store64(o16 + 96, 6); store64(o16 + 104, 9); store64(o16 + 112, 14); store64(o16 + 120, 1);
+        ordering = o16;
+    } else {
+        var o10 = alloc(10 * 8);
+        store64(o10 + 0, 0); store64(o10 + 8, 9); store64(o10 + 16, 6); store64(o10 + 24, 3);
+        store64(o10 + 32, 4); store64(o10 + 40, 5); store64(o10 + 48, 8); store64(o10 + 56, 1);
+        store64(o10 + 64, 2); store64(o10 + 72, 7);
+        ordering = o10;
+    }
+    var cos_QA = alloc(d * 8);
+    var k = 0;
+    while (k < d) {
+        var nlsf = load64(NLSF + k * 8);
+        var f_int = sar(nlsf, 8);                 # RSHIFT(NLSF,15-7)
+        var f_frac = nlsf - (f_int << 8);
+        var cos_val = load64(_silk_lsfcos_q12 + f_int * 8);
+        var delta = load64(_silk_lsfcos_q12 + (f_int + 1) * 8) - cos_val;
+        # RSHIFT_ROUND( LSHIFT(cos_val,8) + MUL(delta,f_frac), 20-QA=4 )
+        var cqa = silk_rshift_round((cos_val << 8) + silk_mul(delta, f_frac), 4);
+        store64(cos_QA + load64(ordering + k * 8) * 8, cqa);
+        k = k + 1;
+    }
+    var dd = sar(d, 1);
+    var P = alloc((dd + 1) * 8);
+    var Q = alloc((dd + 1) * 8);
+    silk_nlsf2a_find_poly(P, cos_QA + 0 * 8, dd);
+    silk_nlsf2a_find_poly(Q, cos_QA + 1 * 8, dd);
+    var a32 = alloc(d * 8);
+    k = 0;
+    while (k < dd) {
+        var Ptmp = load64(P + (k + 1) * 8) + load64(P + k * 8);
+        var Qtmp = load64(Q + (k + 1) * 8) - load64(Q + k * 8);
+        store64(a32 + k * 8, (0 - Qtmp) - Ptmp);
+        store64(a32 + (d - k - 1) * 8, Qtmp - Ptmp);
+        k = k + 1;
+    }
+    silk_lpc_fit(a_Q12, a32, 12, 17, d);
+    var A_QA = alloc(d * 8);
+    var i = 0;
+    while ((silk_lpc_inv_pred_gain(a_Q12, d, A_QA) == 0) & (i < 16)) {
+        silk_bwexpander_32(a32, d, 65536 - (2 << i));
+        k = 0;
+        while (k < d) {
+            store64(a_Q12 + k * 8, silk_rshift_round(load64(a32 + k * 8), 5));   # QA+1-12 = 5
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- LTP codebooks + pitch-lag codebooks + scales (verbatim from libopus) ----
+var _silk_ltpscales_q14 = 0;
+var _silk_ltpvq0 = 0;
+var _silk_ltpvq1 = 0;
+var _silk_ltpvq2 = 0;
+var _silk_cblags2 = 0;
+var _silk_cblags3 = 0;
+
+fn _silk_tables4_init() {
+    _silk_ltpvq0 = alloc(40 * 8);
+    store64(_silk_ltpvq0 + 0 * 8, 4); store64(_silk_ltpvq0 + 1 * 8, 6); store64(_silk_ltpvq0 + 2 * 8, 24); store64(_silk_ltpvq0 + 3 * 8, 7); store64(_silk_ltpvq0 + 4 * 8, 5); store64(_silk_ltpvq0 + 5 * 8, 0); store64(_silk_ltpvq0 + 6 * 8, 0); store64(_silk_ltpvq0 + 7 * 8, 2);
+    store64(_silk_ltpvq0 + 8 * 8, 0); store64(_silk_ltpvq0 + 9 * 8, 0); store64(_silk_ltpvq0 + 10 * 8, 12); store64(_silk_ltpvq0 + 11 * 8, 28); store64(_silk_ltpvq0 + 12 * 8, 41); store64(_silk_ltpvq0 + 13 * 8, 13); store64(_silk_ltpvq0 + 14 * 8, 0 - 4); store64(_silk_ltpvq0 + 15 * 8, 0 - 9);
+    store64(_silk_ltpvq0 + 16 * 8, 15); store64(_silk_ltpvq0 + 17 * 8, 42); store64(_silk_ltpvq0 + 18 * 8, 25); store64(_silk_ltpvq0 + 19 * 8, 14); store64(_silk_ltpvq0 + 20 * 8, 1); store64(_silk_ltpvq0 + 21 * 8, 0 - 2); store64(_silk_ltpvq0 + 22 * 8, 62); store64(_silk_ltpvq0 + 23 * 8, 41);
+    store64(_silk_ltpvq0 + 24 * 8, 0 - 9); store64(_silk_ltpvq0 + 25 * 8, 0 - 10); store64(_silk_ltpvq0 + 26 * 8, 37); store64(_silk_ltpvq0 + 27 * 8, 65); store64(_silk_ltpvq0 + 28 * 8, 0 - 4); store64(_silk_ltpvq0 + 29 * 8, 3); store64(_silk_ltpvq0 + 30 * 8, 0 - 6); store64(_silk_ltpvq0 + 31 * 8, 4);
+    store64(_silk_ltpvq0 + 32 * 8, 66); store64(_silk_ltpvq0 + 33 * 8, 7); store64(_silk_ltpvq0 + 34 * 8, 0 - 8); store64(_silk_ltpvq0 + 35 * 8, 16); store64(_silk_ltpvq0 + 36 * 8, 14); store64(_silk_ltpvq0 + 37 * 8, 38); store64(_silk_ltpvq0 + 38 * 8, 0 - 3); store64(_silk_ltpvq0 + 39 * 8, 33);
+    _silk_ltpvq1 = alloc(80 * 8);
+    store64(_silk_ltpvq1 + 0 * 8, 13); store64(_silk_ltpvq1 + 1 * 8, 22); store64(_silk_ltpvq1 + 2 * 8, 39); store64(_silk_ltpvq1 + 3 * 8, 23); store64(_silk_ltpvq1 + 4 * 8, 12); store64(_silk_ltpvq1 + 5 * 8, 0 - 1); store64(_silk_ltpvq1 + 6 * 8, 36); store64(_silk_ltpvq1 + 7 * 8, 64);
+    store64(_silk_ltpvq1 + 8 * 8, 27); store64(_silk_ltpvq1 + 9 * 8, 0 - 6); store64(_silk_ltpvq1 + 10 * 8, 0 - 7); store64(_silk_ltpvq1 + 11 * 8, 10); store64(_silk_ltpvq1 + 12 * 8, 55); store64(_silk_ltpvq1 + 13 * 8, 43); store64(_silk_ltpvq1 + 14 * 8, 17); store64(_silk_ltpvq1 + 15 * 8, 1);
+    store64(_silk_ltpvq1 + 16 * 8, 1); store64(_silk_ltpvq1 + 17 * 8, 8); store64(_silk_ltpvq1 + 18 * 8, 1); store64(_silk_ltpvq1 + 19 * 8, 1); store64(_silk_ltpvq1 + 20 * 8, 6); store64(_silk_ltpvq1 + 21 * 8, 0 - 11); store64(_silk_ltpvq1 + 22 * 8, 74); store64(_silk_ltpvq1 + 23 * 8, 53);
+    store64(_silk_ltpvq1 + 24 * 8, 0 - 9); store64(_silk_ltpvq1 + 25 * 8, 0 - 12); store64(_silk_ltpvq1 + 26 * 8, 55); store64(_silk_ltpvq1 + 27 * 8, 76); store64(_silk_ltpvq1 + 28 * 8, 0 - 12); store64(_silk_ltpvq1 + 29 * 8, 8); store64(_silk_ltpvq1 + 30 * 8, 0 - 3); store64(_silk_ltpvq1 + 31 * 8, 3);
+    store64(_silk_ltpvq1 + 32 * 8, 93); store64(_silk_ltpvq1 + 33 * 8, 27); store64(_silk_ltpvq1 + 34 * 8, 0 - 4); store64(_silk_ltpvq1 + 35 * 8, 26); store64(_silk_ltpvq1 + 36 * 8, 39); store64(_silk_ltpvq1 + 37 * 8, 59); store64(_silk_ltpvq1 + 38 * 8, 3); store64(_silk_ltpvq1 + 39 * 8, 0 - 8);
+    store64(_silk_ltpvq1 + 40 * 8, 2); store64(_silk_ltpvq1 + 41 * 8, 0); store64(_silk_ltpvq1 + 42 * 8, 77); store64(_silk_ltpvq1 + 43 * 8, 11); store64(_silk_ltpvq1 + 44 * 8, 9); store64(_silk_ltpvq1 + 45 * 8, 0 - 8); store64(_silk_ltpvq1 + 46 * 8, 22); store64(_silk_ltpvq1 + 47 * 8, 44);
+    store64(_silk_ltpvq1 + 48 * 8, 0 - 6); store64(_silk_ltpvq1 + 49 * 8, 7); store64(_silk_ltpvq1 + 50 * 8, 40); store64(_silk_ltpvq1 + 51 * 8, 9); store64(_silk_ltpvq1 + 52 * 8, 26); store64(_silk_ltpvq1 + 53 * 8, 3); store64(_silk_ltpvq1 + 54 * 8, 9); store64(_silk_ltpvq1 + 55 * 8, 0 - 7);
+    store64(_silk_ltpvq1 + 56 * 8, 20); store64(_silk_ltpvq1 + 57 * 8, 101); store64(_silk_ltpvq1 + 58 * 8, 0 - 7); store64(_silk_ltpvq1 + 59 * 8, 4); store64(_silk_ltpvq1 + 60 * 8, 3); store64(_silk_ltpvq1 + 61 * 8, 0 - 8); store64(_silk_ltpvq1 + 62 * 8, 42); store64(_silk_ltpvq1 + 63 * 8, 26);
+    store64(_silk_ltpvq1 + 64 * 8, 0); store64(_silk_ltpvq1 + 65 * 8, 0 - 15); store64(_silk_ltpvq1 + 66 * 8, 33); store64(_silk_ltpvq1 + 67 * 8, 68); store64(_silk_ltpvq1 + 68 * 8, 2); store64(_silk_ltpvq1 + 69 * 8, 23); store64(_silk_ltpvq1 + 70 * 8, 0 - 2); store64(_silk_ltpvq1 + 71 * 8, 55);
+    store64(_silk_ltpvq1 + 72 * 8, 46); store64(_silk_ltpvq1 + 73 * 8, 0 - 2); store64(_silk_ltpvq1 + 74 * 8, 15); store64(_silk_ltpvq1 + 75 * 8, 3); store64(_silk_ltpvq1 + 76 * 8, 0 - 1); store64(_silk_ltpvq1 + 77 * 8, 21); store64(_silk_ltpvq1 + 78 * 8, 16); store64(_silk_ltpvq1 + 79 * 8, 41);
+    _silk_ltpvq2 = alloc(160 * 8);
+    store64(_silk_ltpvq2 + 0 * 8, 0 - 6); store64(_silk_ltpvq2 + 1 * 8, 27); store64(_silk_ltpvq2 + 2 * 8, 61); store64(_silk_ltpvq2 + 3 * 8, 39); store64(_silk_ltpvq2 + 4 * 8, 5); store64(_silk_ltpvq2 + 5 * 8, 0 - 11); store64(_silk_ltpvq2 + 6 * 8, 42); store64(_silk_ltpvq2 + 7 * 8, 88);
+    store64(_silk_ltpvq2 + 8 * 8, 4); store64(_silk_ltpvq2 + 9 * 8, 1); store64(_silk_ltpvq2 + 10 * 8, 0 - 2); store64(_silk_ltpvq2 + 11 * 8, 60); store64(_silk_ltpvq2 + 12 * 8, 65); store64(_silk_ltpvq2 + 13 * 8, 6); store64(_silk_ltpvq2 + 14 * 8, 0 - 4); store64(_silk_ltpvq2 + 15 * 8, 0 - 1);
+    store64(_silk_ltpvq2 + 16 * 8, 0 - 5); store64(_silk_ltpvq2 + 17 * 8, 73); store64(_silk_ltpvq2 + 18 * 8, 56); store64(_silk_ltpvq2 + 19 * 8, 1); store64(_silk_ltpvq2 + 20 * 8, 0 - 9); store64(_silk_ltpvq2 + 21 * 8, 19); store64(_silk_ltpvq2 + 22 * 8, 94); store64(_silk_ltpvq2 + 23 * 8, 29);
+    store64(_silk_ltpvq2 + 24 * 8, 0 - 9); store64(_silk_ltpvq2 + 25 * 8, 0); store64(_silk_ltpvq2 + 26 * 8, 12); store64(_silk_ltpvq2 + 27 * 8, 99); store64(_silk_ltpvq2 + 28 * 8, 6); store64(_silk_ltpvq2 + 29 * 8, 4); store64(_silk_ltpvq2 + 30 * 8, 8); store64(_silk_ltpvq2 + 31 * 8, 0 - 19);
+    store64(_silk_ltpvq2 + 32 * 8, 102); store64(_silk_ltpvq2 + 33 * 8, 46); store64(_silk_ltpvq2 + 34 * 8, 0 - 13); store64(_silk_ltpvq2 + 35 * 8, 3); store64(_silk_ltpvq2 + 36 * 8, 2); store64(_silk_ltpvq2 + 37 * 8, 13); store64(_silk_ltpvq2 + 38 * 8, 3); store64(_silk_ltpvq2 + 39 * 8, 2);
+    store64(_silk_ltpvq2 + 40 * 8, 9); store64(_silk_ltpvq2 + 41 * 8, 0 - 21); store64(_silk_ltpvq2 + 42 * 8, 84); store64(_silk_ltpvq2 + 43 * 8, 72); store64(_silk_ltpvq2 + 44 * 8, 0 - 18); store64(_silk_ltpvq2 + 45 * 8, 0 - 11); store64(_silk_ltpvq2 + 46 * 8, 46); store64(_silk_ltpvq2 + 47 * 8, 104);
+    store64(_silk_ltpvq2 + 48 * 8, 0 - 22); store64(_silk_ltpvq2 + 49 * 8, 8); store64(_silk_ltpvq2 + 50 * 8, 18); store64(_silk_ltpvq2 + 51 * 8, 38); store64(_silk_ltpvq2 + 52 * 8, 48); store64(_silk_ltpvq2 + 53 * 8, 23); store64(_silk_ltpvq2 + 54 * 8, 0); store64(_silk_ltpvq2 + 55 * 8, 0 - 16);
+    store64(_silk_ltpvq2 + 56 * 8, 70); store64(_silk_ltpvq2 + 57 * 8, 83); store64(_silk_ltpvq2 + 58 * 8, 0 - 21); store64(_silk_ltpvq2 + 59 * 8, 11); store64(_silk_ltpvq2 + 60 * 8, 5); store64(_silk_ltpvq2 + 61 * 8, 0 - 11); store64(_silk_ltpvq2 + 62 * 8, 117); store64(_silk_ltpvq2 + 63 * 8, 22);
+    store64(_silk_ltpvq2 + 64 * 8, 0 - 8); store64(_silk_ltpvq2 + 65 * 8, 0 - 6); store64(_silk_ltpvq2 + 66 * 8, 23); store64(_silk_ltpvq2 + 67 * 8, 117); store64(_silk_ltpvq2 + 68 * 8, 0 - 12); store64(_silk_ltpvq2 + 69 * 8, 3); store64(_silk_ltpvq2 + 70 * 8, 3); store64(_silk_ltpvq2 + 71 * 8, 0 - 8);
+    store64(_silk_ltpvq2 + 72 * 8, 95); store64(_silk_ltpvq2 + 73 * 8, 28); store64(_silk_ltpvq2 + 74 * 8, 4); store64(_silk_ltpvq2 + 75 * 8, 0 - 10); store64(_silk_ltpvq2 + 76 * 8, 15); store64(_silk_ltpvq2 + 77 * 8, 77); store64(_silk_ltpvq2 + 78 * 8, 60); store64(_silk_ltpvq2 + 79 * 8, 0 - 15);
+    store64(_silk_ltpvq2 + 80 * 8, 0 - 1); store64(_silk_ltpvq2 + 81 * 8, 4); store64(_silk_ltpvq2 + 82 * 8, 124); store64(_silk_ltpvq2 + 83 * 8, 2); store64(_silk_ltpvq2 + 84 * 8, 0 - 4); store64(_silk_ltpvq2 + 85 * 8, 3); store64(_silk_ltpvq2 + 86 * 8, 38); store64(_silk_ltpvq2 + 87 * 8, 84);
+    store64(_silk_ltpvq2 + 88 * 8, 24); store64(_silk_ltpvq2 + 89 * 8, 0 - 25); store64(_silk_ltpvq2 + 90 * 8, 2); store64(_silk_ltpvq2 + 91 * 8, 13); store64(_silk_ltpvq2 + 92 * 8, 42); store64(_silk_ltpvq2 + 93 * 8, 13); store64(_silk_ltpvq2 + 94 * 8, 31); store64(_silk_ltpvq2 + 95 * 8, 21);
+    store64(_silk_ltpvq2 + 96 * 8, 0 - 4); store64(_silk_ltpvq2 + 97 * 8, 56); store64(_silk_ltpvq2 + 98 * 8, 46); store64(_silk_ltpvq2 + 99 * 8, 0 - 1); store64(_silk_ltpvq2 + 100 * 8, 0 - 1); store64(_silk_ltpvq2 + 101 * 8, 35); store64(_silk_ltpvq2 + 102 * 8, 79); store64(_silk_ltpvq2 + 103 * 8, 0 - 13);
+    store64(_silk_ltpvq2 + 104 * 8, 19); store64(_silk_ltpvq2 + 105 * 8, 0 - 7); store64(_silk_ltpvq2 + 106 * 8, 65); store64(_silk_ltpvq2 + 107 * 8, 88); store64(_silk_ltpvq2 + 108 * 8, 0 - 9); store64(_silk_ltpvq2 + 109 * 8, 0 - 14); store64(_silk_ltpvq2 + 110 * 8, 20); store64(_silk_ltpvq2 + 111 * 8, 4);
+    store64(_silk_ltpvq2 + 112 * 8, 81); store64(_silk_ltpvq2 + 113 * 8, 49); store64(_silk_ltpvq2 + 114 * 8, 0 - 29); store64(_silk_ltpvq2 + 115 * 8, 20); store64(_silk_ltpvq2 + 116 * 8, 0); store64(_silk_ltpvq2 + 117 * 8, 75); store64(_silk_ltpvq2 + 118 * 8, 3); store64(_silk_ltpvq2 + 119 * 8, 0 - 17);
+    store64(_silk_ltpvq2 + 120 * 8, 5); store64(_silk_ltpvq2 + 121 * 8, 0 - 9); store64(_silk_ltpvq2 + 122 * 8, 44); store64(_silk_ltpvq2 + 123 * 8, 92); store64(_silk_ltpvq2 + 124 * 8, 0 - 8); store64(_silk_ltpvq2 + 125 * 8, 1); store64(_silk_ltpvq2 + 126 * 8, 0 - 3); store64(_silk_ltpvq2 + 127 * 8, 22);
+    store64(_silk_ltpvq2 + 128 * 8, 69); store64(_silk_ltpvq2 + 129 * 8, 31); store64(_silk_ltpvq2 + 130 * 8, 0 - 6); store64(_silk_ltpvq2 + 131 * 8, 95); store64(_silk_ltpvq2 + 132 * 8, 41); store64(_silk_ltpvq2 + 133 * 8, 0 - 12); store64(_silk_ltpvq2 + 134 * 8, 5); store64(_silk_ltpvq2 + 135 * 8, 39);
+    store64(_silk_ltpvq2 + 136 * 8, 67); store64(_silk_ltpvq2 + 137 * 8, 16); store64(_silk_ltpvq2 + 138 * 8, 0 - 4); store64(_silk_ltpvq2 + 139 * 8, 1); store64(_silk_ltpvq2 + 140 * 8, 0); store64(_silk_ltpvq2 + 141 * 8, 0 - 6); store64(_silk_ltpvq2 + 142 * 8, 120); store64(_silk_ltpvq2 + 143 * 8, 55);
+    store64(_silk_ltpvq2 + 144 * 8, 0 - 36); store64(_silk_ltpvq2 + 145 * 8, 0 - 13); store64(_silk_ltpvq2 + 146 * 8, 44); store64(_silk_ltpvq2 + 147 * 8, 122); store64(_silk_ltpvq2 + 148 * 8, 4); store64(_silk_ltpvq2 + 149 * 8, 0 - 24); store64(_silk_ltpvq2 + 150 * 8, 81); store64(_silk_ltpvq2 + 151 * 8, 5);
+    store64(_silk_ltpvq2 + 152 * 8, 11); store64(_silk_ltpvq2 + 153 * 8, 3); store64(_silk_ltpvq2 + 154 * 8, 7); store64(_silk_ltpvq2 + 155 * 8, 2); store64(_silk_ltpvq2 + 156 * 8, 0); store64(_silk_ltpvq2 + 157 * 8, 9); store64(_silk_ltpvq2 + 158 * 8, 10); store64(_silk_ltpvq2 + 159 * 8, 88);
+    _silk_cblags2 = alloc(44 * 8);
+    store64(_silk_cblags2 + 0 * 8, 0); store64(_silk_cblags2 + 1 * 8, 2); store64(_silk_cblags2 + 2 * 8, 0 - 1); store64(_silk_cblags2 + 3 * 8, 0 - 1); store64(_silk_cblags2 + 4 * 8, 0 - 1); store64(_silk_cblags2 + 5 * 8, 0); store64(_silk_cblags2 + 6 * 8, 0); store64(_silk_cblags2 + 7 * 8, 1);
+    store64(_silk_cblags2 + 8 * 8, 1); store64(_silk_cblags2 + 9 * 8, 0); store64(_silk_cblags2 + 10 * 8, 1); store64(_silk_cblags2 + 11 * 8, 0); store64(_silk_cblags2 + 12 * 8, 1); store64(_silk_cblags2 + 13 * 8, 0); store64(_silk_cblags2 + 14 * 8, 0); store64(_silk_cblags2 + 15 * 8, 0);
+    store64(_silk_cblags2 + 16 * 8, 0); store64(_silk_cblags2 + 17 * 8, 0); store64(_silk_cblags2 + 18 * 8, 1); store64(_silk_cblags2 + 19 * 8, 0); store64(_silk_cblags2 + 20 * 8, 0); store64(_silk_cblags2 + 21 * 8, 0); store64(_silk_cblags2 + 22 * 8, 0); store64(_silk_cblags2 + 23 * 8, 0);
+    store64(_silk_cblags2 + 24 * 8, 1); store64(_silk_cblags2 + 25 * 8, 0); store64(_silk_cblags2 + 26 * 8, 0); store64(_silk_cblags2 + 27 * 8, 0); store64(_silk_cblags2 + 28 * 8, 1); store64(_silk_cblags2 + 29 * 8, 0); store64(_silk_cblags2 + 30 * 8, 0); store64(_silk_cblags2 + 31 * 8, 0);
+    store64(_silk_cblags2 + 32 * 8, 0); store64(_silk_cblags2 + 33 * 8, 0); store64(_silk_cblags2 + 34 * 8, 0 - 1); store64(_silk_cblags2 + 35 * 8, 2); store64(_silk_cblags2 + 36 * 8, 1); store64(_silk_cblags2 + 37 * 8, 0); store64(_silk_cblags2 + 38 * 8, 1); store64(_silk_cblags2 + 39 * 8, 1);
+    store64(_silk_cblags2 + 40 * 8, 0); store64(_silk_cblags2 + 41 * 8, 0); store64(_silk_cblags2 + 42 * 8, 0 - 1); store64(_silk_cblags2 + 43 * 8, 0 - 1);
+    _silk_cblags3 = alloc(136 * 8);
+    store64(_silk_cblags3 + 0 * 8, 0); store64(_silk_cblags3 + 1 * 8, 0); store64(_silk_cblags3 + 2 * 8, 1); store64(_silk_cblags3 + 3 * 8, 0 - 1); store64(_silk_cblags3 + 4 * 8, 0); store64(_silk_cblags3 + 5 * 8, 1); store64(_silk_cblags3 + 6 * 8, 0 - 1); store64(_silk_cblags3 + 7 * 8, 0);
+    store64(_silk_cblags3 + 8 * 8, 0 - 1); store64(_silk_cblags3 + 9 * 8, 1); store64(_silk_cblags3 + 10 * 8, 0 - 2); store64(_silk_cblags3 + 11 * 8, 2); store64(_silk_cblags3 + 12 * 8, 0 - 2); store64(_silk_cblags3 + 13 * 8, 0 - 2); store64(_silk_cblags3 + 14 * 8, 2); store64(_silk_cblags3 + 15 * 8, 0 - 3);
+    store64(_silk_cblags3 + 16 * 8, 2); store64(_silk_cblags3 + 17 * 8, 3); store64(_silk_cblags3 + 18 * 8, 0 - 3); store64(_silk_cblags3 + 19 * 8, 0 - 4); store64(_silk_cblags3 + 20 * 8, 3); store64(_silk_cblags3 + 21 * 8, 0 - 4); store64(_silk_cblags3 + 22 * 8, 4); store64(_silk_cblags3 + 23 * 8, 4);
+    store64(_silk_cblags3 + 24 * 8, 0 - 5); store64(_silk_cblags3 + 25 * 8, 5); store64(_silk_cblags3 + 26 * 8, 0 - 6); store64(_silk_cblags3 + 27 * 8, 0 - 5); store64(_silk_cblags3 + 28 * 8, 6); store64(_silk_cblags3 + 29 * 8, 0 - 7); store64(_silk_cblags3 + 30 * 8, 6); store64(_silk_cblags3 + 31 * 8, 5);
+    store64(_silk_cblags3 + 32 * 8, 8); store64(_silk_cblags3 + 33 * 8, 0 - 9); store64(_silk_cblags3 + 34 * 8, 0); store64(_silk_cblags3 + 35 * 8, 0); store64(_silk_cblags3 + 36 * 8, 1); store64(_silk_cblags3 + 37 * 8, 0); store64(_silk_cblags3 + 38 * 8, 0); store64(_silk_cblags3 + 39 * 8, 0);
+    store64(_silk_cblags3 + 40 * 8, 0); store64(_silk_cblags3 + 41 * 8, 0); store64(_silk_cblags3 + 42 * 8, 0); store64(_silk_cblags3 + 43 * 8, 0); store64(_silk_cblags3 + 44 * 8, 0 - 1); store64(_silk_cblags3 + 45 * 8, 1); store64(_silk_cblags3 + 46 * 8, 0); store64(_silk_cblags3 + 47 * 8, 0);
+    store64(_silk_cblags3 + 48 * 8, 1); store64(_silk_cblags3 + 49 * 8, 0 - 1); store64(_silk_cblags3 + 50 * 8, 0); store64(_silk_cblags3 + 51 * 8, 1); store64(_silk_cblags3 + 52 * 8, 0 - 1); store64(_silk_cblags3 + 53 * 8, 0 - 1); store64(_silk_cblags3 + 54 * 8, 1); store64(_silk_cblags3 + 55 * 8, 0 - 1);
+    store64(_silk_cblags3 + 56 * 8, 2); store64(_silk_cblags3 + 57 * 8, 1); store64(_silk_cblags3 + 58 * 8, 0 - 1); store64(_silk_cblags3 + 59 * 8, 2); store64(_silk_cblags3 + 60 * 8, 0 - 2); store64(_silk_cblags3 + 61 * 8, 0 - 2); store64(_silk_cblags3 + 62 * 8, 2); store64(_silk_cblags3 + 63 * 8, 0 - 2);
+    store64(_silk_cblags3 + 64 * 8, 2); store64(_silk_cblags3 + 65 * 8, 2); store64(_silk_cblags3 + 66 * 8, 3); store64(_silk_cblags3 + 67 * 8, 0 - 3); store64(_silk_cblags3 + 68 * 8, 0); store64(_silk_cblags3 + 69 * 8, 1); store64(_silk_cblags3 + 70 * 8, 0); store64(_silk_cblags3 + 71 * 8, 0);
+    store64(_silk_cblags3 + 72 * 8, 0); store64(_silk_cblags3 + 73 * 8, 0); store64(_silk_cblags3 + 74 * 8, 0); store64(_silk_cblags3 + 75 * 8, 0); store64(_silk_cblags3 + 76 * 8, 1); store64(_silk_cblags3 + 77 * 8, 0); store64(_silk_cblags3 + 78 * 8, 1); store64(_silk_cblags3 + 79 * 8, 0);
+    store64(_silk_cblags3 + 80 * 8, 0); store64(_silk_cblags3 + 81 * 8, 1); store64(_silk_cblags3 + 82 * 8, 0 - 1); store64(_silk_cblags3 + 83 * 8, 1); store64(_silk_cblags3 + 84 * 8, 0); store64(_silk_cblags3 + 85 * 8, 0); store64(_silk_cblags3 + 86 * 8, 2); store64(_silk_cblags3 + 87 * 8, 1);
+    store64(_silk_cblags3 + 88 * 8, 0 - 1); store64(_silk_cblags3 + 89 * 8, 2); store64(_silk_cblags3 + 90 * 8, 0 - 1); store64(_silk_cblags3 + 91 * 8, 0 - 1); store64(_silk_cblags3 + 92 * 8, 2); store64(_silk_cblags3 + 93 * 8, 0 - 1); store64(_silk_cblags3 + 94 * 8, 2); store64(_silk_cblags3 + 95 * 8, 2);
+    store64(_silk_cblags3 + 96 * 8, 0 - 1); store64(_silk_cblags3 + 97 * 8, 3); store64(_silk_cblags3 + 98 * 8, 0 - 2); store64(_silk_cblags3 + 99 * 8, 0 - 2); store64(_silk_cblags3 + 100 * 8, 0 - 2); store64(_silk_cblags3 + 101 * 8, 3); store64(_silk_cblags3 + 102 * 8, 0); store64(_silk_cblags3 + 103 * 8, 1);
+    store64(_silk_cblags3 + 104 * 8, 0); store64(_silk_cblags3 + 105 * 8, 0); store64(_silk_cblags3 + 106 * 8, 1); store64(_silk_cblags3 + 107 * 8, 0); store64(_silk_cblags3 + 108 * 8, 1); store64(_silk_cblags3 + 109 * 8, 0 - 1); store64(_silk_cblags3 + 110 * 8, 2); store64(_silk_cblags3 + 111 * 8, 0 - 1);
+    store64(_silk_cblags3 + 112 * 8, 2); store64(_silk_cblags3 + 113 * 8, 0 - 1); store64(_silk_cblags3 + 114 * 8, 2); store64(_silk_cblags3 + 115 * 8, 3); store64(_silk_cblags3 + 116 * 8, 0 - 2); store64(_silk_cblags3 + 117 * 8, 3); store64(_silk_cblags3 + 118 * 8, 0 - 2); store64(_silk_cblags3 + 119 * 8, 0 - 2);
+    store64(_silk_cblags3 + 120 * 8, 4); store64(_silk_cblags3 + 121 * 8, 4); store64(_silk_cblags3 + 122 * 8, 0 - 3); store64(_silk_cblags3 + 123 * 8, 5); store64(_silk_cblags3 + 124 * 8, 0 - 3); store64(_silk_cblags3 + 125 * 8, 0 - 4); store64(_silk_cblags3 + 126 * 8, 6); store64(_silk_cblags3 + 127 * 8, 0 - 4);
+    store64(_silk_cblags3 + 128 * 8, 6); store64(_silk_cblags3 + 129 * 8, 5); store64(_silk_cblags3 + 130 * 8, 0 - 5); store64(_silk_cblags3 + 131 * 8, 8); store64(_silk_cblags3 + 132 * 8, 0 - 6); store64(_silk_cblags3 + 133 * 8, 0 - 5); store64(_silk_cblags3 + 134 * 8, 0 - 7); store64(_silk_cblags3 + 135 * 8, 9);
+    _silk_ltpscales_q14 = alloc(3 * 8);
+    store64(_silk_ltpscales_q14 + 0, 15565); store64(_silk_ltpscales_q14 + 8, 12288); store64(_silk_ltpscales_q14 + 16, 8192);
+    return 0;
+}
+
+# ---- pitch lag + LTP coefficient decode (decode_pitch.c / decode_parameters.c) ----
+# silk_decode_pitch: contour codebook maps (subframe, contourIndex) -> lag offset.
+# nb_subfr fixed at 4 (20 ms). pitchL_out[4].
+fn silk_decode_pitch(lagIndex, contourIndex, fs_kHz, pitchL_out) {
+    if (_silk_cblags2 == 0) { _silk_tables4_init(); }
+    var lag_cb = _silk_cblags3;
+    var cbk_size = 34;
+    if (fs_kHz == 8) { lag_cb = _silk_cblags2; cbk_size = 11; }
+    var min_lag = 2 * fs_kHz;
+    var max_lag = 18 * fs_kHz;
+    var lag = min_lag + lagIndex;
+    var k = 0;
+    while (k < 4) {
+        var pl = lag + load64(lag_cb + (k * cbk_size + contourIndex) * 8);
+        store64(pitchL_out + k * 8, silk_limit(pl, min_lag, max_lag));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# silk_decode_ltp: fill LTPCoef_Q14[4*5] from PERIndex + per-subframe LTPIndex.
+# ltp_idx points at LTPIndex[0] (4 consecutive i64 slots).
+fn silk_decode_ltp(PERIndex, ltp_idx, ltpcoef_out) {
+    if (_silk_ltpvq0 == 0) { _silk_tables4_init(); }
+    var cbk = _silk_ltpvq0;
+    if (PERIndex == 1) { cbk = _silk_ltpvq1; }
+    if (PERIndex == 2) { cbk = _silk_ltpvq2; }
+    var k = 0;
+    while (k < 4) {
+        var Ix = load64(ltp_idx + k * 8);
+        var i = 0;
+        while (i < 5) {
+            store64(ltpcoef_out + (k * 5 + i) * 8, load64(cbk + (Ix * 5 + i) * 8) << 7);
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+# silk_ltp_scale: LTP_scale_Q14 from LTP_scaleIndex (0..2).
+fn silk_ltp_scale(LTP_scaleIndex) {
+    if (_silk_ltpscales_q14 == 0) { _silk_tables4_init(); }
+    return load64(_silk_ltpscales_q14 + LTP_scaleIndex * 8);
+}

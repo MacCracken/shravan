@@ -2415,6 +2415,25 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(pn + 13 * 8), 26240, "sw0 pNLSF13");
     assert_eq(load64(pn + 14 * 8), 28416, "sw0 pNLSF14");
     assert_eq(load64(pn + 15 * 8), 30336, "sw0 pNLSF15");
+    # sw0 NLSF2A -> a_Q12 (bit-exact vs libopus PredCoef_Q12, first frame no interp)
+    var aq = alloc(16 * 8);
+    silk_nlsf2a(aq, pn, 16);
+    assert_eq(load64(aq + 0 * 8), 6616, "sw0 LPC0");
+    assert_eq(load64(aq + 1 * 8), 0 - 2821, "sw0 LPC1");
+    assert_eq(load64(aq + 2 * 8), 638, "sw0 LPC2");
+    assert_eq(load64(aq + 3 * 8), 0 - 386, "sw0 LPC3");
+    assert_eq(load64(aq + 4 * 8), 0 - 140, "sw0 LPC4");
+    assert_eq(load64(aq + 5 * 8), 0 - 335, "sw0 LPC5");
+    assert_eq(load64(aq + 6 * 8), 813, "sw0 LPC6");
+    assert_eq(load64(aq + 7 * 8), 0 - 473, "sw0 LPC7");
+    assert_eq(load64(aq + 8 * 8), 85, "sw0 LPC8");
+    assert_eq(load64(aq + 9 * 8), 0 - 152, "sw0 LPC9");
+    assert_eq(load64(aq + 10 * 8), 449, "sw0 LPC10");
+    assert_eq(load64(aq + 11 * 8), 0 - 318, "sw0 LPC11");
+    assert_eq(load64(aq + 12 * 8), 86, "sw0 LPC12");
+    assert_eq(load64(aq + 13 * 8), 0 - 180, "sw0 LPC13");
+    assert_eq(load64(aq + 14 * 8), 490, "sw0 LPC14");
+    assert_eq(load64(aq + 15 * 8), 0 - 336, "sw0 LPC15");
     # sw1
     var sw1_p = alloc(28);
     store8(sw1_p + 0, 167); store8(sw1_p + 1, 33); store8(sw1_p + 2, 153); store8(sw1_p + 3, 115); store8(sw1_p + 4, 110); store8(sw1_p + 5, 47); store8(sw1_p + 6, 26); store8(sw1_p + 7, 189); store8(sw1_p + 8, 218); store8(sw1_p + 9, 230); store8(sw1_p + 10, 208); store8(sw1_p + 11, 14); store8(sw1_p + 12, 195); store8(sw1_p + 13, 190);
@@ -2454,6 +2473,23 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 36 * 8), 28, "sw1 LTPI1");
     assert_eq(load64(out + 37 * 8), 28, "sw1 LTPI2");
     assert_eq(load64(out + 38 * 8), 28, "sw1 LTPI3");
+    # sw1 pitch + LTP (voiced, WB) bit-exact vs libopus decode_pitch/decode_parameters
+    var pl = alloc(4 * 8);
+    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 16, pl);
+    assert_eq(load64(pl + 0 * 8), 145, "sw1 pitchL0");
+    assert_eq(load64(pl + 1 * 8), 145, "sw1 pitchL1");
+    assert_eq(load64(pl + 2 * 8), 145, "sw1 pitchL2");
+    assert_eq(load64(pl + 3 * 8), 145, "sw1 pitchL3");
+    var ltpc = alloc(20 * 8);
+    silk_decode_ltp(load64(out + 14 * 8), out + 35 * 8, ltpc);
+    assert_eq(load64(ltpc + 0 * 8), 0, "sw1 LTP0");
+    assert_eq(load64(ltpc + 1 * 8), 0 - 768, "sw1 LTP1");
+    assert_eq(load64(ltpc + 2 * 8), 15360, "sw1 LTP2");
+    assert_eq(load64(ltpc + 3 * 8), 7040, "sw1 LTP3");
+    assert_eq(load64(ltpc + 4 * 8), 0 - 4608, "sw1 LTP4");
+    assert_eq(load64(ltpc + 15 * 8), 0, "sw1 LTP15");
+    assert_eq(load64(ltpc + 19 * 8), 0 - 4608, "sw1 LTP19");
+    assert_eq(silk_ltp_scale(load64(out + 15 * 8)), 15565, "sw1 LTPscale");
     # sn0
     store64(lg, 0);
     var sn0_p = alloc(19);
@@ -2500,6 +2536,18 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(pn + 7 * 8), 21772, "sn0 pNLSF7");
     assert_eq(load64(pn + 8 * 8), 25872, "sn0 pNLSF8");
     assert_eq(load64(pn + 9 * 8), 29694, "sn0 pNLSF9");
+    # sn0 NLSF2A -> a_Q12 (NB order 10, bit-exact vs libopus PredCoef_Q12)
+    silk_nlsf2a(aq, pn, 10);
+    assert_eq(load64(aq + 0 * 8), 7104, "sn0 LPC0");
+    assert_eq(load64(aq + 1 * 8), 0 - 3036, "sn0 LPC1");
+    assert_eq(load64(aq + 2 * 8), 0 - 481, "sn0 LPC2");
+    assert_eq(load64(aq + 3 * 8), 1031, "sn0 LPC3");
+    assert_eq(load64(aq + 4 * 8), 0 - 1108, "sn0 LPC4");
+    assert_eq(load64(aq + 5 * 8), 590, "sn0 LPC5");
+    assert_eq(load64(aq + 6 * 8), 0 - 312, "sn0 LPC6");
+    assert_eq(load64(aq + 7 * 8), 0 - 56, "sn0 LPC7");
+    assert_eq(load64(aq + 8 * 8), 208, "sn0 LPC8");
+    assert_eq(load64(aq + 9 * 8), 0 - 40, "sn0 LPC9");
     # sn1
     var sn1_p = alloc(16);
     store8(sn1_p + 0, 166); store8(sn1_p + 1, 148); store8(sn1_p + 2, 176); store8(sn1_p + 3, 15); store8(sn1_p + 4, 63); store8(sn1_p + 5, 212); store8(sn1_p + 6, 70); store8(sn1_p + 7, 179); store8(sn1_p + 8, 102); store8(sn1_p + 9, 77); store8(sn1_p + 10, 112); store8(sn1_p + 11, 201); store8(sn1_p + 12, 233); store8(sn1_p + 13, 158);
@@ -2533,6 +2581,24 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 30 * 8), 28, "sn1 LTPI1");
     assert_eq(load64(out + 31 * 8), 29, "sn1 LTPI2");
     assert_eq(load64(out + 32 * 8), 29, "sn1 LTPI3");
+    # sn1 pitch + LTP (voiced, NB) bit-exact vs libopus
+    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 8, pl);
+    assert_eq(load64(pl + 0 * 8), 73, "sn1 pitchL0");
+    assert_eq(load64(pl + 3 * 8), 73, "sn1 pitchL3");
+    silk_decode_ltp(load64(out + 14 * 8), out + 29 * 8, ltpc);
+    # subfr0 = idx29
+    assert_eq(load64(ltpc + 0 * 8), 0 - 1664, "sn1 LTP0");
+    assert_eq(load64(ltpc + 1 * 8), 5632, "sn1 LTP1");
+    assert_eq(load64(ltpc + 2 * 8), 15616, "sn1 LTP2");
+    assert_eq(load64(ltpc + 3 * 8), 512, "sn1 LTP3");
+    assert_eq(load64(ltpc + 4 * 8), 0 - 3072, "sn1 LTP4");
+    # subfr1 = idx28 (different)
+    assert_eq(load64(ltpc + 5 * 8), 0, "sn1 LTP5");
+    assert_eq(load64(ltpc + 6 * 8), 0 - 768, "sn1 LTP6");
+    assert_eq(load64(ltpc + 7 * 8), 15360, "sn1 LTP7");
+    assert_eq(load64(ltpc + 8 * 8), 7040, "sn1 LTP8");
+    assert_eq(load64(ltpc + 9 * 8), 0 - 4608, "sn1 LTP9");
+    assert_eq(silk_ltp_scale(load64(out + 15 * 8)), 15565, "sn1 LTPscale");
     return 0;
 }
 
