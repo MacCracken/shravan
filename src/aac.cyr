@@ -819,8 +819,8 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
     var i = 0;
     if (is_stereo == 1) {
-        # M/S stereo: mid = (L+R)/2, side = (L-R)/2 (first 1024 only for now)
-        while (i < AAC_FRAME_SIZE) {
+        # M/S stereo over the full 2048-sample overlap window: mid=(L+R)/2, side=(L-R)/2
+        while (i < windowed_size) {
             var left = load64(samples + (i * ch) * 8);
             var right = load64(samples + (i * ch + 1) * 8);
             store64(mono + i * 8, f64_mul(f64_add(left, right), F64_HALF));
@@ -1054,17 +1054,18 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         band = band + 1;
     }
 
-    # Section coding: group consecutive bands with same codebook
+    # Section coding: group consecutive bands with the SAME codebook. (The old code
+    # grouped by has_data but wrote the first band's codebook for the whole run, so a
+    # run of data bands with different codebooks was mislabeled -> the decoder decoded
+    # later bands with the wrong codebook = garbage. Masked for a single-band tone;
+    # exposed by any multi-band signal, e.g. the stereo mid = two tones.)
     band = 0;
     while (band < _AAC_NUM_SWB) {
-        var has_data = load64(band_has_data + band * 8);
         var cb = load64(band_cb + band * 8);
 
-        # Find run of same codebook
         var run = 1;
         while (band + run < _AAC_NUM_SWB) {
-            var next_has = load64(band_has_data + (band + run) * 8);
-            if ((next_has != 0) != (has_data != 0)) { break; }
+            if (load64(band_cb + (band + run) * 8) != cb) { break; }
             run = run + 1;
         }
 
@@ -1256,9 +1257,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                 f64_from(windowed_size)
             );
             var w = f64_sin(angle);
-            if (i < AAC_FRAME_SIZE) {
-                store64(side_windowed + i * 8, f64_mul(load64(side + i * 8), w));
-            }
+            store64(side_windowed + i * 8, f64_mul(load64(side + i * 8), w));
             i = i + 1;
         }
         var side_mdct = alloc(AAC_FRAME_SIZE * 8);
@@ -1280,8 +1279,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                 var xval = load64(side_mdct + j * 8);
                 var abs_val = f64_abs(xval);
                 if (f64_gt(step, floor_step) == 1) {
-                    var powered = f64_pow(abs_val, f64_div(f64_from(3), f64_from(4)));
-                    var q = f64_to(f64_floor(f64_add(f64_div(powered, step), F64_HALF)));
+                    var q = f64_to(f64_floor(f64_add(f64_pow(f64_div(abs_val, step), f64_div(f64_from(3), f64_from(4))), F64_HALF)));
                     if (q > 8191) { q = 8191; }
                     if (f64_lt(xval, F64_ZERO) == 1) { store64(side_quant + j * 8, 0 - q); }
                     else { store64(side_quant + j * 8, q); }
@@ -1291,20 +1289,22 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
             band = band + 1;
         }
 
-        # Side channel ICS info (not shared — written per-channel after CPE common window)
-        _bw_write(bw, 0, 1);  # ics_reserved_bit
-        _bw_write(bw, 0, 2);  # window_sequence
-        _bw_write(bw, 0, 1);  # window_shape
-        _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
-        _bw_write(bw, 0, 1);  # predictor
+        # NO per-channel ICS here: with common_window=1 the ICS info is shared (written
+        # once above) and the decoder reads ch1 starting at the section data. The old
+        # code emitted an 11-bit side ICS block the decoder never read -> misalignment.
 
-        # Side channel section coding — use same codebook selection as mid
+        # Side sections: escape codebook (11) for data bands, 0 otherwise, matching the
+        # escape-coded side spectral below. (The old code copied the mid codebooks into
+        # the sections but always escape-coded the spectral data -> decoder desync.)
         band = 0;
         while (band < _AAC_NUM_SWB) {
-            var scb = load64(band_cb + band * 8);
+            var scb = 0;
+            if (load64(band_has_data + band * 8) != 0) { scb = 11; }
             var run = 1;
             while (band + run < _AAC_NUM_SWB) {
-                if (load64(band_cb + (band + run) * 8) != scb) { break; }
+                var nscb = 0;
+                if (load64(band_has_data + (band + run) * 8) != 0) { nscb = 11; }
+                if (nscb != scb) { break; }
                 run = run + 1;
             }
             _bw_write(bw, scb, 4);

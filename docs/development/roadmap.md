@@ -1,7 +1,8 @@
 # Development Roadmap
 
-> **v2.5.9** — 859 tests, Cyrius 6.3.27. **Opus now decodes to real PCM audio**
-> (encode→decode waveform correlation 0.99+, mono+stereo) — the headline deferred item.
+> **v2.5.10** — 870 tests, Cyrius 6.3.27. **Opus AND AAC now encode→decode to real PCM
+> audio** (waveform correlation 0.99+, mono+stereo). The deepest fix: `fft_mdct`/`fft_imdct`
+> were never a matched pair — one bug that had been silencing *both* encoders.
 > The forward plan below was **reorganized 2026-07-02**: the sprawling
 > 2.5.9–2.5.23 point-release list was collapsed into **four focused 2.5.x releases**
 > that **do the deferred core work** — the actual audio the 2.5.0–2.5.8 scaffolding was
@@ -20,8 +21,10 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
   `sowt`).
 - **FLAC** encode (Fixed-prediction only, no LPC) + decode (full: CONSTANT/VERBATIM/
   FIXED/LPC, Rice, all 4 stereo modes, CRC, SEEKTABLE-ranged).
-- **AAC *decode*** (real dequant → IMDCT → overlap-add) and **MP4/M4A** demux → AAC-decode
-  → PCM (verified: 1024 non-zero samples from a real AU).
+- **AAC encode+decode → PCM** *(2.5.10)* — `aac_encode` → `aac_decode` round-trips real
+  audio (waveform correlation mono 0.999, stereo 0.999/0.999); **MP4/M4A** demux →
+  AAC-decode → PCM. Caveat: TNS disabled (amplified quant noise — proper noise-shaping is
+  a follow-up); HCB6 reuses HCB5 (never selected by shravan's encoder).
 - **Opus/CELT encode+decode → PCM** *(2.5.9)* — `opus_encode` → `opus_decode_from_packets`
   round-trips real audio (waveform correlation: mono 0.997, stereo 0.996/0.999, transient
   0.998), mono + stereo. Caveat: a **bespoke, non-RFC-6716** stream (won't interoperate
@@ -29,11 +32,6 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
   long MDCT (short-window pre-echo coding deferred).
 
 **🟥 Looks done, isn't (scaffolding / broken — the "actual core" that remains):**
-- **AAC *encode* → silence.** The quantizer step is ~100× too coarse **and** the encode/
-  decode quantizers don't invert → every coefficient rounds to 0. A 0.6-amplitude sine
-  decodes to ~2e-7. *(The old status wrongly listed AAC as end-to-end.)* Also: `fft_mdct`
-  is not the inverse of `fft_imdct` (found in 2.5.9), a second reason encode→decode can't
-  reconstruct — the AAC encoder needs the fixed transform pair too.
 - **ALAC — dead code.** A full decoder exists but is **unwired**: `detect_format` has no
   ALAC branch and MP4 routes only to AAC, so `codec_open`'s `FMT_ALAC` dispatch is
   unreachable and the decoder is unverified on real frames.
@@ -95,31 +93,31 @@ is wired. Stream stays shravan-internal (RFC-6716 conformance is its own item be
 matched pair (unblocks the AAC encoder + lets Opus drop the O(N²) direct transform), and
 add a real MDCT↔IMDCT reconstruction test (today's only asserts "output nonzero").
 
-### v2.5.10 — AAC produces audio + all AAC bugs/completions · medium–large · IN PROGRESS
+### v2.5.10 — AAC produces audio + all AAC bugs · shipped 2026-07-02
 
-**Goal:** `aac_encode` → `aac_decode` faithfully round-trips (SNR-verified), **mono and
-stereo**, and every AAC correctness/safety bug the audit found is closed.
+**Done:** `aac_encode` → `aac_decode` round-trips real audio — mono **0.999**, stereo
+**0.999 / 0.999** waveform correlation (was silence). Every AAC correctness/safety bug the
+audit found is closed.
 
-**Status (mono audio + correctness bugs done; stereo + completions remain):**
 - [x] **Matched MDCT/IMDCT transform** — replaced the mismatched `fft_mdct`/`fft_imdct`
-      with a verified TDAC pair (machine-precision reconstruction test; unity gain). This
-      was the deepest root cause (silent AAC *and* Opus encoders) — pulled forward from
-      the 2.5.12 tail. Also made Opus decode unity-gain.
-- [x] **AAC encoder 50%-overlap framing** (window 2048, hop 1024, stop zeroing the 2nd
-      half) + **invertible quantizer** (`q=round((|x|/step)^0.75)`) + **peak-based scale
-      factors** so tonal peaks survive. Mono round-trip **0.975 correlation** (was silence).
-- [x] **Scale-factor DPCM predictor** tracks the transmitted (clamped) value (mono + CPE).
-- [x] **Decoder robustness**: guard reserved section codebooks 12–15 (was a DoS
-      infinite-loop) + removed the band double-increment for cb 1–4/9/10 + reject-not-hang test.
-- [~] **TNS temporarily disabled** — its FIR/IIR pair amplified quant noise through the
-      quantizer (dropped the tone round-trip to 0.68); proper prediction-gain-gated noise
-      shaping is folded into the completion below.
-- [ ] **CPE stereo**: 50%-overlap framing for mid/side + fix the bitstream (stray side
-      ICS, side codebook/escape disagreement) + stereo SNR test.
-- [ ] **Completions**: real HCB6 tables; TNS (correct noise shaping, short-window,
-      stereo/CPE); psychoacoustic ATH floor + tonality-adjusted SMR.
-- [ ] Optional: rate/distortion scale-factor loop (replaces the peak heuristic).
-- [ ] `docs/CHANGELOG/VERSION: 2.5.10`.
+      with a verified TDAC pair (machine-precision reconstruction test; unity gain). The
+      deepest root cause — silent AAC *and* Opus encoders — pulled forward from 2.5.12.
+      Also made Opus decode unity-gain.
+- [x] Encoder 50%-overlap framing + invertible quantizer + peak-based scale factors.
+- [x] **Section coding groups by codebook** (was mislabeling multi-codebook runs → garbage;
+      capped mono at 0.975 and broke stereo). Fixing it lifted mono to 0.999.
+- [x] CPE stereo: dropped the stray side ICS, side sections match the escape-coded
+      spectral, mid/side overlap framing + invertible side quantizer → stereo 0.999.
+- [x] Scale-factor DPCM predictor tracks the transmitted (clamped) value (mono + CPE).
+- [x] Decoder robustness: reserved codebook 12–15 guard (DoS) + removed band
+      double-increment for cb 1–4/9/10 + reject-not-hang test.
+
+**Deferred (AAC completions — refinements, not blockers):**
+- **TNS** temporarily disabled (amplified quant noise through the quantizer: 0.98→0.68);
+  proper prediction-gain-gated noise shaping + short-window + stereo/CPE is a follow-up.
+- Real **HCB6** tables (reuses HCB5; shravan's encoder never selects cb6 so it only
+  affects some third-party files) + **psychoacoustic ATH floor + tonality-adjusted SMR**.
+- Optional rate/distortion scale-factor loop (replaces the peak heuristic).
 
 ### v2.5.11 — MP3 decode → PCM · large
 

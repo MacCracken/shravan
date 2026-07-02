@@ -1055,6 +1055,57 @@ fn test_aac_audio_roundtrip() {
     return 0;
 }
 
+# 2.5.10: real end-to-end AAC stereo (CPE / mid-side). Encode two distinct tones,
+# decode, deinterleave, and assert each channel correlates — verifies the M/S downmix,
+# side-channel overlap framing, and the fixed CPE bitstream (no stray side ICS, side
+# sections matching the escape-coded spectral).
+fn test_aac_stereo_roundtrip() {
+    syscall(1, 1, "test: aac stereo roundtrip\n", 27);
+    var n = 4096;
+    var aL = f64_div(F64_ONE, F64_TWO);
+    var aR = f64_div(f64_from(2), f64_from(5));
+    var samples = vec_new();
+    var xl = alloc(n * 8);
+    var xr = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        var l = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(40))), aL);
+        var r = f64_mul(f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(60))), aR);
+        vec_push(samples, l);
+        vec_push(samples, r);
+        store64(xl + i * 8, l);
+        store64(xr + i * 8, r);
+        i = i + 1;
+    }
+    var out = alloc(524288);
+    var sz = aac_encode(samples, 44100, 2, 160000, out);
+    assert(res_ok(sz) == 1, "aac stereo encode ok");
+    var result = aac_decode(out, sz);
+    assert(res_ok(result) == 1, "aac stereo decode ok");
+    var sout = decode_result_samples(result);
+    var pairs = vec_len(sout) / 2;
+    assert(pairs > 1024, "aac stereo decode long enough to skip priming");
+    var dl_len = pairs - 1024;
+    var dl = alloc(dl_len * 8);
+    var dr = alloc(dl_len * 8);
+    i = 0;
+    while (i < dl_len) {
+        store64(dl + i * 8, vec_get(sout, (1024 + i) * 2));
+        store64(dr + i * 8, vec_get(sout, (1024 + i) * 2 + 1));
+        i = i + 1;
+    }
+    var cl = _best_lag_corr(dl, dl_len, xl, n, 1024);
+    var cr = _best_lag_corr(dr, dl_len, xr, n, 1024);
+    syscall(1, 1, "  aac stereo corr*1000 L=", 25);
+    fmt_int(cl);
+    syscall(1, 1, " R=", 3);
+    fmt_int(cr);
+    syscall(1, 1, "\n", 1);
+    assert(cl > 900, "aac left channel correlates (>0.9)");
+    assert(cr > 900, "aac right channel correlates (>0.9)");
+    return 0;
+}
+
 # 2.5.10: a section codebook in {12..15} (reserved/PNS/intensity) must not spin the
 # spectral decoder forever (it never advanced `band` before). Reject-not-hang guard.
 fn test_aac_reserved_cb_no_hang() {
@@ -1393,6 +1444,7 @@ test_opus_decode_audio_roundtrip();
 test_opus_decode_stereo_roundtrip();
 test_opus_decode_transient_roundtrip();
 test_aac_audio_roundtrip();
+test_aac_stereo_roundtrip();
 test_aac_reserved_cb_no_hang();
 test_aac_encode_decode_roundtrip();
 test_tag_write_id3v2_roundtrip();

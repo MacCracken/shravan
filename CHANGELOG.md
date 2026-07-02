@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.10] - 2026-07-02
+
+**AAC encoder produces real audio** — `aac_encode` → `aac_decode` now round-trips
+faithfully (mono **0.999**, stereo **0.999 / 0.999** waveform correlation), where before
+it decoded to silence. Every AAC correctness/safety bug the audit found is closed. 870
+assertions (was 859, +11).
+
+### Fixed — the transform (root cause of BOTH silent encoders)
+
+- **`fft_mdct`/`fft_imdct` were never a matched analysis/synthesis pair** (`fft_imdct`
+  is a valid IMDCT — it decodes real AAC — but `fft_mdct`'s convention did not invert it,
+  so encode→decode cancelled to silence). Replaced them with a verified TDAC-invertible
+  direct pair (shared cosine basis, standard AAC/Vorbis convention, unity gain). The old
+  `test_fft_mdct_roundtrip` only checked "output is nonzero"; it now asserts real
+  windowed 50%-overlap reconstruction to `<1e-6`. Also fixed the IMDCT scale (`2/M`) so
+  reconstruction is unity-gain (this made Opus decode unity-gain too). O(N²); a fast
+  FFT-based pair preserving this convention is a perf follow-up.
+
+### Fixed — AAC encoder/decoder
+
+- **Encoder 50%-overlap framing** (window 2048, hop 1024; stop zeroing the 2nd MDCT
+  half) so the decoder's overlap-add reconstructs (TDAC) — mono and stereo mid/side.
+- **Invertible quantizer**: `q = round((|x|/step)^0.75)` (was `round(|x|^0.75/step)`,
+  which did not invert the decoder's `q^(4/3)·step`), with **peak-based scale factors**
+  so tonal peaks survive (the rms-based target ~10 collapsed single-bin tones to zero).
+- **Section coding groups by codebook** (was grouping by has-data but writing the first
+  band's codebook for the whole run, so a run of data bands with different codebooks was
+  mislabeled and decoded as garbage — masked for a single-band tone, fatal for any
+  multi-band signal). This one bug was capping mono at 0.975 and breaking stereo entirely.
+- **CPE stereo bitstream**: dropped the stray 11-bit per-channel side ICS block the
+  decoder never read (11-bit misalignment); the side sections now use the escape codebook
+  matching the escape-coded side spectral (was copying the mid codebooks); mid/side
+  overlap framing + invertible side quantizer.
+- **Scale-factor DPCM predictor** tracks the transmitted (clamped) value, not the raw
+  scale factor (mono + CPE) — the confirmed desync bug.
+- **Decoder robustness**: reserved section codebooks 12–15 now advance the band (were an
+  unguarded infinite loop = DoS on malformed input); removed the band double-increment
+  for codebooks 1–4/9/10 (skipped the following band). Reject-not-hang test added.
+
+### Tests
+
+- Value-level round-trip tests (correlation vs. input, not sample counts): AAC mono,
+  AAC stereo, and the transient/stereo/mono Opus paths. `aac_decode` of a real AAC AU
+  (via MP4) still works — the new transform is standard-conformant.
+
+### Deferred (AAC completions — refinements, not blockers)
+
+- **TNS temporarily disabled**: the analysis-FIR/synthesis-IIR pair is exact only without
+  quantization; engaged through the quantizer it amplified quant noise (0.98→0.68).
+  Proper prediction-gain-gated noise shaping (+ short-window, stereo/CPE) is a follow-up.
+- **Real HCB6 tables** (codebook 6 currently reuses HCB5; shravan's own encoder never
+  selects it, so it only affects some third-party files) and the **psychoacoustic ATH
+  floor + tonality-adjusted SMR** completion.
+- Optional rate/distortion scale-factor loop (replaces the peak heuristic).
+
 ## [2.5.9] - 2026-07-02
 
 **Opus/CELT decodes to real PCM audio** — the headline gap the 2.5.0–2.5.8 scaffolding
