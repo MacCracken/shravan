@@ -123,6 +123,7 @@ enum AudioFormat {
     FMT_OPUS   = 6;
     FMT_AAC    = 7;
     FMT_ALAC   = 8;
+    FMT_MP4    = 9;
 }
 
 fn format_name(fmt) {
@@ -135,6 +136,7 @@ fn format_name(fmt) {
     if (fmt == FMT_OPUS) { return "Opus"; }
     if (fmt == FMT_AAC)  { return "AAC"; }
     if (fmt == FMT_ALAC) { return "ALAC"; }
+    if (fmt == FMT_MP4)  { return "MP4/M4A"; }
     return "Unknown";
 }
 
@@ -249,6 +251,19 @@ fn detect_format(data, len) {
                 return FMT_AAC;
             }
             return FMT_MP3;
+        }
+    }
+
+    # MP4/M4A: "ftyp" box at offset 4 (ISO base media file format)
+    if (len >= 8) {
+        if (load8(data+4) == 0x66) {
+            if (load8(data+5) == 0x74) {
+                if (load8(data+6) == 0x79) {
+                    if (load8(data+7) == 0x70) {
+                        return FMT_MP4;
+                    }
+                }
+            }
         }
     }
 
@@ -1682,6 +1697,7 @@ fn codec_open(data, len) {
     if (fmt == FMT_AAC)  { return aac_decode(data, len); }
     if (fmt == FMT_ALAC) { return alac_decode(data, len); }
     if (fmt == FMT_OPUS) { return ogg_decode(data, len); }
+    if (fmt == FMT_MP4)  { return mp4_decode(data, len); }
 
     return err(ERR_UNSUPPORTED_FMT);
 }

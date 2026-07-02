@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
-the **test harness** — it `include`s the library + codecs and runs the 809-assertion
+the **test harness** — it `include`s the library + codecs and runs the 830-assertion
 suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
 the **self-contained bundle consumers include** (they supply stdlib + bayan +
 sankoch from their own manifest).
@@ -27,7 +27,7 @@ sankoch from their own manifest).
 cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, [lib] bundle, version = ${file:VERSION})
 cyrius.lock      -- per-file stdlib hash lock (committed)
 src/shravan.cyr  -- the library (core + codec dispatch); first [lib] module
-src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, aac, resample, dither, simd, stream, serde)
+src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, aac, mp4, resample, dither, simd, stream, serde)
 src/main.cyr     -- test harness entry (includes shravan.cyr + codecs, runs tests)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
 dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyrius distlib`)
@@ -71,6 +71,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
 | opus | src/opus.cyr | Opus CELT-mode encoder + encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch); SILK/hybrid = 2.5.x |
 | aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
+| mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
 | dither | src/dither.cyr | Dithering for sample depth reduction |
 | simd | src/simd.cyr | SIMD-optimized inner loops |

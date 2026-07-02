@@ -14,6 +14,7 @@ shravan/
     fft.cyr         -- Mixed-radix FFT (2,3,5), forward/inverse MDCT
     opus.cyr        -- Opus CELT-mode encoder, OpusHead/OpusTags parsing
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, M/S, short windows)
+    mp4.cyr         -- MP4/M4A container demux (box tree, sample table, AAC -> aac_decode)
     resample.cyr    -- Windowed sinc resampler (Draft/Good/Best)
     dither.cyr      -- TPDF + noise-shaped dithering
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)

@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.7] - 2026-07-01
+
+MP4/M4A container demux — enables real `.m4a` playback. 830 assertions
+(was 809, +21).
+
+### Added
+
+- **MP4/M4A container module** (`src/mp4.cyr`) — ISO Base Media File Format demux:
+  - Box-tree parser (`mp4_find`) + navigation `moov → trak → mdia → minf → stbl`,
+    picking the track whose `hdlr` handler is `soun`.
+  - `mp4_audio_info` reads channels + sample rate from the `stsd` `mp4a` entry;
+    `mp4_build_sample_table` computes each AAC access unit's file offset + size from
+    `stsz` + `stco`/`co64` + `stsc` (sample-to-chunk).
+  - `mp4_demux` returns the track info + per-sample table; `mp4_decode` wraps each AU
+    in an ADTS header (`aac_build_adts_header`) and hands the stream to `aac_decode`.
+  - New `FMT_MP4` format + `detect_format` recognition (`ftyp` box) + decode dispatch,
+    so `codec_open`/`decode_file` handle `.m4a` transparently.
+- **Tests**: a constructed minimal MP4 demuxes to the correct track info + sample
+  table (`detect_format → FMT_MP4`), an MP4 wrapping a real AAC access unit decodes
+  to 1024 PCM samples, and hostile inputs are rejected safely.
+
+### Security
+
+- The demuxer parses untrusted input, so it was adversarially reviewed and hardened:
+  every attacker-controlled count/offset/size is bounds-checked against its box and
+  the buffer (`stsz`/`stco`/`co64`/`stsc` counts, per-AU offset+size before `memcpy`),
+  every FullBox header read (`hdlr`/`stsz`/`stco`/`stsc`) is guarded against an
+  empty/truncated box, the largesize (`size==1`) read is guarded, and all
+  allocations are null-checked. Malformed files return an error instead of reading
+  out of bounds, over-allocating, or crashing.
+  - Deferred: adding `mp4_decode` to the fuzz harness (needs the AAC chain vendored
+    into the standalone harness).
+
 ## [2.5.6] - 2026-07-01
 
 CELT stereo coupling: full two-channel bitstream (replaces the mono downmix).

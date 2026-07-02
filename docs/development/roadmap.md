@@ -1,11 +1,12 @@
 # Development Roadmap
 
-> **v2.5.6** — 809 tests + fuzz (90K/0), Cyrius 6.3.27.
-> CELT stereo coupling — full two-channel bitstream: couple L/R → mid/side + per-band
-> `ms_flags`, code both channels (energies + PVQ shapes), stereo TOC bit. Replaces the
-> mono downmix. (v2.5.5: stereo coupling foundation. v2.5.4: CELT transient detection +
-> short-block MDCT. v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair.
-> v2.5.1: first CELT decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
+> **v2.5.7** — 830 tests + fuzz (90K/0), Cyrius 6.3.27.
+> MP4/M4A container demux: box-tree parser + sample-table (stsz/stco/stsc) → AAC
+> extraction → aac_decode; `FMT_MP4` detection + dispatch. Adversarially reviewed +
+> hardened against malformed input. (v2.5.6: CELT stereo full two-channel bitstream.
+> v2.5.5: stereo coupling foundation. v2.5.4: transient detection + short-block MDCT.
+> v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair. v2.5.1: first CELT
+> decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -223,15 +224,23 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       encoder-path smoke test. Mono path unchanged.
 - Deferred: stereo + transient (short blocks); intensity stereo; non-even bit split.
 
+## v2.5.7 — MP4/M4A container · shipped 2026-07-01
+
+- [x] Box-tree parser (`mp4_find`) + `moov→trak→mdia→minf→stbl` navigation (picks the
+      `soun` handler track); `stsd`/`mp4a` track info + `stsz`/`stco`/`co64`/`stsc`
+      sample-location table.
+- [x] `mp4_decode` wraps each AU in an ADTS header → `aac_decode`; `FMT_MP4`
+      detection (`ftyp`) + `codec_open`/`decode_file` dispatch.
+- [x] Adversarially reviewed + hardened against malformed input (bounds-checked
+      counts/offsets/sizes + FullBox headers + largesize; null-checked allocs);
+      hostile files return an error, not a crash. Reject-not-crash tests added.
+- Deferred: full `esds`/AudioSpecificConfig parse; multi-track/edit-list; fuzzing
+  `mp4_decode` (needs the AAC chain in the standalone fuzz harness).
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.7 — MP4/M4A container · deferred (independent)
-
-- MP4 box parsing (moov/trak/mdia/stbl), AAC extraction; enables real `.m4a`.
-  `sankoch` already a dep for payloads.
 
 ### v2.5.8 — Rate control + VBR (CELT/Opus) · needs 2.5.0/4/6
 
