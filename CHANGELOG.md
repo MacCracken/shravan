@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-07-02
+
+**Opus is real.** shravan now decodes actual libopus-encoded `.opus` files
+(RFC 6716, CELT-only fullband — TOC config 31, mono + stereo) end-to-end to PCM,
+**correlation 1.000000 / SNR ~131 dB vs ffmpeg's libopus decoder**, matching sample
+values to ~1e-7. This is the interop milestone the 2.5.x arc kept deferring: the
+bespoke, non-RFC LZMA-style stream is retired from the file-decode dispatch and
+replaced by a real port of the libopus CELT decoder, built foundation-up with every
+stage proven **bit-exact against libopus**. 1033 assertions.
+
+### Added — real RFC-6716 CELT decoder (`src/opus.cyr`)
+
+- **`ec_dec` range decoder** — exact port of libopus `entdec.c`/`entcode.c`
+  (`ec_decode`/`ec_dec_update`/`ec_dec_bit_logp`/`ec_dec_icdf`/`ec_dec_uint`/
+  `ec_dec_bits`/`ec_tell`/`ec_tell_frac`). Bit-exact vs a libopus-`ec_enc`-produced
+  vector (`test_ec_dec_rfc_vectors`).
+- **Energy** — `ec_laplace_decode` + coarse/fine/finalise (`quant_bands.c` float path).
+  Laplace bit-exact vs libopus (`test_ec_laplace_rfc_vectors`); `e_prob_model`,
+  `pred_coef`/`beta`, `eMeans` extracted verbatim.
+- **Bit allocation + front-of-frame** — `tf_decode`, `clt_compute_allocation` /
+  `interp_bits2pulses` / `bits2pulses` / `init_caps`, and the full silence → postfilter
+  → transient → intra → coarse → tf → spread → dynalloc → trim → alloc → fine sequence.
+  Bit-exact across 4 real frames incl. band-skipping (`test_celt_allocation_rfc`).
+- **PVQ / CWRS / bands** — `cwrsi`/`decode_pulses` (Fischer U-table, replaces the bespoke
+  index scheme), `alg_unquant`, `exp_rotation`, `quant_all_bands` / `quant_partition` /
+  `quant_band_stereo`, `compute_theta`/`compute_qn`, `bitexact_cos`/`log2tan`,
+  intensity+dual stereo, `denormalise_bands`. Verified via CWRS vectors
+  (`test_celt_cwrs_rfc`) and full-recursion range-sync + collapse-mask match
+  (`test_celt_bands_rfc`, mono+stereo, transient+steady).
+- **Synthesis** — inverse MDCT (`clt_mdct_backward`, direct DFT, CELT 120-sample overlap
+  window, per-channel overlap-add via `decode_mem`), `anti_collapse`, pitch `comb_filter`
+  post-filter, and de-emphasis. IMDCT impulse-exact (`test_celt_imdct_unit`).
+- **Wired**: `opus_decode_from_packets` drives the real decoder (config-31 detection,
+  per-packet channels, pre-skip trim, granule cap). Full-file decode of
+  `real_mono.opus`/`real_stereo.opus` verified 1.0 vs ffmpeg;
+  `test_celt_pcm_rfc` + `test_celt_pcm_stereo_rfc` assert PCM correlation in-suite.
+
+### Changed
+
+- The bespoke Opus encoder/decoder path (2.5.9) is now **legacy** — retained for the
+  encoder-conformance work (2.6.3) but no longer on the `.opus` file-decode path. The
+  three bespoke encode→decode roundtrip tests (which asserted that superseded contract)
+  were removed; the real decoder is verified against actual libopus streams instead.
+
+### Scope (honest)
+
+- Done: **CELT-only, fullband (config 31)** decode — what libopus emits for music, so
+  real-world music `.opus` files decode today.
+- Not yet: **SILK** (voice, 2.6.1), **hybrid** (2.6.2), and the **encoder** so libopus
+  can decode shravan's output (2.6.3). See `docs/development/roadmap.md`.
+
 ## [2.5.12] - 2026-07-02
 
 **MP3 decode is now comprehensive** — MPEG-2/2.5 (LSF) Layer III, plus **Layer II

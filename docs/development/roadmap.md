@@ -1,16 +1,18 @@
 # Development Roadmap
 
-> **v2.5.12** — 932 tests, Cyrius 6.3.27. **MP3 decode is comprehensive**: MPEG-1/2/2.5
+> **v2.6.0** — 1033 tests, Cyrius 6.3.x. **Opus is real**: shravan decodes actual
+> libopus `.opus` files (CELT-only fullband) at correlation 1.0 / SNR ~131 dB vs ffmpeg.
+> Prior: **v2.5.12** — MP3 decode comprehensive: MPEG-1/2/2.5
 > **Layer III** + **Layer II** + **Layer I**, all verified sample-exact against minimp3
 > (one narrow known edge: MPEG-2.5 8 kHz low-bitrate short blocks). Builds on **v2.5.11**
 > (MPEG-1 Layer III, 0.99999 vs minimp3) and **Opus/AAC** (2.5.9/2.5.10, encode→decode 0.99+).
 > **Honest scope (do not claim "almost done").** The 2.5.x arc got every codec *producing
 > audio*. It did **not** make them complete or conformant — a lot was deferred along the
 > way. The 2.6.x–2.8.x plan below is the real remaining work, and it is large. It is
-> enumerated in full here (nothing hidden in "deferred" asides), **Opus-real first** —
-> decoding an actual `.opus` file was the one thing 2.5.x kept punting, so it is now
-> v2.6.0, ahead of everything else, built foundation-up with each stage proven bit-exact
-> against libopus. The true distance to a v1.0-quality codec suite stays visible.
+> enumerated in full here (nothing hidden in "deferred" asides). **Opus-real shipped in
+> v2.6.0** — real `.opus` (CELT-only fullband) decodes at correlation 1.0 vs ffmpeg; the
+> remaining Opus lifts (SILK 2.6.1, hybrid 2.6.2, encoder 2.6.3) lead the forward plan,
+> then the rest. The true distance to a v1.0-quality codec suite stays visible.
 
 ## Functional status (verified 2026-07-02)
 
@@ -30,11 +32,12 @@ path. The lists below are the *current* verified state, not the original audit.
   audio (waveform correlation mono 0.999, stereo 0.999/0.999); **MP4/M4A** demux →
   AAC-decode → PCM. Caveat: TNS disabled (amplified quant noise — proper noise-shaping is
   a follow-up); HCB6 reuses HCB5 (never selected by shravan's encoder).
-- **Opus/CELT encode+decode → PCM** *(2.5.9)* — `opus_encode` → `opus_decode_from_packets`
-  round-trips real audio (waveform correlation: mono 0.997, stereo 0.996/0.999, transient
-  0.998), mono + stereo. Caveat: a **bespoke, non-RFC-6716** stream (won't interoperate
-  with libopus — conformance is **v2.7.0**); transient frames decode via the long MDCT
-  (short-window pre-echo coding is **v2.6.6**).
+- **Opus CELT decode → PCM, RFC-6716** *(2.6.0)* — `opus_decode_from_packets` decodes real
+  libopus-encoded `.opus` files (CELT-only fullband, config 31, mono + stereo) end-to-end at
+  **correlation 1.000000 / SNR ~131 dB vs ffmpeg**, sample-accurate to ~1e-7. Every decode
+  stage is bit-exact vs libopus (range coder, energy, allocation, PVQ/CWRS, MDCT, postfilter).
+  The bespoke non-RFC encoder (2.5.9) is retained as legacy for the 2.6.3 encoder work but
+  is off the file-decode path. Not yet: **SILK** (voice, 2.6.1), **hybrid** (2.6.2), **encoder** (2.6.3).
 - **MP3 decode → PCM** *(2.5.11 + 2.5.12)* — `mp3_decode` produces real samples for
   **all three layers and all MPEG versions**, verified sample-exact vs minimp3:
   MPEG-1/2/2.5 **Layer III** (mono/stereo/M-S/intensity; bit reservoir; block switching),
@@ -74,61 +77,24 @@ is how the old suite hid the silence. Each commit builds clean
 (`cyrius build src/main.cyr build/shravan`) and keeps the suite green. **Never skip
 benchmarks** on a perf claim.
 
-### v2.6.0 — **Opus is REAL: decode actual `.opus` files (RFC-6716 CELT)** · large · ✅ CELT DECODE DONE
-**This is now #1, not last.** For the entire 2.5.x arc this was deferred every release
-(it sat at v2.7.0, behind ALAC/fuzz/MP4/FLAC/AAC/hi-res). It is pulled to the front and
-being built foundation-up, each stage proven **bit-exact against libopus** (system
-libopus 1.6.1 + a C reference harness built from the fetched CELT source), and the whole
-chain proven by PCM correlation vs ffmpeg's libopus decoder. Target: real libopus-encoded
-fullband files (`config 31`, CELT-only, 20 ms, mono **and** stereo — confirmed what
-libopus actually emits for music) decode to PCM. The bespoke LZMA-style coder is removed
-from the file-decode path.
+### v2.6.1 — Opus SILK mode · large (voice `.opus`)
+Fullband music (`config 31`, CELT-only) decodes today (2.6.0). SILK covers the
+low-bitrate / voice configs (TOC 0–11) that real-world speech `.opus` uses.
+- `feat(opus): SILK decode — LSF/NLSF → LPC, LTP (long-term prediction), excitation
+  (shell/pulse coding + the shared range decoder), gains, subframe reconstruction, the
+  NB/MB/WB internal rates + resampling`. Verify against libopus-encoded voice `.opus`
+  (correlation vs ffmpeg), the same way CELT was proven in 2.6.0.
 
-Progress (checked = landed + verified in the suite; unchecked = remaining, enumerated in
-full — nothing hidden):
-- [x] **Real `ec_dec` range decoder** (entdec.c/entcode.c port) — **bit-exact vs libopus**
-  (`test_ec_dec_rfc_vectors`, 11 asserts against a libopus-`ec_enc`-produced vector).
-- [x] **`ec_laplace_decode`** (laplace.c port) — **bit-exact vs libopus**
-  (`test_ec_laplace_rfc_vectors`, 8 asserts). Coarse/fine/finalise energy decode ported
-  from the float-build spec (`celt_unquant_coarse/fine/energy_finalise`).
-- [x] **Bit allocation + front-of-frame decode** (rate.c `clt_compute_allocation` /
-  `interp_bits2pulses` / `bits2pulses` / `init_caps`; `tf_decode`; and the full R1–R13
-  prefix: silence, postfilter parse, transient, intra, coarse+fine energy, spread,
-  dynalloc boosts, alloc_trim) — **bit-exact vs libopus** (`test_celt_allocation_rfc`,
-  60 asserts across 4 real frames: intra+transient+boosts, inter/steady cross-frame,
-  stereo/intensity, and a low-rate frame that actually skips bands). Large tables
-  (`band_allocation`, `cache_index50/bits50/caps50`, `eBands`, `logN`) extracted
-  verbatim from the runtime mode; signed-shift (`sar`) handles the negative-tilt sites.
-- [x] **Bands + PVQ + CWRS** (bands.c/vq.c/cwrs.c: `quant_all_bands`, `quant_band`/
-  `quant_partition`/`quant_band_stereo`, `compute_theta`/`compute_qn`, `alg_unquant` →
-  `cwrsi`/`decode_pulses`, `exp_rotation` spreading, θ/split rebalance, intensity+dual
-  stereo, `bitexact_cos`/`log2tan`, `renormalise`, `denormalise_bands`) — **bit-exact vs
-  libopus**: `test_celt_cwrs_rfc` (9 CWRS vectors) + `test_celt_bands_rfc` (mono+stereo,
-  transient+steady frames match the final range-coder `rng`, `ec_tell`, and every
-  collapse mask). CELT's real `cwrsi` (U-table) replaces the bespoke PVQ index scheme.
-  Remaining in this subsystem: `anti_collapse` (transient noise refill).
-- [x] **Inverse MDCT + FFT** (`clt_mdct_backward`, direct DFT, CELT 120-overlap window,
-  per-channel overlap-add) — **impulse-exact vs libopus** (`test_celt_imdct_unit`, corr 1.0).
-- [x] **Orchestration + state + postfilter + deemphasis** (`celt_decode_frame`: full
-  R1–R26 order, persistent `oldBandE`/`decode_mem`/postfilter/deemph state across frames,
-  `anti_collapse`, pitch `comb_filter`, de-emphasis) — verified via full-file decode.
-- [x] **Wire + verify**: `opus_decode_from_packets` now drives the real CELT decoder
-  (config 31, per-packet channel detect, pre-skip trim, granule cap); bespoke path retired
-  from the file-decode dispatch. **shravan decodes real `real_mono.opus`/`real_stereo.opus`
-  end-to-end at correlation 1.000000, SNR ~131 dB vs ffmpeg** (mono + stereo).
-  `test_celt_pcm_rfc` + `test_celt_pcm_stereo_rfc` assert this in-suite on real frames.
+### v2.6.2 — Opus hybrid mode · large (SILK low-band + CELT high-band)
+- `feat(opus): hybrid decode — SILK codes the low band and CELT the high band over one
+  shared range coder (TOC 12–15, SWB/FB)`. Reuses the 2.6.0 CELT decoder + the 2.6.1 SILK
+  decoder; wires the band split and the single ec_dec across both. Verify vs ffmpeg.
 
-### v2.6.1 — Opus encoder conformance (libopus decodes OURS) · large
-- `feat(opus): real ec_enc + RFC band layout/allocation/TOC on the encode side` — goal:
-  a shravan-encoded `.opus` decodes correctly in libopus/ffmpeg. Supersedes the bespoke
-  encoder.
-
-### v2.6.2 — Opus SILK mode · large (voice `.opus`)
-- `feat(opus): SILK — LPC/LTP/LSF, excitation, shared range coder` (low-bitrate/voice
-  files use SILK; needed for arbitrary `.opus`, not just fullband music).
-
-### v2.6.3 — Opus hybrid mode · large (completes Opus)
-- `feat(opus): hybrid — SILK low-band + CELT high-band over one range coder`.
+### v2.6.3 — Opus encoder conformance (libopus decodes OURS) · large
+The decode side is real (2.6.0–2.6.2); make the encode side real too.
+- `feat(opus): real ec_enc + RFC-6716 CELT encode (band energy quant, allocation, PVQ
+  search/encode via icwrs, TOC)` — goal: a shravan-encoded `.opus` decodes correctly in
+  libopus/ffmpeg. Supersedes the bespoke 2.5.9 encoder. (SILK/hybrid encode follow.)
 
 ### v2.6.4 — Opus CELT completion · medium (refinements from 2.5.9)
 - `feat(opus): true overlapping short-window transient coding + two-pass VBR`.
@@ -172,6 +138,21 @@ tracked in the CSV history.
 ---
 
 ## Completed history
+
+### v2.6.0 — Opus is REAL: real `.opus` files decode (shipped 2026-07-02)
+
+**The interop milestone.** shravan decodes actual libopus-encoded `.opus` files
+(RFC 6716, CELT-only fullband, config 31, mono + stereo) end-to-end to PCM at
+**correlation 1.000000 / SNR ~131 dB vs ffmpeg**, sample-accurate to ~1e-7. Retired the
+bespoke non-RFC stream from the file-decode dispatch. Full libopus CELT decoder ported
+foundation-up, every stage bit-exact vs libopus: `ec_dec` range coder, `ec_laplace` +
+energy, `clt_compute_allocation` + `tf_decode`, `cwrsi`/`quant_all_bands` (PVQ/CWRS +
+stereo), `clt_mdct_backward` + `anti_collapse` + pitch `comb_filter` + de-emphasis.
+`opus_decode_from_packets` now drives it (pre-skip trim, granule cap). Proven in-suite by
+`test_ec_dec_rfc_vectors`, `test_ec_laplace_rfc_vectors`, `test_celt_allocation_rfc`,
+`test_celt_cwrs_rfc`, `test_celt_bands_rfc`, `test_celt_imdct_unit`, `test_celt_pcm_rfc`,
+`test_celt_pcm_stereo_rfc`. Scope: CELT-only fullband (music); SILK/hybrid/encoder are
+2.6.1–2.6.3. 1033 assertions.
 
 ### v2.5.9–2.5.12 — the codecs actually produce audio (shipped 2026-07-02)
 

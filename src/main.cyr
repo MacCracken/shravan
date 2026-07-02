@@ -16,6 +16,7 @@ include "src/dither.cyr"
 include "src/simd.cyr"
 include "src/stream.cyr"
 include "src/serde.cyr"
+include "src/opus_rfc_tests.cyr"
 
 # ================================================================
 # Tests
@@ -1212,7 +1213,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.5.8 — audio codecs for AGNOS (Cyrius)\n", 50);
+syscall(1, 1, "shravan v2.6.0 — audio codecs for AGNOS (Cyrius)\n", 50);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1292,6 +1293,7 @@ test_tag_vorbis_reject_short();
 test_tag_syncsafe_decode();
 test_fft_all();
 test_opus_all();
+test_opus_rfc_all();
 test_aac_all();
 test_mp4_all();
 test_resample();
