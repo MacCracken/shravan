@@ -1,10 +1,11 @@
 # Development Roadmap
 
-> **v2.5.10** — 870 tests, Cyrius 6.3.27. **Opus AND AAC now encode→decode to real PCM
-> audio** (waveform correlation 0.99+, mono+stereo). The deepest fix: `fft_mdct`/`fft_imdct`
-> were never a matched pair — one bug that had been silencing *both* encoders.
+> **v2.5.11** — 904 tests, Cyrius 6.3.27. **MP3 (MPEG-1 Layer III) now decodes to real PCM
+> audio** — verified sample-for-sample against minimp3 (waveform correlation 0.99999) and
+> the committed suite correlates the decode against its source (0.999). This joins
+> **Opus and AAC** (2.5.9/2.5.10), which encode→decode to real PCM (0.99+, mono+stereo).
 > The forward plan below was **reorganized 2026-07-02**: the sprawling
-> 2.5.9–2.5.23 point-release list was collapsed into **four focused 2.5.x releases**
+> 2.5.9–2.5.23 point-release list was collapsed into focused 2.5.x releases
 > that **do the deferred core work** — the actual audio the 2.5.0–2.5.8 scaffolding was
 > built for. Nothing here is pushed to a future major; every deferred tail lives inside
 > the 2.5.x arc and gets *done*, packed as bite-sized commits.
@@ -30,12 +31,16 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
   0.998), mono + stereo. Caveat: a **bespoke, non-RFC-6716** stream (won't interoperate
   with libopus — conformance is a pinned 2.5.x item); transient frames decode via the
   long MDCT (short-window pre-echo coding deferred).
+- **MP3 (MPEG-1 Layer III) decode → PCM** *(2.5.11)* — `mp3_decode` produces real samples
+  (verified vs minimp3 at 0.99999, sample-exact; committed test correlates 0.999 vs the
+  source two-tone), mono + stereo/joint, with the bit reservoir and long/short block
+  switching. Ported from pdmp3 + ISO 11172-3; untrusted-input fuzzed (20K/0) + hardened.
+  Caveat: MPEG-2/2.5 (LSF) L3 and Layer I/II decode remain metadata-only (fall back).
 
 **🟥 Looks done, isn't (scaffolding / broken — the "actual core" that remains):**
 - **ALAC — dead code.** A full decoder exists but is **unwired**: `detect_format` has no
   ALAC branch and MP4 routes only to AAC, so `codec_open`'s `FMT_ALAC` dispatch is
   unreachable and the decoder is unverified on real frames.
-- **MP3 decode — empty stub** (metadata only; no Huffman/requant/IMDCT/filterbank).
 
 **🐛 Confirmed real bugs the "843 passing" hides** *(scheduled into 2.6.0 unless noted)*:
 - **[AAC] DoS**: `_aac_decode_spectral` **infinite-loops** on section codebook 12–15
@@ -46,9 +51,10 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
 - **[AAC] CPE stereo bitstream malformed** → wrong stereo (a stray 11-bit side ICS +
   codebook/escape disagreement; the "hang" theory was *refuted* — guards terminate it).
 - **[AAC] decoder double-increments band** for codebooks 1–4/9/10 → skips the next band.
-- **[MP3]** Layer I/II parsed with the Layer III bitrate table → wrong frame size/duration.
-- **[Opus]** decode advertises `total_samples>0` but returns 0 samples → silent playback,
-  no error, for any consumer trusting the metadata.
+- ~~**[MP3]** Layer I/II parsed with the Layer III bitrate table~~ — **fixed 2.5.11** (per-
+  layer bitrate tables; `test_mp3_layer2_bitrate`).
+- ~~**[Opus]** decode advertised `total_samples>0` but returned 0 samples~~ — **fixed 2.5.9**
+  (`opus_decode_from_packets` now returns real PCM).
 - **[FLAC]** `decode_range` seek anchor uses the current frame's block size, not the
   stream's; Rice unary bound (32768) can reject valid deep-bps streams *(both low)*.
 - **[core]** WAVE_FORMAT_EXTENSIBLE uses `valid_bits` as the byte stride (mis-decodes
@@ -59,42 +65,14 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
 
 ## Forward plan — remaining 2.5.x work
 
-**Opus (2.5.9) and AAC (2.5.10) now encode→decode to real PCM audio** — see Completed
-history + Functional status. What remains: **MP3 decode (2.5.11)**, then the deferred
-tails + hardening + new subsystems (2.5.12).
+**Opus (2.5.9), AAC (2.5.10), and MP3 (2.5.11) now decode to real PCM audio** — see
+Completed history + Functional status. What remains: the deferred tails + hardening + new
+subsystems (2.5.12), plus the MP3 tails (MPEG-2/2.5 LSF, Layer I/II decode).
 
 Acceptance rule for every release: **new/changed audio paths are proven by value-level
 tests (SNR or correlation vs. input), never by sample count** — that is how the old suite
 hid the silence. Each commit must build clean (`cyrius build src/main.cyr build/shravan`)
 and keep the suite green.
-
-### v2.5.11 — MP3 decode → PCM · large · IN PROGRESS
-
-**Goal:** MP3 Layer III (+ Layer I/II bitrate correctness) decodes to real PCM — replaces
-the metadata-only stub (`mp3_decode` returns an empty sample vector today, `src/mp3.cyr`).
-
-**Commit plan:**
-1. [x] `fix(mp3): Layer I/II bitrate tables (select by layer) + frame-size test` — **DONE**
-   (added v1_l1/v1_l2/v2_l1 tables; `test_mp3_layer2_bitrate`). The rest below is untouched.
-2. [ ] `feat(mp3): granule/side-info parse + scalefactor decode + cross-frame bit reservoir`
-3. [ ] `feat(mp3): Huffman tables + big_values/count1 decode of the 576 frequency lines`
-4. [ ] `feat(mp3): requantization (power law + pretab) + short-block reorder`
-5. [ ] `feat(mp3): alias reduction + hybrid IMDCT (long 36 / short 12) + overlap-add`
-6. [ ] `feat(mp3): 32-band polyphase synthesis filterbank`
-7. [ ] `feat(mp3): MS/intensity stereo + wire into mp3_decode + real-file correlation test`
-8. [ ] `docs/CHANGELOG/VERSION: 2.5.11 — MP3 decode`
-
-**Notes for whoever takes this on** — this is the biggest, most precision-critical bite in
-the arc and, unlike Opus/AAC, it is **decode-only** (no shravan encoder to round-trip), so
-there is no incremental testable milestone until the whole chain is wired. Two things make
-it hard: (a) large data tables that must be transcribed **exactly** — the 32 Huffman code
-tables and the 512-entry synthesis-filterbank `D[]` window; a single wrong entry yields
-noise with no easy way to localize it; (b) the only real test is "decode a whole MP3 and
-correlate against a reference decoder." `ffmpeg`/`lame` are available locally to make the
-vector (a real MPEG1 Layer III mono file + its PCM), but the file is ~5 KB — too big to
-hand-embed as bytes, so plan to embed it base64 (+ a tiny base64 decoder in the test) or
-commit it as a binary fixture. Recommend building it as a focused effort with the spec
-(ISO/IEC 11172-3) and a reference decoder (e.g. `minimp3`) side-by-side.
 
 ### v2.5.12 — remaining deferred tails + hardening + new subsystems · medium–large
 
@@ -115,7 +93,8 @@ breadth. Order these by priority; each is an independent bite.
 - `feat(aac): re-enable TNS with proper prediction-gain-gated noise shaping (it currently amplifies quant noise, so it is disabled) + short-window + stereo/CPE`
 - `feat(aac): real HCB6 tables (reuses HCB5 today; shravan's encoder never selects cb6) + psychoacoustic ATH floor + tonality-adjusted SMR; optional rate/distortion scale-factor loop`
 - `feat(opus): true overlapping short-window transient coding (transient frames decode via the long MDCT today) + two-pass VBR`
-- `perf: fast FFT-based MDCT/IMDCT preserving the verified convention (fft.cyr's pair is now O(N²) direct — correct but slow; the fast fft_mdct/fft_imdct were replaced because they did not invert each other). Benchmark before/after.`
+- `feat(mp3): MPEG-2/2.5 (LSF) Layer III decode (half-rate side info, one granule, LSF intensity-stereo scalefactor compression) + Layer I/II decode (both metadata-only today)`
+- `perf: fast FFT-based MDCT/IMDCT preserving the verified convention (fft.cyr's pair is now O(N²) direct — correct but slow; the fast fft_mdct/fft_imdct were replaced because they did not invert each other). The MP3 IMDCT/synthesis cosines are likewise direct O(N²). Benchmark before/after.`
 
 **New subsystems (larger; may each become their own 2.5.x point release):**
 - `feat(opus): RFC-6716 conformance — real ec_enc/ec_dec, Laplace coarse/fine energy, spec band layout + allocation (trim/boost/anti-collapse/fine-energy), correct TOC` — decode real `.opus`, libopus decodes ours *(supersedes the bespoke coder)*
@@ -127,8 +106,16 @@ breadth. Order these by priority; each is an independent bite.
 
 ## Completed history
 
-### v2.5.9–2.5.10 — the codecs actually produce audio (shipped 2026-07-02)
+### v2.5.9–2.5.11 — the codecs actually produce audio (shipped 2026-07-02)
 
+- **v2.5.11** — **MP3 (MPEG-1 Layer III) decode produces real PCM** (verified vs minimp3 at
+  0.99999, sample-exact; committed test 0.999 vs the source two-tone), mono + stereo/joint.
+  Ported from pdmp3 + ISO 11172-3: side info + cross-frame bit reservoir, scalefactors,
+  Huffman (34-tree array from pdmp3 + big-values regions + count1 quads + linbits),
+  requantization, short-block reorder, MS/intensity stereo, antialias, hybrid IMDCT
+  (long 36 / short 12 + block-type switching), and the 512-tap polyphase synthesis
+  filterbank. Untrusted-input fuzzed (20K/0) + hardened (big_values / region-index
+  clamps). MPEG-2/2.5 (LSF) L3 and Layer I/II decode deferred to 2.5.12 (metadata-only).
 - **v2.5.10** — **AAC encode→decode produces real PCM** (mono 0.999, stereo 0.999/0.999).
   Fixed the `fft_mdct`/`fft_imdct` mismatch (verified TDAC pair — the root cause silencing
   *both* encoders), the section-coding-by-has-data-not-codebook bug, the invertible

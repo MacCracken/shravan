@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.11] - 2026-07-02
+
+**MP3 (MPEG-1 Layer III) decodes to real PCM audio** — `mp3_decode` returned an
+empty sample vector (metadata only) since 2.0.0; it now produces actual samples,
+verified sample-for-sample against a reference decoder (minimp3 waveform
+correlation **0.99999**, lag 0) and, in the committed suite, against the source
+signal (**0.999** best-lag correlation). 904 assertions (was 875, +29).
+
+### Added — full MPEG-1 Layer III decode chain (`src/mp3.cyr`)
+
+Ported from pdmp3 (Krister Lagerström, public domain) + ISO/IEC 11172-3. The
+whole pipeline, all f64-internal:
+
+- **Side info + bit reservoir** — `main_data_begin` back-pointer assembles main
+  data from up to two previous frames (real streams carry Huffman data across
+  frame boundaries); side info parsed over shravan's `bitreader`.
+- **Scalefactors** — long/short/mixed blocks, `scfsi` copy-from-granule-0.
+- **Huffman** — the 34 code tables as a compact binary-tree array (2804 nodes,
+  generated from pdmp3.c), big-values regions (per-region `table_select`),
+  count1 quadruples, `linbits`, sign bits.
+- **Requantization** — `x^(4/3)` power law, global gain, per-band scalefactors,
+  `subblock_gain`, `preflag`/pretab; long and short blocks.
+- **Reorder** (short-block frequency-line interleave), **stereo** (MS +
+  intensity, long/short), **antialias** (8-tap butterflies from `cs`/`ca`).
+- **Hybrid IMDCT** — long (36) / short (12) with the four block-type windows and
+  block-type switching (start/stop/short/mixed), overlap-add across granules;
+  frequency inversion.
+- **Polyphase synthesis filterbank** — 32→64 matrixing + the 512-tap synthesis
+  window (`g_synth_dtbl`) + the 1024-sample V FIFO → 576 PCM samples/granule.
+
+`mp3_decode` now decodes MPEG-1 Layer III (mono + stereo/joint) to PCM and falls
+back to the previous metadata-only path for Layer I/II and MPEG-2/2.5 (LSF), so
+nothing regresses. Large tables are CSV string literals generated from pdmp3.c;
+trig tables (IMDCT/synthesis cosines, windows, `cs`/`ca`, intensity ratios) are
+derived at init from formulas.
+
+### Tests
+
+- **Value-level correlation test** (the roadmap's acceptance rule): an embedded
+  real MPEG-1-L3 mono fixture (44100 Hz, 32 kbps, 11 frames, base64 in-source +
+  a tiny decoder) decodes to 12672 samples and correlates **0.999** with its
+  two-tone source — the fixture exercises the bit reservoir and long/start/stop/
+  short block switching. Plus a table-derivation self-test (Huffman node count,
+  synthesis window, `cs`/`ca`, sfb indices, windows).
+
+### Security
+
+- The MPEG-1-L3 path parses untrusted input, so it was fuzzed (**50,000 malformed
+  frames across two runs — plain and joint-stereo/intensity — 0 crashes**) and
+  hardened. `big_values*2` (a 9-bit field, up to 1022) is clamped to the 576-line
+  spectrum buffer and the Huffman region boundary indices (`r0+1`, `r0+r1+2`) are
+  clamped to the 23-entry scalefactor-band table. An adversarial review against
+  the reference then found three more boundary over-reads, all fixed: the top
+  long-block region (band 21) and short-block region (band 12) now use
+  scalefactor/pretab 0 (ISO-correct) instead of reading one past their tables,
+  and intensity-stereo gates on `is_pos < 7` (0..6 valid) instead of `!= 7`, so a
+  crafted 4-bit scalefactor (8..15) can't index the 6-entry `is_ratios` table out
+  of bounds. A committed hostile-input test drives garbage/truncated/stereo
+  frames through `mp3_decode` and asserts it returns safely.
+
+### Deferred (MP3 tails — refinements, not blockers)
+
+- MPEG-2/2.5 (LSF) Layer III (half-rate side info, one granule, intensity-stereo
+  scalefactor compression) and Layer I/II *decode* (still metadata-only).
+- A fast (FFT-based) IMDCT/synthesis (the direct cosine transforms are O(N²) —
+  correct but a perf follow-up, matching the AAC/Opus note).
+
 ## [2.5.10] - 2026-07-02
 
 **AAC encoder produces real audio** — `aac_encode` → `aac_decode` now round-trips

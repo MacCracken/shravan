@@ -66,7 +66,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | codec | src/shravan.cyr | Auto-detect format and dispatch to decoder |
 | flac | src/flac.cyr | FLAC encode/decode (all subframe types, Rice coding, channel decorrelation) |
 | ogg | src/ogg.cyr | Ogg container parse/mux (CRC32, page extraction, lacing) |
-| mp3 | src/mp3.cyr | MP3 header parse, frame scanning, ID3v2 skip, decode stub |
+| mp3 | src/mp3.cyr | MP3 header parse + frame scanning + ID3v2 skip; MPEG-1 Layer III decode → PCM (reservoir, Huffman, requant, IMDCT, polyphase synth). MPEG-2/2.5 + Layer I/II = decode TBD |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
 | opus | src/opus.cyr | Opus CELT-mode encoder + encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch); SILK/hybrid = 2.5.x |
