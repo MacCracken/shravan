@@ -91,10 +91,14 @@ full — nothing hidden):
 - [x] **`ec_laplace_decode`** (laplace.c port) — **bit-exact vs libopus**
   (`test_ec_laplace_rfc_vectors`, 8 asserts). Coarse/fine/finalise energy decode ported
   from the float-build spec (`celt_unquant_coarse/fine/energy_finalise`).
-- [ ] **Bit allocation** (rate.c: `clt_compute_allocation` / `interp_bits2pulses` + the
-  `eband5ms` / `logN400` / `cache_index50` / `cache_bits50` / `cache_caps50` /
-  `band_allocation` tables) — decode `alloc_trim`/boosts/skip, produce `pulses[]`,
-  `fine_quant[]`, `fine_priority[]`.
+- [x] **Bit allocation + front-of-frame decode** (rate.c `clt_compute_allocation` /
+  `interp_bits2pulses` / `bits2pulses` / `init_caps`; `tf_decode`; and the full R1–R13
+  prefix: silence, postfilter parse, transient, intra, coarse+fine energy, spread,
+  dynalloc boosts, alloc_trim) — **bit-exact vs libopus** (`test_celt_allocation_rfc`,
+  60 asserts across 4 real frames: intra+transient+boosts, inter/steady cross-frame,
+  stereo/intensity, and a low-rate frame that actually skips bands). Large tables
+  (`band_allocation`, `cache_index50/bits50/caps50`, `eBands`, `logN`) extracted
+  verbatim from the runtime mode; signed-shift (`sar`) handles the negative-tilt sites.
 - [ ] **Bands + PVQ + CWRS** (bands.c/vq.c/cwrs.c: `quant_all_bands` decode, `alg_unquant`
   → `cwrsi`, `exp_rotation` spreading, θ/split, intensity+dual stereo, `renormalise`,
   `denormalise_bands`, `anti_collapse`). Note: CELT's `cwrsi`/`icwrs` ordering must
