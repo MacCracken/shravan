@@ -1,12 +1,11 @@
 # Development Roadmap
 
-> **v2.5.4** — 796 tests + fuzz (90K/0), Cyrius 6.3.25.
-> CELT transient detection + short-block MDCT: onset/decay detector switches a
-> transient frame to 8 interleaved short MDCTs; `isTransient` bit at the frame head.
-> (v2.5.3: AAC psychoacoustic masking model. v2.5.2: AAC TNS + toolchain 6.3.25 +
-> serde repair. v2.5.1: first CELT decode — matched range coder + PVQ shape decode.
-> v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework. v2.4.3: distlib
-> bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
+> **v2.5.5** — 799 tests + fuzz (90K/0), Cyrius 6.3.27.
+> CELT stereo coupling foundation: exactly-invertible mid/side transform + per-band
+> coupled-vs-dual decision (couple∘decouple = identity). Toolchain bumped to 6.3.27.
+> (v2.5.4: CELT transient detection + short-block MDCT. v2.5.3: AAC psychoacoustic
+> model. v2.5.2: AAC TNS + serde repair. v2.5.1: first CELT decode. v2.5.0: full PVQ
+> spectral shape. v2.4.4: Opus encoder framework. v2.4.3: distlib bundle. v2.4.0: cyrius.cyml.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -203,41 +202,51 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - Deferred: proper CELT overlapping short-window shapes + per-band time-frequency
   resolution + cross-frame transient memory (need full IMDCT→PCM synthesis).
 
+## v2.5.5 — Stereo coupling foundation (CELT) · shipped 2026-07-01
+
+- [x] `_opus_stereo_ms_forward` / `_opus_stereo_ms_inverse` — energy-preserving
+      mid/side transform (M=(L+R)/√2, S=(L-R)/√2), exactly invertible.
+- [x] `_opus_stereo_couple` — per-band coupled-vs-dual decision (M/S when
+      min(E_M,E_S) < min(E_L,E_R)); `_opus_stereo_decouple` inverts via `ms_flags`;
+      couple∘decouple is the identity for any per-band choice.
+- Deferred to 2.5.6: full two-channel bitstream + intensity stereo.
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
 
-### v2.5.5 — Stereo coupling (CELT) · needs 2.5.0
+### v2.5.6 — Stereo coupling: full two-channel bitstream (CELT) · needs 2.5.5
 
-- Per-band mid/side + intensity stereo; coupled-vs-dual decision. Replaces mono downmix.
+- Code mid+side as two channels with per-band `ms_flags` + stereo TOC bit; stereo
+  decode + decouple; full stereo roundtrip. Then intensity stereo for high bands.
 
-### v2.5.6 — MP4/M4A container · deferred (independent)
+### v2.5.7 — MP4/M4A container · deferred (independent)
 
 - MP4 box parsing (moov/trak/mdia/stbl), AAC extraction; enables real `.m4a`.
   `sankoch` already a dep for payloads.
 
-### v2.5.7 — Rate control + VBR (CELT/Opus) · needs 2.5.0/4/5
+### v2.5.8 — Rate control + VBR (CELT/Opus) · needs 2.5.0/4/6
 
 - Bit-reservoir rate-control state; unconstrained + constrained VBR. Completes CELT mode.
 
-### v2.5.8 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
+### v2.5.9 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
 
 - 88.2–384 kHz; 32-bit int / 64-bit float PCM; PCM SSE2 hot loops (the perf item).
 
-### v2.5.9 — SILK mode (speech) · needs framework
+### v2.5.10 — SILK mode (speech) · needs framework
 
 - LPC/LTP/LSF, excitation, shared range coder. Largest new subsystem.
 
-### v2.5.10 — Hybrid mode (SILK + CELT) · needs 2.5.9 + full CELT
+### v2.5.11 — Hybrid mode (SILK + CELT) · needs 2.5.10 + full CELT
 
 - SILK low-band + CELT high-band over one range coder. Completes the Opus encoder.
 
-### v2.5.11 — FLAC LPC encoder · deferred (independent)
+### v2.5.12 — FLAC LPC encoder · deferred (independent)
 
 - LPC prediction (beats Fixed); matters most for 24/32-bit hi-res lossless.
 
-### v2.5.12 — DSD (DSD64/128/256, DoP) · hi-res (independent)
+### v2.5.13 — DSD (DSD64/128/256, DoP) · hi-res (independent)
 
 - 1-bit sigma-delta path.
 

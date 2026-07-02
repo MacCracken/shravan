@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
-the **test harness** — it `include`s the library + codecs and runs the 796-assertion
+the **test harness** — it `include`s the library + codecs and runs the 799-assertion
 suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
 the **self-contained bundle consumers include** (they supply stdlib + bayan +
 sankoch from their own manifest).
@@ -39,13 +39,15 @@ docs/            -- architecture, roadmap
 
 ## Build
 
-Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.3.25**). Bumping
-the pin requires re-vendoring stdlib: `cyrius lib sync`.
+Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.3.27**). The
+cyrius toolchain rolls fast, so the pin is a deliberate stability anchor — hold it;
+bump only on explicit instruction. Bumping the pin requires re-vendoring stdlib:
+`cyrius lib sync`.
 
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.25)
+cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.27)
 ./build/shravan                             # run tests (727 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks

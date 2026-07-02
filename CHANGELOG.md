@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.5] - 2026-07-01
+
+CELT stereo coupling foundation + toolchain bump to 6.3.27. 799 assertions
+(was 796, +3).
+
+### Added
+
+- **CELT stereo coupling primitives** (`src/opus.cyr`) — the invertible core that
+  replaces the mono downmix (full two-channel bitstream integration lands in 2.5.6):
+  - `_opus_stereo_ms_forward` / `_opus_stereo_ms_inverse` — energy-preserving
+    mid/side transform (M=(L+R)/√2, S=(L-R)/√2), exactly invertible.
+  - `_opus_stereo_couple` — per-band coupled-vs-dual decision: chooses M/S when it
+    concentrates energy (`min(E_M,E_S) < min(E_L,E_R)`), else dual L/R; records the
+    choice in `ms_flags[band]`.
+  - `_opus_stereo_decouple` — reconstructs L/R from the coupled channels + `ms_flags`;
+    `couple∘decouple` is the identity for any per-band choice.
+- **Tests** (`+3` assertions): M/S invertibility, per-band decision (correlated band
+  → M/S), and an exact couple/decouple roundtrip over mixed correlated/uncorrelated bands.
+
+### Changed
+
+- **Toolchain pin bumped 6.3.25 → 6.3.27** (`cyrius.cyml`) — re-vendored stdlib via
+  `cyrius lib sync`, lock refreshed. Clears the pin drift; all tests pass on 6.3.27.
+
 ## [2.5.4] - 2026-07-01
 
 CELT transient detection + short-block MDCT. 796 assertions (was 785, +11).

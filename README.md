@@ -10,7 +10,7 @@ WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, and AAC-LC encoding/decoding. PCM sample f
 # Build
 cyrius build src/main.cyr build/shravan
 
-# Run tests (796 assertions)
+# Run tests (799 assertions)
 ./build/shravan
 
 # Benchmarks
@@ -82,7 +82,7 @@ Benchmarked against the previous Rust+LLVM implementation (v1.1.0):
 
 ## Requirements
 
-- Cyrius 6.3.25 (pinned in `cyrius.cyml [package].cyrius`)
+- Cyrius 6.3.27 (pinned in `cyrius.cyml [package].cyrius`)
 - Linux x86_64
 
 ## License
