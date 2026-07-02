@@ -3,11 +3,35 @@
 > **v2.5.8** — 843 tests + fuzz (90K/0), Cyrius 6.3.27.
 > CELT/Opus rate control + VBR: bit-reservoir controller + per-frame complexity metric
 > drive CBR / constrained-VBR / VBR packet sizing; `opus_encode_vbr`. Completes the CELT
-> rate model. (v2.5.7: MP4/M4A container demux. v2.5.6: CELT stereo full two-channel
+> bit-allocation *layer* — but Opus decode-to-PCM is still not wired (see Functional
+> status below). (v2.5.7: MP4/M4A container demux. v2.5.6: CELT stereo full two-channel
 > bitstream. v2.5.5: stereo coupling foundation. v2.5.4: transient detection + short-block
 > MDCT. v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair. v2.5.1: first
 > CELT decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
+
+## Functional status (honest — verified 2026-07-01)
+
+"Tests pass" ≠ "codec produces audio." The passing Opus tests assert real, exact
+*internal* properties (range coder invertible, PVQ bijective, M/S orthonormal, TNS
+FIR∘IIR = identity, DPCM round-trips) — but not "a real stream decodes to audio."
+What actually round-trips PCM end-to-end vs. what is still internal-only:
+
+- **Real end-to-end audio:** WAV, AIFF (encode+decode); FLAC, ALAC (decode); AAC
+  (encode+decode → IMDCT/overlap-add → PCM); MP4/M4A (demux → AAC → PCM).
+- **NOT end-to-end yet — pinned below:**
+  - **Opus/CELT.** The 2.5.0–2.5.8 work built the encoder + the entropy/PVQ/TNS/
+    stereo/transient/rate sub-layers and proved each internally bit-exact, but
+    `opus_decode_from_packets` still returns an **empty** sample vector: the CELT
+    decoder (`_opus_decode_celt_frame`) is **only called from tests**, never wired
+    into the decode path, and it reconstructs shape *direction* + energies, not PCM
+    (no magnitude synthesis / IMDCT / overlap-add). The encoder emits a **bespoke,
+    non-RFC-6716** bitstream, so it does not interoperate with real Opus tools either.
+  - **MP3 decode.** A stub: `mp3_decode` returns metadata + an **empty** sample vector
+    (no Huffman / requant / IMDCT / synthesis filterbank).
+
+The v2.5.x items below finish these tails. They were previously buried as "Deferred:"
+footnotes on shipped releases; they are now real, ordered, pinned releases.
 
 ## Completed (v2.0.0)
 
@@ -249,30 +273,104 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - Deferred: complexity from the actual MDCT/masking (vs the time-domain proxy);
   stereo/transient-aware allocation; a two-pass VBR.
 
-## v2.5.x — remaining
+## v2.5.x — remaining (every deferred tail now pinned)
 
-Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
-breathers between Opus vertebrae.
+Functional correctness first — make the codecs actually produce audio before adding
+breadth. Order is dependency-first. Effort tags: small / medium / large. Each item
+below was previously a "Deferred:" footnote or an undisclosed stub; they are now real.
 
-### v2.5.9 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
+### v2.5.9 — Opus/CELT decode → PCM audio · needs 2.5.1–2.5.8 · large
 
-- 88.2–384 kHz; 32-bit int / 64-bit float PCM; PCM SSE2 hot loops (the perf item).
+**The headline gap.** Wire `_opus_decode_celt_frame` / `_opus_decode_celt_stereo_frame`
+into `opus_decode_from_packets` (today it returns an empty sample vector), and implement
+the missing synthesis: magnitude reconstruction (unit shape × band energy) → IMDCT →
+inter-frame **TDAC overlap-add** → PCM. Prove it with a **real waveform round-trip**
+(encode a tone/sweep, decode, assert the output correlates with the input) — not an
+internal symbol check. Until this ships, Opus decode produces no sound. (Deferred from 2.5.1.)
 
-### v2.5.10 — SILK mode (speech) · needs framework
+### v2.5.10 — Opus bitstream conformance · needs 2.5.9 · large
 
-- LPC/LTP/LSF, excitation, shared range coder. Largest new subsystem.
+Decide and execute: either make the stream **RFC 6716-conformant** (real `ec_enc`
+range coder, spec band-energy coding + bit allocation, correct TOC) so it interoperates
+with libopus, **or** explicitly document + label it as a shravan-internal format. Today
+it is neither conformant nor decodable to audio outside shravan's own tests.
 
-### v2.5.11 — Hybrid mode (SILK + CELT) · needs 2.5.10 + full CELT
+### v2.5.11 — CELT transient completion · needs 2.5.9 · medium
 
-- SILK low-band + CELT high-band over one range coder. Completes the Opus encoder.
+Proper CELT **overlapping short-window** shapes, per-band **time-frequency resolution**,
+and **cross-frame transient memory** (needs real IMDCT/overlap from 2.5.9). Today's path
+swaps to 8 short MDCTs with per-block (non-overlapping) windows and no TF signalling.
+(Deferred from 2.5.4.)
 
-### v2.5.12 — FLAC LPC encoder · deferred (independent)
+### v2.5.12 — CELT stereo completion · needs 2.5.9 · medium
 
-- LPC prediction (beats Fixed); matters most for 24/32-bit hi-res lossless.
+**Stereo + transient combined** (today stereo forces a long MDCT — mutually exclusive),
+**intensity stereo** for high bands, and a **non-even mid/side bit split**. (Deferred from 2.5.6.)
 
-### v2.5.13 — DSD (DSD64/128/256, DoP) · hi-res (independent)
+### v2.5.13 — Opus rate-control completion · needs 2.5.9/11/12 · medium
 
-- 1-bit sigma-delta path.
+Drive VBR from the **actual MDCT/masking** complexity (not the time-domain first-difference
+proxy), make allocation **stereo/transient-aware**, and add **two-pass VBR**. (Deferred from 2.5.8.)
+
+### v2.5.14 — AAC TNS completion · medium
+
+**Short-window** TNS and **stereo/CPE** TNS (today: AAC-LC long-window, mono/SCE only).
+(Deferred from 2.5.2.)
+
+### v2.5.15 — AAC psychoacoustic completion · medium
+
+**Absolute-threshold-of-hearing** floor + **tonality-adjusted SMR** (needs SPL calibration),
+and a **closed-loop scale-factor DPCM** fix — the AAC encoder transmits scale-factor deltas
+clamped to ±60 but tracks the *unclamped* predictor, so encoder/decoder desync on large
+deltas (a real correctness bug, not just a quality gap). (Deferred from 2.5.3.)
+
+### v2.5.16 — MP3 decoder · large
+
+Real MP3 **decode to PCM**: Huffman + requantization + alias reduction + IMDCT + synthesis
+polyphase filterbank + stereo. Today `mp3_decode` is a metadata-only stub (empty samples).
+(Newly pinned — was an undisclosed stub.)
+
+### v2.5.17 — MP4 completion · small–medium
+
+Full **`esds` / AudioSpecificConfig** parse (today: channels/rate lifted from the `mp4a`
+entry, ADTS synthesized from that), **multi-track / edit-list** handling, and vendor the
+AAC chain into the fuzz harness to **fuzz `mp4_decode`**. (Deferred from 2.5.7.)
+
+### v2.5.18 — Fuzz-coverage completion · small
+
+The fuzz harness covers FLAC / Ogg / MP3-scan / ID3 only. Add **AAC, MP4, and Opus
+decode** targets so the untrusted-input paths shipped since 2.5.2 are actually fuzzed.
+(Newly pinned — coverage gap.)
+
+### v2.5.19 — Hi-res rates + wide PCM + SSE2 · independent · medium
+
+88.2–384 kHz round-trip tests; **PCM_F64** (64-bit float) WAV encode/decode (today
+`wav_encode` rejects `PCM_F64`); PCM conversion **SSE2/unrolled hot loops** with
+before/after benchmarks (the perf item). Note: 32-bit int PCM already works.
+
+### v2.5.20 — SILK mode (speech) · needs framework · large
+
+LPC/LTP/LSF, excitation, shared range coder. Largest new subsystem.
+
+### v2.5.21 — Hybrid mode (SILK + CELT) · needs 2.5.20 + 2.5.9 · large
+
+SILK low-band + CELT high-band over one range coder. Completes the Opus encoder.
+
+### v2.5.22 — FLAC LPC encoder · independent · medium
+
+LPC prediction (beats Fixed); matters most for 24/32-bit hi-res lossless. (FLAC *decode*
+already works; this is the encoder.)
+
+### v2.5.23 — DSD (DSD64/128/256, DoP) · independent · medium
+
+1-bit sigma-delta path.
+
+### Backlog note
+
+If the primary goal is a *working, interoperable Opus codec*, 2.5.9 + 2.5.10 are the
+real "end of line" — everything from 2.5.11 on is refinement or breadth. The nine
+"shipped" 2.5.0–2.5.8 releases are the entropy/allocation *scaffolding* for 2.5.9, not
+a finished decoder.
 
 ---
 
