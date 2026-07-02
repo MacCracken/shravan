@@ -48,6 +48,101 @@ fn _silk_tables_init() {
     return 0;
 }
 
+# ---- NLSF stage-2 + voiced-block tables (verbatim from libopus) ----
+var _silk_ec_sel_nb = 0;
+var _silk_ec_sel_wb = 0;
+var _silk_ec_icdf_nb = 0;
+var _silk_ec_icdf_wb = 0;
+var _silk_pred_nb = 0;
+var _silk_pred_wb = 0;
+var _silk_pitch_lag = 0;
+var _silk_pitch_contour_nb = 0;
+var _silk_pitch_contour = 0;
+var _silk_ltp_per = 0;
+var _silk_ltp_gain0 = 0;
+var _silk_ltp_gain1 = 0;
+var _silk_ltp_gain2 = 0;
+var _silk_ltpscale = 0;
+var _silk_uniform4 = 0;
+var _silk_nlsf_ext = 0;
+var _silk_nlsf_interp = 0;
+
+fn _silk_tables2_init() {
+    _silk_ec_sel_nb = alloc(160);
+    store8(_silk_ec_sel_nb + 0, 16); store8(_silk_ec_sel_nb + 1, 0); store8(_silk_ec_sel_nb + 2, 0); store8(_silk_ec_sel_nb + 3, 0); store8(_silk_ec_sel_nb + 4, 0); store8(_silk_ec_sel_nb + 5, 99); store8(_silk_ec_sel_nb + 6, 66); store8(_silk_ec_sel_nb + 7, 36); store8(_silk_ec_sel_nb + 8, 36); store8(_silk_ec_sel_nb + 9, 34); store8(_silk_ec_sel_nb + 10, 36); store8(_silk_ec_sel_nb + 11, 34); store8(_silk_ec_sel_nb + 12, 34); store8(_silk_ec_sel_nb + 13, 34); store8(_silk_ec_sel_nb + 14, 34); store8(_silk_ec_sel_nb + 15, 83);
+    store8(_silk_ec_sel_nb + 16, 69); store8(_silk_ec_sel_nb + 17, 36); store8(_silk_ec_sel_nb + 18, 52); store8(_silk_ec_sel_nb + 19, 34); store8(_silk_ec_sel_nb + 20, 116); store8(_silk_ec_sel_nb + 21, 102); store8(_silk_ec_sel_nb + 22, 70); store8(_silk_ec_sel_nb + 23, 68); store8(_silk_ec_sel_nb + 24, 68); store8(_silk_ec_sel_nb + 25, 176); store8(_silk_ec_sel_nb + 26, 102); store8(_silk_ec_sel_nb + 27, 68); store8(_silk_ec_sel_nb + 28, 68); store8(_silk_ec_sel_nb + 29, 34); store8(_silk_ec_sel_nb + 30, 65); store8(_silk_ec_sel_nb + 31, 85);
+    store8(_silk_ec_sel_nb + 32, 68); store8(_silk_ec_sel_nb + 33, 84); store8(_silk_ec_sel_nb + 34, 36); store8(_silk_ec_sel_nb + 35, 116); store8(_silk_ec_sel_nb + 36, 141); store8(_silk_ec_sel_nb + 37, 152); store8(_silk_ec_sel_nb + 38, 139); store8(_silk_ec_sel_nb + 39, 170); store8(_silk_ec_sel_nb + 40, 132); store8(_silk_ec_sel_nb + 41, 187); store8(_silk_ec_sel_nb + 42, 184); store8(_silk_ec_sel_nb + 43, 216); store8(_silk_ec_sel_nb + 44, 137); store8(_silk_ec_sel_nb + 45, 132); store8(_silk_ec_sel_nb + 46, 249); store8(_silk_ec_sel_nb + 47, 168);
+    store8(_silk_ec_sel_nb + 48, 185); store8(_silk_ec_sel_nb + 49, 139); store8(_silk_ec_sel_nb + 50, 104); store8(_silk_ec_sel_nb + 51, 102); store8(_silk_ec_sel_nb + 52, 100); store8(_silk_ec_sel_nb + 53, 68); store8(_silk_ec_sel_nb + 54, 68); store8(_silk_ec_sel_nb + 55, 178); store8(_silk_ec_sel_nb + 56, 218); store8(_silk_ec_sel_nb + 57, 185); store8(_silk_ec_sel_nb + 58, 185); store8(_silk_ec_sel_nb + 59, 170); store8(_silk_ec_sel_nb + 60, 244); store8(_silk_ec_sel_nb + 61, 216); store8(_silk_ec_sel_nb + 62, 187); store8(_silk_ec_sel_nb + 63, 187);
+    store8(_silk_ec_sel_nb + 64, 170); store8(_silk_ec_sel_nb + 65, 244); store8(_silk_ec_sel_nb + 66, 187); store8(_silk_ec_sel_nb + 67, 187); store8(_silk_ec_sel_nb + 68, 219); store8(_silk_ec_sel_nb + 69, 138); store8(_silk_ec_sel_nb + 70, 103); store8(_silk_ec_sel_nb + 71, 155); store8(_silk_ec_sel_nb + 72, 184); store8(_silk_ec_sel_nb + 73, 185); store8(_silk_ec_sel_nb + 74, 137); store8(_silk_ec_sel_nb + 75, 116); store8(_silk_ec_sel_nb + 76, 183); store8(_silk_ec_sel_nb + 77, 155); store8(_silk_ec_sel_nb + 78, 152); store8(_silk_ec_sel_nb + 79, 136);
+    store8(_silk_ec_sel_nb + 80, 132); store8(_silk_ec_sel_nb + 81, 217); store8(_silk_ec_sel_nb + 82, 184); store8(_silk_ec_sel_nb + 83, 184); store8(_silk_ec_sel_nb + 84, 170); store8(_silk_ec_sel_nb + 85, 164); store8(_silk_ec_sel_nb + 86, 217); store8(_silk_ec_sel_nb + 87, 171); store8(_silk_ec_sel_nb + 88, 155); store8(_silk_ec_sel_nb + 89, 139); store8(_silk_ec_sel_nb + 90, 244); store8(_silk_ec_sel_nb + 91, 169); store8(_silk_ec_sel_nb + 92, 184); store8(_silk_ec_sel_nb + 93, 185); store8(_silk_ec_sel_nb + 94, 170); store8(_silk_ec_sel_nb + 95, 164);
+    store8(_silk_ec_sel_nb + 96, 216); store8(_silk_ec_sel_nb + 97, 223); store8(_silk_ec_sel_nb + 98, 218); store8(_silk_ec_sel_nb + 99, 138); store8(_silk_ec_sel_nb + 100, 214); store8(_silk_ec_sel_nb + 101, 143); store8(_silk_ec_sel_nb + 102, 188); store8(_silk_ec_sel_nb + 103, 218); store8(_silk_ec_sel_nb + 104, 168); store8(_silk_ec_sel_nb + 105, 244); store8(_silk_ec_sel_nb + 106, 141); store8(_silk_ec_sel_nb + 107, 136); store8(_silk_ec_sel_nb + 108, 155); store8(_silk_ec_sel_nb + 109, 170); store8(_silk_ec_sel_nb + 110, 168); store8(_silk_ec_sel_nb + 111, 138);
+    store8(_silk_ec_sel_nb + 112, 220); store8(_silk_ec_sel_nb + 113, 219); store8(_silk_ec_sel_nb + 114, 139); store8(_silk_ec_sel_nb + 115, 164); store8(_silk_ec_sel_nb + 116, 219); store8(_silk_ec_sel_nb + 117, 202); store8(_silk_ec_sel_nb + 118, 216); store8(_silk_ec_sel_nb + 119, 137); store8(_silk_ec_sel_nb + 120, 168); store8(_silk_ec_sel_nb + 121, 186); store8(_silk_ec_sel_nb + 122, 246); store8(_silk_ec_sel_nb + 123, 185); store8(_silk_ec_sel_nb + 124, 139); store8(_silk_ec_sel_nb + 125, 116); store8(_silk_ec_sel_nb + 126, 185); store8(_silk_ec_sel_nb + 127, 219);
+    store8(_silk_ec_sel_nb + 128, 185); store8(_silk_ec_sel_nb + 129, 138); store8(_silk_ec_sel_nb + 130, 100); store8(_silk_ec_sel_nb + 131, 100); store8(_silk_ec_sel_nb + 132, 134); store8(_silk_ec_sel_nb + 133, 100); store8(_silk_ec_sel_nb + 134, 102); store8(_silk_ec_sel_nb + 135, 34); store8(_silk_ec_sel_nb + 136, 68); store8(_silk_ec_sel_nb + 137, 68); store8(_silk_ec_sel_nb + 138, 100); store8(_silk_ec_sel_nb + 139, 68); store8(_silk_ec_sel_nb + 140, 168); store8(_silk_ec_sel_nb + 141, 203); store8(_silk_ec_sel_nb + 142, 221); store8(_silk_ec_sel_nb + 143, 218);
+    store8(_silk_ec_sel_nb + 144, 168); store8(_silk_ec_sel_nb + 145, 167); store8(_silk_ec_sel_nb + 146, 154); store8(_silk_ec_sel_nb + 147, 136); store8(_silk_ec_sel_nb + 148, 104); store8(_silk_ec_sel_nb + 149, 70); store8(_silk_ec_sel_nb + 150, 164); store8(_silk_ec_sel_nb + 151, 246); store8(_silk_ec_sel_nb + 152, 171); store8(_silk_ec_sel_nb + 153, 137); store8(_silk_ec_sel_nb + 154, 139); store8(_silk_ec_sel_nb + 155, 137); store8(_silk_ec_sel_nb + 156, 155); store8(_silk_ec_sel_nb + 157, 218); store8(_silk_ec_sel_nb + 158, 219); store8(_silk_ec_sel_nb + 159, 139);
+    _silk_ec_sel_wb = alloc(256);
+    store8(_silk_ec_sel_wb + 0, 0); store8(_silk_ec_sel_wb + 1, 0); store8(_silk_ec_sel_wb + 2, 0); store8(_silk_ec_sel_wb + 3, 0); store8(_silk_ec_sel_wb + 4, 0); store8(_silk_ec_sel_wb + 5, 0); store8(_silk_ec_sel_wb + 6, 0); store8(_silk_ec_sel_wb + 7, 1); store8(_silk_ec_sel_wb + 8, 100); store8(_silk_ec_sel_wb + 9, 102); store8(_silk_ec_sel_wb + 10, 102); store8(_silk_ec_sel_wb + 11, 68); store8(_silk_ec_sel_wb + 12, 68); store8(_silk_ec_sel_wb + 13, 36); store8(_silk_ec_sel_wb + 14, 34); store8(_silk_ec_sel_wb + 15, 96);
+    store8(_silk_ec_sel_wb + 16, 164); store8(_silk_ec_sel_wb + 17, 107); store8(_silk_ec_sel_wb + 18, 158); store8(_silk_ec_sel_wb + 19, 185); store8(_silk_ec_sel_wb + 20, 180); store8(_silk_ec_sel_wb + 21, 185); store8(_silk_ec_sel_wb + 22, 139); store8(_silk_ec_sel_wb + 23, 102); store8(_silk_ec_sel_wb + 24, 64); store8(_silk_ec_sel_wb + 25, 66); store8(_silk_ec_sel_wb + 26, 36); store8(_silk_ec_sel_wb + 27, 34); store8(_silk_ec_sel_wb + 28, 34); store8(_silk_ec_sel_wb + 29, 0); store8(_silk_ec_sel_wb + 30, 1); store8(_silk_ec_sel_wb + 31, 32);
+    store8(_silk_ec_sel_wb + 32, 208); store8(_silk_ec_sel_wb + 33, 139); store8(_silk_ec_sel_wb + 34, 141); store8(_silk_ec_sel_wb + 35, 191); store8(_silk_ec_sel_wb + 36, 152); store8(_silk_ec_sel_wb + 37, 185); store8(_silk_ec_sel_wb + 38, 155); store8(_silk_ec_sel_wb + 39, 104); store8(_silk_ec_sel_wb + 40, 96); store8(_silk_ec_sel_wb + 41, 171); store8(_silk_ec_sel_wb + 42, 104); store8(_silk_ec_sel_wb + 43, 166); store8(_silk_ec_sel_wb + 44, 102); store8(_silk_ec_sel_wb + 45, 102); store8(_silk_ec_sel_wb + 46, 102); store8(_silk_ec_sel_wb + 47, 132);
+    store8(_silk_ec_sel_wb + 48, 1); store8(_silk_ec_sel_wb + 49, 0); store8(_silk_ec_sel_wb + 50, 0); store8(_silk_ec_sel_wb + 51, 0); store8(_silk_ec_sel_wb + 52, 0); store8(_silk_ec_sel_wb + 53, 16); store8(_silk_ec_sel_wb + 54, 16); store8(_silk_ec_sel_wb + 55, 0); store8(_silk_ec_sel_wb + 56, 80); store8(_silk_ec_sel_wb + 57, 109); store8(_silk_ec_sel_wb + 58, 78); store8(_silk_ec_sel_wb + 59, 107); store8(_silk_ec_sel_wb + 60, 185); store8(_silk_ec_sel_wb + 61, 139); store8(_silk_ec_sel_wb + 62, 103); store8(_silk_ec_sel_wb + 63, 101);
+    store8(_silk_ec_sel_wb + 64, 208); store8(_silk_ec_sel_wb + 65, 212); store8(_silk_ec_sel_wb + 66, 141); store8(_silk_ec_sel_wb + 67, 139); store8(_silk_ec_sel_wb + 68, 173); store8(_silk_ec_sel_wb + 69, 153); store8(_silk_ec_sel_wb + 70, 123); store8(_silk_ec_sel_wb + 71, 103); store8(_silk_ec_sel_wb + 72, 36); store8(_silk_ec_sel_wb + 73, 0); store8(_silk_ec_sel_wb + 74, 0); store8(_silk_ec_sel_wb + 75, 0); store8(_silk_ec_sel_wb + 76, 0); store8(_silk_ec_sel_wb + 77, 0); store8(_silk_ec_sel_wb + 78, 0); store8(_silk_ec_sel_wb + 79, 1);
+    store8(_silk_ec_sel_wb + 80, 48); store8(_silk_ec_sel_wb + 81, 0); store8(_silk_ec_sel_wb + 82, 0); store8(_silk_ec_sel_wb + 83, 0); store8(_silk_ec_sel_wb + 84, 0); store8(_silk_ec_sel_wb + 85, 0); store8(_silk_ec_sel_wb + 86, 0); store8(_silk_ec_sel_wb + 87, 32); store8(_silk_ec_sel_wb + 88, 68); store8(_silk_ec_sel_wb + 89, 135); store8(_silk_ec_sel_wb + 90, 123); store8(_silk_ec_sel_wb + 91, 119); store8(_silk_ec_sel_wb + 92, 119); store8(_silk_ec_sel_wb + 93, 103); store8(_silk_ec_sel_wb + 94, 69); store8(_silk_ec_sel_wb + 95, 98);
+    store8(_silk_ec_sel_wb + 96, 68); store8(_silk_ec_sel_wb + 97, 103); store8(_silk_ec_sel_wb + 98, 120); store8(_silk_ec_sel_wb + 99, 118); store8(_silk_ec_sel_wb + 100, 118); store8(_silk_ec_sel_wb + 101, 102); store8(_silk_ec_sel_wb + 102, 71); store8(_silk_ec_sel_wb + 103, 98); store8(_silk_ec_sel_wb + 104, 134); store8(_silk_ec_sel_wb + 105, 136); store8(_silk_ec_sel_wb + 106, 157); store8(_silk_ec_sel_wb + 107, 184); store8(_silk_ec_sel_wb + 108, 182); store8(_silk_ec_sel_wb + 109, 153); store8(_silk_ec_sel_wb + 110, 139); store8(_silk_ec_sel_wb + 111, 134);
+    store8(_silk_ec_sel_wb + 112, 208); store8(_silk_ec_sel_wb + 113, 168); store8(_silk_ec_sel_wb + 114, 248); store8(_silk_ec_sel_wb + 115, 75); store8(_silk_ec_sel_wb + 116, 189); store8(_silk_ec_sel_wb + 117, 143); store8(_silk_ec_sel_wb + 118, 121); store8(_silk_ec_sel_wb + 119, 107); store8(_silk_ec_sel_wb + 120, 32); store8(_silk_ec_sel_wb + 121, 49); store8(_silk_ec_sel_wb + 122, 34); store8(_silk_ec_sel_wb + 123, 34); store8(_silk_ec_sel_wb + 124, 34); store8(_silk_ec_sel_wb + 125, 0); store8(_silk_ec_sel_wb + 126, 17); store8(_silk_ec_sel_wb + 127, 2);
+    store8(_silk_ec_sel_wb + 128, 210); store8(_silk_ec_sel_wb + 129, 235); store8(_silk_ec_sel_wb + 130, 139); store8(_silk_ec_sel_wb + 131, 123); store8(_silk_ec_sel_wb + 132, 185); store8(_silk_ec_sel_wb + 133, 137); store8(_silk_ec_sel_wb + 134, 105); store8(_silk_ec_sel_wb + 135, 134); store8(_silk_ec_sel_wb + 136, 98); store8(_silk_ec_sel_wb + 137, 135); store8(_silk_ec_sel_wb + 138, 104); store8(_silk_ec_sel_wb + 139, 182); store8(_silk_ec_sel_wb + 140, 100); store8(_silk_ec_sel_wb + 141, 183); store8(_silk_ec_sel_wb + 142, 171); store8(_silk_ec_sel_wb + 143, 134);
+    store8(_silk_ec_sel_wb + 144, 100); store8(_silk_ec_sel_wb + 145, 70); store8(_silk_ec_sel_wb + 146, 68); store8(_silk_ec_sel_wb + 147, 70); store8(_silk_ec_sel_wb + 148, 66); store8(_silk_ec_sel_wb + 149, 66); store8(_silk_ec_sel_wb + 150, 34); store8(_silk_ec_sel_wb + 151, 131); store8(_silk_ec_sel_wb + 152, 64); store8(_silk_ec_sel_wb + 153, 166); store8(_silk_ec_sel_wb + 154, 102); store8(_silk_ec_sel_wb + 155, 68); store8(_silk_ec_sel_wb + 156, 36); store8(_silk_ec_sel_wb + 157, 2); store8(_silk_ec_sel_wb + 158, 1); store8(_silk_ec_sel_wb + 159, 0);
+    store8(_silk_ec_sel_wb + 160, 134); store8(_silk_ec_sel_wb + 161, 166); store8(_silk_ec_sel_wb + 162, 102); store8(_silk_ec_sel_wb + 163, 68); store8(_silk_ec_sel_wb + 164, 34); store8(_silk_ec_sel_wb + 165, 34); store8(_silk_ec_sel_wb + 166, 66); store8(_silk_ec_sel_wb + 167, 132); store8(_silk_ec_sel_wb + 168, 212); store8(_silk_ec_sel_wb + 169, 246); store8(_silk_ec_sel_wb + 170, 158); store8(_silk_ec_sel_wb + 171, 139); store8(_silk_ec_sel_wb + 172, 107); store8(_silk_ec_sel_wb + 173, 107); store8(_silk_ec_sel_wb + 174, 87); store8(_silk_ec_sel_wb + 175, 102);
+    store8(_silk_ec_sel_wb + 176, 100); store8(_silk_ec_sel_wb + 177, 219); store8(_silk_ec_sel_wb + 178, 125); store8(_silk_ec_sel_wb + 179, 122); store8(_silk_ec_sel_wb + 180, 137); store8(_silk_ec_sel_wb + 181, 118); store8(_silk_ec_sel_wb + 182, 103); store8(_silk_ec_sel_wb + 183, 132); store8(_silk_ec_sel_wb + 184, 114); store8(_silk_ec_sel_wb + 185, 135); store8(_silk_ec_sel_wb + 186, 137); store8(_silk_ec_sel_wb + 187, 105); store8(_silk_ec_sel_wb + 188, 171); store8(_silk_ec_sel_wb + 189, 106); store8(_silk_ec_sel_wb + 190, 50); store8(_silk_ec_sel_wb + 191, 34);
+    store8(_silk_ec_sel_wb + 192, 164); store8(_silk_ec_sel_wb + 193, 214); store8(_silk_ec_sel_wb + 194, 141); store8(_silk_ec_sel_wb + 195, 143); store8(_silk_ec_sel_wb + 196, 185); store8(_silk_ec_sel_wb + 197, 151); store8(_silk_ec_sel_wb + 198, 121); store8(_silk_ec_sel_wb + 199, 103); store8(_silk_ec_sel_wb + 200, 192); store8(_silk_ec_sel_wb + 201, 34); store8(_silk_ec_sel_wb + 202, 0); store8(_silk_ec_sel_wb + 203, 0); store8(_silk_ec_sel_wb + 204, 0); store8(_silk_ec_sel_wb + 205, 0); store8(_silk_ec_sel_wb + 206, 0); store8(_silk_ec_sel_wb + 207, 1);
+    store8(_silk_ec_sel_wb + 208, 208); store8(_silk_ec_sel_wb + 209, 109); store8(_silk_ec_sel_wb + 210, 74); store8(_silk_ec_sel_wb + 211, 187); store8(_silk_ec_sel_wb + 212, 134); store8(_silk_ec_sel_wb + 213, 249); store8(_silk_ec_sel_wb + 214, 159); store8(_silk_ec_sel_wb + 215, 137); store8(_silk_ec_sel_wb + 216, 102); store8(_silk_ec_sel_wb + 217, 110); store8(_silk_ec_sel_wb + 218, 154); store8(_silk_ec_sel_wb + 219, 118); store8(_silk_ec_sel_wb + 220, 87); store8(_silk_ec_sel_wb + 221, 101); store8(_silk_ec_sel_wb + 222, 119); store8(_silk_ec_sel_wb + 223, 101);
+    store8(_silk_ec_sel_wb + 224, 0); store8(_silk_ec_sel_wb + 225, 2); store8(_silk_ec_sel_wb + 226, 0); store8(_silk_ec_sel_wb + 227, 36); store8(_silk_ec_sel_wb + 228, 36); store8(_silk_ec_sel_wb + 229, 66); store8(_silk_ec_sel_wb + 230, 68); store8(_silk_ec_sel_wb + 231, 35); store8(_silk_ec_sel_wb + 232, 96); store8(_silk_ec_sel_wb + 233, 164); store8(_silk_ec_sel_wb + 234, 102); store8(_silk_ec_sel_wb + 235, 100); store8(_silk_ec_sel_wb + 236, 36); store8(_silk_ec_sel_wb + 237, 0); store8(_silk_ec_sel_wb + 238, 2); store8(_silk_ec_sel_wb + 239, 33);
+    store8(_silk_ec_sel_wb + 240, 167); store8(_silk_ec_sel_wb + 241, 138); store8(_silk_ec_sel_wb + 242, 174); store8(_silk_ec_sel_wb + 243, 102); store8(_silk_ec_sel_wb + 244, 100); store8(_silk_ec_sel_wb + 245, 84); store8(_silk_ec_sel_wb + 246, 2); store8(_silk_ec_sel_wb + 247, 2); store8(_silk_ec_sel_wb + 248, 100); store8(_silk_ec_sel_wb + 249, 107); store8(_silk_ec_sel_wb + 250, 120); store8(_silk_ec_sel_wb + 251, 119); store8(_silk_ec_sel_wb + 252, 36); store8(_silk_ec_sel_wb + 253, 197); store8(_silk_ec_sel_wb + 254, 24); store8(_silk_ec_sel_wb + 255, 0);
+    _silk_ec_icdf_nb = alloc(72);
+    store8(_silk_ec_icdf_nb + 0, 255); store8(_silk_ec_icdf_nb + 1, 254); store8(_silk_ec_icdf_nb + 2, 253); store8(_silk_ec_icdf_nb + 3, 238); store8(_silk_ec_icdf_nb + 4, 14); store8(_silk_ec_icdf_nb + 5, 3); store8(_silk_ec_icdf_nb + 6, 2); store8(_silk_ec_icdf_nb + 7, 1); store8(_silk_ec_icdf_nb + 8, 0); store8(_silk_ec_icdf_nb + 9, 255); store8(_silk_ec_icdf_nb + 10, 254); store8(_silk_ec_icdf_nb + 11, 252); store8(_silk_ec_icdf_nb + 12, 218); store8(_silk_ec_icdf_nb + 13, 35); store8(_silk_ec_icdf_nb + 14, 3); store8(_silk_ec_icdf_nb + 15, 2);
+    store8(_silk_ec_icdf_nb + 16, 1); store8(_silk_ec_icdf_nb + 17, 0); store8(_silk_ec_icdf_nb + 18, 255); store8(_silk_ec_icdf_nb + 19, 254); store8(_silk_ec_icdf_nb + 20, 250); store8(_silk_ec_icdf_nb + 21, 208); store8(_silk_ec_icdf_nb + 22, 59); store8(_silk_ec_icdf_nb + 23, 4); store8(_silk_ec_icdf_nb + 24, 2); store8(_silk_ec_icdf_nb + 25, 1); store8(_silk_ec_icdf_nb + 26, 0); store8(_silk_ec_icdf_nb + 27, 255); store8(_silk_ec_icdf_nb + 28, 254); store8(_silk_ec_icdf_nb + 29, 246); store8(_silk_ec_icdf_nb + 30, 194); store8(_silk_ec_icdf_nb + 31, 71);
+    store8(_silk_ec_icdf_nb + 32, 10); store8(_silk_ec_icdf_nb + 33, 2); store8(_silk_ec_icdf_nb + 34, 1); store8(_silk_ec_icdf_nb + 35, 0); store8(_silk_ec_icdf_nb + 36, 255); store8(_silk_ec_icdf_nb + 37, 252); store8(_silk_ec_icdf_nb + 38, 236); store8(_silk_ec_icdf_nb + 39, 183); store8(_silk_ec_icdf_nb + 40, 82); store8(_silk_ec_icdf_nb + 41, 8); store8(_silk_ec_icdf_nb + 42, 2); store8(_silk_ec_icdf_nb + 43, 1); store8(_silk_ec_icdf_nb + 44, 0); store8(_silk_ec_icdf_nb + 45, 255); store8(_silk_ec_icdf_nb + 46, 252); store8(_silk_ec_icdf_nb + 47, 235);
+    store8(_silk_ec_icdf_nb + 48, 180); store8(_silk_ec_icdf_nb + 49, 90); store8(_silk_ec_icdf_nb + 50, 17); store8(_silk_ec_icdf_nb + 51, 2); store8(_silk_ec_icdf_nb + 52, 1); store8(_silk_ec_icdf_nb + 53, 0); store8(_silk_ec_icdf_nb + 54, 255); store8(_silk_ec_icdf_nb + 55, 248); store8(_silk_ec_icdf_nb + 56, 224); store8(_silk_ec_icdf_nb + 57, 171); store8(_silk_ec_icdf_nb + 58, 97); store8(_silk_ec_icdf_nb + 59, 30); store8(_silk_ec_icdf_nb + 60, 4); store8(_silk_ec_icdf_nb + 61, 1); store8(_silk_ec_icdf_nb + 62, 0); store8(_silk_ec_icdf_nb + 63, 255);
+    store8(_silk_ec_icdf_nb + 64, 254); store8(_silk_ec_icdf_nb + 65, 236); store8(_silk_ec_icdf_nb + 66, 173); store8(_silk_ec_icdf_nb + 67, 95); store8(_silk_ec_icdf_nb + 68, 37); store8(_silk_ec_icdf_nb + 69, 7); store8(_silk_ec_icdf_nb + 70, 1); store8(_silk_ec_icdf_nb + 71, 0);
+    _silk_ec_icdf_wb = alloc(72);
+    store8(_silk_ec_icdf_wb + 0, 255); store8(_silk_ec_icdf_wb + 1, 254); store8(_silk_ec_icdf_wb + 2, 253); store8(_silk_ec_icdf_wb + 3, 244); store8(_silk_ec_icdf_wb + 4, 12); store8(_silk_ec_icdf_wb + 5, 3); store8(_silk_ec_icdf_wb + 6, 2); store8(_silk_ec_icdf_wb + 7, 1); store8(_silk_ec_icdf_wb + 8, 0); store8(_silk_ec_icdf_wb + 9, 255); store8(_silk_ec_icdf_wb + 10, 254); store8(_silk_ec_icdf_wb + 11, 252); store8(_silk_ec_icdf_wb + 12, 224); store8(_silk_ec_icdf_wb + 13, 38); store8(_silk_ec_icdf_wb + 14, 3); store8(_silk_ec_icdf_wb + 15, 2);
+    store8(_silk_ec_icdf_wb + 16, 1); store8(_silk_ec_icdf_wb + 17, 0); store8(_silk_ec_icdf_wb + 18, 255); store8(_silk_ec_icdf_wb + 19, 254); store8(_silk_ec_icdf_wb + 20, 251); store8(_silk_ec_icdf_wb + 21, 209); store8(_silk_ec_icdf_wb + 22, 57); store8(_silk_ec_icdf_wb + 23, 4); store8(_silk_ec_icdf_wb + 24, 2); store8(_silk_ec_icdf_wb + 25, 1); store8(_silk_ec_icdf_wb + 26, 0); store8(_silk_ec_icdf_wb + 27, 255); store8(_silk_ec_icdf_wb + 28, 254); store8(_silk_ec_icdf_wb + 29, 244); store8(_silk_ec_icdf_wb + 30, 195); store8(_silk_ec_icdf_wb + 31, 69);
+    store8(_silk_ec_icdf_wb + 32, 4); store8(_silk_ec_icdf_wb + 33, 2); store8(_silk_ec_icdf_wb + 34, 1); store8(_silk_ec_icdf_wb + 35, 0); store8(_silk_ec_icdf_wb + 36, 255); store8(_silk_ec_icdf_wb + 37, 251); store8(_silk_ec_icdf_wb + 38, 232); store8(_silk_ec_icdf_wb + 39, 184); store8(_silk_ec_icdf_wb + 40, 84); store8(_silk_ec_icdf_wb + 41, 7); store8(_silk_ec_icdf_wb + 42, 2); store8(_silk_ec_icdf_wb + 43, 1); store8(_silk_ec_icdf_wb + 44, 0); store8(_silk_ec_icdf_wb + 45, 255); store8(_silk_ec_icdf_wb + 46, 254); store8(_silk_ec_icdf_wb + 47, 240);
+    store8(_silk_ec_icdf_wb + 48, 186); store8(_silk_ec_icdf_wb + 49, 86); store8(_silk_ec_icdf_wb + 50, 14); store8(_silk_ec_icdf_wb + 51, 2); store8(_silk_ec_icdf_wb + 52, 1); store8(_silk_ec_icdf_wb + 53, 0); store8(_silk_ec_icdf_wb + 54, 255); store8(_silk_ec_icdf_wb + 55, 254); store8(_silk_ec_icdf_wb + 56, 239); store8(_silk_ec_icdf_wb + 57, 178); store8(_silk_ec_icdf_wb + 58, 91); store8(_silk_ec_icdf_wb + 59, 30); store8(_silk_ec_icdf_wb + 60, 5); store8(_silk_ec_icdf_wb + 61, 1); store8(_silk_ec_icdf_wb + 62, 0); store8(_silk_ec_icdf_wb + 63, 255);
+    store8(_silk_ec_icdf_wb + 64, 248); store8(_silk_ec_icdf_wb + 65, 227); store8(_silk_ec_icdf_wb + 66, 177); store8(_silk_ec_icdf_wb + 67, 100); store8(_silk_ec_icdf_wb + 68, 19); store8(_silk_ec_icdf_wb + 69, 2); store8(_silk_ec_icdf_wb + 70, 1); store8(_silk_ec_icdf_wb + 71, 0);
+    _silk_pred_nb = alloc(18);
+    store8(_silk_pred_nb + 0, 179); store8(_silk_pred_nb + 1, 138); store8(_silk_pred_nb + 2, 140); store8(_silk_pred_nb + 3, 148); store8(_silk_pred_nb + 4, 151); store8(_silk_pred_nb + 5, 149); store8(_silk_pred_nb + 6, 153); store8(_silk_pred_nb + 7, 151); store8(_silk_pred_nb + 8, 163); store8(_silk_pred_nb + 9, 116); store8(_silk_pred_nb + 10, 67); store8(_silk_pred_nb + 11, 82); store8(_silk_pred_nb + 12, 59); store8(_silk_pred_nb + 13, 92); store8(_silk_pred_nb + 14, 72); store8(_silk_pred_nb + 15, 100);
+    store8(_silk_pred_nb + 16, 89); store8(_silk_pred_nb + 17, 92);
+    _silk_pred_wb = alloc(30);
+    store8(_silk_pred_wb + 0, 175); store8(_silk_pred_wb + 1, 148); store8(_silk_pred_wb + 2, 160); store8(_silk_pred_wb + 3, 176); store8(_silk_pred_wb + 4, 178); store8(_silk_pred_wb + 5, 173); store8(_silk_pred_wb + 6, 174); store8(_silk_pred_wb + 7, 164); store8(_silk_pred_wb + 8, 177); store8(_silk_pred_wb + 9, 174); store8(_silk_pred_wb + 10, 196); store8(_silk_pred_wb + 11, 182); store8(_silk_pred_wb + 12, 198); store8(_silk_pred_wb + 13, 192); store8(_silk_pred_wb + 14, 182); store8(_silk_pred_wb + 15, 68);
+    store8(_silk_pred_wb + 16, 62); store8(_silk_pred_wb + 17, 66); store8(_silk_pred_wb + 18, 60); store8(_silk_pred_wb + 19, 72); store8(_silk_pred_wb + 20, 117); store8(_silk_pred_wb + 21, 85); store8(_silk_pred_wb + 22, 90); store8(_silk_pred_wb + 23, 118); store8(_silk_pred_wb + 24, 136); store8(_silk_pred_wb + 25, 151); store8(_silk_pred_wb + 26, 142); store8(_silk_pred_wb + 27, 160); store8(_silk_pred_wb + 28, 142); store8(_silk_pred_wb + 29, 155);
+    _silk_pitch_lag = alloc(32);
+    store8(_silk_pitch_lag + 0, 253); store8(_silk_pitch_lag + 1, 250); store8(_silk_pitch_lag + 2, 244); store8(_silk_pitch_lag + 3, 233); store8(_silk_pitch_lag + 4, 212); store8(_silk_pitch_lag + 5, 182); store8(_silk_pitch_lag + 6, 150); store8(_silk_pitch_lag + 7, 131); store8(_silk_pitch_lag + 8, 120); store8(_silk_pitch_lag + 9, 110); store8(_silk_pitch_lag + 10, 98); store8(_silk_pitch_lag + 11, 85); store8(_silk_pitch_lag + 12, 72); store8(_silk_pitch_lag + 13, 60); store8(_silk_pitch_lag + 14, 49); store8(_silk_pitch_lag + 15, 40);
+    store8(_silk_pitch_lag + 16, 32); store8(_silk_pitch_lag + 17, 25); store8(_silk_pitch_lag + 18, 19); store8(_silk_pitch_lag + 19, 15); store8(_silk_pitch_lag + 20, 13); store8(_silk_pitch_lag + 21, 11); store8(_silk_pitch_lag + 22, 9); store8(_silk_pitch_lag + 23, 8); store8(_silk_pitch_lag + 24, 7); store8(_silk_pitch_lag + 25, 6); store8(_silk_pitch_lag + 26, 5); store8(_silk_pitch_lag + 27, 4); store8(_silk_pitch_lag + 28, 3); store8(_silk_pitch_lag + 29, 2); store8(_silk_pitch_lag + 30, 1); store8(_silk_pitch_lag + 31, 0);
+    _silk_pitch_contour_nb = alloc(11);
+    store8(_silk_pitch_contour_nb + 0, 188); store8(_silk_pitch_contour_nb + 1, 176); store8(_silk_pitch_contour_nb + 2, 155); store8(_silk_pitch_contour_nb + 3, 138); store8(_silk_pitch_contour_nb + 4, 119); store8(_silk_pitch_contour_nb + 5, 97); store8(_silk_pitch_contour_nb + 6, 67); store8(_silk_pitch_contour_nb + 7, 43); store8(_silk_pitch_contour_nb + 8, 26); store8(_silk_pitch_contour_nb + 9, 10); store8(_silk_pitch_contour_nb + 10, 0);
+    _silk_pitch_contour = alloc(34);
+    store8(_silk_pitch_contour + 0, 223); store8(_silk_pitch_contour + 1, 201); store8(_silk_pitch_contour + 2, 183); store8(_silk_pitch_contour + 3, 167); store8(_silk_pitch_contour + 4, 152); store8(_silk_pitch_contour + 5, 138); store8(_silk_pitch_contour + 6, 124); store8(_silk_pitch_contour + 7, 111); store8(_silk_pitch_contour + 8, 98); store8(_silk_pitch_contour + 9, 88); store8(_silk_pitch_contour + 10, 79); store8(_silk_pitch_contour + 11, 70); store8(_silk_pitch_contour + 12, 62); store8(_silk_pitch_contour + 13, 56); store8(_silk_pitch_contour + 14, 50); store8(_silk_pitch_contour + 15, 44);
+    store8(_silk_pitch_contour + 16, 39); store8(_silk_pitch_contour + 17, 35); store8(_silk_pitch_contour + 18, 31); store8(_silk_pitch_contour + 19, 27); store8(_silk_pitch_contour + 20, 24); store8(_silk_pitch_contour + 21, 21); store8(_silk_pitch_contour + 22, 18); store8(_silk_pitch_contour + 23, 16); store8(_silk_pitch_contour + 24, 14); store8(_silk_pitch_contour + 25, 12); store8(_silk_pitch_contour + 26, 10); store8(_silk_pitch_contour + 27, 8); store8(_silk_pitch_contour + 28, 6); store8(_silk_pitch_contour + 29, 4); store8(_silk_pitch_contour + 30, 3); store8(_silk_pitch_contour + 31, 2);
+    store8(_silk_pitch_contour + 32, 1); store8(_silk_pitch_contour + 33, 0);
+    _silk_ltp_per = alloc(3);
+    store8(_silk_ltp_per + 0, 179); store8(_silk_ltp_per + 1, 99); store8(_silk_ltp_per + 2, 0);
+    _silk_ltp_gain0 = alloc(8);
+    store8(_silk_ltp_gain0 + 0, 71); store8(_silk_ltp_gain0 + 1, 56); store8(_silk_ltp_gain0 + 2, 43); store8(_silk_ltp_gain0 + 3, 30); store8(_silk_ltp_gain0 + 4, 21); store8(_silk_ltp_gain0 + 5, 12); store8(_silk_ltp_gain0 + 6, 6); store8(_silk_ltp_gain0 + 7, 0);
+    _silk_ltp_gain1 = alloc(16);
+    store8(_silk_ltp_gain1 + 0, 199); store8(_silk_ltp_gain1 + 1, 165); store8(_silk_ltp_gain1 + 2, 144); store8(_silk_ltp_gain1 + 3, 124); store8(_silk_ltp_gain1 + 4, 109); store8(_silk_ltp_gain1 + 5, 96); store8(_silk_ltp_gain1 + 6, 84); store8(_silk_ltp_gain1 + 7, 71); store8(_silk_ltp_gain1 + 8, 61); store8(_silk_ltp_gain1 + 9, 51); store8(_silk_ltp_gain1 + 10, 42); store8(_silk_ltp_gain1 + 11, 32); store8(_silk_ltp_gain1 + 12, 23); store8(_silk_ltp_gain1 + 13, 15); store8(_silk_ltp_gain1 + 14, 8); store8(_silk_ltp_gain1 + 15, 0);
+    _silk_ltp_gain2 = alloc(32);
+    store8(_silk_ltp_gain2 + 0, 241); store8(_silk_ltp_gain2 + 1, 225); store8(_silk_ltp_gain2 + 2, 211); store8(_silk_ltp_gain2 + 3, 199); store8(_silk_ltp_gain2 + 4, 187); store8(_silk_ltp_gain2 + 5, 175); store8(_silk_ltp_gain2 + 6, 164); store8(_silk_ltp_gain2 + 7, 153); store8(_silk_ltp_gain2 + 8, 142); store8(_silk_ltp_gain2 + 9, 132); store8(_silk_ltp_gain2 + 10, 123); store8(_silk_ltp_gain2 + 11, 114); store8(_silk_ltp_gain2 + 12, 105); store8(_silk_ltp_gain2 + 13, 96); store8(_silk_ltp_gain2 + 14, 88); store8(_silk_ltp_gain2 + 15, 80);
+    store8(_silk_ltp_gain2 + 16, 72); store8(_silk_ltp_gain2 + 17, 64); store8(_silk_ltp_gain2 + 18, 57); store8(_silk_ltp_gain2 + 19, 50); store8(_silk_ltp_gain2 + 20, 44); store8(_silk_ltp_gain2 + 21, 38); store8(_silk_ltp_gain2 + 22, 33); store8(_silk_ltp_gain2 + 23, 29); store8(_silk_ltp_gain2 + 24, 24); store8(_silk_ltp_gain2 + 25, 20); store8(_silk_ltp_gain2 + 26, 16); store8(_silk_ltp_gain2 + 27, 12); store8(_silk_ltp_gain2 + 28, 9); store8(_silk_ltp_gain2 + 29, 5); store8(_silk_ltp_gain2 + 30, 2); store8(_silk_ltp_gain2 + 31, 0);
+    _silk_ltpscale = alloc(3);
+    store8(_silk_ltpscale + 0, 128); store8(_silk_ltpscale + 1, 64); store8(_silk_ltpscale + 2, 0);
+    _silk_uniform4 = alloc(4);
+    store8(_silk_uniform4 + 0, 192); store8(_silk_uniform4 + 1, 128); store8(_silk_uniform4 + 2, 64); store8(_silk_uniform4 + 3, 0);
+    _silk_nlsf_ext = alloc(7);
+    store8(_silk_nlsf_ext + 0, 100); store8(_silk_nlsf_ext + 1, 40); store8(_silk_nlsf_ext + 2, 16); store8(_silk_nlsf_ext + 3, 7); store8(_silk_nlsf_ext + 4, 3); store8(_silk_nlsf_ext + 5, 1); store8(_silk_nlsf_ext + 6, 0);
+    _silk_nlsf_interp = alloc(5);
+    store8(_silk_nlsf_interp + 0, 243); store8(_silk_nlsf_interp + 1, 221); store8(_silk_nlsf_interp + 2, 192); store8(_silk_nlsf_interp + 3, 181); store8(_silk_nlsf_interp + 4, 0);
+    return 0;
+}
+
 # ---- integer-width helpers (reuse sar/_i16 from opus.cyr) ----
 fn silk_sx32(v) { return ((v & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000; }
 
@@ -113,27 +208,46 @@ fn _silk_gains_dequant_impl(GI, gains_out, lastgain_ptr, conditional, nb_subfr) 
     return 0;
 }
 
-# ---- LP header + decode_indices Steps A-C ----
-# Decodes signalType, quantOffsetType, GainsIndices[4] -> Gains_Q16[4], NLSFIndices[0]
-# from a SILK payload (config 1 NB fs_kHz=8 / config 9 WB fs_kHz=16), mono 20ms.
-# out[0]=signalType out[1]=quantOffset out[2..5]=GainsIndices out[6..9]=Gains_Q16
-# out[10]=NLSFIndices0. lastgain_ptr persists across frames. Returns the ec state.
-fn silk_decode_indices_ac(payload, len, fs_kHz, lastgain_ptr, out) {
+# ---- silk_decode_indices (full A-G) ----
+# silk_NLSF_unpack: fill ec_ix[order] (stage-2 icdf offsets) + pred_Q8[order].
+fn silk_nlsf_unpack(cb1_index, fs_kHz, ec_ix, pred_out) {
+    var order = 16;
+    var ec_sel = _silk_ec_sel_wb;
+    var pred = _silk_pred_wb;
+    if (fs_kHz == 8) { order = 10; ec_sel = _silk_ec_sel_nb; pred = _silk_pred_nb; }
+    var base = cb1_index * order / 2;
+    var i = 0;
+    while (i < order) {
+        var entry = load8(ec_sel + base + i / 2);
+        store64(ec_ix + i * 8, ((entry >> 1) & 7) * 9);
+        store8(pred_out + i, load8(pred + (i + (entry & 1) * (order - 1))));
+        store64(ec_ix + (i + 1) * 8, ((entry >> 5) & 7) * 9);
+        store8(pred_out + (i + 1), load8(pred + (i + ((entry >> 4) & 1) * (order - 1) + 1)));
+        i = i + 2;
+    }
+    return 0;
+}
+
+# Full silk_decode_indices (Steps A-G, mono 20ms, condCoding INDEPENDENTLY).
+# out layout: 0 signalType, 1 quantOffset, 2..5 GainsIndices, 6..9 Gains_Q16,
+# 10 NLSF0, 11 NInterp, 12 lag, 13 contour, 14 PER, 15 LTPscale, 16 seed,
+# 17 ec_tell, 18..18+order NLSFIndices[0..order], (19+order)..(22+order) LTPIndex[0..3].
+fn silk_decode_indices(payload, len, fs_kHz, lastgain_ptr, out) {
     if (_silk_type_VAD == 0) { _silk_tables_init(); }
+    if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
+    var order = 16;
+    if (fs_kHz == 8) { order = 10; }
     var ec = ec_dec_new(payload, len);
-    # LP header (mono, 1 frame/packet): VAD_flags[0], LBRR_flag
+    # LP header
     var vad = ec_dec_bit_logp(ec, 1);
     var lbrr = ec_dec_bit_logp(ec, 1);
-    # (LBRR_flag==1 for a single-frame packet sets LBRR_flags[0]=1 with no extra
-    #  bits; the LBRR-skip decode that would advance ec is a later bite -- rare for
-    #  low-bitrate voice and absent in our reference frames.)
-    # Step A: signal type + quant offset
+    # A: signal type
     var Ix = 0;
     if (vad != 0) { Ix = ec_dec_icdf(ec, _silk_type_VAD, 8) + 2; }
     else { Ix = ec_dec_icdf(ec, _silk_type_noVAD, 8); }
     var signalType = Ix >> 1;
     var quantOffset = Ix & 1;
-    # Step B: gains (independent coding)
+    # B: gains
     var GI = alloc(4 * 8);
     var g0 = ec_dec_icdf(ec, _silk_gain_iCDF + signalType * 8, 8) << 3;
     g0 = g0 + ec_dec_icdf(ec, _silk_uniform8, 8);
@@ -142,11 +256,55 @@ fn silk_decode_indices_ac(payload, len, fs_kHz, lastgain_ptr, out) {
     while (i < 4) { store64(GI + i * 8, ec_dec_icdf(ec, _silk_delta_gain, 8)); i = i + 1; }
     var gains = alloc(4 * 8);
     _silk_gains_dequant_impl(GI, gains, lastgain_ptr, 0, 4);
-    # Step C: NLSF stage-1 index
+    # C: NLSF stage-1 index
     var cb1 = _silk_cb1_wb;
     if (fs_kHz == 8) { cb1 = _silk_cb1_nb; }
     var nlsf0 = ec_dec_icdf(ec, cb1 + (signalType >> 1) * 32, 8);
-    # fill outputs
+    var NLSF = alloc((order + 1) * 8);
+    store64(NLSF + 0, nlsf0);
+    # D: NLSF stage-2 residuals
+    var ec_ix = alloc(order * 8);
+    var pred = alloc(order);
+    silk_nlsf_unpack(nlsf0, fs_kHz, ec_ix, pred);
+    var ec_icdf = _silk_ec_icdf_wb;
+    if (fs_kHz == 8) { ec_icdf = _silk_ec_icdf_nb; }
+    i = 0;
+    while (i < order) {
+        var Ix2 = ec_dec_icdf(ec, ec_icdf + load64(ec_ix + i * 8), 8);
+        if (Ix2 == 0) { Ix2 = Ix2 - ec_dec_icdf(ec, _silk_nlsf_ext, 8); }
+        else { if (Ix2 == 8) { Ix2 = Ix2 + ec_dec_icdf(ec, _silk_nlsf_ext, 8); } }
+        store64(NLSF + (i + 1) * 8, Ix2 - 4);
+        i = i + 1;
+    }
+    # E: interpolation factor (nb_subfr == 4)
+    var NInterp = ec_dec_icdf(ec, _silk_nlsf_interp, 8);
+    # F: voiced block
+    var lag = 0;
+    var cont = 0;
+    var PER = 0;
+    var LTPsc = 0;
+    var LTPI = alloc(4 * 8);
+    var kk = 0;
+    while (kk < 4) { store64(LTPI + kk * 8, 0); kk = kk + 1; }
+    if (signalType == 2) {
+        lag = ec_dec_icdf(ec, _silk_pitch_lag, 8) * (fs_kHz >> 1);
+        var lowbits = _silk_uniform8;
+        if (fs_kHz == 8) { lowbits = _silk_uniform4; }
+        lag = lag + ec_dec_icdf(ec, lowbits, 8);
+        var contour = _silk_pitch_contour;
+        if (fs_kHz == 8) { contour = _silk_pitch_contour_nb; }
+        cont = ec_dec_icdf(ec, contour, 8);
+        PER = ec_dec_icdf(ec, _silk_ltp_per, 8);
+        var ltpgain = _silk_ltp_gain0;
+        if (PER == 1) { ltpgain = _silk_ltp_gain1; }
+        if (PER == 2) { ltpgain = _silk_ltp_gain2; }
+        kk = 0;
+        while (kk < 4) { store64(LTPI + kk * 8, ec_dec_icdf(ec, ltpgain, 8)); kk = kk + 1; }
+        LTPsc = ec_dec_icdf(ec, _silk_ltpscale, 8);
+    }
+    # G: seed
+    var seed = ec_dec_icdf(ec, _silk_uniform4, 8);
+    # outputs
     store64(out + 0 * 8, signalType);
     store64(out + 1 * 8, quantOffset);
     var j = 0;
@@ -154,5 +312,17 @@ fn silk_decode_indices_ac(payload, len, fs_kHz, lastgain_ptr, out) {
     j = 0;
     while (j < 4) { store64(out + (6 + j) * 8, load64(gains + j * 8)); j = j + 1; }
     store64(out + 10 * 8, nlsf0);
+    store64(out + 11 * 8, NInterp);
+    store64(out + 12 * 8, lag);
+    store64(out + 13 * 8, cont);
+    store64(out + 14 * 8, PER);
+    store64(out + 15 * 8, LTPsc);
+    store64(out + 16 * 8, seed);
+    store64(out + 17 * 8, ec_tell(ec));
+    j = 0;
+    while (j <= order) { store64(out + (18 + j) * 8, load64(NLSF + j * 8)); j = j + 1; }
+    var lbase = 19 + order;
+    j = 0;
+    while (j < 4) { store64(out + (lbase + j) * 8, load64(LTPI + j * 8)); j = j + 1; }
     return ec;
 }
