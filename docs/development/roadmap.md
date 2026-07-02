@@ -1,11 +1,12 @@
 # Development Roadmap
 
-> **v2.5.1** — 748 tests + fuzz (90K/0), Cyrius 6.3.19.
-> First CELT decode: matched (invertible) range coder + PVQ shape decode +
-> full-stream encode→decode roundtrip (energies bit-exact, shapes bit-exact).
-> (v2.5.0: full PVQ spectral shape — V(N,K)/CWRS quantizer + pulse search replace
-> sign-only, cosine 0.98 vs 0.80. v2.4.4: Opus encoder framework. v2.4.3:
-> distlib bundle. v2.4.1: serde full coverage. v2.4.0: cyrius.cyml modernize.)
+> **v2.5.2** — 775 tests + fuzz (90K/0), Cyrius 6.3.25.
+> AAC TNS (Temporal Noise Shaping, AAC-LC long-window mono): exact-inverse
+> analysis-FIR/synthesis-IIR filter pair from shared quantized reflection coefs +
+> `tns_data()` bitstream. Toolchain 6.3.25 + serde Str-deserialize repair (derive
+> fixed upstream). (v2.5.1: first CELT decode — matched range coder + PVQ shape
+> decode + full-stream roundtrip. v2.5.0: full PVQ spectral shape. v2.4.4: Opus
+> encoder framework. v2.4.3: distlib bundle. v2.4.1: serde coverage. v2.4.0: cyrius.cyml.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -170,50 +171,60 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
   inter-frame TDAC overlap-add — a later 2.5.x refinement (this ships CELT
   *direction* decode, which is what PVQ carries).
 
+## v2.5.2 — Toolchain 6.3.25 + serde repair + AAC TNS · shipped 2026-07-01
+
+- [x] Toolchain pin 6.3.19 → 6.3.25 (`cyrius lib sync` re-vendor; lock refresh).
+- [x] Retired the serde Str-deserialize workaround — cycc 6.3.25 fixes derived
+      `_from_json` for `Str` fields (`ShrAudioMetadata` roundtrips via the derive).
+- [x] AAC TNS (AAC-LC long-window, mono/SCE): analysis FIR before quantization +
+      synthesis IIR before IMDCT, exact-inverse filter pair from shared quantized
+      reflection coefs; `tns_data()` bitstream; full mono encode→decode roundtrip.
+      Stereo/CPE path untouched. (Short-window + stereo TNS = later refinement.)
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
 
-### v2.5.2 — AAC TNS + psychoacoustic model · deferred (independent)
+### v2.5.3 — AAC psychoacoustic model · deferred (independent)
 
-- TNS: IIR filter before IMDCT (decoder) + TNS encoding.
-- Psychoacoustic masking thresholds for the AAC encoder.
+- Per-SFB masking thresholds (bark-scale spreading function) driving scale-factor /
+  bit allocation so quantization noise stays under the mask. Builds on 2.5.2 TNS.
 
-### v2.5.3 — Transient detection + short-window switching (CELT) · needs 2.5.0
+### v2.5.4 — Transient detection + short-window switching (CELT) · needs 2.5.0
 
 - Transient detector → 2/4/8 short MDCTs; `transient` flag; per-band tf resolution.
 
-### v2.5.4 — Stereo coupling (CELT) · needs 2.5.0
+### v2.5.5 — Stereo coupling (CELT) · needs 2.5.0
 
 - Per-band mid/side + intensity stereo; coupled-vs-dual decision. Replaces mono downmix.
 
-### v2.5.5 — MP4/M4A container · deferred (independent)
+### v2.5.6 — MP4/M4A container · deferred (independent)
 
 - MP4 box parsing (moov/trak/mdia/stbl), AAC extraction; enables real `.m4a`.
   `sankoch` already a dep for payloads.
 
-### v2.5.6 — Rate control + VBR (CELT/Opus) · needs 2.5.0/3/4
+### v2.5.7 — Rate control + VBR (CELT/Opus) · needs 2.5.0/4/5
 
 - Bit-reservoir rate-control state; unconstrained + constrained VBR. Completes CELT mode.
 
-### v2.5.7 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
+### v2.5.8 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
 
 - 88.2–384 kHz; 32-bit int / 64-bit float PCM; PCM SSE2 hot loops (the perf item).
 
-### v2.5.8 — SILK mode (speech) · needs framework
+### v2.5.9 — SILK mode (speech) · needs framework
 
 - LPC/LTP/LSF, excitation, shared range coder. Largest new subsystem.
 
-### v2.5.9 — Hybrid mode (SILK + CELT) · needs 2.5.8 + full CELT
+### v2.5.10 — Hybrid mode (SILK + CELT) · needs 2.5.9 + full CELT
 
 - SILK low-band + CELT high-band over one range coder. Completes the Opus encoder.
 
-### v2.5.10 — FLAC LPC encoder · deferred (independent)
+### v2.5.11 — FLAC LPC encoder · deferred (independent)
 
 - LPC prediction (beats Fixed); matters most for 24/32-bit hi-res lossless.
 
-### v2.5.11 — DSD (DSD64/128/256, DoP) · hi-res (independent)
+### v2.5.12 — DSD (DSD64/128/256, DoP) · hi-res (independent)
 
 - 1-bit sigma-delta path.
 

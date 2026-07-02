@@ -334,6 +334,404 @@ fn _bw_byte_len(bw) {
 }
 
 # ================================================================
+# TNS (Temporal Noise Shaping) — AAC-LC, long window
+# ================================================================
+# Linear prediction ACROSS frequency: the encoder runs an all-zero analysis
+# (FIR) filter over the top spectral bands to flatten the temporal envelope; the
+# decoder runs the exact-inverse all-pole synthesis (IIR) filter. Both filters
+# are built from the SAME quantized reflection (PARCOR) coefficients, so
+# analysis∘synthesis is the identity — TNS shapes only the quantization noise.
+# Convention: analysis e[n]=x[n]+Σa[j]x[n-j]; synthesis x[n]=e[n]-Σa[j]x[n-j].
+
+var TNS_MAX_ORDER = 12;
+var TNS_MIN_SFB = 12;      # apply TNS over SFBs [TNS_MIN_SFB, max_sfb)
+var TNS_GAIN_NUM = 3;      # enable when prediction gain r0/err > 3/2
+var TNS_GAIN_DEN = 2;
+
+# per-channel TNS state (single long-window filter)
+var TNS_ST_PRESENT = 0;
+var TNS_ST_ORDER = 8;
+var TNS_ST_DIR = 16;
+var TNS_ST_START = 24;     # region start bin (inclusive)
+var TNS_ST_END = 32;       # region end bin (exclusive)
+var TNS_ST_LEN = 40;       # region length in SFBs (bitstream field)
+var TNS_ST_RESBITS = 48;   # coef resolution bits (3 or 4)
+var TNS_ST_COMPRESS = 56;  # coef_compress flag
+var TNS_ST_COEF = 64;      # coef_index[0..order-1] (signed), 12 slots
+var TNS_ST_SIZE = 168;     # 64 + 12*8 = 160, padded
+
+# Autocorrelation of x[start..end) for lags 0..maxlag into r_out[0..maxlag].
+fn _tns_autocorr(x, start, end, maxlag, r_out) {
+    var lag = 0;
+    while (lag <= maxlag) {
+        var s = F64_ZERO;
+        var i = start;
+        while (i + lag < end) {
+            s = f64_add(s, f64_mul(load64(x + i * 8), load64(x + (i + lag) * 8)));
+            i = i + 1;
+        }
+        store64(r_out + lag * 8, s);
+        lag = lag + 1;
+    }
+    return 0;
+}
+
+# Levinson-Durbin: r[0..order] -> reflection k_out[1..order] (f64).
+# Returns 1 if the filter is stable and the prediction gain clears the threshold,
+# else 0 (caller then leaves TNS disabled).
+fn _tns_levinson(r, order, k_out) {
+    var r0 = load64(r);
+    if (f64_gt(r0, F64_ZERO) == 0) { return 0; }
+    var err = r0;
+    var a = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(a, 0, (TNS_MAX_ORDER + 1) * 8);
+    var tmp = alloc((TNS_MAX_ORDER + 1) * 8);
+    store64(a, F64_ONE);
+    var m = 1;
+    while (m <= order) {
+        var acc = load64(r + m * 8);
+        var i = 1;
+        while (i < m) {
+            acc = f64_add(acc, f64_mul(load64(a + i * 8), load64(r + (m - i) * 8)));
+            i = i + 1;
+        }
+        var k = f64_neg(f64_div(acc, err));
+        if (f64_gt(f64_abs(k), F64_ONE) == 1) { return 0; }
+        i = 1;
+        while (i < m) {
+            store64(tmp + i * 8, f64_add(load64(a + i * 8), f64_mul(k, load64(a + (m - i) * 8))));
+            i = i + 1;
+        }
+        i = 1;
+        while (i < m) { store64(a + i * 8, load64(tmp + i * 8)); i = i + 1; }
+        store64(a + m * 8, k);
+        store64(k_out + m * 8, k);
+        err = f64_mul(err, f64_sub(F64_ONE, f64_mul(k, k)));
+        if (f64_gt(err, F64_ZERO) == 0) { return 0; }
+        m = m + 1;
+    }
+    if (f64_gt(f64_mul(r0, f64_from(TNS_GAIN_DEN)), f64_mul(err, f64_from(TNS_GAIN_NUM))) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+# Rebuild LPC a_out[0..order] (a_out[0]=1) from reflection k[1..order] — the same
+# recursion Levinson uses, so encoder and decoder derive identical a[] from the
+# same reflection coefficients.
+fn _tns_parcor_to_lpc(k, order, a_out) {
+    memset(a_out, 0, (TNS_MAX_ORDER + 1) * 8);
+    store64(a_out, F64_ONE);
+    var tmp = alloc((TNS_MAX_ORDER + 1) * 8);
+    var m = 1;
+    while (m <= order) {
+        var km = load64(k + m * 8);
+        var i = 1;
+        while (i < m) {
+            store64(tmp + i * 8, f64_add(load64(a_out + i * 8), f64_mul(km, load64(a_out + (m - i) * 8))));
+            i = i + 1;
+        }
+        i = 1;
+        while (i < m) { store64(a_out + i * 8, load64(tmp + i * 8)); i = i + 1; }
+        store64(a_out + m * 8, km);
+        m = m + 1;
+    }
+    return 0;
+}
+
+# Dequantize a signed coef index to a reflection coefficient (ISO sin mapping).
+fn _tns_dequant_coef(coef, res_bits) {
+    var half = 1;
+    var b = 0;
+    while (b < res_bits - 1) { half = half * 2; b = b + 1; }
+    var pi_half = f64_div(F64_PI, F64_TWO);
+    var iqfac = f64_div(f64_sub(f64_from(half), F64_HALF), pi_half);
+    var iqfac_m = f64_div(f64_add(f64_from(half), F64_HALF), pi_half);
+    var denom = iqfac;
+    if (coef < 0) { denom = iqfac_m; }
+    return f64_sin(f64_div(f64_from(coef), denom));
+}
+
+# Quantize a reflection coefficient to the nearest coef index (search over the
+# small signed range — guaranteed consistent with _tns_dequant_coef, no asin).
+fn _tns_quant_coef(k, res_bits) {
+    var half = 1;
+    var b = 0;
+    while (b < res_bits - 1) { half = half * 2; b = b + 1; }
+    var best = 0;
+    var bestd = f64_from(1000000);
+    var c = 0 - half;
+    while (c <= half - 1) {
+        var d = f64_abs(f64_sub(_tns_dequant_coef(c, res_bits), k));
+        if (f64_lt(d, bestd) == 1) { bestd = d; best = c; }
+        c = c + 1;
+    }
+    return best;
+}
+
+# Apply the TNS filter over spec[start..end) with LPC a[0..order] (a[0]=1).
+# is_synth=0: analysis FIR (encoder), reads original inputs (region copied first).
+# is_synth=1: synthesis IIR (decoder), in-place using computed outputs.
+# direction=0: forward (low->high); direction=1: backward (high->low).
+# History bins outside the region contribute 0 (identical on both sides).
+fn _tns_filter(spec, start, end, a, order, direction, is_synth) {
+    if (end - start <= 0) { return 0; }
+    if (order <= 0) { return 0; }
+    var n = end - start;
+    if (direction == 0) {
+        if (is_synth == 0) {
+            var x0 = alloc(n * 8);
+            var t = 0;
+            while (t < n) { store64(x0 + t * 8, load64(spec + (start + t) * 8)); t = t + 1; }
+            var i = start;
+            while (i < end) {
+                var acc = load64(x0 + (i - start) * 8);
+                var j = 1;
+                while (j <= order) {
+                    if (i - j >= start) {
+                        acc = f64_add(acc, f64_mul(load64(a + j * 8), load64(x0 + (i - j - start) * 8)));
+                    }
+                    j = j + 1;
+                }
+                store64(spec + i * 8, acc);
+                i = i + 1;
+            }
+        } else {
+            var i = start;
+            while (i < end) {
+                var acc = load64(spec + i * 8);
+                var j = 1;
+                while (j <= order) {
+                    if (i - j >= start) {
+                        acc = f64_sub(acc, f64_mul(load64(a + j * 8), load64(spec + (i - j) * 8)));
+                    }
+                    j = j + 1;
+                }
+                store64(spec + i * 8, acc);
+                i = i + 1;
+            }
+        }
+    } else {
+        if (is_synth == 0) {
+            var x0 = alloc(n * 8);
+            var t = 0;
+            while (t < n) { store64(x0 + t * 8, load64(spec + (start + t) * 8)); t = t + 1; }
+            var i = end - 1;
+            while (i >= start) {
+                var acc = load64(x0 + (i - start) * 8);
+                var j = 1;
+                while (j <= order) {
+                    if (i + j < end) {
+                        acc = f64_add(acc, f64_mul(load64(a + j * 8), load64(x0 + (i + j - start) * 8)));
+                    }
+                    j = j + 1;
+                }
+                store64(spec + i * 8, acc);
+                i = i - 1;
+            }
+        } else {
+            var i = end - 1;
+            while (i >= start) {
+                var acc = load64(spec + i * 8);
+                var j = 1;
+                while (j <= order) {
+                    if (i + j < end) {
+                        acc = f64_sub(acc, f64_mul(load64(a + j * 8), load64(spec + (i + j) * 8)));
+                    }
+                    j = j + 1;
+                }
+                store64(spec + i * 8, acc);
+                i = i - 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# Encoder: analyze the top spectral region, and if TNS helps, apply the analysis
+# filter to spec IN PLACE (so quantization sees the flattened residual) and record
+# the quantized coefficients + region in the TNS state for the bitstream writer.
+fn _tns_analyze_apply(spec, max_sfb, st) {
+    store64(st + TNS_ST_PRESENT, 0);
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var s_sfb = TNS_MIN_SFB;
+    if (s_sfb >= max_sfb) { return 0; }
+    var start = load64(_aac_swb_offset + s_sfb * 8);
+    var end = load64(_aac_swb_offset + max_sfb * 8);
+    var order = TNS_MAX_ORDER;
+    if (end - start < order + 1) { return 0; }
+    var r = alloc((TNS_MAX_ORDER + 1) * 8);
+    _tns_autocorr(spec, start, end, order, r);
+    var kbuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(kbuf, 0, (TNS_MAX_ORDER + 1) * 8);
+    if (_tns_levinson(r, order, kbuf) == 0) { return 0; }
+    var resbits = 4;
+    var coefidx = alloc((TNS_MAX_ORDER + 1) * 8);
+    var kq = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(kq, 0, (TNS_MAX_ORDER + 1) * 8);
+    var i = 1;
+    while (i <= order) {
+        var ci = _tns_quant_coef(load64(kbuf + i * 8), resbits);
+        store64(coefidx + i * 8, ci);
+        store64(kq + i * 8, _tns_dequant_coef(ci, resbits));
+        i = i + 1;
+    }
+    var abuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    _tns_parcor_to_lpc(kq, order, abuf);
+    _tns_filter(spec, start, end, abuf, order, 0, 0);
+    store64(st + TNS_ST_PRESENT, 1);
+    store64(st + TNS_ST_ORDER, order);
+    store64(st + TNS_ST_DIR, 0);
+    store64(st + TNS_ST_COMPRESS, 0);
+    store64(st + TNS_ST_RESBITS, resbits);
+    store64(st + TNS_ST_LEN, max_sfb - s_sfb);
+    store64(st + TNS_ST_START, start);
+    store64(st + TNS_ST_END, end);
+    i = 0;
+    while (i < order) {
+        store64(st + TNS_ST_COEF + i * 8, load64(coefidx + (i + 1) * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Decoder: rebuild the LPC from the decoded reflection coefficients and apply the
+# synthesis (IIR) filter to the dequantized spectrum IN PLACE, before the IMDCT.
+fn _tns_synth_apply(spec, st) {
+    if (load64(st + TNS_ST_PRESENT) == 0) { return 0; }
+    var order = load64(st + TNS_ST_ORDER);
+    if (order <= 0) { return 0; }
+    var resbits = load64(st + TNS_ST_RESBITS);
+    var kbuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(kbuf, 0, (TNS_MAX_ORDER + 1) * 8);
+    var i = 1;
+    while (i <= order) {
+        store64(kbuf + i * 8, _tns_dequant_coef(load64(st + TNS_ST_COEF + (i - 1) * 8), resbits));
+        i = i + 1;
+    }
+    var abuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    _tns_parcor_to_lpc(kbuf, order, abuf);
+    _tns_filter(spec, load64(st + TNS_ST_START), load64(st + TNS_ST_END), abuf, order, load64(st + TNS_ST_DIR), 1);
+    return 0;
+}
+
+# Write the ICS extension after scale_factor_data: pulse_data_present=0,
+# tns_data_present(+tns_data), gain_control_data_present=0 (AAC-LC syntax).
+fn _aac_write_ics_ext(bw, st) {
+    _bw_write(bw, 0, 1);   # pulse_data_present = 0
+    if (load64(st + TNS_ST_PRESENT) == 1) {
+        _bw_write(bw, 1, 1);   # tns_data_present
+        _bw_write(bw, 1, 2);   # n_filt = 1 (long: 2 bits)
+        var resbits = load64(st + TNS_ST_RESBITS);
+        var coef_res_bit = 0;
+        if (resbits == 4) { coef_res_bit = 1; }
+        _bw_write(bw, coef_res_bit, 1);
+        _bw_write(bw, load64(st + TNS_ST_LEN), 6);   # length in SFBs
+        var order = load64(st + TNS_ST_ORDER);
+        _bw_write(bw, order, 5);
+        if (order > 0) {
+            _bw_write(bw, load64(st + TNS_ST_DIR), 1);
+            var compress = load64(st + TNS_ST_COMPRESS);
+            _bw_write(bw, compress, 1);
+            var coef_len = resbits - compress;
+            var mask = (1 << coef_len) - 1;
+            var i = 0;
+            while (i < order) {
+                _bw_write(bw, load64(st + TNS_ST_COEF + i * 8) & mask, coef_len);
+                i = i + 1;
+            }
+        }
+    } else {
+        _bw_write(bw, 0, 1);   # tns_data_present = 0
+    }
+    _bw_write(bw, 0, 1);   # gain_control_data_present = 0
+    return 0;
+}
+
+# Parse tns_data() into the TNS state (long window stores filter 0; short windows
+# are consumed to stay in sync but not applied — the encoder is long-only).
+fn _tns_parse_data(br, is_short, max_sfb, st) {
+    var n_filt_bits = 2;
+    var len_bits = 6;
+    var order_bits = 5;
+    var num_windows = 1;
+    if (is_short == 1) { n_filt_bits = 1; len_bits = 4; order_bits = 3; num_windows = 8; }
+    var w = 0;
+    while (w < num_windows) {
+        var n_filt = _br_read(br, n_filt_bits);
+        if (is_err(n_filt) == 1) { return n_filt; }
+        if (n_filt > 0) {
+            var coef_res = _br_read(br, 1);
+            if (is_err(coef_res) == 1) { return coef_res; }
+            var res_bits = 3;
+            if (coef_res == 1) { res_bits = 4; }
+            var f = 0;
+            while (f < n_filt) {
+                var length = _br_read(br, len_bits);
+                if (is_err(length) == 1) { return length; }
+                var order = _br_read(br, order_bits);
+                if (is_err(order) == 1) { return order; }
+                if (order > TNS_MAX_ORDER) { return err(ERR_DECODE); }
+                if (order > 0) {
+                    var direction = _br_read(br, 1);
+                    if (is_err(direction) == 1) { return direction; }
+                    var compress = _br_read(br, 1);
+                    if (is_err(compress) == 1) { return compress; }
+                    var coef_len = res_bits - compress;
+                    var signbit = 1;
+                    var sb = 0;
+                    while (sb < coef_len - 1) { signbit = signbit * 2; sb = sb + 1; }
+                    var store_it = 0;
+                    if (is_short == 0) { if (f == 0) { store_it = 1; } }
+                    var i = 0;
+                    while (i < order) {
+                        var raw = _br_read(br, coef_len);
+                        if (is_err(raw) == 1) { return raw; }
+                        var ci = raw;
+                        if (raw >= signbit) { ci = raw - signbit * 2; }
+                        if (store_it == 1) { store64(st + TNS_ST_COEF + i * 8, ci); }
+                        i = i + 1;
+                    }
+                    if (store_it == 1) {
+                        store64(st + TNS_ST_PRESENT, 1);
+                        store64(st + TNS_ST_ORDER, order);
+                        store64(st + TNS_ST_DIR, direction);
+                        store64(st + TNS_ST_COMPRESS, compress);
+                        store64(st + TNS_ST_RESBITS, res_bits);
+                        var s_sfb = max_sfb - length;
+                        if (s_sfb < 0) { s_sfb = 0; }
+                        store64(st + TNS_ST_LEN, length);
+                        store64(st + TNS_ST_START, load64(_aac_swb_offset + s_sfb * 8));
+                        store64(st + TNS_ST_END, load64(_aac_swb_offset + max_sfb * 8));
+                    }
+                }
+                f = f + 1;
+            }
+        }
+        w = w + 1;
+    }
+    return 0;
+}
+
+# Parse the ICS extension (pulse/tns/gain presence flags). Fills st; returns 0 or err.
+fn _aac_parse_ics_ext(br, is_short, max_sfb, st) {
+    store64(st + TNS_ST_PRESENT, 0);
+    var pulse = _br_read(br, 1);
+    if (is_err(pulse) == 1) { return pulse; }
+    if (pulse == 1) { return err(ERR_UNSUPPORTED_FMT); }   # pulse_data not produced by this encoder
+    var tns_present = _br_read(br, 1);
+    if (is_err(tns_present) == 1) { return tns_present; }
+    if (tns_present == 1) {
+        var prc = _tns_parse_data(br, is_short, max_sfb, st);
+        if (is_err(prc) == 1) { return prc; }
+    }
+    var gain = _br_read(br, 1);
+    if (is_err(gain) == 1) { return gain; }
+    if (gain == 1) { return err(ERR_UNSUPPORTED_FMT); }
+    return 0;
+}
+
+# ================================================================
 # AAC-LC frame encoder
 # ================================================================
 
@@ -395,6 +793,12 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     var mdct_out = alloc(AAC_FRAME_SIZE * 8);
     memset(mdct_out, 0, AAC_FRAME_SIZE * 8);
     fft_mdct(windowed, windowed_size, mdct_out);
+
+    # TNS analysis (mono/SCE only): flatten the temporal envelope before
+    # quantization so scale factors + quantization see the prediction residual.
+    var tns_mid = alloc(TNS_ST_SIZE);
+    memset(tns_mid, 0, TNS_ST_SIZE);
+    if (is_stereo == 0) { _tns_analyze_apply(mdct_out, _AAC_NUM_SWB, tns_mid); }
 
     # Quantize spectral coefficients per scale factor band
     var scale_factors = alloc(_AAC_NUM_SWB * 8);
@@ -615,6 +1019,10 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         }
         band = band + 1;
     }
+
+    # ICS extension (pulse/tns/gain presence + tns_data) — mono/SCE only, so the
+    # stereo/CPE bitstream is untouched. Sits after scale_factor_data per ISO order.
+    if (is_stereo == 0) { _aac_write_ics_ext(bw, tns_mid); }
 
     # Spectral data: encode each band using selected codebook
     if (_aac_hcb5_lens == 0) { _aac_init_spectral_codebooks(); }
@@ -2208,7 +2616,7 @@ fn _aac_synth_short(scale_factors, quant_spec, overlap, out_samples) {
     return 0;
 }
 
-fn _aac_synth(scale_factors, quant_spec, overlap, out_samples) {
+fn _aac_synth(scale_factors, quant_spec, overlap, out_samples, tns_st) {
     var spec = alloc(AAC_FRAME_SIZE * 8);
     memset(spec, 0, AAC_FRAME_SIZE * 8);
     var f43 = f64_div(f64_from(4), f64_from(3));
@@ -2234,6 +2642,9 @@ fn _aac_synth(scale_factors, quant_spec, overlap, out_samples) {
         }
         band = band + 1;
     }
+
+    # TNS synthesis (all-pole IIR) on the dequantized spectrum before the IMDCT.
+    _tns_synth_apply(spec, tns_st);
 
     var mdct_out = alloc(2048 * 8);
     memset(mdct_out, 0, 2048 * 8);
@@ -2295,11 +2706,17 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         var max_sfb = _aac_parse_ics(br, sect_cb, scale_factors);
         if (is_err(max_sfb) == 1) { return max_sfb; }
 
+        # ICS extension (pulse/tns/gain) follows scale_factor_data — SCE only.
+        var tns_st = alloc(TNS_ST_SIZE);
+        memset(tns_st, 0, TNS_ST_SIZE);
+        var text = _aac_parse_ics_ext(br, 0, max_sfb, tns_st);
+        if (is_err(text) == 1) { return text; }
+
         var quant_spec = alloc(AAC_FRAME_SIZE * 8);
         memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
         _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec);
 
-        var rc = _aac_synth(scale_factors, quant_spec, overlap, out_samples);
+        var rc = _aac_synth(scale_factors, quant_spec, overlap, out_samples, tns_st);
         if (is_err(rc) == 1) { return rc; }
         return 1;
     }
@@ -2459,8 +2876,11 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         var out_l = alloc(AAC_FRAME_SIZE * 8);
         var out_r = alloc(AAC_FRAME_SIZE * 8);
 
-        _aac_synth(sf0, qs0, overlap_l, out_l);
-        _aac_synth(sf1, qs1, overlap_r, out_r);
+        # Stereo/CPE path carries no TNS (encoder writes it for SCE only).
+        var tns_none = alloc(TNS_ST_SIZE);
+        memset(tns_none, 0, TNS_ST_SIZE);
+        _aac_synth(sf0, qs0, overlap_l, out_l, tns_none);
+        _aac_synth(sf1, qs1, overlap_r, out_r, tns_none);
 
         # Apply M/S stereo reconstruction if present
         if (ms_mask_present == 1) {
@@ -2821,6 +3241,202 @@ fn test_aac_bitwriter_basic() {
     return 0;
 }
 
+# TNS analysis (FIR) and synthesis (IIR) built from the same LPC are exact
+# inverses — the core roundtrip guarantee. Test both filter directions.
+fn test_aac_tns_filter_inverse() {
+    test_group("aac: TNS filter analysis/synthesis inverse");
+    var order = 3;
+    var k = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(k, 0, (TNS_MAX_ORDER + 1) * 8);
+    store64(k + 8, f64_div(f64_from(1), f64_from(2)));                    # 0.5
+    store64(k + 16, f64_neg(f64_div(f64_from(3), f64_from(10))));         # -0.3
+    store64(k + 24, f64_div(f64_from(1), f64_from(5)));                   # 0.2
+    var a = alloc((TNS_MAX_ORDER + 1) * 8);
+    _tns_parcor_to_lpc(k, order, a);
+    var n = 40;
+    var start = 100;
+    var spec = alloc((start + n) * 8);
+    var orig = alloc((start + n) * 8);
+    memset(spec, 0, (start + n) * 8);
+    memset(orig, 0, (start + n) * 8);
+    var i = 0;
+    while (i < n) {
+        var v = f64_sin(f64_div(f64_from((i + 1) * 7), f64_from(13)));
+        store64(spec + (start + i) * 8, v);
+        store64(orig + (start + i) * 8, v);
+        i = i + 1;
+    }
+    var eps = f64_div(F64_ONE, f64_from(1000000));
+    _tns_filter(spec, start, start + n, a, order, 0, 0);
+    _tns_filter(spec, start, start + n, a, order, 0, 1);
+    var ok = 1;
+    i = 0;
+    while (i < n) {
+        if (f64_gt(f64_abs(f64_sub(load64(spec + (start + i) * 8), load64(orig + (start + i) * 8))), eps) == 1) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, "TNS forward analysis+synthesis == identity");
+    i = 0;
+    while (i < n) { store64(spec + (start + i) * 8, load64(orig + (start + i) * 8)); i = i + 1; }
+    _tns_filter(spec, start, start + n, a, order, 1, 0);
+    _tns_filter(spec, start, start + n, a, order, 1, 1);
+    ok = 1;
+    i = 0;
+    while (i < n) {
+        if (f64_gt(f64_abs(f64_sub(load64(spec + (start + i) * 8), load64(orig + (start + i) * 8))), eps) == 1) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, "TNS backward analysis+synthesis == identity");
+    return 0;
+}
+
+# Quantized reflection coefficients still yield exactly-inverting filters (both
+# sides use the dequantized value), and indices stay in the signed 4-bit range.
+fn test_aac_tns_coef_quant() {
+    test_group("aac: TNS coefficient quantization roundtrip");
+    var resbits = 4;
+    var order = 4;
+    var kq = alloc((TNS_MAX_ORDER + 1) * 8);
+    memset(kq, 0, (TNS_MAX_ORDER + 1) * 8);
+    var vals = alloc(4 * 8);
+    store64(vals + 0, f64_div(f64_from(6), f64_from(10)));
+    store64(vals + 8, f64_neg(f64_div(f64_from(4), f64_from(10))));
+    store64(vals + 16, f64_div(f64_from(1), f64_from(10)));
+    store64(vals + 24, f64_neg(f64_div(f64_from(7), f64_from(10))));
+    var i = 0;
+    while (i < order) {
+        var idx = _tns_quant_coef(load64(vals + i * 8), resbits);
+        assert(idx <= 7, "coef idx <= 7");
+        assert(idx >= 0 - 8, "coef idx >= -8");
+        store64(kq + (i + 1) * 8, _tns_dequant_coef(idx, resbits));
+        i = i + 1;
+    }
+    var a = alloc((TNS_MAX_ORDER + 1) * 8);
+    _tns_parcor_to_lpc(kq, order, a);
+    var n = 30;
+    var start = 60;
+    var spec = alloc((start + n) * 8);
+    var orig = alloc((start + n) * 8);
+    memset(spec, 0, (start + n) * 8);
+    memset(orig, 0, (start + n) * 8);
+    i = 0;
+    while (i < n) {
+        var v = f64_sin(f64_div(f64_from((i + 3) * 5), f64_from(11)));
+        store64(spec + (start + i) * 8, v);
+        store64(orig + (start + i) * 8, v);
+        i = i + 1;
+    }
+    _tns_filter(spec, start, start + n, a, order, 0, 0);
+    _tns_filter(spec, start, start + n, a, order, 0, 1);
+    var ok = 1;
+    var eps = f64_div(F64_ONE, f64_from(1000000));
+    i = 0;
+    while (i < n) {
+        if (f64_gt(f64_abs(f64_sub(load64(spec + (start + i) * 8), load64(orig + (start + i) * 8))), eps) == 1) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, "quantized-coef TNS filter inverts exactly");
+    return 0;
+}
+
+# tns_data() writes and parses back identically (order/direction/coefs/region).
+fn test_aac_tns_bitstream() {
+    test_group("aac: TNS bitstream roundtrip");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var st = alloc(TNS_ST_SIZE);
+    memset(st, 0, TNS_ST_SIZE);
+    store64(st + TNS_ST_PRESENT, 1);
+    store64(st + TNS_ST_ORDER, 4);
+    store64(st + TNS_ST_DIR, 1);
+    store64(st + TNS_ST_COMPRESS, 0);
+    store64(st + TNS_ST_RESBITS, 4);
+    store64(st + TNS_ST_LEN, 10);
+    store64(st + TNS_ST_START, load64(_aac_swb_offset + (49 - 10) * 8));
+    store64(st + TNS_ST_END, load64(_aac_swb_offset + 49 * 8));
+    store64(st + TNS_ST_COEF + 0, 3);
+    store64(st + TNS_ST_COEF + 8, 0 - 5);
+    store64(st + TNS_ST_COEF + 16, 7);
+    store64(st + TNS_ST_COEF + 24, 0 - 8);
+    var bw = _bw_new();
+    _aac_write_ics_ext(bw, st);
+    var s = _bw_flush(bw);
+    var br = _br_new(str_data(s), str_len(s));
+    var st2 = alloc(TNS_ST_SIZE);
+    memset(st2, 0, TNS_ST_SIZE);
+    var rc = _aac_parse_ics_ext(br, 0, 49, st2);
+    assert(is_err(rc) == 0, "tns ics_ext parse ok");
+    assert_eq(load64(st2 + TNS_ST_PRESENT), 1, "tns present");
+    assert_eq(load64(st2 + TNS_ST_ORDER), 4, "tns order");
+    assert_eq(load64(st2 + TNS_ST_DIR), 1, "tns direction");
+    assert_eq(load64(st2 + TNS_ST_LEN), 10, "tns length");
+    assert_eq(load64(st2 + TNS_ST_COEF + 0), 3, "tns coef0");
+    assert_eq(load64(st2 + TNS_ST_COEF + 8), 0 - 5, "tns coef1");
+    assert_eq(load64(st2 + TNS_ST_COEF + 16), 7, "tns coef2");
+    assert_eq(load64(st2 + TNS_ST_COEF + 24), 0 - 8, "tns coef3");
+    assert_eq(load64(st2 + TNS_ST_START), load64(_aac_swb_offset + 39 * 8), "tns region start");
+    return 0;
+}
+
+# End-to-end TNS state path: encoder analysis fills the state + applies the FIR,
+# decoder synthesis reads the state + applies the IIR — exact inverse recovery.
+fn test_aac_tns_analyze_synth() {
+    test_group("aac: TNS analyze/synth state roundtrip");
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var spec = alloc(AAC_FRAME_SIZE * 8);
+    var orig = alloc(AAC_FRAME_SIZE * 8);
+    memset(spec, 0, AAC_FRAME_SIZE * 8);
+    memset(orig, 0, AAC_FRAME_SIZE * 8);
+    var i = 0;
+    while (i < AAC_FRAME_SIZE) {
+        # correlated spectrum (slowly varying) so upper bands have prediction gain
+        var v = f64_sin(f64_div(f64_from(i), f64_from(9)));
+        store64(spec + i * 8, v);
+        store64(orig + i * 8, v);
+        i = i + 1;
+    }
+    var st = alloc(TNS_ST_SIZE);
+    memset(st, 0, TNS_ST_SIZE);
+    _tns_analyze_apply(spec, _AAC_NUM_SWB, st);
+    assert_eq(load64(st + TNS_ST_PRESENT), 1, "TNS engaged on correlated spectrum");
+    _tns_synth_apply(spec, st);
+    var ok = 1;
+    var eps = f64_div(F64_ONE, f64_from(100000));
+    var start = load64(st + TNS_ST_START);
+    var end = load64(st + TNS_ST_END);
+    i = start;
+    while (i < end) {
+        if (f64_gt(f64_abs(f64_sub(load64(spec + i * 8), load64(orig + i * 8))), eps) == 1) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, "encoder-analyze then decoder-synth recovers the region");
+    return 0;
+}
+
+# Full mono pipeline: encode with TNS in the stream, decode via the real audio
+# path. A misaligned tns_data() would desync the frame and yield zero samples.
+fn test_aac_tns_frame_roundtrip() {
+    test_group("aac: TNS mono frame encode/decode");
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var samples = vec_new();
+    var i = 0;
+    while (i < 1024) {
+        var v = f64_sin(f64_div(f64_from(i * 6), f64_from(50)));
+        if (i == 200) { v = f64_add(v, f64_from(1)); }   # transient
+        vec_push(samples, v);
+        i = i + 1;
+    }
+    var out = alloc(131072);
+    var nbytes = aac_encode(samples, 44100, 1, 128000, out);
+    assert(is_err(nbytes) == 0, "TNS-frame encode ok");
+    assert(nbytes > 7, "produced bytes");
+    var dec = aac_decode(out, nbytes);
+    assert(is_err(dec) == 0, "TNS-frame decode ok");
+    var decoded = decode_result_samples(dec);
+    assert(vec_len(decoded) == 1024, "one mono frame decoded (tns_data in sync)");
+    return 0;
+}
+
 fn test_aac_all() {
     fft_init();
     aac_init();
@@ -2837,5 +3453,10 @@ fn test_aac_all() {
     test_aac_encode_produces_adts();
     test_aac_decode_empty();
     test_aac_bitwriter_basic();
+    test_aac_tns_filter_inverse();
+    test_aac_tns_coef_quant();
+    test_aac_tns_bitstream();
+    test_aac_tns_analyze_synth();
+    test_aac_tns_frame_roundtrip();
     return 0;
 }

@@ -228,32 +228,13 @@ fn test_serde_opus_head() {
     return 0;
 }
 
-# AudioMetadata (Str fields). #derive(Serialize) to_json works, but the
-# generated ShrAudioMetadata_from_json is BROKEN for Str fields on cyrius 6.3.x
-# (it doesn't parse JSON strings back — yields garbage pointer bytes).
-# WORKAROUND, pending the upstream fix — see cyrius issue
-# docs/development/issues/2026-07-01-derive-serialize-str-field-deserialize-broken.md.
-# Delete audio_metadata_from_json and use the derive's once that lands.
-# A Str field is an 8-byte handle (sizeof reports 8/field); bayan_json_get
-# returns the Str handle directly (str_len works on it), so store it as-is.
-# Absent (Option::None) fields become an empty Str.
-fn _meta_get_str(dst, pairs, key, keylen) {
-    var v = bayan_json_get(pairs, str_new(key, keylen));
-    if (v == 0) { v = str_new("", 0); }
-    store64(dst, v);
-    return 0;
-}
-fn audio_metadata_from_json(pairs) {
-    var m = alloc(56);   # 7 Str-handle fields x 8 bytes
-    _meta_get_str(m + 0,  pairs, "title", 5);
-    _meta_get_str(m + 8,  pairs, "artist", 6);
-    _meta_get_str(m + 16, pairs, "album", 5);
-    _meta_get_str(m + 24, pairs, "track_number", 12);
-    _meta_get_str(m + 32, pairs, "year", 4);
-    _meta_get_str(m + 40, pairs, "genre", 5);
-    _meta_get_str(m + 48, pairs, "comment", 7);
-    return m;
-}
+# AudioMetadata (Str fields). #derive(Serialize) generates both halves:
+# ShrAudioMetadata_to_json emits the string content (v5.10.x Str-field fix), and
+# as of cyrius 6.3.25 the matching ShrAudioMetadata_from_json reconstructs Str
+# fields correctly — the 2.4.1 hand-written workaround (_meta_get_str /
+# audio_metadata_from_json) is retired in 2.5.2. Fixes cyrius issue
+# docs/development/issues/2026-07-01-derive-serialize-str-field-deserialize-broken.md
+# (verified broken on 6.3.19/6.3.22, fixed on 6.3.25).
 
 fn test_serde_audio_metadata() {
     syscall(1, 1, "test: serde AudioMetadata roundtrip\n", 36);
@@ -262,8 +243,8 @@ fn test_serde_audio_metadata() {
     ShrAudioMetadata_to_json(&m, sb);
     var js = str_builder_build(sb);
     assert(str_eq_cstr(js, "{\"title\":\"Song\",\"artist\":\"Band\",\"album\":\"Album\",\"track_number\":\"3\",\"year\":\"2024\",\"genre\":\"Rock\",\"comment\":\"hi\"}") == 1, "serde AudioMetadata to_json");
-    # roundtrip via the hand-written deserializer: re-serialize must match
-    var rec = audio_metadata_from_json(bayan_json_parse(js));
+    # roundtrip via the derived deserializer: re-serialize must match
+    var rec = ShrAudioMetadata_from_json(bayan_json_parse(js));
     var sb2 = str_builder_new();
     ShrAudioMetadata_to_json(rec, sb2);
     assert(str_eq(js, str_builder_build(sb2)) == 1, "serde AudioMetadata roundtrip");

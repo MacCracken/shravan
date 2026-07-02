@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.2] - 2026-07-01
+
+Toolchain modernization (cyrius 6.3.25), the serde Str-deserialize repair, and
+AAC TNS (Temporal Noise Shaping). 775 assertions (was 748, +27). The
+psychoacoustic model moves to 2.5.3.
+
+### Added
+
+- **AAC TNS (Temporal Noise Shaping)** (`src/aac.cyr`) — AAC-LC long-window,
+  mono/SCE path. Linear prediction across frequency flattens the temporal
+  envelope so quantization noise tracks transients (reduces pre-echo):
+  - Encoder: `_tns_autocorr` → `_tns_levinson` (reflection coefs + prediction-gain
+    gate) → quantize (`_tns_quant_coef`) → analysis FIR (`_tns_filter`) over the top
+    spectral bands before quantization; `_aac_write_ics_ext` emits the AAC-LC ICS
+    extension (`pulse`/`tns`/`gain` presence + `tns_data()`).
+  - Decoder: `_aac_parse_ics_ext` / `_tns_parse_data` read `tns_data()`; `_aac_synth`
+    applies the synthesis IIR (`_tns_synth_apply`) to the dequantized spectrum before
+    the IMDCT. Analysis and synthesis are built from the *same* quantized reflection
+    coefficients, so the filter pair is an exact inverse — TNS shapes only quant noise.
+  - Stereo/CPE path is untouched (TNS gated to the mono encoder; CPE decode passes a
+    zeroed state), keeping that bitstream byte-identical.
+- **Tests** (`+27` assertions): filter analysis/synthesis identity (both directions),
+  coefficient-quantization roundtrip, `tns_data()` bitstream roundtrip, encoder-analyze
+  → decoder-synth exact recovery (TNS engaged), and a full mono encode→decode frame
+  roundtrip proving the stream stays in sync.
+
+### Changed
+
+- **Toolchain pin bumped 6.3.19 → 6.3.25** (`cyrius.cyml`) — re-vendored stdlib
+  via `cyrius lib sync`; `cyrius.lock` refreshed. Clears the pin-vs-cycc drift
+  warning. All 748 assertions pass, fuzz 90K/0, `cyrius vet` clean on 6.3.25.
+- **Retired the serde Str-deserialize workaround** (`src/serde.cyr`) — cycc 6.3.25
+  fixes `#derive(Serialize)`'s generated `_from_json` for `Str` fields, so
+  `ShrAudioMetadata` now round-trips through the derived `ShrAudioMetadata_from_json`;
+  the hand-written `audio_metadata_from_json` / `_meta_get_str` (2.4.1) are gone.
+  Resolves cyrius issue `2026-07-01-derive-serialize-str-field-deserialize-broken`.
+
 ## [2.5.1] - 2026-07-01
 
 shravan's first CELT decode: a matched, provably-invertible range coder, PVQ

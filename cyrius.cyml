@@ -5,7 +5,7 @@ description = "shravan — audio codecs for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/shravan"
 language = "cyrius"
-cyrius = "6.3.19"
+cyrius = "6.3.25"
 
 # [build] entry/output are metadata/convention only — `cyrius build`
 # takes explicit <source> <output> positionals (see CI). src/main.cyr is the
