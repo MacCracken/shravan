@@ -1,11 +1,11 @@
 # Development Roadmap
 
-> **v2.5.5** — 799 tests + fuzz (90K/0), Cyrius 6.3.27.
-> CELT stereo coupling foundation: exactly-invertible mid/side transform + per-band
-> coupled-vs-dual decision (couple∘decouple = identity). Toolchain bumped to 6.3.27.
-> (v2.5.4: CELT transient detection + short-block MDCT. v2.5.3: AAC psychoacoustic
-> model. v2.5.2: AAC TNS + serde repair. v2.5.1: first CELT decode. v2.5.0: full PVQ
-> spectral shape. v2.4.4: Opus encoder framework. v2.4.3: distlib bundle. v2.4.0: cyrius.cyml.)
+> **v2.5.6** — 809 tests + fuzz (90K/0), Cyrius 6.3.27.
+> CELT stereo coupling — full two-channel bitstream: couple L/R → mid/side + per-band
+> `ms_flags`, code both channels (energies + PVQ shapes), stereo TOC bit. Replaces the
+> mono downmix. (v2.5.5: stereo coupling foundation. v2.5.4: CELT transient detection +
+> short-block MDCT. v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair.
+> v2.5.1: first CELT decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -211,15 +211,22 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
       couple∘decouple is the identity for any per-band choice.
 - Deferred to 2.5.6: full two-channel bitstream + intensity stereo.
 
+## v2.5.6 — Stereo coupling: full two-channel bitstream (CELT) · shipped 2026-07-01
+
+- [x] `_opus_encode_celt_frame` stereo branch: deinterleave L/R → window + MDCT →
+      `_opus_stereo_couple` → mid/side + `ms_flags`; codes isTransient + 21 `ms_flags`
+      bits + mid/side energies + mid/side PVQ shapes (shape budget split evenly);
+      stereo TOC bit. Replaces the mono downmix.
+- [x] `_opus_decode_celt_stereo_frame` — mirror decode; caller `_opus_stereo_decouple`s
+      to L/R. Shape encode/decode refactored to an explicit-bit-budget core.
+- [x] Full stereo roundtrip (`ms_flags` + mid/side energies + shapes bit-exact) +
+      encoder-path smoke test. Mono path unchanged.
+- Deferred: stereo + transient (short blocks); intensity stereo; non-even bit split.
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.6 — Stereo coupling: full two-channel bitstream (CELT) · needs 2.5.5
-
-- Code mid+side as two channels with per-band `ms_flags` + stereo TOC bit; stereo
-  decode + decouple; full stereo roundtrip. Then intensity stereo for high bands.
 
 ### v2.5.7 — MP4/M4A container · deferred (independent)
 

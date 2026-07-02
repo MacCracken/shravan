@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.6] - 2026-07-01
+
+CELT stereo coupling: full two-channel bitstream (replaces the mono downmix).
+809 assertions (was 799, +10).
+
+### Added
+
+- **Two-channel stereo CELT frame** (`src/opus.cyr`) — building on the 2.5.5
+  coupling primitives, the encoder now codes stereo instead of downmixing:
+  - `_opus_encode_celt_frame` gained a stereo branch: deinterleave L/R → window +
+    MDCT each → `_opus_stereo_couple` → mid/side + per-band `ms_flags`; range-codes
+    `isTransient` + 21 `ms_flags` bits + mid/side band energies + mid/side PVQ shapes,
+    with the shape budget split evenly between the two channels. Stereo TOC bit set.
+  - `_opus_decode_celt_stereo_frame` — mirror decode: reads `ms_flags` + both channels'
+    energies and shapes; the caller applies `_opus_stereo_decouple` for L/R.
+  - Shape encode/decode refactored to an explicit-bit-budget core
+    (`_opus_encode_spectral_shape_bits` / `_opus_decode_spectral_shape_bits`) so the
+    mid/side split is data-independent (both sides derive it from the packet size).
+  - The mono path is unchanged.
+- **Tests** (`+10` assertions): full stereo frame roundtrip (`ms_flags` + mid/side
+  energies + mid/side shapes all bit-exact, couple∘decouple recovers L/R MDCT) and an
+  encoder-path smoke test (stereo TOC bit + decodable packet).
+
+### Deferred
+
+- Stereo + transient (short blocks) combined; intensity stereo for high bands;
+  stereo bit-budget beyond an even mid/side split.
+
 ## [2.5.5] - 2026-07-01
 
 CELT stereo coupling foundation + toolchain bump to 6.3.27. 799 assertions
