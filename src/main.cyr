@@ -1408,6 +1408,7 @@ test_ogg_crc_mismatch();
 test_ogg_multiple_pages();
 test_ogg_decode_unsupported();
 test_mp3_valid_header_parse();
+test_mp3_layer2_bitrate();
 test_mp3_reject_bad_sync();
 test_mp3_reject_reserved_version();
 test_mp3_reject_reserved_layer();

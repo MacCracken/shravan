@@ -13,7 +13,10 @@
 # ================================================================
 
 var mp3_bitrate_v1_l3 = 0;    # 16 entries
-var mp3_bitrate_v2_l3 = 0;    # 16 entries
+var mp3_bitrate_v2_l3 = 0;    # 16 entries (also V2/V2.5 Layer II)
+var mp3_bitrate_v1_l1 = 0;    # 16 entries
+var mp3_bitrate_v1_l2 = 0;    # 16 entries
+var mp3_bitrate_v2_l1 = 0;    # 16 entries
 var mp3_sr_v1  = 0;            # 3 entries
 var mp3_sr_v2  = 0;            # 3 entries
 var mp3_sr_v25 = 0;            # 3 entries
@@ -56,6 +59,39 @@ fn mp3_init() {
     store64(mp3_bitrate_v2_l3 + 13 * 8, 144);
     store64(mp3_bitrate_v2_l3 + 14 * 8, 160);
     store64(mp3_bitrate_v2_l3 + 15 * 8, 0);
+
+    # MPEG1 Layer I bitrate table (kbps): {free,32,64,96,...,448,bad}
+    mp3_bitrate_v1_l1 = alloc(16 * 8);
+    store64(mp3_bitrate_v1_l1 + 0 * 8, 0);   store64(mp3_bitrate_v1_l1 + 1 * 8, 32);
+    store64(mp3_bitrate_v1_l1 + 2 * 8, 64);  store64(mp3_bitrate_v1_l1 + 3 * 8, 96);
+    store64(mp3_bitrate_v1_l1 + 4 * 8, 128); store64(mp3_bitrate_v1_l1 + 5 * 8, 160);
+    store64(mp3_bitrate_v1_l1 + 6 * 8, 192); store64(mp3_bitrate_v1_l1 + 7 * 8, 224);
+    store64(mp3_bitrate_v1_l1 + 8 * 8, 256); store64(mp3_bitrate_v1_l1 + 9 * 8, 288);
+    store64(mp3_bitrate_v1_l1 + 10 * 8, 320); store64(mp3_bitrate_v1_l1 + 11 * 8, 352);
+    store64(mp3_bitrate_v1_l1 + 12 * 8, 384); store64(mp3_bitrate_v1_l1 + 13 * 8, 416);
+    store64(mp3_bitrate_v1_l1 + 14 * 8, 448); store64(mp3_bitrate_v1_l1 + 15 * 8, 0);
+
+    # MPEG1 Layer II bitrate table (kbps)
+    mp3_bitrate_v1_l2 = alloc(16 * 8);
+    store64(mp3_bitrate_v1_l2 + 0 * 8, 0);   store64(mp3_bitrate_v1_l2 + 1 * 8, 32);
+    store64(mp3_bitrate_v1_l2 + 2 * 8, 48);  store64(mp3_bitrate_v1_l2 + 3 * 8, 56);
+    store64(mp3_bitrate_v1_l2 + 4 * 8, 64);  store64(mp3_bitrate_v1_l2 + 5 * 8, 80);
+    store64(mp3_bitrate_v1_l2 + 6 * 8, 96);  store64(mp3_bitrate_v1_l2 + 7 * 8, 112);
+    store64(mp3_bitrate_v1_l2 + 8 * 8, 128); store64(mp3_bitrate_v1_l2 + 9 * 8, 160);
+    store64(mp3_bitrate_v1_l2 + 10 * 8, 192); store64(mp3_bitrate_v1_l2 + 11 * 8, 224);
+    store64(mp3_bitrate_v1_l2 + 12 * 8, 256); store64(mp3_bitrate_v1_l2 + 13 * 8, 320);
+    store64(mp3_bitrate_v1_l2 + 14 * 8, 384); store64(mp3_bitrate_v1_l2 + 15 * 8, 0);
+
+    # MPEG2/2.5 Layer I bitrate table (kbps)
+    mp3_bitrate_v2_l1 = alloc(16 * 8);
+    store64(mp3_bitrate_v2_l1 + 0 * 8, 0);   store64(mp3_bitrate_v2_l1 + 1 * 8, 32);
+    store64(mp3_bitrate_v2_l1 + 2 * 8, 48);  store64(mp3_bitrate_v2_l1 + 3 * 8, 56);
+    store64(mp3_bitrate_v2_l1 + 4 * 8, 64);  store64(mp3_bitrate_v2_l1 + 5 * 8, 80);
+    store64(mp3_bitrate_v2_l1 + 6 * 8, 96);  store64(mp3_bitrate_v2_l1 + 7 * 8, 112);
+    store64(mp3_bitrate_v2_l1 + 8 * 8, 128); store64(mp3_bitrate_v2_l1 + 9 * 8, 144);
+    store64(mp3_bitrate_v2_l1 + 10 * 8, 160); store64(mp3_bitrate_v2_l1 + 11 * 8, 176);
+    store64(mp3_bitrate_v2_l1 + 12 * 8, 192); store64(mp3_bitrate_v2_l1 + 13 * 8, 224);
+    store64(mp3_bitrate_v2_l1 + 14 * 8, 256); store64(mp3_bitrate_v2_l1 + 15 * 8, 0);
 
     # MPEG1 sample rates: 44100, 48000, 32000
     mp3_sr_v1 = alloc(3 * 8);
@@ -182,20 +218,19 @@ fn mp3_parse_frame_header(data, off) {
     var b2 = load8(data + off + 2);
     var bitrate_index = (b2 >> 4) & 0x0F;
 
+    # Each MPEG version + layer has its OWN bitrate table (Layer I and II differ from
+    # Layer III — the old code used the Layer III table for all layers, giving wrong
+    # frame sizes / durations / frame scanning for Layer I/II).
     var bitrate = 0;
     if (version == MP3_VERSION_V1) {
-        if (layer == MP3_LAYER_III) {
-            bitrate = load64(mp3_bitrate_v1_l3 + bitrate_index * 8);
-        } else {
-            # Use V1 L3 table as fallback for non-Layer-III
-            bitrate = load64(mp3_bitrate_v1_l3 + bitrate_index * 8);
-        }
+        if (layer == MP3_LAYER_I)   { bitrate = load64(mp3_bitrate_v1_l1 + bitrate_index * 8); }
+        if (layer == MP3_LAYER_II)  { bitrate = load64(mp3_bitrate_v1_l2 + bitrate_index * 8); }
+        if (layer == MP3_LAYER_III) { bitrate = load64(mp3_bitrate_v1_l3 + bitrate_index * 8); }
     } else {
-        if (layer == MP3_LAYER_III) {
-            bitrate = load64(mp3_bitrate_v2_l3 + bitrate_index * 8);
-        } else {
-            bitrate = load64(mp3_bitrate_v1_l3 + bitrate_index * 8);
-        }
+        # MPEG2 / MPEG2.5 — Layer II and III share a table (mp3_bitrate_v2_l3).
+        if (layer == MP3_LAYER_I)   { bitrate = load64(mp3_bitrate_v2_l1 + bitrate_index * 8); }
+        if (layer == MP3_LAYER_II)  { bitrate = load64(mp3_bitrate_v2_l3 + bitrate_index * 8); }
+        if (layer == MP3_LAYER_III) { bitrate = load64(mp3_bitrate_v2_l3 + bitrate_index * 8); }
     }
     if (bitrate == 0) { return err(ERR_INVALID_HEADER); }
 
@@ -367,6 +402,25 @@ fn test_mp3_valid_header_parse() {
     # Frame size = 1152 * 128000 / (8 * 44100) = 417
     assert_eq(mp3_frame_size(info), 417, "frame size 417");
 
+    return 0;
+}
+
+# 2.5.11: Layer I/II must use their own bitrate tables (the old code used Layer III's).
+fn test_mp3_layer2_bitrate() {
+    test_group("mp3: layer II uses its own bitrate table");
+    var hdr = alloc(4);
+    store8(hdr, 0xFF);
+    store8(hdr + 1, 0xFD);   # sync + V1 + Layer II + no CRC
+    store8(hdr + 2, 0xE0);   # bitrate_index=14, sr_index=0 (44100), no padding
+    store8(hdr + 3, 0x00);   # stereo
+    var info = mp3_parse_frame_header(hdr, 0);
+    assert(res_ok(info) == 1, "parse ok");
+    assert_eq(mp3_frame_layer(info), MP3_LAYER_II, "layer II");
+    # V1 Layer II index 14 = 384 kbps (Layer III index 14 = 320 — the old bug value).
+    assert_eq(mp3_frame_bitrate(info), 384, "L2 bitrate 384 (not L3's 320)");
+    assert_eq(mp3_frame_samples_per_frame(info), 1152, "1152 spf");
+    # 1152 * 384000 / (8 * 44100) = 1253 (integer division)
+    assert_eq(mp3_frame_size(info), 1253, "L2 frame size 1253");
     return 0;
 }
 

@@ -57,82 +57,44 @@ completeness**: many "roundtrip" tests assert only sample *count* (`vec_len==102
 
 ---
 
-## Forward plan — the deferred 2.5.x core work, done
+## Forward plan — remaining 2.5.x work
 
-Every deferred tail from 2.5.0–2.5.8 (the "Deferred:" footnotes) plus the bugs the audit
-found are packed here into **four focused 2.5.x releases**, ordered dependency-first. This
-is the work the scaffolding was for — none of it is pushed to a future major.
+**Opus (2.5.9) and AAC (2.5.10) now encode→decode to real PCM audio** — see Completed
+history + Functional status. What remains: **MP3 decode (2.5.11)**, then the deferred
+tails + hardening + new subsystems (2.5.12).
 
 Acceptance rule for every release: **new/changed audio paths are proven by value-level
 tests (SNR or correlation vs. input), never by sample count** — that is how the old suite
 hid the silence. Each commit must build clean (`cyrius build src/main.cyr build/shravan`)
 and keep the suite green.
 
-### v2.5.9 — Opus/CELT decode → PCM · shipped 2026-07-02 · THE headline deferred item
-
-**Done:** `opus_encode` → `opus_decode_from_packets` round-trips real audio — waveform
-correlation mono 0.997, stereo 0.996/0.999, transient 0.998 (verified by value, not
-sample count). The 2.5.0–2.5.8 pieces are now composed into PCM and the real decode path
-is wired. Stream stays shravan-internal (RFC-6716 conformance is its own item below).
-
-- [x] Magnitude synthesis (`_opus_denorm_frame`): band energy × unit PVQ shape → MDCT coeffs.
-- [x] **Found + fixed the real blocker:** `fft_mdct`/`fft_imdct` are not a matched pair
-      (encode→decode cancelled to silence — also a cause of the silent AAC encoder); added a
-      verified direct pair `_opus_mdct`/`_opus_imdct` (OLA reconstruction 0.999).
-- [x] IMDCT + synthesis sine window + 50%-overlap-add (Princen-Bradley TDAC); encoder now
-      frames with 50% overlap to match.
-- [x] Wired `opus_decode_from_packets` (mono + stereo via `_opus_stereo_decouple`).
-- [x] Band-energy DPCM widened 128→256 symbols (the ±63 clamp was losing absolute levels).
-- [x] Rate-control complexity from the real MDCT spectrum (2.5.8 deferral).
-- [x] Encoder overflow no longer truncates/corrupts the packet.
-- [~] Transient frames decode via the long MDCT (correct audio); true overlapping
-      short-window coding deferred (see 2.5.10-tail / CELT transient completion).
-- [~] Two-pass VBR still future.
-
-**Follow-on hardening (do in 2.5.12):** fix `fft.cyr`'s `fft_mdct`/`fft_imdct` to be a
-matched pair (unblocks the AAC encoder + lets Opus drop the O(N²) direct transform), and
-add a real MDCT↔IMDCT reconstruction test (today's only asserts "output nonzero").
-
-### v2.5.10 — AAC produces audio + all AAC bugs · shipped 2026-07-02
-
-**Done:** `aac_encode` → `aac_decode` round-trips real audio — mono **0.999**, stereo
-**0.999 / 0.999** waveform correlation (was silence). Every AAC correctness/safety bug the
-audit found is closed.
-
-- [x] **Matched MDCT/IMDCT transform** — replaced the mismatched `fft_mdct`/`fft_imdct`
-      with a verified TDAC pair (machine-precision reconstruction test; unity gain). The
-      deepest root cause — silent AAC *and* Opus encoders — pulled forward from 2.5.12.
-      Also made Opus decode unity-gain.
-- [x] Encoder 50%-overlap framing + invertible quantizer + peak-based scale factors.
-- [x] **Section coding groups by codebook** (was mislabeling multi-codebook runs → garbage;
-      capped mono at 0.975 and broke stereo). Fixing it lifted mono to 0.999.
-- [x] CPE stereo: dropped the stray side ICS, side sections match the escape-coded
-      spectral, mid/side overlap framing + invertible side quantizer → stereo 0.999.
-- [x] Scale-factor DPCM predictor tracks the transmitted (clamped) value (mono + CPE).
-- [x] Decoder robustness: reserved codebook 12–15 guard (DoS) + removed band
-      double-increment for cb 1–4/9/10 + reject-not-hang test.
-
-**Deferred (AAC completions — refinements, not blockers):**
-- **TNS** temporarily disabled (amplified quant noise through the quantizer: 0.98→0.68);
-  proper prediction-gain-gated noise shaping + short-window + stereo/CPE is a follow-up.
-- Real **HCB6** tables (reuses HCB5; shravan's encoder never selects cb6 so it only
-  affects some third-party files) + **psychoacoustic ATH floor + tonality-adjusted SMR**.
-- Optional rate/distortion scale-factor loop (replaces the peak heuristic).
-
-### v2.5.11 — MP3 decode → PCM · large
+### v2.5.11 — MP3 decode → PCM · large · IN PROGRESS
 
 **Goal:** MP3 Layer III (+ Layer I/II bitrate correctness) decodes to real PCM — replaces
-the metadata-only stub.
+the metadata-only stub (`mp3_decode` returns an empty sample vector today, `src/mp3.cyr`).
 
 **Commit plan:**
-1. `fix(mp3): Layer I/II bitrate tables (select by layer) + frame-size test` *(existing bug)*
-2. `feat(mp3): granule/side-info parse + scalefactor decode + cross-frame bit reservoir`
-3. `feat(mp3): Huffman tables + big_values/count1 decode of the 576 frequency lines`
-4. `feat(mp3): requantization (power law + pretab) + short-block reorder`
-5. `feat(mp3): alias reduction + hybrid IMDCT (long 36 / short 12) + overlap-add`
-6. `feat(mp3): 32-band polyphase synthesis filterbank`
-7. `feat(mp3): MS/intensity stereo + wire into mp3_decode + real-file correlation test`
-8. `docs/CHANGELOG/VERSION: 2.5.11 — MP3 decode`
+1. [x] `fix(mp3): Layer I/II bitrate tables (select by layer) + frame-size test` — **DONE**
+   (added v1_l1/v1_l2/v2_l1 tables; `test_mp3_layer2_bitrate`). The rest below is untouched.
+2. [ ] `feat(mp3): granule/side-info parse + scalefactor decode + cross-frame bit reservoir`
+3. [ ] `feat(mp3): Huffman tables + big_values/count1 decode of the 576 frequency lines`
+4. [ ] `feat(mp3): requantization (power law + pretab) + short-block reorder`
+5. [ ] `feat(mp3): alias reduction + hybrid IMDCT (long 36 / short 12) + overlap-add`
+6. [ ] `feat(mp3): 32-band polyphase synthesis filterbank`
+7. [ ] `feat(mp3): MS/intensity stereo + wire into mp3_decode + real-file correlation test`
+8. [ ] `docs/CHANGELOG/VERSION: 2.5.11 — MP3 decode`
+
+**Notes for whoever takes this on** — this is the biggest, most precision-critical bite in
+the arc and, unlike Opus/AAC, it is **decode-only** (no shravan encoder to round-trip), so
+there is no incremental testable milestone until the whole chain is wired. Two things make
+it hard: (a) large data tables that must be transcribed **exactly** — the 32 Huffman code
+tables and the 512-entry synthesis-filterbank `D[]` window; a single wrong entry yields
+noise with no easy way to localize it; (b) the only real test is "decode a whole MP3 and
+correlate against a reference decoder." `ffmpeg`/`lame` are available locally to make the
+vector (a real MPEG1 Layer III mono file + its PCM), but the file is ~5 KB — too big to
+hand-embed as bytes, so plan to embed it base64 (+ a tiny base64 decoder in the test) or
+commit it as a binary fixture. Recommend building it as a focused effort with the spec
+(ISO/IEC 11172-3) and a reference decoder (e.g. `minimp3`) side-by-side.
 
 ### v2.5.12 — remaining deferred tails + hardening + new subsystems · medium–large
 
@@ -149,6 +111,12 @@ breadth. Order these by priority; each is an independent bite.
 - `feat: hi-res 88.2–384 kHz roundtrip tests; PCM_F64 WAV encode/decode; PCM SSE2/unrolled hot loops + before/after benchmarks`
 - `feat(flac): LPC encoder (autocorr + Levinson-Durbin + quantized coeffs), partitioned Rice, adaptive stereo choice, CONSTANT subframe, SEEKTABLE emit, decoder MD5 verify`
 
+**Codec completions (deferred from 2.5.9 / 2.5.10 — refinements, codecs already produce audio):**
+- `feat(aac): re-enable TNS with proper prediction-gain-gated noise shaping (it currently amplifies quant noise, so it is disabled) + short-window + stereo/CPE`
+- `feat(aac): real HCB6 tables (reuses HCB5 today; shravan's encoder never selects cb6) + psychoacoustic ATH floor + tonality-adjusted SMR; optional rate/distortion scale-factor loop`
+- `feat(opus): true overlapping short-window transient coding (transient frames decode via the long MDCT today) + two-pass VBR`
+- `perf: fast FFT-based MDCT/IMDCT preserving the verified convention (fft.cyr's pair is now O(N²) direct — correct but slow; the fast fft_mdct/fft_imdct were replaced because they did not invert each other). Benchmark before/after.`
+
 **New subsystems (larger; may each become their own 2.5.x point release):**
 - `feat(opus): RFC-6716 conformance — real ec_enc/ec_dec, Laplace coarse/fine energy, spec band layout + allocation (trim/boost/anti-collapse/fine-energy), correct TOC` — decode real `.opus`, libopus decodes ours *(supersedes the bespoke coder)*
 - `feat(opus): SILK mode — LPC/LTP/LSF, excitation, shared range coder`
@@ -159,11 +127,25 @@ breadth. Order these by priority; each is an independent bite.
 
 ## Completed history
 
+### v2.5.9–2.5.10 — the codecs actually produce audio (shipped 2026-07-02)
+
+- **v2.5.10** — **AAC encode→decode produces real PCM** (mono 0.999, stereo 0.999/0.999).
+  Fixed the `fft_mdct`/`fft_imdct` mismatch (verified TDAC pair — the root cause silencing
+  *both* encoders), the section-coding-by-has-data-not-codebook bug, the invertible
+  quantizer + peak scale factors + 50%-overlap framing, the CPE stereo bitstream (stray
+  side ICS + escape-codebook mismatch), the DPCM predictor sync, and the decoder DoS /
+  band-double-increment bugs. TNS disabled (amplified quant noise); HCB6/psy-ATH deferred.
+- **v2.5.9** — **Opus encode→decode produces real PCM** (mono 0.997, stereo 0.996/0.999,
+  transient 0.998). Composed the 2.5.0–2.5.8 scaffolding into audio: magnitude synthesis,
+  IMDCT + 50%-overlap TDAC, wired `opus_decode_from_packets` (mono+stereo), band-energy
+  DPCM widened to 256 symbols, MDCT-spectrum rate complexity. Bespoke non-RFC-6716 stream;
+  transient uses long MDCT; two-pass VBR + RFC conformance deferred.
+
 ### v2.5.0–2.5.8 — CELT/Opus + AAC sub-layer scaffolding (shipped, internal-only)
 
 Nine point releases built the Opus/CELT entropy + allocation layers and several AAC
-sub-features, each proven **internally bit-exact** but **not composed into PCM** (see
-Functional status). Superseded by the 2.6.0–3.0.0 plan above.
+sub-features, each proven **internally bit-exact** but **not composed into PCM** — the
+scaffolding that 2.5.9/2.5.10 composed into real audio (above).
 
 - **2.5.8** rate control + VBR (bit-reservoir CBR/CVBR/VBR, complexity metric).
 - **2.5.7** MP4/M4A container demux (box tree, sample table, ADTS-wrap → `aac_decode`).
