@@ -2348,6 +2348,48 @@ fn test_celt_pcm_stereo_rfc() {
     return 0;
 }
 
+fn test_silk_indices_ac_rfc() {
+    test_group("opus: SILK header+gains+nlsf1 bit-exact vs libopus");
+    var lg = alloc(8);
+    var out = alloc(16 * 8);
+    # sw0 (fs_kHz=16)
+    store64(lg, 0);
+    var sw0_p = alloc(29);
+    store8(sw0_p + 0, 129); store8(sw0_p + 1, 23); store8(sw0_p + 2, 177); store8(sw0_p + 3, 248); store8(sw0_p + 4, 92); store8(sw0_p + 5, 123); store8(sw0_p + 6, 184); store8(sw0_p + 7, 64); store8(sw0_p + 8, 62); store8(sw0_p + 9, 2); store8(sw0_p + 10, 172); store8(sw0_p + 11, 194); store8(sw0_p + 12, 182); store8(sw0_p + 13, 50);
+    store8(sw0_p + 14, 216); store8(sw0_p + 15, 140); store8(sw0_p + 16, 54); store8(sw0_p + 17, 182); store8(sw0_p + 18, 247); store8(sw0_p + 19, 108); store8(sw0_p + 20, 54); store8(sw0_p + 21, 251); store8(sw0_p + 22, 199); store8(sw0_p + 23, 173); store8(sw0_p + 24, 157); store8(sw0_p + 25, 239); store8(sw0_p + 26, 213); store8(sw0_p + 27, 3);
+    store8(sw0_p + 28, 144);
+    silk_decode_indices_ac(sw0_p, 29, 16, lg, out);
+    assert_eq(load64(out + 0 * 8), 1, "sw0 signalType");
+    assert_eq(load64(out + 1 * 8), 0, "sw0 quantOffset");
+    assert_eq(load64(out + 2 * 8), 20, "sw0 GI0");
+    assert_eq(load64(out + 3 * 8), 17, "sw0 GI1");
+    assert_eq(load64(out + 4 * 8), 6, "sw0 GI2");
+    assert_eq(load64(out + 5 * 8), 5, "sw0 GI3");
+    assert_eq(load64(out + 6 * 8), 1925120, "sw0 Gain0");
+    assert_eq(load64(out + 7 * 8), 14876672, "sw0 Gain1");
+    assert_eq(load64(out + 8 * 8), 20316160, "sw0 Gain2");
+    assert_eq(load64(out + 9 * 8), 23855104, "sw0 Gain3");
+    assert_eq(load64(out + 10 * 8), 15, "sw0 NLSF0");
+    # sn0 (fs_kHz=8)
+    store64(lg, 0);
+    var sn0_p = alloc(19);
+    store8(sn0_p + 0, 129); store8(sn0_p + 1, 124); store8(sn0_p + 2, 73); store8(sn0_p + 3, 71); store8(sn0_p + 4, 36); store8(sn0_p + 5, 125); store8(sn0_p + 6, 71); store8(sn0_p + 7, 241); store8(sn0_p + 8, 175); store8(sn0_p + 9, 251); store8(sn0_p + 10, 171); store8(sn0_p + 11, 84); store8(sn0_p + 12, 93); store8(sn0_p + 13, 235);
+    store8(sn0_p + 14, 187); store8(sn0_p + 15, 156); store8(sn0_p + 16, 131); store8(sn0_p + 17, 75); store8(sn0_p + 18, 128);
+    silk_decode_indices_ac(sn0_p, 19, 8, lg, out);
+    assert_eq(load64(out + 0 * 8), 1, "sn0 signalType");
+    assert_eq(load64(out + 1 * 8), 0, "sn0 quantOffset");
+    assert_eq(load64(out + 2 * 8), 23, "sn0 GI0");
+    assert_eq(load64(out + 3 * 8), 12, "sn0 GI1");
+    assert_eq(load64(out + 4 * 8), 6, "sn0 GI2");
+    assert_eq(load64(out + 5 * 8), 6, "sn0 GI3");
+    assert_eq(load64(out + 6 * 8), 3080192, "sn0 Gain0");
+    assert_eq(load64(out + 7 * 8), 10813440, "sn0 Gain1");
+    assert_eq(load64(out + 8 * 8), 14876672, "sn0 Gain2");
+    assert_eq(load64(out + 9 * 8), 20316160, "sn0 Gain3");
+    assert_eq(load64(out + 10 * 8), 6, "sn0 NLSF0");
+    return 0;
+}
+
 fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_laplace_rfc_vectors();
@@ -2357,5 +2399,6 @@ fn test_opus_rfc_all() {
     test_celt_imdct_unit();
     test_celt_pcm_rfc();
     test_celt_pcm_stereo_rfc();
+    test_silk_indices_ac_rfc();
     return 0;
 }

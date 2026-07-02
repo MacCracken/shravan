@@ -1,0 +1,158 @@
+# ================================================================
+# silk.cyr -- RFC 6716 SILK decoder (v2.6.1, in progress)
+# ================================================================
+# The low-bitrate/voice half of Opus. Fixed-point in libopus, so this is an exact
+# integer port (int16/int32 widths, arithmetic shifts, saturation emulated in i64).
+# Shares the verified ec_dec range coder + `sar`/`_i16` helpers from src/opus.cyr.
+#
+# Target configs: 1 (SILK NB, 8kHz internal, 20ms) and 9 (SILK WB, 16kHz, 20ms),
+# mono, one SILK frame/packet, 4 subframes. Built stage-by-stage, each bit-exact
+# vs libopus (silkref/opusdec reference). This file currently covers the LP-layer
+# header + silk_decode_indices Steps A-C (signal type, gains, gains dequant, NLSF
+# stage-1 index). NLSF stage-2/LPC, pitch/LTP, excitation, synthesis, resample
+# are the following bites.
+
+# ---- small iCDF / codebook tables (verbatim from libopus) ----
+var _silk_type_VAD = 0;
+var _silk_type_noVAD = 0;
+var _silk_gain_iCDF = 0;
+var _silk_delta_gain = 0;
+var _silk_uniform8 = 0;
+var _silk_cb1_nb = 0;
+var _silk_cb1_wb = 0;
+
+fn _silk_tables_init() {
+    _silk_type_VAD = alloc(4);
+    store8(_silk_type_VAD + 0, 232); store8(_silk_type_VAD + 1, 158); store8(_silk_type_VAD + 2, 10); store8(_silk_type_VAD + 3, 0);
+    _silk_type_noVAD = alloc(2);
+    store8(_silk_type_noVAD + 0, 230); store8(_silk_type_noVAD + 1, 0);
+    _silk_gain_iCDF = alloc(24);
+    store8(_silk_gain_iCDF + 0, 224); store8(_silk_gain_iCDF + 1, 112); store8(_silk_gain_iCDF + 2, 44); store8(_silk_gain_iCDF + 3, 15); store8(_silk_gain_iCDF + 4, 3); store8(_silk_gain_iCDF + 5, 2); store8(_silk_gain_iCDF + 6, 1); store8(_silk_gain_iCDF + 7, 0); store8(_silk_gain_iCDF + 8, 254); store8(_silk_gain_iCDF + 9, 237); store8(_silk_gain_iCDF + 10, 192); store8(_silk_gain_iCDF + 11, 132); store8(_silk_gain_iCDF + 12, 70); store8(_silk_gain_iCDF + 13, 23); store8(_silk_gain_iCDF + 14, 4); store8(_silk_gain_iCDF + 15, 0);
+    store8(_silk_gain_iCDF + 16, 255); store8(_silk_gain_iCDF + 17, 252); store8(_silk_gain_iCDF + 18, 226); store8(_silk_gain_iCDF + 19, 155); store8(_silk_gain_iCDF + 20, 61); store8(_silk_gain_iCDF + 21, 11); store8(_silk_gain_iCDF + 22, 2); store8(_silk_gain_iCDF + 23, 0);
+    _silk_delta_gain = alloc(41);
+    store8(_silk_delta_gain + 0, 250); store8(_silk_delta_gain + 1, 245); store8(_silk_delta_gain + 2, 234); store8(_silk_delta_gain + 3, 203); store8(_silk_delta_gain + 4, 71); store8(_silk_delta_gain + 5, 50); store8(_silk_delta_gain + 6, 42); store8(_silk_delta_gain + 7, 38); store8(_silk_delta_gain + 8, 35); store8(_silk_delta_gain + 9, 33); store8(_silk_delta_gain + 10, 31); store8(_silk_delta_gain + 11, 29); store8(_silk_delta_gain + 12, 28); store8(_silk_delta_gain + 13, 27); store8(_silk_delta_gain + 14, 26); store8(_silk_delta_gain + 15, 25);
+    store8(_silk_delta_gain + 16, 24); store8(_silk_delta_gain + 17, 23); store8(_silk_delta_gain + 18, 22); store8(_silk_delta_gain + 19, 21); store8(_silk_delta_gain + 20, 20); store8(_silk_delta_gain + 21, 19); store8(_silk_delta_gain + 22, 18); store8(_silk_delta_gain + 23, 17); store8(_silk_delta_gain + 24, 16); store8(_silk_delta_gain + 25, 15); store8(_silk_delta_gain + 26, 14); store8(_silk_delta_gain + 27, 13); store8(_silk_delta_gain + 28, 12); store8(_silk_delta_gain + 29, 11); store8(_silk_delta_gain + 30, 10); store8(_silk_delta_gain + 31, 9);
+    store8(_silk_delta_gain + 32, 8); store8(_silk_delta_gain + 33, 7); store8(_silk_delta_gain + 34, 6); store8(_silk_delta_gain + 35, 5); store8(_silk_delta_gain + 36, 4); store8(_silk_delta_gain + 37, 3); store8(_silk_delta_gain + 38, 2); store8(_silk_delta_gain + 39, 1); store8(_silk_delta_gain + 40, 0);
+    _silk_uniform8 = alloc(8);
+    store8(_silk_uniform8 + 0, 224); store8(_silk_uniform8 + 1, 192); store8(_silk_uniform8 + 2, 160); store8(_silk_uniform8 + 3, 128); store8(_silk_uniform8 + 4, 96); store8(_silk_uniform8 + 5, 64); store8(_silk_uniform8 + 6, 32); store8(_silk_uniform8 + 7, 0);
+    _silk_cb1_nb = alloc(64);
+    store8(_silk_cb1_nb + 0, 212); store8(_silk_cb1_nb + 1, 178); store8(_silk_cb1_nb + 2, 148); store8(_silk_cb1_nb + 3, 129); store8(_silk_cb1_nb + 4, 108); store8(_silk_cb1_nb + 5, 96); store8(_silk_cb1_nb + 6, 85); store8(_silk_cb1_nb + 7, 82); store8(_silk_cb1_nb + 8, 79); store8(_silk_cb1_nb + 9, 77); store8(_silk_cb1_nb + 10, 61); store8(_silk_cb1_nb + 11, 59); store8(_silk_cb1_nb + 12, 57); store8(_silk_cb1_nb + 13, 56); store8(_silk_cb1_nb + 14, 51); store8(_silk_cb1_nb + 15, 49);
+    store8(_silk_cb1_nb + 16, 48); store8(_silk_cb1_nb + 17, 45); store8(_silk_cb1_nb + 18, 42); store8(_silk_cb1_nb + 19, 41); store8(_silk_cb1_nb + 20, 40); store8(_silk_cb1_nb + 21, 38); store8(_silk_cb1_nb + 22, 36); store8(_silk_cb1_nb + 23, 34); store8(_silk_cb1_nb + 24, 31); store8(_silk_cb1_nb + 25, 30); store8(_silk_cb1_nb + 26, 21); store8(_silk_cb1_nb + 27, 12); store8(_silk_cb1_nb + 28, 10); store8(_silk_cb1_nb + 29, 3); store8(_silk_cb1_nb + 30, 1); store8(_silk_cb1_nb + 31, 0);
+    store8(_silk_cb1_nb + 32, 255); store8(_silk_cb1_nb + 33, 245); store8(_silk_cb1_nb + 34, 244); store8(_silk_cb1_nb + 35, 236); store8(_silk_cb1_nb + 36, 233); store8(_silk_cb1_nb + 37, 225); store8(_silk_cb1_nb + 38, 217); store8(_silk_cb1_nb + 39, 203); store8(_silk_cb1_nb + 40, 190); store8(_silk_cb1_nb + 41, 176); store8(_silk_cb1_nb + 42, 175); store8(_silk_cb1_nb + 43, 161); store8(_silk_cb1_nb + 44, 149); store8(_silk_cb1_nb + 45, 136); store8(_silk_cb1_nb + 46, 125); store8(_silk_cb1_nb + 47, 114);
+    store8(_silk_cb1_nb + 48, 102); store8(_silk_cb1_nb + 49, 91); store8(_silk_cb1_nb + 50, 81); store8(_silk_cb1_nb + 51, 71); store8(_silk_cb1_nb + 52, 60); store8(_silk_cb1_nb + 53, 52); store8(_silk_cb1_nb + 54, 43); store8(_silk_cb1_nb + 55, 35); store8(_silk_cb1_nb + 56, 28); store8(_silk_cb1_nb + 57, 20); store8(_silk_cb1_nb + 58, 19); store8(_silk_cb1_nb + 59, 18); store8(_silk_cb1_nb + 60, 12); store8(_silk_cb1_nb + 61, 11); store8(_silk_cb1_nb + 62, 5); store8(_silk_cb1_nb + 63, 0);
+    _silk_cb1_wb = alloc(64);
+    store8(_silk_cb1_wb + 0, 225); store8(_silk_cb1_wb + 1, 204); store8(_silk_cb1_wb + 2, 201); store8(_silk_cb1_wb + 3, 184); store8(_silk_cb1_wb + 4, 183); store8(_silk_cb1_wb + 5, 175); store8(_silk_cb1_wb + 6, 158); store8(_silk_cb1_wb + 7, 154); store8(_silk_cb1_wb + 8, 153); store8(_silk_cb1_wb + 9, 135); store8(_silk_cb1_wb + 10, 119); store8(_silk_cb1_wb + 11, 115); store8(_silk_cb1_wb + 12, 113); store8(_silk_cb1_wb + 13, 110); store8(_silk_cb1_wb + 14, 109); store8(_silk_cb1_wb + 15, 99);
+    store8(_silk_cb1_wb + 16, 98); store8(_silk_cb1_wb + 17, 95); store8(_silk_cb1_wb + 18, 79); store8(_silk_cb1_wb + 19, 68); store8(_silk_cb1_wb + 20, 52); store8(_silk_cb1_wb + 21, 50); store8(_silk_cb1_wb + 22, 48); store8(_silk_cb1_wb + 23, 45); store8(_silk_cb1_wb + 24, 43); store8(_silk_cb1_wb + 25, 32); store8(_silk_cb1_wb + 26, 31); store8(_silk_cb1_wb + 27, 27); store8(_silk_cb1_wb + 28, 18); store8(_silk_cb1_wb + 29, 10); store8(_silk_cb1_wb + 30, 3); store8(_silk_cb1_wb + 31, 0);
+    store8(_silk_cb1_wb + 32, 255); store8(_silk_cb1_wb + 33, 251); store8(_silk_cb1_wb + 34, 235); store8(_silk_cb1_wb + 35, 230); store8(_silk_cb1_wb + 36, 212); store8(_silk_cb1_wb + 37, 201); store8(_silk_cb1_wb + 38, 196); store8(_silk_cb1_wb + 39, 182); store8(_silk_cb1_wb + 40, 167); store8(_silk_cb1_wb + 41, 166); store8(_silk_cb1_wb + 42, 163); store8(_silk_cb1_wb + 43, 151); store8(_silk_cb1_wb + 44, 138); store8(_silk_cb1_wb + 45, 124); store8(_silk_cb1_wb + 46, 110); store8(_silk_cb1_wb + 47, 104);
+    store8(_silk_cb1_wb + 48, 90); store8(_silk_cb1_wb + 49, 78); store8(_silk_cb1_wb + 50, 76); store8(_silk_cb1_wb + 51, 70); store8(_silk_cb1_wb + 52, 69); store8(_silk_cb1_wb + 53, 57); store8(_silk_cb1_wb + 54, 45); store8(_silk_cb1_wb + 55, 34); store8(_silk_cb1_wb + 56, 24); store8(_silk_cb1_wb + 57, 21); store8(_silk_cb1_wb + 58, 11); store8(_silk_cb1_wb + 59, 6); store8(_silk_cb1_wb + 60, 5); store8(_silk_cb1_wb + 61, 4); store8(_silk_cb1_wb + 62, 3); store8(_silk_cb1_wb + 63, 0);
+    return 0;
+}
+
+# ---- integer-width helpers (reuse sar/_i16 from opus.cyr) ----
+fn silk_sx32(v) { return ((v & 0xFFFFFFFF) ^ 0x80000000) - 0x80000000; }
+
+# silk_SMULBB(a,b) = (int16)a * (int16)b, result int32.
+fn silk_smulbb(a, b) { return silk_sx32(_i16(a) * _i16(b)); }
+
+# silk_SMULWB(a,b) = (a>>16)*(int16)b + ((a&0xFFFF)*(int16)b)>>16  (both >> arithmetic).
+fn silk_smulwb(a, b) {
+    var b16 = _i16(b);
+    return sar(a, 16) * b16 + sar((a & 0xFFFF) * b16, 16);
+}
+
+# silk_MUL(a,b) = (int32)(a*b)
+fn silk_mul(a, b) { return silk_sx32(a * b); }
+
+# silk_SMLAWB(a,b,c) = (int32)(a + silk_SMULWB(b,c))
+fn silk_smlawb(a, b, c) { return silk_sx32(a + silk_smulwb(b, c)); }
+
+# silk_log2lin(inLog_Q7) -> Q16 linear (gain_quant.c / log2lin.c).
+fn silk_log2lin(inLog) {
+    if (inLog < 0) { return 0; }
+    if (inLog >= 3967) { return 2147483647; }
+    var out = 1 << (inLog >> 7);
+    var frac = inLog & 0x7F;
+    var t = silk_smlawb(frac, silk_smulbb(frac, 128 - frac), 0 - 174);
+    if (inLog < 2048) {
+        # ADD_RSHIFT32(out, MUL(out,t), 7)
+        out = silk_sx32(out + sar(silk_mul(out, t), 7));
+    } else {
+        # MLA(out, RSHIFT(out,7), t) = out + (out>>7)*t
+        out = silk_sx32(out + silk_mul(sar(out, 7), t));
+    }
+    return out;
+}
+
+# ---- gains dequant (gain_quant.c) ----
+fn _silk_gains_dequant_impl(GI, gains_out, lastgain_ptr, conditional, nb_subfr) {
+    var prev_ind = load64(lastgain_ptr);
+    var k = 0;
+    while (k < nb_subfr) {
+        var gk = load64(GI + k * 8);
+        if ((k == 0) & (conditional == 0)) {
+            var lo = prev_ind - 16;
+            prev_ind = gk;
+            if (lo > prev_ind) { prev_ind = lo; }
+        } else {
+            var ind_tmp = gk - 4;                 # + MIN_DELTA_GAIN_QUANT(-4)
+            var thr = 8 + prev_ind;               # 2*36 - 64 + prev_ind
+            if (ind_tmp > thr) {
+                prev_ind = prev_ind + ((ind_tmp << 1) - thr);
+            } else {
+                prev_ind = prev_ind + ind_tmp;
+            }
+        }
+        if (prev_ind < 0) { prev_ind = 0; }
+        if (prev_ind > 63) { prev_ind = 63; }
+        var il = silk_smulwb(1907825, prev_ind) + 2090;
+        if (il > 3967) { il = 3967; }
+        store64(gains_out + k * 8, silk_log2lin(il));
+        k = k + 1;
+    }
+    store64(lastgain_ptr, prev_ind);
+    return 0;
+}
+
+# ---- LP header + decode_indices Steps A-C ----
+# Decodes signalType, quantOffsetType, GainsIndices[4] -> Gains_Q16[4], NLSFIndices[0]
+# from a SILK payload (config 1 NB fs_kHz=8 / config 9 WB fs_kHz=16), mono 20ms.
+# out[0]=signalType out[1]=quantOffset out[2..5]=GainsIndices out[6..9]=Gains_Q16
+# out[10]=NLSFIndices0. lastgain_ptr persists across frames. Returns the ec state.
+fn silk_decode_indices_ac(payload, len, fs_kHz, lastgain_ptr, out) {
+    if (_silk_type_VAD == 0) { _silk_tables_init(); }
+    var ec = ec_dec_new(payload, len);
+    # LP header (mono, 1 frame/packet): VAD_flags[0], LBRR_flag
+    var vad = ec_dec_bit_logp(ec, 1);
+    var lbrr = ec_dec_bit_logp(ec, 1);
+    # (LBRR_flag==1 for a single-frame packet sets LBRR_flags[0]=1 with no extra
+    #  bits; the LBRR-skip decode that would advance ec is a later bite -- rare for
+    #  low-bitrate voice and absent in our reference frames.)
+    # Step A: signal type + quant offset
+    var Ix = 0;
+    if (vad != 0) { Ix = ec_dec_icdf(ec, _silk_type_VAD, 8) + 2; }
+    else { Ix = ec_dec_icdf(ec, _silk_type_noVAD, 8); }
+    var signalType = Ix >> 1;
+    var quantOffset = Ix & 1;
+    # Step B: gains (independent coding)
+    var GI = alloc(4 * 8);
+    var g0 = ec_dec_icdf(ec, _silk_gain_iCDF + signalType * 8, 8) << 3;
+    g0 = g0 + ec_dec_icdf(ec, _silk_uniform8, 8);
+    store64(GI + 0, g0);
+    var i = 1;
+    while (i < 4) { store64(GI + i * 8, ec_dec_icdf(ec, _silk_delta_gain, 8)); i = i + 1; }
+    var gains = alloc(4 * 8);
+    _silk_gains_dequant_impl(GI, gains, lastgain_ptr, 0, 4);
+    # Step C: NLSF stage-1 index
+    var cb1 = _silk_cb1_wb;
+    if (fs_kHz == 8) { cb1 = _silk_cb1_nb; }
+    var nlsf0 = ec_dec_icdf(ec, cb1 + (signalType >> 1) * 32, 8);
+    # fill outputs
+    store64(out + 0 * 8, signalType);
+    store64(out + 1 * 8, quantOffset);
+    var j = 0;
+    while (j < 4) { store64(out + (2 + j) * 8, load64(GI + j * 8)); j = j + 1; }
+    j = 0;
+    while (j < 4) { store64(out + (6 + j) * 8, load64(gains + j * 8)); j = j + 1; }
+    store64(out + 10 * 8, nlsf0);
+    return ec;
+}
