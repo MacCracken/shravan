@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.8] - 2026-07-01
+
+CELT/Opus rate control + VBR — completes the CELT rate model. 843 assertions
+(was 830, +13).
+
+### Added
+
+- **Bit-reservoir rate control + VBR** (`src/opus.cyr`):
+  - `_opus_rate_new` / `_opus_rate_target` — a reservoir rate controller. CBR emits
+    the nominal size every frame; **constrained VBR** lets a complex frame spend saved
+    bits from the reservoir but keeps the average at/under the target bitrate (the
+    reservoir stays ≥ 0, so total ≤ frames × nominal); **unconstrained VBR** sizes each
+    frame purely by complexity.
+  - `_opus_frame_complexity` — a cheap per-frame complexity in [0,100] (high-frequency
+    first-difference energy / total energy): tones are simple, noise/transients complex.
+  - `opus_encode` refactored onto `_opus_encode_impl` (CBR — behavior unchanged) and a
+    new `opus_encode_vbr` (constrained VBR) that varies packet size with content.
+- **Tests** (`+13` assertions): CBR target = nominal for all complexities; VBR
+  monotonic in complexity (c=50 → nominal); CVBR per-frame bounded + average ≤ target
+  over mixed frames; complexity(noise) > complexity(tone) + silence = 0; `opus_encode_vbr`
+  yields a valid Ogg stream.
+
 ## [2.5.7] - 2026-07-01
 
 MP4/M4A container demux — enables real `.m4a` playback. 830 assertions

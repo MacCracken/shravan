@@ -1,12 +1,12 @@
 # Development Roadmap
 
-> **v2.5.7** — 830 tests + fuzz (90K/0), Cyrius 6.3.27.
-> MP4/M4A container demux: box-tree parser + sample-table (stsz/stco/stsc) → AAC
-> extraction → aac_decode; `FMT_MP4` detection + dispatch. Adversarially reviewed +
-> hardened against malformed input. (v2.5.6: CELT stereo full two-channel bitstream.
-> v2.5.5: stereo coupling foundation. v2.5.4: transient detection + short-block MDCT.
-> v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair. v2.5.1: first CELT
-> decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
+> **v2.5.8** — 843 tests + fuzz (90K/0), Cyrius 6.3.27.
+> CELT/Opus rate control + VBR: bit-reservoir controller + per-frame complexity metric
+> drive CBR / constrained-VBR / VBR packet sizing; `opus_encode_vbr`. Completes the CELT
+> rate model. (v2.5.7: MP4/M4A container demux. v2.5.6: CELT stereo full two-channel
+> bitstream. v2.5.5: stereo coupling foundation. v2.5.4: transient detection + short-block
+> MDCT. v2.5.3: AAC psychoacoustic model. v2.5.2: AAC TNS + serde repair. v2.5.1: first
+> CELT decode. v2.5.0: full PVQ spectral shape. v2.4.4: Opus encoder framework.)
 > (v2.3.0: security audit 21/21 fixed, 90K fuzz 0 crashes; MDCT 5.45x, polyphase resampler.)
 
 ## Completed (v2.0.0)
@@ -237,14 +237,22 @@ Restored the full Rust `#[derive(Serialize, Deserialize)]` surface as JSON.
 - Deferred: full `esds`/AudioSpecificConfig parse; multi-track/edit-list; fuzzing
   `mp4_decode` (needs the AAC chain in the standalone fuzz harness).
 
+## v2.5.8 — Rate control + VBR (CELT/Opus) · shipped 2026-07-01
+
+- [x] `_opus_rate_new` / `_opus_rate_target` — bit-reservoir controller: CBR (nominal
+      every frame), constrained VBR (spend saved bits, average ≤ target bitrate),
+      unconstrained VBR (size by complexity).
+- [x] `_opus_frame_complexity` — high-frequency-energy proxy in [0,100] driving the
+      per-frame allocation.
+- [x] `opus_encode` refactored onto `_opus_encode_impl` (CBR, unchanged) + new
+      `opus_encode_vbr` (constrained VBR).
+- Deferred: complexity from the actual MDCT/masking (vs the time-domain proxy);
+  stereo/transient-aware allocation; a two-pass VBR.
+
 ## v2.5.x — remaining
 
 Order = dependency order; the 2.3.x deferrals + hi-res/DSD are dependency-independent
 breathers between Opus vertebrae.
-
-### v2.5.8 — Rate control + VBR (CELT/Opus) · needs 2.5.0/4/6
-
-- Bit-reservoir rate-control state; unconstrained + constrained VBR. Completes CELT mode.
 
 ### v2.5.9 — Hi-res rates + wide PCM + SSE2 · hi-res/deferred (independent)
 

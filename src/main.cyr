@@ -1,7 +1,7 @@
 # shravan — test harness entry point.
 # The library lives in src/shravan.cyr (bundled into dist/shravan.cyr via
 # `cyrius distlib`); this file includes it plus the codec modules and runs the
-# 830-assertion suite. Consumers use dist/shravan.cyr, not this file.
+# 843-assertion suite. Consumers use dist/shravan.cyr, not this file.
 include "src/shravan.cyr"
 include "src/flac.cyr"
 include "src/ogg.cyr"
@@ -1060,7 +1060,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.5.7 — audio codecs for AGNOS (Cyrius)\n", 50);
+syscall(1, 1, "shravan v2.5.8 — audio codecs for AGNOS (Cyrius)\n", 50);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

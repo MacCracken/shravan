@@ -1459,6 +1459,100 @@ fn test_opus_stereo_encode_frame() {
     return 0;
 }
 
+# CBR: every frame's target equals the nominal size, regardless of complexity.
+fn test_opus_rate_cbr() {
+    test_group("opus: rate control CBR");
+    var st = _opus_rate_new(64000, RATE_CBR);
+    var nominal = 64000 / 8 / 50;
+    assert_eq(_opus_rate_target(st, 0), nominal, "CBR target = nominal (c=0)");
+    assert_eq(_opus_rate_target(st, 100), nominal, "CBR target = nominal (c=100)");
+    assert_eq(_opus_rate_target(st, 50), nominal, "CBR target = nominal (c=50)");
+    return 0;
+}
+
+# VBR: a complex frame gets more bytes than a simple one; c=50 maps to nominal.
+fn test_opus_rate_vbr_complexity() {
+    test_group("opus: rate control VBR complexity");
+    var nominal = 64000 / 8 / 50;
+    var lo = _opus_rate_new(64000, RATE_VBR);
+    var t_lo = _opus_rate_target(lo, 10);
+    var hi = _opus_rate_new(64000, RATE_VBR);
+    var t_hi = _opus_rate_target(hi, 90);
+    assert(t_hi > t_lo, "VBR: complex frame gets more bytes");
+    var mid = _opus_rate_new(64000, RATE_VBR);
+    assert_eq(_opus_rate_target(mid, 50), nominal, "VBR c=50 ~ nominal");
+    return 0;
+}
+
+# CVBR: bounded per frame, and the average never exceeds the target bitrate.
+fn test_opus_rate_cvbr_reservoir() {
+    test_group("opus: rate control CVBR reservoir");
+    var st = _opus_rate_new(64000, RATE_CVBR);
+    var nominal = 64000 / 8 / 50;
+    var total = 0;
+    var n = 20;
+    var bounds_ok = 1;
+    var i = 0;
+    while (i < n) {
+        var c = 10;
+        if ((i % 2) == 1) { c = 100; }
+        var t = _opus_rate_target(st, c);
+        total = total + t;
+        if (t < nominal / 2) { bounds_ok = 0; }
+        if (t > nominal + nominal * 6) { bounds_ok = 0; }
+        i = i + 1;
+    }
+    assert(bounds_ok == 1, "every CVBR target within [floor, nominal+reservoir cap]");
+    assert(total <= n * nominal, "CVBR average bitrate <= target");
+    return 0;
+}
+
+# Complexity: a tone is simpler than high-frequency noise; silence is 0.
+fn test_opus_complexity() {
+    test_group("opus: frame complexity metric");
+    var n = 960;
+    var tone = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(tone + i * 8, f64_sin(f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(480))));
+        i = i + 1;
+    }
+    var c_tone = _opus_frame_complexity(tone, n, 1);
+    var noise = alloc(n * 8);
+    i = 0;
+    while (i < n) {
+        var v = f64_from(1);
+        if ((i % 2) == 1) { v = f64_neg(f64_from(1)); }
+        store64(noise + i * 8, v);
+        i = i + 1;
+    }
+    var c_noise = _opus_frame_complexity(noise, n, 1);
+    assert(c_noise > c_tone, "noise more complex than tone");
+    var sil = alloc(n * 8);
+    memset(sil, 0, n * 8);
+    assert_eq(_opus_frame_complexity(sil, n, 1), 0, "silence complexity 0");
+    return 0;
+}
+
+# End-to-end: constrained-VBR encode produces a valid Ogg stream.
+fn test_opus_vbr_encode() {
+    test_group("opus: VBR encode produces Ogg");
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var samples = vec_new();
+    var i = 0;
+    while (i < 960 * 3) {
+        vec_push(samples, f64_sin(f64_div(f64_from(i * 7), f64_from(60))));
+        i = i + 1;
+    }
+    var out = alloc(131072);
+    var nb = opus_encode_vbr(samples, 48000, 1, 64000, out);
+    assert(is_err(nb) == 0, "vbr encode ok");
+    assert(nb > 0, "produced bytes");
+    assert_eq(load8(out), 0x4F, "OggS[0] = 'O'");
+    assert_eq(load8(out + 1), 0x67, "OggS[1] = 'g'");
+    return 0;
+}
+
 fn test_opus_pvq_all() {
     test_opus_range_roundtrip();
     test_pvq_v_counting();
@@ -1474,6 +1568,11 @@ fn test_opus_pvq_all() {
     test_opus_stereo_couple();
     test_opus_stereo_frame_roundtrip();
     test_opus_stereo_encode_frame();
+    test_opus_rate_cbr();
+    test_opus_rate_vbr_complexity();
+    test_opus_rate_cvbr_reservoir();
+    test_opus_complexity();
+    test_opus_vbr_encode();
     return 0;
 }
 
@@ -1972,18 +2071,101 @@ fn _opus_encode_celt_frame(samples, frame_size, channels, target_bytes) {
 }
 
 # ================================================================
+# Rate control + VBR (2.5.8)
+# ================================================================
+# A bit-reservoir rate controller decides each frame's byte target. CBR emits the
+# nominal size every frame. Constrained VBR (CVBR) lets a complex frame spend saved
+# bits from the reservoir but never exceeds the target bitrate on average (reservoir
+# stays >= 0, so total <= frames*nominal). Unconstrained VBR sizes each frame purely
+# by complexity. Per-frame complexity is a cheap high-frequency-energy proxy
+# (first-difference energy / total energy): tones are simple, noise/transients complex.
+
+var RATE_CBR = 0;
+var RATE_CVBR = 1;
+var RATE_VBR = 2;
+
+var RATE_ST_NOMINAL = 0;
+var RATE_ST_MODE = 8;
+var RATE_ST_RESERVOIR = 16;
+var RATE_ST_RMAX = 24;
+var RATE_ST_SIZE = 32;
+
+fn _opus_rate_new(bitrate, mode) {
+    var st = alloc(RATE_ST_SIZE);
+    var nominal = bitrate / 8 / 50;   # bytes per 20ms frame
+    if (nominal < 10) { nominal = 10; }
+    store64(st + RATE_ST_NOMINAL, nominal);
+    store64(st + RATE_ST_MODE, mode);
+    store64(st + RATE_ST_RESERVOIR, 0);
+    store64(st + RATE_ST_RMAX, nominal * 6);   # reservoir cap ~6 frames
+    return st;
+}
+
+# Per-frame byte target for `complexity` in [0,100]; updates the reservoir.
+fn _opus_rate_target(st, complexity) {
+    var nominal = load64(st + RATE_ST_NOMINAL);
+    var mode = load64(st + RATE_ST_MODE);
+    if (mode == RATE_CBR) { return nominal; }
+    # desired = nominal * (0.6 .. 1.4) as complexity goes 0..100
+    var factor = 60 + (complexity * 4) / 5;    # 60..140 (percent)
+    var desired = nominal * factor / 100;
+    if (desired < 10) { desired = 10; }
+    var reservoir = load64(st + RATE_ST_RESERVOIR);
+    var rmax = load64(st + RATE_ST_RMAX);
+    var target = desired;
+    if (mode == RATE_CVBR) {
+        var avail = nominal + reservoir;       # can't spend beyond nominal + saved
+        if (target > avail) { target = avail; }
+        var floor = nominal / 2;
+        if (target < floor) { target = floor; }
+    }
+    if (target < 10) { target = 10; }
+    reservoir = reservoir + nominal - target;  # save when under nominal, spend when over
+    if (reservoir > rmax) { reservoir = rmax; }
+    if (mode == RATE_CVBR) {
+        if (reservoir < 0) { reservoir = 0; }              # no debt: keeps average <= target
+    } else {
+        if (reservoir < 0 - rmax) { reservoir = 0 - rmax; }
+    }
+    store64(st + RATE_ST_RESERVOIR, reservoir);
+    return target;
+}
+
+# Cheap per-frame complexity in [0,100]: high-frequency (first-difference) energy
+# as a fraction of total energy. Uses channel 0 of an interleaved frame.
+fn _opus_frame_complexity(samples, n, ch) {
+    var tiny = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
+    var d_energy = F64_ZERO;
+    var t_energy = F64_ZERO;
+    var prev = F64_ZERO;
+    var i = 0;
+    while (i < n) {
+        var s = load64(samples + (i * ch) * 8);
+        var d = f64_sub(s, prev);
+        d_energy = f64_add(d_energy, f64_mul(d, d));
+        t_energy = f64_add(t_energy, f64_mul(s, s));
+        prev = s;
+        i = i + 1;
+    }
+    if (f64_gt(t_energy, tiny) == 0) { return 0; }
+    var c = f64_to(f64_mul(f64_div(d_energy, t_energy), f64_from(50)));
+    if (c > 100) { c = 100; }
+    if (c < 0) { c = 0; }
+    return c;
+}
+
+# ================================================================
 # Opus encoder (Ogg container output)
 # ================================================================
 #
-# opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
+# opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)  -- CBR
+# opus_encode_vbr(...)                                               -- constrained VBR
 #   samples_vec: vec of f64 bit patterns (interleaved)
-#   sample_rate: must be 48000
-#   channels: 1 or 2
-#   bitrate: 32000..256000
+#   sample_rate: must be 48000; channels: 1 or 2; bitrate: 32000..256000
 #   out_buf: pointer to output buffer (must be large enough)
 # Returns bytes written, or err().
 
-fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
+fn _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, mode, out_buf) {
     # Validate parameters
     if (sample_rate != 48000) { return err(ERR_INVALID_RATE); }
     if (channels < 1) { return err(ERR_INVALID_CHANNELS); }
@@ -2001,6 +2183,9 @@ fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     # Bytes per CELT frame: bitrate / 8 / 50 (20ms = 50 frames/sec)
     var bytes_per_frame = bitrate / 8 / 50;
     if (bytes_per_frame < 10) { bytes_per_frame = 10; }
+
+    # Rate controller: CBR emits nominal every frame; VBR modes vary by complexity.
+    var rate_st = _opus_rate_new(bitrate, mode);
 
     # Generate header packets
     var head_buf = alloc(19);
@@ -2031,7 +2216,9 @@ fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
             fi = fi + 1;
         }
 
-        var pkt = _opus_encode_celt_frame(frame_buf, OPUS_FRAME_SIZE, channels, bytes_per_frame);
+        var complexity = _opus_frame_complexity(frame_buf, OPUS_FRAME_SIZE, ch);
+        var target = _opus_rate_target(rate_st, complexity);
+        var pkt = _opus_encode_celt_frame(frame_buf, OPUS_FRAME_SIZE, channels, target);
         vec_push(audio_packets, pkt);
 
         var actual_samples = count / ch;
@@ -2045,7 +2232,7 @@ fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     if (vec_len(audio_packets) == 0) {
         var silence = alloc(frame_interleaved * 8);
         memset(silence, 0, frame_interleaved * 8);
-        var pkt = _opus_encode_celt_frame(silence, OPUS_FRAME_SIZE, channels, bytes_per_frame);
+        var pkt = _opus_encode_celt_frame(silence, OPUS_FRAME_SIZE, channels, _opus_rate_target(rate_st, 0));
         vec_push(audio_packets, pkt);
         vec_push(granule_positions, granule);
     }
@@ -2084,6 +2271,17 @@ fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     }
 
     return write_pos;
+}
+
+# CBR: fixed-size packets (nominal bytes every frame). Unchanged public behavior.
+fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
+    return _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, RATE_CBR, out_buf);
+}
+
+# Constrained VBR: packet size follows per-frame complexity via the bit reservoir,
+# without exceeding the target bitrate on average.
+fn opus_encode_vbr(samples_vec, sample_rate, channels, bitrate, out_buf) {
+    return _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, RATE_CVBR, out_buf);
 }
 
 # ================================================================
