@@ -3771,7 +3771,7 @@ fn celt_spreading_decision(X, end, C, LM, avg_ptr, last_decision) {
 # `freq` holds the C*N MDCT coefficients. Non-transient mono/stereo, no dynalloc boosts,
 # default spread/trim — a first correct-and-decodable frame (the encoder-quality knobs
 # tf/spread/dynalloc/intra-race are refinements). Mirrors celt_decode_frame_ec's prefix.
-fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra) {
+fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransient) {
     if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
     var M = 1 << LM;
     var N = 120 << LM;
@@ -3795,7 +3795,6 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra) {
     var X = alloc(C * N * 8);
     normalise_bands(freq, X, bandE, end, C, LM);
     # --- prefix ---
-    var isTransient = 0;
     var tell = ec_tell(ec);
     if (tell == 1) { ec_enc_bit_logp(ec, 0, 15); }                              # R1 silence=0
     tell = ec_tell(ec);
