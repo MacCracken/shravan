@@ -1733,8 +1733,9 @@ fn test_celt_tf_analysis_rfc() {
     var bandE = alloc(21 * 8); compute_band_energies(freq, bandE, 21, 1, 3);
     var Xn = alloc(N * 8); normalise_bands(freq, Xn, bandE, 21, 1, 3);
     var lambda = 20480 / 160 + 2;                                # 130
+    var imp13 = alloc(21 * 8); var q13 = 0; while (q13 < 21) { store64(imp13 + q13 * 8, 13); q13 = q13 + 1; }
     var tf = alloc(21 * 8);
-    var tf_select = celt_tf_analysis(Xn, N, 21, it, 3, _celt_tf_estimate, 0, lambda, tf);
+    var tf_select = celt_tf_analysis(Xn, N, 21, it, 3, _celt_tf_estimate, 0, lambda, tf, imp13);
     # Encode the raw tf_res (celt_tf_encode remaps `tf` in place to the tf_change values)
     var buf = alloc(64); var zz = 0; while (zz < 64) { store8(buf + zz, 0); zz = zz + 1; }
     var ee = ec_enc_new(buf, 64);
@@ -1764,8 +1765,62 @@ fn test_celt_tf_analysis_rfc() {
     var be2 = alloc(21 * 8); compute_band_energies(freq2, be2, 21, 1, 3);
     var X2 = alloc(N * 8); normalise_bands(freq2, X2, be2, 21, 1, 3);
     var tf2 = alloc(21 * 8);
-    var tfsel2 = celt_tf_analysis(X2, N, 21, it2, 3, _celt_tf_estimate, 0, lambda, tf2);
+    var tfsel2 = celt_tf_analysis(X2, N, 21, it2, 3, _celt_tf_estimate, 0, lambda, tf2, imp13);
     assert(tfsel2 == 0, "non-transient tf_select stays 0");
+    return 0;
+}
+
+# celt_dynalloc_analysis — masking-model per-band bit boosts + tf importance (celt_encoder.c:1049).
+# A flat spectrum masks itself → no boosts, importance stays at the uniform 13. A spectrum with a
+# strong isolated peak → that band rises above the masking follower → it earns a dynalloc boost and
+# a higher tf importance. Also confirms a peaked signal still round-trips exactly with boosts active.
+fn test_celt_dynalloc_analysis_rfc() {
+    test_group("opus: celt_dynalloc_analysis — masking boosts + tf importance");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    var offs = alloc(21 * 8); var imp = alloc(21 * 8);
+    # Flat spectrum → self-masking → no boosts, uniform importance
+    var flat = alloc(21 * 8); var i = 0; while (i < 21) { store64(flat + i * 8, f64_from(5)); i = i + 1; }
+    celt_dynalloc_analysis(flat, 21, 3, 160, offs, imp, 0);
+    var sum_off = 0; i = 0; while (i < 21) { sum_off = sum_off + load64(offs + i * 8); i = i + 1; }
+    assert(sum_off == 0, "flat spectrum -> no dynalloc boosts");
+    assert(load64(imp + 10 * 8) == 13, "flat spectrum -> tf importance stays 13");
+    # Strong isolated peak at band 10 → boost + higher importance there
+    var peak = alloc(21 * 8); i = 0; while (i < 21) { store64(peak + i * 8, F64_ZERO); i = i + 1; }
+    store64(peak + 10 * 8, f64_from(8));
+    celt_dynalloc_analysis(peak, 21, 3, 160, offs, imp, 0);
+    syscall(1, 2, "dynalloc_peak_offset=", 21); fmt_int_fd(2, load64(offs + 10 * 8));
+    syscall(1, 2, " importance=", 12); fmt_int_fd(2, load64(imp + 10 * 8)); syscall(1, 2, "\n", 1);
+    assert(load64(offs + 10 * 8) > 0, "spectral peak -> band earns a dynalloc boost");
+    assert(load64(imp + 10 * 8) > 13, "spectral peak -> band tf importance > 13");
+    # The other bands stay unboosted
+    assert(load64(offs + 0) == 0, "off-peak band -> no boost");
+    # Round-trip: a tone burst (which triggers boosts internally) encodes+decodes cleanly
+    var nsamp = 1080; var N = 960;
+    var pcm = alloc(nsamp * 8);
+    var twopi = f64_mul(F64_TWO, F64_PI);
+    var n = 0;
+    while (n < nsamp) {
+        var ph = f64_div(f64_mul(twopi, f64_mul(f64_from(24), f64_from(n))), f64_from(960));
+        store64(pcm + n * 8, f64_mul(f64_div(f64_from(4), f64_from(10)), f64_sin(ph)));
+        n = n + 1;
+    }
+    var ste = celt_dec_state_new(); var pmem = alloc(8); store64(pmem, 0);
+    var buf = alloc(160); var ee = ec_enc_new(buf, 160);
+    celt_encode(ste, ee, pcm, 1, 3, 1, 0, pmem); ec_enc_done(ee);
+    assert(load64(ee + 88) == 0, "dynalloc frame encode: no error");
+    var std = celt_dec_state_new(); var dd = ec_dec_new(buf, 160);
+    var pcmo = alloc(960 * 8);
+    celt_decode_frame_ec(std, dd, 160, 1, 0, 21, 0, 3, pcmo);
+    var dot = F64_ZERO; var na = F64_ZERO; var nb2 = F64_ZERO; i = 120;
+    while (i < 840) {
+        var a = load64(pcm + i * 8); var b = load64(pcmo + i * 8);
+        dot = f64_add(dot, f64_mul(a, b)); na = f64_add(na, f64_mul(a, a)); nb2 = f64_add(nb2, f64_mul(b, b));
+        i = i + 1;
+    }
+    var corr = f64_div(dot, f64_sqrt(f64_mul(na, nb2)));
+    syscall(1, 2, "dynalloc_roundtrip_corr_x1000=", 30); fmt_int_fd(2, f64_to(f64_mul(corr, f64_from(1000)))); syscall(1, 2, "\n", 1);
+    assert(f64_gt(corr, f64_div(f64_from(95), f64_from(100))) == 1, "boosted frame decodes (corr > 0.95)");
     return 0;
 }
 
@@ -1792,5 +1847,6 @@ fn test_opus_encoder_all() {
     test_celt_encode_pcm_rfc();
     test_celt_transient_analysis_rfc();
     test_celt_tf_analysis_rfc();
+    test_celt_dynalloc_analysis_rfc();
     return 0;
 }

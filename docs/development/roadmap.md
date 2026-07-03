@@ -35,9 +35,12 @@ Make the CELT encoder produce *good* frames, not just valid ones (2.6.5 uses fix
   uniform (dynalloc-off fallback). Replaces the all-zeros `tf_res` in `celt_encode_frame_ec`;
   round-trips through `celt_tf_encode`/`celt_tf_decode` (encoder remap == decoder remap, same
   bits) and *improved* every spectrum correlation (frame 0.968→0.990, transient 0.898→0.943).
-- Remaining: `feat(opus): dynalloc boosts` (real per-band `offsets` from `dynalloc_analysis`
-  + the real `importance[]` it feeds back into tf_analysis). Verify rate/quality against libopus;
-  keep the encode→decode round-trip exact. **Cut 2.6.6 once dynalloc lands.**
+- ✅ **dynalloc boosts** (`celt_dynalloc_analysis`, `celt_encoder.c:1049` float path): a masking
+  follower (forward/backward + median-of-5 filter, noise-floor bounded) → per-band `offsets` (bit
+  units = boost_count·quanta, so the R9 boost loop reproduces them exactly) + the real `importance[]`
+  that now feeds tf_analysis. Mono; stereo keeps the flat fallback. Flat spectrum → no boosts /
+  importance 13; a spectral peak → boost + higher importance (verified exact: peak offset 384,
+  importance 208); pcm round-trip 0.997→0.999. **v2.6.6 is feature-complete — ready to cut.**
 
 ### v2.6.7 — CELT stereo encode · medium
 - `feat(opus): stereo_split / intensity_stereo, quant_band_stereo N==2 sign encode, dual-stereo

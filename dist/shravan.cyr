@@ -10543,6 +10543,160 @@ fn celt_tf_encode(tf_res, isTransient, tf_select, ec, start, end) {
     return 0;
 }
 
+# median_of_3 / median_of_5 (celt_encoder.c:990/1029) — the dynalloc median filter. Operate on
+# `x`, a pointer to 3 / 5 consecutive f64 log-energies; return the median.
+fn _celt_median3(x) {
+    var a = load64(x + 0); var b = load64(x + 8); var c = load64(x + 16);
+    var t0 = a; var t1 = b;
+    if (f64_gt(a, b) != 0) { t0 = b; t1 = a; }
+    if (f64_lt(t1, c) != 0) { return t1; }
+    if (f64_lt(t0, c) != 0) { return c; }
+    return t0;
+}
+
+fn _celt_median5(x) {
+    var t2 = load64(x + 16);
+    var a = load64(x + 0); var b = load64(x + 8);
+    var t0 = a; var t1 = b;
+    if (f64_gt(a, b) != 0) { t0 = b; t1 = a; }
+    var d = load64(x + 24); var e = load64(x + 32);
+    var t3 = d; var t4 = e;
+    if (f64_gt(d, e) != 0) { t3 = e; t4 = d; }
+    if (f64_gt(t0, t3) != 0) { var s = t0; t0 = t3; t3 = s; s = t1; t1 = t4; t4 = s; }
+    if (f64_gt(t2, t1) != 0) {
+        if (f64_lt(t1, t3) != 0) { var r = t2; if (f64_lt(t3, r) != 0) { r = t3; } return r; }
+        var r2 = t4; if (f64_lt(t1, r2) != 0) { r2 = t1; } return r2;
+    }
+    if (f64_lt(t2, t3) != 0) { var r3 = t1; if (f64_lt(t3, r3) != 0) { r3 = t3; } return r3; }
+    var r4 = t2; if (f64_lt(t4, r4) != 0) { r4 = t4; } return r4;
+}
+
+# celt_dynalloc_analysis (celt_encoder.c:1049, float path) — decide per-band bit boosts (offsets)
+# and the per-band tf importance from a simple masking model. Mono, non-surround, non-tone,
+# analysis-off, LM>0 (the current CELT encode target). bandLogE is log2(E)-eMeans. Fills:
+#   offsets[i] — the dynalloc boost TARGET in accumulated 1/64-bit units (= boost_count·quanta, so
+#                the existing R9 boost loop reproduces exactly boost_count flags; boost_bits ==
+#                boost_count·quanta in every width branch, so this is bit-exact to libopus's offsets),
+#   importance[i] — floor(0.5 + 13·2^min(follower,4)), the tf_analysis Viterbi weight.
+# The float macros make SHR32/SHL32/DB_SHIFT no-ops, so the whole thing works in raw log2 units
+# (1 unit = 6.02 dB; GCONST(.5)=+3 dB). lsb_depth = 24 (the float default).
+fn celt_dynalloc_analysis(bandLogE, end, LM, effectiveBytes, offsets, importance, isTransient) {
+    var lsb_depth = 24;
+    var nf = alloc(end * 8);
+    var c0062 = f64_div(f64_from(62), f64_from(10000));       # 0.0062
+    var c00625 = f64_div(f64_from(1), f64_from(16));          # 0.0625
+    var i = 0;
+    while (i < end) {
+        var t = f64_mul(c00625, f64_from(load64(_celt_logN + i * 8)));
+        t = f64_add(t, F64_HALF);
+        t = f64_add(t, f64_from(9 - lsb_depth));
+        t = f64_sub(t, load64(_celt_eMeans + i * 8));
+        var i5 = i + 5;
+        t = f64_add(t, f64_mul(c0062, f64_from(i5 * i5)));
+        store64(nf + i * 8, t);
+        store64(importance + i * 8, 13);                     # default (dynalloc-off fallback)
+        store64(offsets + i * 8, 0);
+        i = i + 1;
+    }
+    if (effectiveBytes < (30 + 5 * LM)) { return 0; }        # dynalloc disabled at very low rate
+    # --- masking follower over bandLogE (bandLogE2 == bandLogE for long/low-complexity blocks) ---
+    var f = alloc(end * 8);
+    var last = 0;
+    store64(f + 0, load64(bandLogE + 0));
+    i = 1;
+    var c15 = f64_div(f64_from(3), f64_from(2));              # 1.5
+    while (i < end) {
+        if (f64_gt(load64(bandLogE + i * 8), f64_add(load64(bandLogE + (i - 1) * 8), F64_HALF)) != 0) { last = i; }
+        var mn = f64_add(load64(f + (i - 1) * 8), c15);
+        var bv = load64(bandLogE + i * 8); if (f64_lt(bv, mn) != 0) { mn = bv; }
+        store64(f + i * 8, mn);
+        i = i + 1;
+    }
+    i = last - 1;
+    while (i >= 0) {
+        var a = f64_add(load64(f + (i + 1) * 8), F64_TWO);
+        var bv2 = load64(bandLogE + i * 8); if (f64_lt(bv2, a) != 0) { a = bv2; }
+        var cur = load64(f + i * 8); if (f64_lt(a, cur) != 0) { cur = a; }
+        store64(f + i * 8, cur);
+        i = i - 1;
+    }
+    # median filter (offset = 1.0), edges via median-of-3
+    i = 2;
+    while (i < end - 2) {
+        var v = f64_sub(_celt_median5(bandLogE + (i - 2) * 8), F64_ONE);
+        var cur2 = load64(f + i * 8); if (f64_gt(v, cur2) != 0) { store64(f + i * 8, v); }
+        i = i + 1;
+    }
+    var tmp = f64_sub(_celt_median3(bandLogE + 0), F64_ONE);
+    if (f64_gt(tmp, load64(f + 0)) != 0) { store64(f + 0, tmp); }
+    if (f64_gt(tmp, load64(f + 8)) != 0) { store64(f + 8, tmp); }
+    tmp = f64_sub(_celt_median3(bandLogE + (end - 3) * 8), F64_ONE);
+    if (f64_gt(tmp, load64(f + (end - 2) * 8)) != 0) { store64(f + (end - 2) * 8, tmp); }
+    if (f64_gt(tmp, load64(f + (end - 1) * 8)) != 0) { store64(f + (end - 1) * 8, tmp); }
+    i = 0;
+    while (i < end) { var nfv = load64(nf + i * 8); if (f64_gt(nfv, load64(f + i * 8)) != 0) { store64(f + i * 8, nfv); } i = i + 1; }
+    # mono: follower = max(0, bandLogE - follower)
+    i = 0;
+    while (i < end) {
+        var dd = f64_sub(load64(bandLogE + i * 8), load64(f + i * 8));
+        if (f64_lt(dd, F64_ZERO) != 0) { dd = F64_ZERO; }
+        store64(f + i * 8, dd);
+        i = i + 1;
+    }
+    var four = f64_add(F64_TWO, F64_TWO);
+    # importance = floor(0.5 + 13·2^min(follower,4))
+    i = 0;
+    while (i < end) {
+        var fm = load64(f + i * 8); if (f64_gt(fm, four) != 0) { fm = four; }
+        store64(importance + i * 8, f64_to(f64_floor(f64_add(F64_HALF, f64_mul(f64_from(13), _celt_exp2(fm))))));
+        i = i + 1;
+    }
+    # CBR (vbr=0) non-transient: halve the dynalloc contribution
+    if (isTransient == 0) { i = 0; while (i < end) { store64(f + i * 8, f64_mul(F64_HALF, load64(f + i * 8))); i = i + 1; } }
+    # band shaping: boost low bands (<8) ×2, cut high bands (≥12) ×0.5
+    i = 0;
+    while (i < end) {
+        var fv = load64(f + i * 8);
+        if (i < 8) { fv = f64_mul(F64_TWO, fv); }
+        if (i >= 12) { fv = f64_mul(F64_HALF, fv); }
+        store64(f + i * 8, fv);
+        i = i + 1;
+    }
+    if (effectiveBytes > 320) {
+        var add = f64_mul(f64_div(f64_from(1), f64_from(1000)), f64_from(effectiveBytes - 320));
+        if (f64_gt(add, c15) != 0) { add = c15; }
+        store64(f + 0, f64_add(load64(f + 0), add));
+    }
+    # --- boost counts -> accumulated bit offsets, with the CBR 2/3-budget cap ---
+    var tot_boost = 0;
+    var budget23 = 2 * effectiveBytes / 3;
+    i = 0;
+    var stop = 0;
+    while ((i < end) & (stop == 0)) {
+        var fv2 = load64(f + i * 8); if (f64_gt(fv2, four) != 0) { fv2 = four; }
+        var width = (load64(_celt_eBands + (i + 1) * 8) - load64(_celt_eBands + i * 8)) << LM;
+        var quanta = width << 3; var q2 = 48; if (width > q2) { q2 = width; } if (q2 < quanta) { quanta = q2; }
+        var boost = 0;
+        if (width < 6) { boost = f64_to(fv2); }
+        else {
+            if (width > 48) { boost = f64_to(f64_mul(fv2, f64_from(8))); }
+            else { boost = f64_to(f64_div(f64_mul(fv2, f64_from(width)), f64_from(6))); }
+        }
+        var boost_bits = boost * quanta;
+        if (((tot_boost + boost_bits) >> 6) > budget23) {
+            var cap = budget23 << 6;
+            store64(offsets + i * 8, cap - tot_boost);
+            tot_boost = cap;
+            stop = 1;
+        } else {
+            store64(offsets + i * 8, boost_bits);
+            tot_boost = tot_boost + boost_bits;
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 # l1_metric (celt_encoder.c:650, float path): L1 = Σ|tmp| then bias toward good frequency
 # resolution — L1 · (1 + lmb·bias). The float macros collapse ABS16(SHR32(x,NORM_SHIFT-14)) to
 # |x| and MAC16_32_Q15(L1, lmb·bias, L1) to L1 + (lmb·bias)·L1.
@@ -10559,10 +10713,11 @@ fn _iabs(x) { if (x < 0) { return 0 - x; } return x; }
 # Per band: copy the normalized coeffs, walk Haar levels, score each with the L1 metric, keep the
 # level with the smallest (freq-biased) L1 → per-band metric in Q1. Then a dual Viterbi (over the
 # two tf_select rows) chooses tf_select, and a second Viterbi (with backtrace) fills tf_res[0..len)
-# with the 0/1 change flags — smoothed by `lambda` (bit cost of a tf change). importance is the
-# uniform 13 (dynalloc-off fallback, celt_encoder.c:1269). Uses the LM=3 _celt_tfsel row (the
-# CELT-only fullband 20 ms encoder target — same table celt_tf_encode/decode use). Returns tf_select.
-fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, tf_res) {
+# with the 0/1 change flags — smoothed by `lambda` (bit cost of a tf change). `importance[]` (the
+# per-band Viterbi weight from celt_dynalloc_analysis; uniform 13 when dynalloc is off) scales the
+# metric-distance cost. Uses the LM=3 _celt_tfsel row (the CELT-only fullband 20 ms encoder target —
+# same table celt_tf_encode/decode use). Returns tf_select.
+fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, tf_res, importance) {
     # bias = 0.04 · max(-0.25, 0.5 − tf_estimate)
     var b_arg = f64_sub(F64_HALF, tf_estimate);
     var neg025 = f64_neg(f64_div(f64_from(1), f64_from(4)));
@@ -10613,14 +10768,14 @@ fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, t
         var t0 = load64(_celt_tfsel + (base + 2 * sel + 0) * 8);
         var t1 = load64(_celt_tfsel + (base + 2 * sel + 1) * 8);
         var lam0 = lambda; if (isTransient != 0) { lam0 = 0; }
-        var cost0 = 13 * _iabs(load64(metric + 0) - 2 * t0);
-        var cost1 = 13 * _iabs(load64(metric + 0) - 2 * t1) + lam0;
+        var cost0 = load64(importance + 0) * _iabs(load64(metric + 0) - 2 * t0);
+        var cost1 = load64(importance + 0) * _iabs(load64(metric + 0) - 2 * t1) + lam0;
         var ii = 1;
         while (ii < len) {
             var c0 = cost0; var a0 = cost1 + lambda; if (a0 < c0) { c0 = a0; }
             var c1 = cost1; var a1 = cost0 + lambda; if (a1 < c1) { c1 = a1; }
-            cost0 = c0 + 13 * _iabs(load64(metric + ii * 8) - 2 * t0);
-            cost1 = c1 + 13 * _iabs(load64(metric + ii * 8) - 2 * t1);
+            cost0 = c0 + load64(importance + ii * 8) * _iabs(load64(metric + ii * 8) - 2 * t0);
+            cost1 = c1 + load64(importance + ii * 8) * _iabs(load64(metric + ii * 8) - 2 * t1);
             ii = ii + 1;
         }
         var fin = cost0; if (cost1 < fin) { fin = cost1; }
@@ -10632,8 +10787,8 @@ fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, t
     var s0 = load64(_celt_tfsel + (base + 2 * tf_select + 0) * 8);
     var s1 = load64(_celt_tfsel + (base + 2 * tf_select + 1) * 8);
     var lamf = lambda; if (isTransient != 0) { lamf = 0; }
-    var cost0 = 13 * _iabs(load64(metric + 0) - 2 * s0);
-    var cost1 = 13 * _iabs(load64(metric + 0) - 2 * s1) + lamf;
+    var cost0 = load64(importance + 0) * _iabs(load64(metric + 0) - 2 * s0);
+    var cost1 = load64(importance + 0) * _iabs(load64(metric + 0) - 2 * s1) + lamf;
     var ii = 1;
     while (ii < len) {
         var from0 = cost0; var from1 = cost1 + lambda;
@@ -10642,8 +10797,8 @@ fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, t
         from0 = cost0 + lambda; from1 = cost1;
         var curr1 = from1; store64(path1 + ii * 8, 1);
         if (from0 < from1) { curr1 = from0; store64(path1 + ii * 8, 0); }
-        cost0 = curr0 + 13 * _iabs(load64(metric + ii * 8) - 2 * s0);
-        cost1 = curr1 + 13 * _iabs(load64(metric + ii * 8) - 2 * s1);
+        cost0 = curr0 + load64(importance + ii * 8) * _iabs(load64(metric + ii * 8) - 2 * s0);
+        cost1 = curr1 + load64(importance + ii * 8) * _iabs(load64(metric + ii * 8) - 2 * s1);
         ii = ii + 1;
     }
     var last = 1; if (cost0 < cost1) { last = 0; }
@@ -13092,9 +13247,9 @@ fn celt_encode(st, ec, pcm, C, LM, force_intra, isTransient, mem_ptr) {
 }
 
 # celt_encode_frame_ec — encode CELT bands [start,end) into a caller-owned range ENCODER.
-# `freq` holds the C*N MDCT coefficients. Non-transient mono/stereo, no dynalloc boosts,
-# default spread/trim — a first correct-and-decodable frame (the encoder-quality knobs
-# tf/spread/dynalloc/intra-race are refinements). Mirrors celt_decode_frame_ec's prefix.
+# `freq` holds the C*N MDCT coefficients. Mono/stereo, with the real encoder-quality knobs:
+# adaptive spread, 2-pass coarse-energy intra/inter race, per-band tf resolution (tf_analysis),
+# and masking-driven dynalloc boosts (mono). Mirrors celt_decode_frame_ec's prefix bit-for-bit.
 fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransient) {
     if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
     var M = 1 << LM;
@@ -13118,6 +13273,11 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     }
     var X = alloc(C * N * 8);
     normalise_bands(freq, X, bandE, end, C, LM);
+    # --- dynalloc analysis (offsets + tf importance) — mono; stereo keeps the flat fallback ---
+    var offsets = alloc(21 * 8);
+    var importance = alloc(21 * 8);
+    var idf = 0; while (idf < 21) { store64(offsets + idf * 8, 0); store64(importance + idf * 8, 13); idf = idf + 1; }
+    if (C == 1) { celt_dynalloc_analysis(bandLogE, end, LM, len, offsets, importance, isTransient); }
     # --- prefix ---
     var tell = ec_tell(ec);
     if (tell == 1) { ec_enc_bit_logp(ec, 0, 15); }                              # R1 silence=0
@@ -13131,7 +13291,7 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var ti = 0; while (ti < 21) { store64(tf + ti * 8, 0); ti = ti + 1; }
     var lambda = 20480 / len + 2; if (lambda < 80) { lambda = 80; }              # rate.c-style tf-change cost
     var tfc = _celt_tf_chan; if (tfc >= C) { tfc = 0; }
-    var tf_select = celt_tf_analysis(X, N, end, isTransient, LM, _celt_tf_estimate, tfc, lambda, tf);
+    var tf_select = celt_tf_analysis(X, N, end, isTransient, LM, _celt_tf_estimate, tfc, lambda, tf, importance);
     celt_tf_encode(tf, isTransient, tf_select, ec, start, end);                  # R6 tf (real per-band)
     var spread_avg = alloc(8); store64(spread_avg, 0);
     var spread = celt_spreading_decision(X, end, C, LM, spread_avg, 2);   # R7 spread (adaptive)
@@ -13139,9 +13299,7 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     if (tell + 4 <= total_bits) { ec_enc_icdf(ec, spread, _celt_spreadIcdf, 5); }
     var cap = alloc(21 * 8);
     celt_init_caps(cap, LM, C);                                                  # R8 caps
-    # R9 dynalloc — no boosts
-    var offsets = alloc(21 * 8);
-    var oi = 0; while (oi < 21) { store64(offsets + oi * 8, 0); oi = oi + 1; }
+    # R9 dynalloc — encode the per-band boosts computed above (offsets in 1/64-bit units)
     var dynalloc_logp = 6;
     var tb2 = total_bits << 3;
     tell = ec_tell_frac(ec);
