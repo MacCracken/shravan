@@ -2669,7 +2669,12 @@ fn quant_band_n1(ctx, X, Y, lowband_out) {
     while (c < 1 + stereo) {
         var sign = 0;
         if (load64(ctx + 16) >= 8) {
-            sign = ec_dec_bits(ec, 1);
+            if (load64(ctx + 72) != 0) {
+                if (f64_lt(load64(x + 0), F64_ZERO) == 1) { sign = 1; }
+                ec_enc_bits(ec, sign, 1);
+            } else {
+                sign = ec_dec_bits(ec, 1);
+            }
             store64(ctx + 16, load64(ctx + 16) - 8);
         }
         if (sign != 0) { store64(x + 0, f64_neg(F64_ONE)); } else { store64(x + 0, F64_ONE); }
@@ -2743,7 +2748,8 @@ fn quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill) {
         }
         if (q != 0) {
             var K = celt_get_pulses(q);
-            cm = alg_unquant(ec, X, N, K, spread, B, gain);
+            if (load64(ctx + 72) != 0) { cm = alg_quant(X, N, K, spread, B, ec, gain); }
+            else { cm = alg_unquant(ec, X, N, K, spread, B, gain); }
         } else {
             var cm_mask = (1 << B) - 1;
             fill = fill & cm_mask;
@@ -2786,6 +2792,7 @@ fn quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill) {
 
 fn quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain, lowband_scratch, fill) {
     var tf_change = load64(ctx + 40);
+    var encode = load64(ctx + 72);
     var N0 = N;
     var N_B = N;
     var B0 = B;
@@ -2803,6 +2810,7 @@ fn quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain, lowband_scratch, 
     }
     var k = 0;
     while (k < recombine) {
+        if (encode != 0) { haar1(X, N >> k, 1 << k); }
         if (lowband != 0) { haar1(lowband, N >> k, 1 << k); }
         fill = load8(_celt_bitil + (fill & 0xF)) | (load8(_celt_bitil + (fill >> 4)) << 2);
         k = k + 1;
@@ -2810,6 +2818,7 @@ fn quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain, lowband_scratch, 
     B = B >> recombine;
     N_B = N_B << recombine;
     while (((N_B & 1) == 0) & (tf_change < 0)) {
+        if (encode != 0) { haar1(X, N_B, B); }
         if (lowband != 0) { haar1(lowband, N_B, B); }
         fill = fill | (fill << B);
         B = B << 1;
@@ -2820,6 +2829,7 @@ fn quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain, lowband_scratch, 
     B0 = B;
     var N_B0 = N_B;
     if (B0 > 1) {
+        if (encode != 0) { deinterleave_hadamard(X, N_B >> recombine, B0 << recombine, longBlocks); }
         if (lowband != 0) { deinterleave_hadamard(lowband, N_B >> recombine, B0 << recombine, longBlocks); }
     }
     var cm = quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill);

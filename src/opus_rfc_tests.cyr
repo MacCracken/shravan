@@ -729,6 +729,50 @@ fn test_celt_compute_theta_rfc() {
     return 0;
 }
 
+fn test_celt_quant_band_rfc() {
+    test_group("opus: quant_band encode -> decode round-trip (mono band, bit-exact)");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    var X = alloc(16 * 8);
+    store64(X + 0 * 8, f64_div(f64_from(7955), f64_from(10000)));
+    store64(X + 1 * 8, f64_div(f64_from(12413), f64_from(10000)));
+    store64(X + 2 * 8, f64_div(f64_from(14460), f64_from(10000)));
+    store64(X + 3 * 8, f64_div(f64_from(13416), f64_from(10000)));
+    store64(X + 4 * 8, f64_div(f64_from(9468), f64_from(10000)));
+    store64(X + 5 * 8, f64_div(f64_from(3616), f64_from(10000)));
+    store64(X + 6 * 8, f64_div(f64_from(-2613), f64_from(10000)));
+    store64(X + 7 * 8, f64_div(f64_from(-7610), f64_from(10000)));
+    store64(X + 8 * 8, f64_div(f64_from(-10145), f64_from(10000)));
+    store64(X + 9 * 8, f64_div(f64_from(-9725), f64_from(10000)));
+    store64(X + 10 * 8, f64_div(f64_from(-6727), f64_from(10000)));
+    store64(X + 11 * 8, f64_div(f64_from(-2275), f64_from(10000)));
+    store64(X + 12 * 8, f64_div(f64_from(2097), f64_from(10000)));
+    store64(X + 13 * 8, f64_div(f64_from(4911), f64_from(10000)));
+    store64(X + 14 * 8, f64_div(f64_from(5182), f64_from(10000)));
+    store64(X + 15 * 8, f64_div(f64_from(2724), f64_from(10000)));
+    var buf = alloc(32); var ee = ec_enc_new(buf, 32);
+    var ce = alloc(96); var ci = 0; while (ci < 12) { store64(ce + ci * 8, 0); ci = ci + 1; }
+    store64(ce + 0, ee); store64(ce + 8, 12345); store64(ce + 16, 3000); store64(ce + 24, 12); store64(ce + 32, 2); store64(ce + 48, 100); store64(ce + 72, 1);
+    var Xe = alloc(16 * 8); var jj = 0; while (jj < 16) { store64(Xe + jj * 8, load64(X + jj * 8)); jj = jj + 1; }
+    quant_band(ce, Xe, 16, 160, 1, 0, 3, 0, F64_ONE, 0, 3);
+    ec_enc_done(ee);
+    assert(load64(ee + 88) == 0, "quant_band enc: no error");
+    var dd = ec_dec_new(buf, 32);
+    var cd = alloc(96); ci = 0; while (ci < 12) { store64(cd + ci * 8, 0); ci = ci + 1; }
+    store64(cd + 0, dd); store64(cd + 8, 12345); store64(cd + 16, 3000); store64(cd + 24, 12); store64(cd + 32, 2); store64(cd + 48, 100); store64(cd + 72, 0);
+    var Xd = alloc(16 * 8);
+    quant_band(cd, Xd, 16, 160, 1, 0, 3, 0, F64_ONE, 0, 3);
+    var maxd = F64_ZERO; var i = 0;
+    while (i < 16) {
+        var dv = f64_sub(load64(Xe + i * 8), load64(Xd + i * 8));
+        if (f64_lt(dv, F64_ZERO) == 1) { dv = f64_neg(dv); }
+        if (f64_gt(dv, maxd) == 1) { maxd = dv; }
+        i = i + 1;
+    }
+    syscall(1, 2, "qband_maxdiff_x1e6=", 19); fmt_int_fd(2, f64_to(f64_mul(maxd, f64_from(1000000)))); syscall(1, 2, "\n", 1);
+    assert(f64_lt(maxd, f64_div(f64_from(1), f64_from(1000000))) == 1, "quant_band: resynth enc==dec (bit-exact)");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14569,6 +14613,7 @@ fn test_opus_rfc_all() {
     test_celt_energy_encode_rfc();
     test_celt_pvq_encode_rfc();
     test_celt_compute_theta_rfc();
+    test_celt_quant_band_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();
