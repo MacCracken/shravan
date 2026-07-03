@@ -26,8 +26,13 @@ rest of the suite, and harden everything; **3.0.0** is the major bump when the s
 fully interoperable both directions, and fuzz-clean.
 
 ### v2.6.7 — CELT stereo encode · medium
-- `feat(opus): stereo_split / intensity_stereo, quant_band_stereo N==2 sign encode, dual-stereo
-  decision` → CELT encode covers mono **and** stereo, all bandwidths, verified vs libopus.
+- ✅ **CELT stereo encode.** `stereo_split` / `intensity_stereo` in `compute_theta`'s encode branch,
+  the `quant_band_stereo` N==2 side-sign + `MIN_STEREO_ENERGY` guard, the bitrate-driven `intensity`
+  (hysteresis over `intensity_thresholds`), and the `stereo_analysis` **dual-stereo decision** (joint
+  mid/side vs L/R-separate). `celt_encode(C=2)` → shravan decode: both paths round-trip — correlated
+  L/R → joint (0.998/0.997), independent L/R → dual (0.996/0.996). Decode stayed bit-exact throughout.
+  Fullband today; other bandwidths ride the `end` param. **v2.6.7 (last of 2.6.x) feature-complete —
+  CELT encode now covers mono AND stereo. Ready to cut.**
 
 ### v2.7.0 — Opus decode completeness · small–medium (close the last decode gaps)
 The mainstream surface decodes; finish the long tail so *every* Opus config decodes.

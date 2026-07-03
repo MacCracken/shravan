@@ -1974,7 +1974,11 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
     }
     # intensity + dual_stereo
     if (intensity_rsv > 0) {
-        if (encode != 0) { ec_enc_uint(ec, load64(intensity_out) - start, codedBands + 1 - start); }
+        if (encode != 0) {
+            var ivc = load64(intensity_out); if (ivc > codedBands) { ivc = codedBands; }   # rate.c:400 clamp
+            store64(intensity_out, ivc);
+            ec_enc_uint(ec, ivc - start, codedBands + 1 - start);
+        }
         else { store64(intensity_out, start + ec_dec_uint(ec, codedBands + 1 - start)); }
     } else {
         store64(intensity_out, 0);
@@ -2377,6 +2381,10 @@ var _celt_bitdeil = 0;     # bit_deinterleave_table[16]
 var _celt_inv_table = 0;   # transient_analysis inv_table[128] (6*64/x, trained)
 var _celt_tf_estimate = 0; # last transient_analysis tf_estimate (f64, for tf/VBR)
 var _celt_tf_chan = 0;     # last transient_analysis dominant channel
+var _celt_enc_bandE = 0;   # per-frame band energies (C*21) for stereo encode (intensity/MIN_STEREO)
+var _celt_int_thr = 0;     # intensity_thresholds[21] (kbps → intensity band, celt_encoder.c)
+var _celt_int_hyst = 0;    # intensity_histeresis[21]
+var _celt_last_dual = 0;   # last stereo encode's dual_stereo decision (test visibility)
 var F64_SQRT1_2 = 0;       # 0.70710678
 
 fn _celt_bands_tables_init() {
@@ -2435,7 +2443,34 @@ fn _celt_bands_tables_init() {
     store8(iv+104,4); store8(iv+105,4); store8(iv+106,4); store8(iv+107,4); store8(iv+108,4); store8(iv+109,4); store8(iv+110,3); store8(iv+111,3);
     store8(iv+112,3); store8(iv+113,3); store8(iv+114,3); store8(iv+115,3); store8(iv+116,3); store8(iv+117,3); store8(iv+118,3); store8(iv+119,3);
     store8(iv+120,3); store8(iv+121,3); store8(iv+122,3); store8(iv+123,3); store8(iv+124,3); store8(iv+125,3); store8(iv+126,3); store8(iv+127,2);
+    # intensity_thresholds[21] / intensity_histeresis[21] (kbps → intensity band, celt_encoder.c)
+    _celt_int_thr = alloc(21 * 8);
+    store64(_celt_int_thr+0,1); store64(_celt_int_thr+8,2); store64(_celt_int_thr+16,3); store64(_celt_int_thr+24,4);
+    store64(_celt_int_thr+32,5); store64(_celt_int_thr+40,6); store64(_celt_int_thr+48,7); store64(_celt_int_thr+56,8);
+    store64(_celt_int_thr+64,16); store64(_celt_int_thr+72,24); store64(_celt_int_thr+80,36); store64(_celt_int_thr+88,44);
+    store64(_celt_int_thr+96,50); store64(_celt_int_thr+104,56); store64(_celt_int_thr+112,62); store64(_celt_int_thr+120,67);
+    store64(_celt_int_thr+128,72); store64(_celt_int_thr+136,79); store64(_celt_int_thr+144,88); store64(_celt_int_thr+152,106); store64(_celt_int_thr+160,134);
+    _celt_int_hyst = alloc(21 * 8);
+    store64(_celt_int_hyst+0,1); store64(_celt_int_hyst+8,1); store64(_celt_int_hyst+16,1); store64(_celt_int_hyst+24,1);
+    store64(_celt_int_hyst+32,1); store64(_celt_int_hyst+40,1); store64(_celt_int_hyst+48,1); store64(_celt_int_hyst+56,2);
+    store64(_celt_int_hyst+64,2); store64(_celt_int_hyst+72,2); store64(_celt_int_hyst+80,2); store64(_celt_int_hyst+88,2);
+    store64(_celt_int_hyst+96,2); store64(_celt_int_hyst+104,2); store64(_celt_int_hyst+112,3); store64(_celt_int_hyst+120,3);
+    store64(_celt_int_hyst+128,4); store64(_celt_int_hyst+136,5); store64(_celt_int_hyst+144,6); store64(_celt_int_hyst+152,8); store64(_celt_int_hyst+160,8);
     return 0;
+}
+
+# hysteresis_decision (celt.c) — map a value onto a band index via a threshold table with
+# hysteresis around the previous choice. Integer domain (val = equiv kbps).
+fn _celt_hysteresis(val, thresholds, hyst, n, prev) {
+    var i = 0; var found = 0;
+    while ((i < n) & (found == 0)) {
+        if (val < load64(thresholds + i * 8)) { found = 1; } else { i = i + 1; }
+    }
+    if ((i > prev) & (val < load64(thresholds + prev * 8) + load64(hyst + prev * 8))) { i = prev; }
+    if ((i < prev) & (prev > 0) & (val > load64(thresholds + (prev - 1) * 8) - load64(hyst + (prev - 1) * 8))) { i = prev; }
+    if (i < 0) { i = 0; }
+    if (i > n - 1) { i = n - 1; }
+    return i;
 }
 
 fn celt_lcg_rand(seed) {
@@ -2844,6 +2879,66 @@ fn interleave_hadamard(X, N0, stride, hadamard) {
 }
 
 # stereo_merge (bands.c:418) — reconstruct L/R from mid(X)/side(Y).
+# stereo_split (bands.c:406) — encode-side L/R → mid/side rotation by 1/√2 (the inverse of the
+# decoder's stereo_merge). X=(l+r)/√2, Y=(r−l)/√2 with l=X/√2, r=Y/√2 pre-scaled.
+fn stereo_split(X, Y, N) {
+    var s = F64_SQRT1_2;
+    var j = 0;
+    while (j < N) {
+        var l = f64_mul(s, load64(X + j * 8));
+        var r = f64_mul(s, load64(Y + j * 8));
+        store64(X + j * 8, f64_add(l, r));
+        store64(Y + j * 8, f64_sub(r, l));
+        j = j + 1;
+    }
+    return 0;
+}
+
+# intensity_stereo (bands.c:380, float path) — fold Y into X for an intensity-coded band: X ←
+# a1·X + a2·Y with a1=left/norm, a2=right/norm, norm=ε+√(ε+left²+right²) (the side isn't coded).
+# bandE holds the C*21 band amplitudes; band `i` uses left=bandE[i], right=bandE[21+i].
+fn intensity_stereo(X, Y, bandE, i, N) {
+    var left = load64(bandE + i * 8);
+    var right = load64(bandE + (21 + i) * 8);
+    var eps = f64_div(f64_from(1), f64_from(1000000000000000));
+    var norm = f64_add(eps, f64_sqrt(f64_add(eps, f64_add(f64_mul(left, left), f64_mul(right, right)))));
+    var a1 = f64_div(left, norm);
+    var a2 = f64_div(right, norm);
+    var j = 0;
+    while (j < N) {
+        store64(X + j * 8, f64_add(f64_mul(a1, load64(X + j * 8)), f64_mul(a2, load64(Y + j * 8))));
+        j = j + 1;
+    }
+    return 0;
+}
+
+# stereo_analysis (celt_encoder.c) — decide joint (mid/side) vs dual (L/R separate) stereo by
+# comparing the L1 "entropy" of L/R against M/S over the first 13 bands. Returns dual_stereo (0/1).
+# X holds the normalized bands: channel 0 in X[0..N0), channel 1 in X[N0..2·N0).
+fn stereo_analysis(X, LM, N0) {
+    var eps = f64_div(f64_from(1), f64_from(1000000000000000));
+    var sumLR = eps; var sumMS = eps;
+    var i = 0;
+    while (i < 13) {
+        var j = load64(_celt_eBands + i * 8) << LM;
+        var jend = load64(_celt_eBands + (i + 1) * 8) << LM;
+        while (j < jend) {
+            var L = load64(X + j * 8);
+            var R = load64(X + (N0 + j) * 8);
+            sumLR = f64_add(sumLR, f64_add(f64_abs(L), f64_abs(R)));
+            sumMS = f64_add(sumMS, f64_add(f64_abs(f64_add(L, R)), f64_abs(f64_sub(L, R))));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    sumMS = f64_mul(sumMS, F64_SQRT1_2);
+    var thetas = 13;
+    if (LM <= 1) { thetas = 5; }
+    var w = load64(_celt_eBands + 13 * 8) << (LM + 1);
+    if (f64_gt(f64_mul(f64_from(w + thetas), sumMS), f64_mul(f64_from(w), sumLR)) != 0) { return 1; }
+    return 0;
+}
+
 fn stereo_merge(X, Y, mid, N) {
     var xp = F64_ZERO;
     var sside = F64_ZERO;
@@ -3002,12 +3097,18 @@ fn compute_theta(ctx, X, Y, N, b, B, B0, LM, stereo, fill, sctx) {
             }
         }
         itheta = (itheta * 16384) / qn;
+        if ((encode != 0) & (stereo != 0)) {                 # apply the split the decoder inverts
+            if (itheta == 0) { intensity_stereo(X, Y, load64(ctx + 88), ii, N); }
+            else { stereo_split(X, Y, N); }
+        }
     } else {
-        if (stereo != 0) {
+        if (stereo != 0) {                                   # qn==1: intensity band (theta forced 0)
             if (encode != 0) {
-                # stereo inv (side-inversion) encode is a follow-up; write inv=0 symmetrically.
-                if ((b > 16) & (load64(ctx + 16) > 16) & (load64(ctx + 56) == 0)) { ec_enc_bit_logp(ec, 0, 2); }
-                inv = 0;
+                if ((itheta > 8192) & (load64(ctx + 56) == 0)) { inv = 1; }   # side inversion decision
+                if (inv != 0) { var jj = 0; while (jj < N) { store64(Y + jj * 8, f64_neg(load64(Y + jj * 8))); jj = jj + 1; } }
+                intensity_stereo(X, Y, load64(ctx + 88), ii, N);
+                if ((b > 16) & (load64(ctx + 16) > 16)) { ec_enc_bit_logp(ec, inv, 2); } else { inv = 0; }
+                if (load64(ctx + 56) != 0) { inv = 0; }
             } else {
                 if ((b > 16) & (load64(ctx + 16) > 16)) { inv = ec_dec_bit_logp(ec, 2); } else { inv = 0; }
                 if (load64(ctx + 56) != 0) { inv = 0; }
@@ -3250,6 +3351,18 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
     var ec = load64(ctx + 0);
     if (N == 1) { return quant_band_n1(ctx, X, Y, lowband_out); }
     var orig_fill = fill;
+    if (load64(ctx + 72) != 0) {                             # encode: if a channel is ~silent, copy
+        var iim = load64(ctx + 24);                          # the louder one over it (MIN_STEREO_ENERGY)
+        var beb = load64(ctx + 88);
+        var eL = load64(beb + iim * 8);
+        var eR = load64(beb + (21 + iim) * 8);
+        var mse = f64_div(F64_ONE, f64_from(10000000000));   # 1e-10
+        if ((f64_lt(eL, mse) != 0) | (f64_lt(eR, mse) != 0)) {
+            var jz = 0;
+            if (f64_gt(eL, eR) != 0) { while (jz < N) { store64(Y + jz * 8, load64(X + jz * 8)); jz = jz + 1; } }
+            else { while (jz < N) { store64(X + jz * 8, load64(Y + jz * 8)); jz = jz + 1; } }
+        }
+    }
     var sctx = alloc(64);
     compute_theta(ctx, X, Y, N, b, B, B, LM, 1, fill, sctx);
     var inv = load64(sctx + 40);
@@ -3274,7 +3387,15 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
         var y2 = Y;
         if (cc != 0) { x2 = Y; y2 = X; }
         var sign = 0;
-        if (sbits != 0) { sign = ec_dec_bits(ec, 1); }
+        if (sbits != 0) {
+            if (load64(ctx + 72) != 0) {                     # encode: sign from the mid/side cross term
+                var cross = f64_sub(f64_mul(load64(x2 + 0), load64(y2 + 8)), f64_mul(load64(x2 + 8), load64(y2 + 0)));
+                if (f64_lt(cross, F64_ZERO) != 0) { sign = 1; }
+                ec_enc_bits(ec, sign, 1);
+            } else {
+                sign = ec_dec_bits(ec, 1);
+            }
+        }
         sign = 1 - 2 * sign;
         cm = quant_band(ctx, x2, N, mbits, B, lowband, LM, lowband_out, F64_ONE, lowband_scratch, orig_fill);
         store64(y2 + 0, f64_mul(f64_from(0 - sign), load64(x2 + 8)));
@@ -3341,6 +3462,7 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     store64(ctx + 64, avoid);
     store64(ctx + 72, encode);
     store64(ctx + 80, 0);   # theta_round = 0
+    store64(ctx + 88, _celt_enc_bandE);   # band energies for stereo intensity/MIN_STEREO (encode)
     var lowband_offset = 0;
     var update_lowband = 1;
     var i = start;
@@ -4311,6 +4433,15 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var dual = alloc(8);
     var balance = alloc(8);
     store64(intensity, 0); store64(dual, 0);
+    if (C == 2) {                                                                # intensity from bitrate
+        var eq_kbps = (len * 384) / (120 << LM);
+        var it2 = _celt_hysteresis(eq_kbps, _celt_int_thr, _celt_int_hyst, 21, 0);
+        if (it2 < start) { it2 = start; }
+        if (it2 > end) { it2 = end; }
+        store64(intensity, it2);
+        if (LM != 0) { store64(dual, stereo_analysis(X, LM, N)); }                # joint vs dual stereo
+        _celt_last_dual = load64(dual);
+    }
     var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, intensity, dual, bits, balance, pulses, fine_quant, fine_priority, C, LM, ec, start, end, 1, 0, end);  # R12
     quant_fine_energy(oldBandE, error, fine_quant, ec, C, start, end);            # R13 fine
     # --- bands ---
@@ -4320,6 +4451,7 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var Y = 0;
     if (C == 2) { Y = X + N * 8; }
     store64(st + 48, 0);   # fold-noise seed (matches decode)
+    _celt_enc_bandE = bandE;   # hand the band energies to quant_all_bands for stereo intensity/MIN_STEREO
     quant_all_bands(X, Y, collapse, pulses, shortBlocks, spread, load64(dual), load64(intensity), tf, len * 64 - acr, load64(balance), ec, LM, codedBands, st + 48, 0, C, start, end, 1);
     if (acr > 0) { ec_enc_bits(ec, 0, 1); }                                       # anti-collapse off
     quant_energy_finalise(oldBandE, error, fine_quant, fine_priority, len * 8 - ec_tell(ec), ec, C, start, end);

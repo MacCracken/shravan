@@ -1824,6 +1824,80 @@ fn test_celt_dynalloc_analysis_rfc() {
     return 0;
 }
 
+# Encode a C=2 frame from an interleaved L/R buffer, decode it, and assert both channels' middle
+# reconstructs above `thr_x100`/100. Prints the correlations and the chosen dual_stereo. `tag` labels it.
+fn _celt_stereo_rt(pcm, nbytes, thr_x100, tag, taglen) {
+    var ste = celt_dec_state_new();
+    var pmem = alloc(16); store64(pmem, 0); store64(pmem + 8, 0);
+    var buf = alloc(nbytes); var ee = ec_enc_new(buf, nbytes);
+    celt_encode(ste, ee, pcm, 2, 3, 1, 0, pmem);
+    ec_enc_done(ee);
+    assert(load64(ee + 88) == 0, "stereo encode: no error");
+    var std = celt_dec_state_new(); var dd = ec_dec_new(buf, nbytes);
+    var pcmo = alloc(2 * 960 * 8);
+    celt_decode_frame_ec(std, dd, nbytes, 2, 0, 21, 0, 3, pcmo);
+    var i = 120;
+    var dotL = F64_ZERO; var naL = F64_ZERO; var nbL = F64_ZERO;
+    var dotR = F64_ZERO; var naR = F64_ZERO; var nbR = F64_ZERO;
+    while (i < 840) {
+        var aL = load64(pcm + (2 * i) * 8); var bL = load64(pcmo + (2 * i) * 8);
+        var aR = load64(pcm + (2 * i + 1) * 8); var bR = load64(pcmo + (2 * i + 1) * 8);
+        dotL = f64_add(dotL, f64_mul(aL, bL)); naL = f64_add(naL, f64_mul(aL, aL)); nbL = f64_add(nbL, f64_mul(bL, bL));
+        dotR = f64_add(dotR, f64_mul(aR, bR)); naR = f64_add(naR, f64_mul(aR, aR)); nbR = f64_add(nbR, f64_mul(bR, bR));
+        i = i + 1;
+    }
+    var corrL = f64_div(dotL, f64_sqrt(f64_mul(naL, nbL)));
+    var corrR = f64_div(dotR, f64_sqrt(f64_mul(naR, nbR)));
+    syscall(1, 2, tag, taglen); syscall(1, 2, " dual=", 6); fmt_int_fd(2, _celt_last_dual);
+    syscall(1, 2, " corrL_x1000=", 13); fmt_int_fd(2, f64_to(f64_mul(corrL, f64_from(1000))));
+    syscall(1, 2, " corrR_x1000=", 13); fmt_int_fd(2, f64_to(f64_mul(corrR, f64_from(1000)))); syscall(1, 2, "\n", 1);
+    var thr = f64_div(f64_from(thr_x100), f64_from(100));
+    assert(f64_gt(corrL, thr) == 1, "stereo L channel round-trip");
+    assert(f64_gt(corrR, thr) == 1, "stereo R channel round-trip");
+    return 0;
+}
+
+# celt_encode STEREO (C=2) — the full mid/side + intensity encode path (stereo_split / intensity_stereo
+# in compute_theta, the N==2 side-sign) AND the dual-stereo path, selected by stereo_analysis. Two
+# signals: correlated (same 40 cyc, phase-shifted R) → joint mid/side; independent (40 vs 44 cyc) →
+# dual stereo. Both encode+decode cleanly, proving both stereo-encode paths round-trip.
+fn test_celt_encode_stereo_rfc() {
+    test_group("opus: celt_encode STEREO (C=2) -> decode round-trip (joint mid/side + dual)");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    var nsamp = 1080;
+    var twopi = f64_mul(F64_TWO, F64_PI);
+    var phase = f64_div(F64_PI, f64_from(5));                # R phase offset for the joint case
+    # --- correlated L/R (same freq, phase-shifted) → joint mid/side ---
+    var pcmJ = alloc(2 * nsamp * 8);
+    var n = 0;
+    while (n < nsamp) {
+        var w = f64_div(f64_mul(twopi, f64_mul(f64_from(40), f64_from(n))), f64_from(960));
+        store64(pcmJ + (2 * n) * 8, f64_mul(f64_div(f64_from(4), f64_from(10)), f64_sin(w)));
+        store64(pcmJ + (2 * n + 1) * 8, f64_mul(f64_div(f64_from(4), f64_from(10)), f64_sin(f64_add(w, phase))));
+        n = n + 1;
+    }
+    _celt_stereo_rt(pcmJ, 300, 90, "stereo joint ", 13);
+    assert(_celt_last_dual == 0, "correlated L/R -> joint (dual_stereo=0, mid/side path)");
+    # --- independent L/R (different freqs) → dual stereo ---
+    var pcmD = alloc(2 * nsamp * 8);
+    n = 0;
+    while (n < nsamp) {
+        var wL = f64_div(f64_mul(twopi, f64_mul(f64_from(40), f64_from(n))), f64_from(960));
+        var wR = f64_div(f64_mul(twopi, f64_mul(f64_from(44), f64_from(n))), f64_from(960));
+        store64(pcmD + (2 * n) * 8, f64_mul(f64_div(f64_from(4), f64_from(10)), f64_sin(wL)));
+        store64(pcmD + (2 * n + 1) * 8, f64_mul(f64_div(f64_from(3), f64_from(10)), f64_sin(wR)));
+        n = n + 1;
+    }
+    _celt_stereo_rt(pcmD, 300, 90, "stereo dual  ", 13);
+    assert(_celt_last_dual == 1, "independent L/R -> dual stereo (dual_stereo=1)");
+    # --- low bitrate (80 bytes): exercises the stereo intensity-coding path with heavy band skipping
+    # (codedBands=15, intensity=10) and the rate.c:400 intensity=min(intensity,codedBands) clamp that
+    # guards against a range-coder desync when a persistent intensity exceeds this frame's codedBands. ---
+    _celt_stereo_rt(pcmJ, 80, 70, "stereo lowbr ", 13);
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -1848,5 +1922,6 @@ fn test_opus_encoder_all() {
     test_celt_transient_analysis_rfc();
     test_celt_tf_analysis_rfc();
     test_celt_dynalloc_analysis_rfc();
+    test_celt_encode_stereo_rfc();
     return 0;
 }
