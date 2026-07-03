@@ -232,12 +232,18 @@ fn silk_nlsf_unpack(cb1_index, fs_kHz, ec_ix, pred_out) {
 # out layout: 0 signalType, 1 quantOffset, 2..5 GainsIndices, 6..9 Gains_Q16,
 # 10 NLSF0, 11 NInterp, 12 lag, 13 contour, 14 PER, 15 LTPscale, 16 seed,
 # 17 ec_tell, 18..18+order NLSFIndices[0..order], (19+order)..(22+order) LTPIndex[0..3].
+# Payload wrapper: create a fresh ec over the SILK payload, then decode indices.
 fn silk_decode_indices(payload, len, fs_kHz, lastgain_ptr, out) {
+    return silk_decode_indices_ec(ec_dec_new(payload, len), fs_kHz, lastgain_ptr, out);
+}
+
+# ec-taking core: decode LP header + indices from an externally-owned range decoder
+# (shared with CELT in hybrid mode). Returns the ec so the caller can continue (pulses).
+fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out) {
     if (_silk_type_VAD == 0) { _silk_tables_init(); }
     if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
     var order = 16;
     if (fs_kHz == 8) { order = 10; }
-    var ec = ec_dec_new(payload, len);
     # LP header
     var vad = ec_dec_bit_logp(ec, 1);
     var lbrr = ec_dec_bit_logp(ec, 1);
@@ -1511,7 +1517,14 @@ fn silk_decoder_init(fs_kHz) {
 
 # silk_decode_frame: full pipeline for one SILK frame using persistent state st.
 # Writes internal-rate output into xq (frame_length i64 slots). condCoding = INDEPENDENT.
+# Payload wrapper: create a fresh ec, then decode one SILK frame.
 fn silk_decode_frame(st, payload, plen, xq) {
+    return silk_decode_frame_ec(st, ec_dec_new(payload, plen), xq);
+}
+
+# ec-taking core: decode one SILK frame from an externally-owned range decoder
+# (shared with CELT in hybrid). Consumes the front of `ec`.
+fn silk_decode_frame_ec(st, ec, xq) {
     var fs_kHz = load64(st + 0 * 8);
     var order = load64(st + 1 * 8);
     var frame_length = load64(st + 2 * 8);
@@ -1520,7 +1533,7 @@ fn silk_decode_frame(st, payload, plen, xq) {
     var first_frame = load64(st + 15 * 8);
 
     var out = alloc(40 * 8);
-    var ec = silk_decode_indices(payload, plen, fs_kHz, lg_ptr, out);
+    silk_decode_indices_ec(ec, fs_kHz, lg_ptr, out);
     var signalType = load64(out + 0 * 8);
     var quantOffset = load64(out + 1 * 8);
     var ninterp = load64(out + 11 * 8);
@@ -1763,9 +1776,15 @@ fn silk_resampler_init(fs_kHz) {
 # st = silk_decoder_init(fs), rst = silk_resampler_init(fs), sMid = 2 i64 slots (init 0).
 # out48 receives 20 ms * 48 kHz = 960 int16 samples.
 fn silk_decode_pcm(st, rst, sMid, payload, plen, out48) {
+    return silk_decode_pcm_ec(st, rst, sMid, ec_dec_new(payload, plen), out48);
+}
+
+# ec-taking core: decode one SILK frame from a shared range decoder + resample to 48 kHz.
+# Used by the hybrid orchestrator (SILK reads the front of the shared ec, CELT continues).
+fn silk_decode_pcm_ec(st, rst, sMid, ec, out48) {
     var frame_length = load64(st + 2 * 8);
     var xq = alloc(frame_length * 8);
-    silk_decode_frame(st, payload, plen, xq);
+    silk_decode_frame_ec(st, ec, xq);
     # Build resampler input: [sMid[1], xq[0..frame_length-2]] (1-sample delay via sStereo.sMid)
     var rin = alloc(frame_length * 8);
     store64(rin + 0, load64(sMid + 8));
