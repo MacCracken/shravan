@@ -234,19 +234,21 @@ fn silk_nlsf_unpack(cb1_index, fs_kHz, ec_ix, pred_out) {
 # 17 ec_tell, 18..18+order NLSFIndices[0..order], (19+order)..(22+order) LTPIndex[0..3].
 # Payload wrapper: create a fresh ec over the SILK payload, then decode indices.
 fn silk_decode_indices(payload, len, fs_kHz, lastgain_ptr, out) {
-    return silk_decode_indices_ec(ec_dec_new(payload, len), fs_kHz, lastgain_ptr, out);
+    var ec = ec_dec_new(payload, len);
+    var vad = ec_dec_bit_logp(ec, 1);   # LP header: VAD flag
+    var lbrr = ec_dec_bit_logp(ec, 1);  # LP header: LBRR flag (unused; LBRR not handled)
+    return silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad);
 }
 
 # ec-taking core: decode LP header + indices from an externally-owned range decoder
 # (shared with CELT in hybrid mode). Returns the ec so the caller can continue (pulses).
-fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out) {
+# ec-taking core with a PRE-READ `vad` flag (the LP-header VAD/LBRR flags are read by the
+# caller — mono/hybrid read them here per-frame; stereo reads both channels' flags up front).
+fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
     if (_silk_type_VAD == 0) { _silk_tables_init(); }
     if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
     var order = 16;
     if (fs_kHz == 8) { order = 10; }
-    # LP header
-    var vad = ec_dec_bit_logp(ec, 1);
-    var lbrr = ec_dec_bit_logp(ec, 1);
     # A: signal type
     var Ix = 0;
     if (vad != 0) { Ix = ec_dec_icdf(ec, _silk_type_VAD, 8) + 2; }
@@ -1525,6 +1527,15 @@ fn silk_decode_frame(st, payload, plen, xq) {
 # ec-taking core: decode one SILK frame from an externally-owned range decoder
 # (shared with CELT in hybrid). Consumes the front of `ec`.
 fn silk_decode_frame_ec(st, ec, xq) {
+    # Mono/hybrid: read this frame's own LP-header VAD/LBRR flags, then decode.
+    var vad = ec_dec_bit_logp(ec, 1);
+    var lbrr = ec_dec_bit_logp(ec, 1);
+    return silk_decode_frame_ec_vad(st, ec, xq, vad);
+}
+
+# ec-taking core with a pre-read `vad` flag (stereo per-channel decode calls this after
+# the shared packet header has already consumed both channels' VAD/LBRR flags).
+fn silk_decode_frame_ec_vad(st, ec, xq, vad) {
     var fs_kHz = load64(st + 0 * 8);
     var order = load64(st + 1 * 8);
     var frame_length = load64(st + 2 * 8);
@@ -1533,7 +1544,7 @@ fn silk_decode_frame_ec(st, ec, xq) {
     var first_frame = load64(st + 15 * 8);
 
     var out = alloc(40 * 8);
-    silk_decode_indices_ec(ec, fs_kHz, lg_ptr, out);
+    silk_decode_indices_ec(ec, fs_kHz, lg_ptr, out, vad);
     var signalType = load64(out + 0 * 8);
     var quantOffset = load64(out + 1 * 8);
     var ninterp = load64(out + 11 * 8);
@@ -1850,4 +1861,97 @@ fn silk_stereo_decode_pred(ec, pred_out) {
 fn silk_stereo_decode_mid_only(ec) {
     if (_silk_stereo_only_mid == 0) { _silk_stereo_tables_init(); }
     return ec_dec_icdf(ec, _silk_stereo_only_mid, 8);
+}
+
+# ---- SILK stereo mid/side -> left/right reconstruction (stereo_MS_to_LR.c) ----
+# state layout (i64): 0-1 sMid[2], 2-3 sSide[2], 4-5 pred_prev_Q13[2].
+# x1 (mid), x2 (side): buffers of (frame_length+2) int16 slots; the decoded frame is at
+# [2..frame_length+2). After the call, L is in x1[1..frame_length+1), R in x2[1..].
+fn silk_stereo_ms_to_lr(state, x1, x2, pred_q13, fs_kHz, frame_length) {
+    # Prepend the 2-sample history; save the last two mid/side samples for next frame.
+    store64(x1 + 0, load64(state + 0 * 8)); store64(x1 + 1 * 8, load64(state + 1 * 8));
+    store64(x2 + 0, load64(state + 2 * 8)); store64(x2 + 1 * 8, load64(state + 3 * 8));
+    store64(state + 0 * 8, load64(x1 + frame_length * 8)); store64(state + 1 * 8, load64(x1 + (frame_length + 1) * 8));
+    store64(state + 2 * 8, load64(x2 + frame_length * 8)); store64(state + 3 * 8, load64(x2 + (frame_length + 1) * 8));
+    # Interpolate predictors and add prediction to the side channel.
+    var pred0 = load64(state + 4 * 8);
+    var pred1 = load64(state + 5 * 8);
+    var p0 = load64(pred_q13 + 0);
+    var p1 = load64(pred_q13 + 8);
+    var interp_len = 8 * fs_kHz;                              # STEREO_INTERP_LEN_MS = 8
+    var denom_q16 = silk_div_trunc(1 << 16, interp_len);
+    var delta0 = silk_rshift_round(silk_smulbb(p0 - pred0, denom_q16), 16);
+    var delta1 = silk_rshift_round(silk_smulbb(p1 - pred1, denom_q16), 16);
+    var n = 0;
+    while (n < interp_len) {
+        pred0 = pred0 + delta0;
+        pred1 = pred1 + delta1;
+        var sum = (load64(x1 + n * 8) + load64(x1 + (n + 2) * 8) + (load64(x1 + (n + 1) * 8) << 1)) << 9;
+        sum = silk_smlawb(load64(x2 + (n + 1) * 8) << 8, sum, pred0);
+        sum = silk_smlawb(sum, load64(x1 + (n + 1) * 8) << 11, pred1);
+        store64(x2 + (n + 1) * 8, silk_sat16(silk_rshift_round(sum, 8)));
+        n = n + 1;
+    }
+    while (n < frame_length) {
+        var sum2 = (load64(x1 + n * 8) + load64(x1 + (n + 2) * 8) + (load64(x1 + (n + 1) * 8) << 1)) << 9;
+        sum2 = silk_smlawb(load64(x2 + (n + 1) * 8) << 8, sum2, p0);
+        sum2 = silk_smlawb(sum2, load64(x1 + (n + 1) * 8) << 11, p1);
+        store64(x2 + (n + 1) * 8, silk_sat16(silk_rshift_round(sum2, 8)));
+        n = n + 1;
+    }
+    store64(state + 4 * 8, p0);
+    store64(state + 5 * 8, p1);
+    # Convert mid/side to left/right.
+    n = 0;
+    while (n < frame_length) {
+        var mid = load64(x1 + (n + 1) * 8);
+        var side = load64(x2 + (n + 1) * 8);
+        store64(x1 + (n + 1) * 8, silk_sat16(mid + side));
+        store64(x2 + (n + 1) * 8, silk_sat16(mid - side));
+        n = n + 1;
+    }
+    return 0;
+}
+
+# ---- full SILK stereo decode: one packet -> L/R at 48 kHz (dec_API.c stereo path) ----
+# st0/st1 = per-channel silk_decoder_init(fs); rstL/rstR = silk_resampler_init(fs) per output
+# channel; sStereo = 6 i64 (sMid[2], sSide[2], pred_prev[2], init 0). outL/outR receive 960
+# int16 samples each. WB (fs=16) 20 ms, code 0, both channels — the common stereo SILK case.
+fn silk_decode_stereo(st0, st1, rstL, rstR, sStereo, ec, fs_kHz, outL, outR) {
+    if (_silk_stereo_pred_q13 == 0) { _silk_stereo_tables_init(); }
+    var frame_length = 20 * fs_kHz;
+    # Packet header: VAD/LBRR for both channels (one 20 ms frame per packet).
+    var vad0 = ec_dec_bit_logp(ec, 1);
+    var lbrr0 = ec_dec_bit_logp(ec, 1);
+    var vad1 = ec_dec_bit_logp(ec, 1);
+    var lbrr1 = ec_dec_bit_logp(ec, 1);
+    # Stereo prediction weights + mid-only flag.
+    var pred = alloc(2 * 8);
+    silk_stereo_decode_pred(ec, pred);
+    var midonly = 0;
+    if (vad1 == 0) { midonly = silk_stereo_decode_mid_only(ec); }
+    # Decode mid (ch0) and side (ch1) frames.
+    var mid = alloc(frame_length * 8);
+    silk_decode_frame_ec_vad(st0, ec, mid, vad0);
+    var side = alloc(frame_length * 8);
+    if (midonly == 0) {
+        silk_decode_frame_ec_vad(st1, ec, side, vad1);
+    } else {
+        var z = 0;
+        while (z < frame_length) { store64(side + z * 8, 0); z = z + 1; }
+    }
+    # Build the frame_length+2 mid/side buffers (frame at [2..]) and reconstruct L/R.
+    var x1 = alloc((frame_length + 2) * 8);
+    var x2 = alloc((frame_length + 2) * 8);
+    var i = 0;
+    while (i < frame_length) {
+        store64(x1 + (i + 2) * 8, load64(mid + i * 8));
+        store64(x2 + (i + 2) * 8, load64(side + i * 8));
+        i = i + 1;
+    }
+    silk_stereo_ms_to_lr(sStereo, x1, x2, pred, fs_kHz, frame_length);
+    # Resample each reconstructed channel (L at x1[1..], R at x2[1..]) to 48 kHz.
+    silk_resampler(rstL, outL, x1 + 1 * 8, frame_length);
+    silk_resampler(rstR, outR, x2 + 1 * 8, frame_length);
+    return 0;
 }

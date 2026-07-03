@@ -5533,6 +5533,15 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
         var silk_mid = 0;
         var silk_fs = 0;
         var silk_out = alloc(960 * 8);
+        # Persistent SILK stereo state (created lazily on the first stereo SILK packet).
+        var sk_st0 = 0;
+        var sk_st1 = 0;
+        var sk_rstL = 0;
+        var sk_rstR = 0;
+        var sk_stereo = 0;
+        var sk_sfs = 0;
+        var sk_outL = alloc(960 * 8);
+        var sk_outR = alloc(960 * 8);
         var F64_32768 = f64_from(32768);
         var wpos = 0;
         var f = 0;
@@ -5577,6 +5586,32 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                     while (q < 960) {
                         store64(pcm + q * 8, f64_div(f64_from(load64(silk_out + q * 8)), F64_32768));
                         q = q + 1;
+                    }
+                    handled = 1;
+                }
+            }
+            # SILK stereo 20ms: config 1/9, stereo bit set. Mid/side channels decoded from
+            # the shared range coder, silk_stereo_MS_to_LR reconstruction, resample per channel.
+            if ((handled == 0) & (stbit == 1) & (code == 0) & (plen >= 2) & (channels == 2)) {
+                if ((config == 1) | (config == 9)) {
+                    var ssfs = 8;
+                    if (config == 9) { ssfs = 16; }
+                    if (sk_sfs != ssfs) {
+                        sk_st0 = silk_decoder_init(ssfs);
+                        sk_st1 = silk_decoder_init(ssfs);
+                        sk_rstL = silk_resampler_init(ssfs);
+                        sk_rstR = silk_resampler_init(ssfs);
+                        sk_stereo = alloc(6 * 8);
+                        var sz = 0; while (sz < 6) { store64(sk_stereo + sz * 8, 0); sz = sz + 1; }
+                        sk_sfs = ssfs;
+                    }
+                    var sec = ec_dec_new(pdata + 1, plen - 1);
+                    silk_decode_stereo(sk_st0, sk_st1, sk_rstL, sk_rstR, sk_stereo, sec, ssfs, sk_outL, sk_outR);
+                    var sq = 0;
+                    while (sq < 960) {
+                        store64(pcm + (sq * 2 + 0) * 8, f64_div(f64_from(load64(sk_outL + sq * 8)), F64_32768));
+                        store64(pcm + (sq * 2 + 1) * 8, f64_div(f64_from(load64(sk_outR + sq * 8)), F64_32768));
+                        sq = sq + 1;
                     }
                     handled = 1;
                 }
