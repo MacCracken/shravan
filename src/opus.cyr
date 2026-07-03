@@ -1101,24 +1101,60 @@ fn quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob, error, 
 # the budget guard; select the per-(LM,intra) probability model). The full libopus 2-pass
 # intra-vs-inter size race is a bit-allocation optimization on top of this and is a separate
 # step — this pass already produces a correct, decodable stream. budget/max_decay per libopus.
+# quant_coarse_energy: the 2-pass intra/inter race (quant_bands.c). Unless intra is forced,
+# encode both an intra pass (into a scratch state) and an inter pass, then keep whichever spends
+# fewer bits (lower badness, tie → fewer bits) by restoring the winner's range-coder state + the
+# bytes it flushed. Coarse energy writes only front (range) bytes, so a 12-slot ec-state copy +
+# the [nstart,nintra) byte range fully captures a pass. Returns the chosen intra flag.
 fn quant_coarse_energy(start, end, eBands, oldEBands, error, enc, C, LM, force_intra, nbAvailableBytes) {
     if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
     var budget = load64(enc + 8) * 8;
+    var two_pass = 1;
     var intra = force_intra;
-    if (ec_tell(enc) + 3 > budget) { intra = 0; }
+    if (ec_tell(enc) + 3 > budget) { two_pass = 0; intra = 0; }
     var max_decay = f64_from(16);
     if (end - start > 10) {
         var md2 = f64_mul(f64_div(F64_ONE, f64_from(8)), f64_from(nbAvailableBytes));
         if (f64_lt(md2, max_decay) == 1) { max_decay = md2; }
     }
-    var prob = _celt_eprob_inter;
-    if (intra != 0) {
-        prob = _celt_eprob_intra;
-        if (LM == 2) { prob = _celt_eprob_intra2; }
-    } else {
-        if (LM == 2) { prob = _celt_eprob_inter2; }
+    var prob_intra = _celt_eprob_intra; if (LM == 2) { prob_intra = _celt_eprob_intra2; }
+    var prob_inter = _celt_eprob_inter; if (LM == 2) { prob_inter = _celt_eprob_inter2; }
+    var enc_start = alloc(96);
+    var k = 0; while (k < 12) { store64(enc_start + k * 8, load64(enc + k * 8)); k = k + 1; }
+    var oldE_intra = alloc(C * 21 * 8);
+    var err_intra = alloc(C * 21 * 8);
+    k = 0; while (k < C * 21) { store64(oldE_intra + k * 8, load64(oldEBands + k * 8)); k = k + 1; }
+    var badness1 = 0;
+    if ((two_pass != 0) | (intra != 0)) {
+        badness1 = quant_coarse_energy_impl(start, end, eBands, oldE_intra, budget, prob_intra, err_intra, enc, C, LM, 1, max_decay);
     }
-    quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob, error, enc, C, LM, intra, max_decay);
+    if (intra == 0) {
+        var tell_intra = ec_tell_frac(enc);
+        var enc_intra = alloc(96);
+        k = 0; while (k < 12) { store64(enc_intra + k * 8, load64(enc + k * 8)); k = k + 1; }
+        var nstart = load64(enc_start + 48);
+        var save_n = load64(enc + 48) - nstart;
+        var buf = load64(enc + 0);
+        var intra_bytes = alloc(save_n + 1);
+        var b = 0; while (b < save_n) { store8(intra_bytes + b, load8(buf + nstart + b)); b = b + 1; }
+        k = 0; while (k < 12) { store64(enc + k * 8, load64(enc_start + k * 8)); k = k + 1; }
+        var badness2 = quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob_inter, error, enc, C, LM, 0, max_decay);
+        var pick_intra = 0;
+        if (two_pass != 0) {
+            if (badness1 < badness2) { pick_intra = 1; }
+            else { if ((badness1 == badness2) & (ec_tell_frac(enc) > tell_intra)) { pick_intra = 1; } }
+        }
+        if (pick_intra == 1) {
+            k = 0; while (k < 12) { store64(enc + k * 8, load64(enc_intra + k * 8)); k = k + 1; }
+            b = 0; while (b < save_n) { store8(buf + nstart + b, load8(intra_bytes + b)); b = b + 1; }
+            k = 0; while (k < C * 21) { store64(oldEBands + k * 8, load64(oldE_intra + k * 8)); store64(error + k * 8, load64(err_intra + k * 8)); k = k + 1; }
+            intra = 1;
+        } else {
+            intra = 0;
+        }
+    } else {
+        k = 0; while (k < C * 21) { store64(oldEBands + k * 8, load64(oldE_intra + k * 8)); store64(error + k * 8, load64(err_intra + k * 8)); k = k + 1; }
+    }
     return intra;
 }
 
@@ -3678,11 +3714,64 @@ fn celt_decode_frame(st, payload, len, C, pcm_out) {
     return celt_decode_frame_ec(st, ec_dec_new(payload, len), len, C, 0, 21, 0, 3, pcm_out);
 }
 
+# celt_spreading_decision (bands.c): choose the PVQ spread (NONE/LIGHT/NORMAL/AGGRESSIVE) from
+# the normalized shape X — a rough CDF of |x[j]|²·N per band, averaged + hysteresis. Encoder
+# quality: replaces the hardcoded SPREAD_NORMAL. avg_ptr holds the running average (0 = fresh);
+# spread_weight is uniform 1 here (libopus weights by fine-bit importance). Tapset omitted
+# (no post-filter). Returns 0/1/2/3.
+fn celt_spreading_decision(X, end, C, LM, avg_ptr, last_decision) {
+    var M = 1 << LM;
+    var N0 = M * 120;
+    if (M * (load64(_celt_eBands + end * 8) - load64(_celt_eBands + (end - 1) * 8)) <= 8) { return 0; }
+    var q4 = f64_div(F64_ONE, f64_from(4));
+    var q16 = f64_div(F64_ONE, f64_from(16));
+    var q64 = f64_div(F64_ONE, f64_from(64));
+    var sum = 0;
+    var nbBands = 0;
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var N = M * (load64(_celt_eBands + (i + 1) * 8) - load64(_celt_eBands + i * 8));
+            if (N > 8) {
+                var xb = X + (M * load64(_celt_eBands + i * 8) + c * N0) * 8;
+                var t0 = 0; var t1 = 0; var t2 = 0;
+                var j = 0;
+                while (j < N) {
+                    var xj = load64(xb + j * 8);
+                    var x2N = f64_mul(f64_mul(xj, xj), f64_from(N));
+                    if (f64_lt(x2N, q4) == 1) { t0 = t0 + 1; }
+                    if (f64_lt(x2N, q16) == 1) { t1 = t1 + 1; }
+                    if (f64_lt(x2N, q64) == 1) { t2 = t2 + 1; }
+                    j = j + 1;
+                }
+                var tmp = 0;
+                if (2 * t2 >= N) { tmp = tmp + 1; }
+                if (2 * t1 >= N) { tmp = tmp + 1; }
+                if (2 * t0 >= N) { tmp = tmp + 1; }
+                sum = sum + tmp;
+                nbBands = nbBands + 1;
+            }
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    if (nbBands == 0) { return 2; }
+    sum = (sum << 8) / nbBands;
+    sum = (sum + load64(avg_ptr)) >> 1;
+    store64(avg_ptr, sum);
+    sum = (3 * sum + (((3 - last_decision) << 7) + 64) + 2) >> 2;
+    var decision = 0;
+    if (sum < 80) { decision = 3; }
+    else { if (sum < 256) { decision = 2; } else { if (sum < 384) { decision = 1; } } }
+    return decision;
+}
+
 # celt_encode_frame_ec — encode CELT bands [start,end) into a caller-owned range ENCODER.
 # `freq` holds the C*N MDCT coefficients. Non-transient mono/stereo, no dynalloc boosts,
 # default spread/trim — a first correct-and-decodable frame (the encoder-quality knobs
 # tf/spread/dynalloc/intra-race are refinements). Mirrors celt_decode_frame_ec's prefix.
-fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end) {
+fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra) {
     if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
     var M = 1 << LM;
     var N = 120 << LM;
@@ -3714,13 +3803,14 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end) {
     tell = ec_tell(ec);
     if (tell + 3 <= total_bits) { ec_enc_bit_logp(ec, isTransient, 3); }         # R3 transient=0
     var error = alloc(C * 21 * 8);
-    quant_coarse_energy(start, end, bandLogE, oldBandE, error, ec, C, LM, 1, len);  # R5 (writes intra+coarse)
+    var chosen_intra = quant_coarse_energy(start, end, bandLogE, oldBandE, error, ec, C, LM, force_intra, len);  # R5 (writes intra+coarse)
     var tf = alloc(21 * 8);
     var ti = 0; while (ti < 21) { store64(tf + ti * 8, 0); ti = ti + 1; }
     celt_tf_encode(tf, isTransient, 0, ec, start, end);                          # R6 tf (all 0)
-    var spread = 2;
+    var spread_avg = alloc(8); store64(spread_avg, 0);
+    var spread = celt_spreading_decision(X, end, C, LM, spread_avg, 2);   # R7 spread (adaptive)
     tell = ec_tell(ec);
-    if (tell + 4 <= total_bits) { ec_enc_icdf(ec, spread, _celt_spreadIcdf, 5); }  # R7 spread
+    if (tell + 4 <= total_bits) { ec_enc_icdf(ec, spread, _celt_spreadIcdf, 5); }
     var cap = alloc(21 * 8);
     celt_init_caps(cap, LM, C);                                                  # R8 caps
     # R9 dynalloc — no boosts
@@ -3777,7 +3867,7 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end) {
     quant_all_bands(X, Y, collapse, pulses, shortBlocks, spread, load64(dual), load64(intensity), tf, len * 64 - acr, load64(balance), ec, LM, codedBands, st + 48, 0, C, start, end, 1);
     if (acr > 0) { ec_enc_bits(ec, 0, 1); }                                       # anti-collapse off
     quant_energy_finalise(oldBandE, error, fine_quant, fine_priority, len * 8 - ec_tell(ec), ec, C, start, end);
-    return 0;
+    return chosen_intra;
 }
 
 # ec-taking core: decode CELT bands [start,end) from a caller-owned range decoder,

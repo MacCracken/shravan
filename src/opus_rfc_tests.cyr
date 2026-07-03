@@ -1070,7 +1070,7 @@ fn test_celt_encode_frame_rfc() {
     var ste = celt_dec_state_new();
     var buf = alloc(160);
     var ee = ec_enc_new(buf, 160);
-    celt_encode_frame_ec(ste, ee, freq, 1, 3, 0, 21);
+    celt_encode_frame_ec(ste, ee, freq, 1, 3, 0, 21, 1);
     ec_enc_done(ee);
     syscall(1, 2, "frame_enc_bytes=", 16); fmt_int_fd(2, load64(ee + 48) + load64(ee + 16)); syscall(1, 2, " err=", 5); fmt_int_fd(2, load64(ee + 88)); syscall(1, 2, "\n", 1);
     assert(load64(ee + 88) == 0, "frame enc: no error");
@@ -1097,6 +1097,60 @@ fn test_celt_encode_frame_rfc() {
     var corr = f64_div(dot, f64_sqrt(f64_mul(na, nb2)));
     syscall(1, 2, "frame_spectrum_corr_x1000=", 26); fmt_int_fd(2, f64_to(f64_mul(corr, f64_from(1000)))); syscall(1, 2, "\n", 1);
     assert(f64_gt(corr, f64_div(f64_from(90), f64_from(100))) == 1, "CELT frame encode->decode spectrum correlation > 0.9");
+    return 0;
+}
+
+fn test_celt_coarse_race_rfc() {
+    test_group("opus: coarse-energy 2-pass race — inter cheaper than intra for a repeated frame");
+    if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
+    var bandLogE = alloc(42 * 8); var zi = 0; while (zi < 42) { store64(bandLogE + zi * 8, F64_ZERO); zi = zi + 1; }
+    store64(bandLogE + 0 * 8, f64_div(f64_from(90000), f64_from(10000)));
+    store64(bandLogE + 1 * 8, f64_div(f64_from(96863), f64_from(10000)));
+    store64(bandLogE + 2 * 8, f64_div(f64_from(99182), f64_from(10000)));
+    store64(bandLogE + 3 * 8, f64_div(f64_from(94548), f64_from(10000)));
+    store64(bandLogE + 4 * 8, f64_div(f64_from(83825), f64_from(10000)));
+    store64(bandLogE + 5 * 8, f64_div(f64_from(70738), f64_from(10000)));
+    store64(bandLogE + 6 * 8, f64_div(f64_from(60126), f64_from(10000)));
+    store64(bandLogE + 7 * 8, f64_div(f64_from(55663), f64_from(10000)));
+    store64(bandLogE + 8 * 8, f64_div(f64_from(58131), f64_from(10000)));
+    store64(bandLogE + 9 * 8, f64_div(f64_from(65052), f64_from(10000)));
+    store64(bandLogE + 10 * 8, f64_div(f64_from(71855), f64_from(10000)));
+    store64(bandLogE + 11 * 8, f64_div(f64_from(74023), f64_from(10000)));
+    store64(bandLogE + 12 * 8, f64_div(f64_from(69219), f64_from(10000)));
+    store64(bandLogE + 13 * 8, f64_div(f64_from(58386), f64_from(10000)));
+    store64(bandLogE + 14 * 8, f64_div(f64_from(45303), f64_from(10000)));
+    store64(bandLogE + 15 * 8, f64_div(f64_from(34805), f64_from(10000)));
+    store64(bandLogE + 16 * 8, f64_div(f64_from(30512), f64_from(10000)));
+    store64(bandLogE + 17 * 8, f64_div(f64_from(33128), f64_from(10000)));
+    store64(bandLogE + 18 * 8, f64_div(f64_from(40104), f64_from(10000)));
+    store64(bandLogE + 19 * 8, f64_div(f64_from(46844), f64_from(10000)));
+    store64(bandLogE + 20 * 8, f64_div(f64_from(48859), f64_from(10000)));
+    # frame 1 (intra) -> oldE = quantized frame-1 energy
+    var oldE = alloc(42 * 8); zi = 0; while (zi < 42) { store64(oldE + zi * 8, F64_ZERO); zi = zi + 1; }
+    var b0 = alloc(64); var e0 = ec_enc_new(b0, 64); var er0 = alloc(42 * 8);
+    quant_coarse_energy(0, 21, bandLogE, oldE, er0, e0, 1, 3, 1, 64);
+    # frame 2 target == bandLogE (repeated). Encode forced-intra:
+    var oeI = alloc(42 * 8); var ci = 0; while (ci < 42) { store64(oeI + ci * 8, load64(oldE + ci * 8)); ci = ci + 1; }
+    var bI = alloc(64); var eI = ec_enc_new(bI, 64); var erI = alloc(42 * 8);
+    quant_coarse_energy(0, 21, bandLogE, oeI, erI, eI, 1, 3, 1, 64);
+    var bits_intra = ec_tell(eI);
+    # encode raced (force_intra=0 -> 2-pass):
+    var oeR = alloc(42 * 8); ci = 0; while (ci < 42) { store64(oeR + ci * 8, load64(oldE + ci * 8)); ci = ci + 1; }
+    var bR = alloc(64); var eR = ec_enc_new(bR, 64); var erR = alloc(42 * 8);
+    var chose = quant_coarse_energy(0, 21, bandLogE, oeR, erR, eR, 1, 3, 0, 64);
+    var bits_raced = ec_tell(eR);
+    syscall(1, 2, "coarse_race chose=", 18); fmt_int_fd(2, chose); syscall(1, 2, " intra_bits=", 12); fmt_int_fd(2, bits_intra); syscall(1, 2, " raced_bits=", 12); fmt_int_fd(2, bits_raced); syscall(1, 2, "\n", 1);
+    assert(chose == 0, "race picks inter for a repeated frame");
+    assert(bits_raced < bits_intra, "inter coarse energy uses fewer bits than intra");
+    ec_enc_done(eR);
+    var d = ec_dec_new(bR, 64);
+    var intra_dec = ec_dec_bit_logp(d, 3);
+    assert(intra_dec == 0, "decoder reads intra=0 (inter)");
+    var oeD = alloc(42 * 8); ci = 0; while (ci < 42) { store64(oeD + ci * 8, load64(oldE + ci * 8)); ci = ci + 1; }
+    celt_unquant_coarse_energy(oeD, 0, d, 1, 0, 21, 3);
+    var md = F64_ZERO; var i = 0;
+    while (i < 21) { var dv = f64_sub(load64(oeR + i * 8), load64(oeD + i * 8)); if (f64_lt(dv, F64_ZERO) == 1) { dv = f64_neg(dv); } if (f64_gt(dv, md) == 1) { md = dv; } i = i + 1; }
+    assert(f64_lt(md, f64_div(f64_from(1), f64_from(1000000))) == 1, "raced coarse energy round-trips (enc==dec)");
     return 0;
 }
 
@@ -14943,6 +14997,7 @@ fn test_opus_rfc_all() {
     test_celt_quant_band_rfc();
     test_celt_tf_encode_rfc();
     test_celt_encode_frame_rfc();
+    test_celt_coarse_race_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();
