@@ -1707,6 +1707,68 @@ fn test_celt_transient_analysis_rfc() {
     return 0;
 }
 
+# celt_tf_analysis — per-band tf_res (time/freq resolution) via the dual Viterbi (celt_encoder.c:663).
+# Proves the encoder's tf decision round-trips through the range coder: the tf_res the encoder writes
+# (celt_tf_encode) is recovered identically by the decoder (celt_tf_decode), consuming the same bits;
+# and tf_select stays 0 for non-transients (libopus only flips it for transients).
+fn test_celt_tf_analysis_rfc() {
+    test_group("opus: celt_tf_analysis — per-band tf_res Viterbi + tf encode/decode round-trip");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    var nsamp = 1080; var N = 960;
+    var twopi = f64_mul(F64_TWO, F64_PI);
+    # --- transient (sudden onset) -> normalized X ---
+    var pcm = alloc(nsamp * 8);
+    var n = 0;
+    while (n < nsamp) {
+        var ph = f64_div(f64_mul(twopi, f64_mul(f64_from(40), f64_from(n))), f64_from(960));
+        var v = F64_ZERO; if (n >= 720) { v = f64_mul(f64_div(f64_from(6), f64_from(10)), f64_sin(ph)); }
+        store64(pcm + n * 8, v);
+        n = n + 1;
+    }
+    var pmem = alloc(8); store64(pmem, 0);
+    var pre = alloc(nsamp * 8); celt_preemphasis(pcm, pre, nsamp, 1, pmem);
+    var it = celt_transient_analysis(pre, nsamp, 1);
+    var freq = alloc(N * 8); celt_compute_mdcts(pre, freq, 1, 3, it, nsamp);
+    var bandE = alloc(21 * 8); compute_band_energies(freq, bandE, 21, 1, 3);
+    var Xn = alloc(N * 8); normalise_bands(freq, Xn, bandE, 21, 1, 3);
+    var lambda = 20480 / 160 + 2;                                # 130
+    var tf = alloc(21 * 8);
+    var tf_select = celt_tf_analysis(Xn, N, 21, it, 3, _celt_tf_estimate, 0, lambda, tf);
+    # Encode the raw tf_res (celt_tf_encode remaps `tf` in place to the tf_change values)
+    var buf = alloc(64); var zz = 0; while (zz < 64) { store8(buf + zz, 0); zz = zz + 1; }
+    var ee = ec_enc_new(buf, 64);
+    celt_tf_encode(tf, it, tf_select, ee, 0, 21);
+    var enc_tell = ec_tell(ee);
+    ec_enc_done(ee);
+    # Decode: the decoder must reconstruct the identical remapped tf_res, consuming the same bits
+    var dtf = alloc(21 * 8);
+    var dd = ec_dec_new(buf, 64);
+    celt_tf_decode(dtf, it, dd, 0, 21);
+    var dec_tell = ec_tell(dd);
+    syscall(1, 2, "tf_select=", 10); fmt_int_fd(2, tf_select); syscall(1, 2, " tf_bits=", 9); fmt_int_fd(2, enc_tell); syscall(1, 2, "\n", 1);
+    _celt_assert_arr(tf, dtf, 21, "tf_res: encoder remap == decoder remap (round-trip)");
+    assert(enc_tell == dec_tell, "tf encode/decode consume identical bits");
+    # --- non-transient (steady tone): tf_select must stay 0 ---
+    var pcm2 = alloc(nsamp * 8);
+    n = 0;
+    while (n < nsamp) {
+        var ph2 = f64_div(f64_mul(twopi, f64_mul(f64_from(40), f64_from(n))), f64_from(960));
+        store64(pcm2 + n * 8, f64_mul(f64_div(f64_from(3), f64_from(10)), f64_sin(ph2)));
+        n = n + 1;
+    }
+    var pm2 = alloc(8); store64(pm2, 0);
+    var pre2 = alloc(nsamp * 8); celt_preemphasis(pcm2, pre2, nsamp, 1, pm2);
+    var it2 = celt_transient_analysis(pre2, nsamp, 1);
+    var freq2 = alloc(N * 8); celt_compute_mdcts(pre2, freq2, 1, 3, it2, nsamp);
+    var be2 = alloc(21 * 8); compute_band_energies(freq2, be2, 21, 1, 3);
+    var X2 = alloc(N * 8); normalise_bands(freq2, X2, be2, 21, 1, 3);
+    var tf2 = alloc(21 * 8);
+    var tfsel2 = celt_tf_analysis(X2, N, 21, it2, 3, _celt_tf_estimate, 0, lambda, tf2);
+    assert(tfsel2 == 0, "non-transient tf_select stays 0");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -1729,5 +1791,6 @@ fn test_opus_encoder_all() {
     test_celt_encode_transient_rfc();
     test_celt_encode_pcm_rfc();
     test_celt_transient_analysis_rfc();
+    test_celt_tf_analysis_rfc();
     return 0;
 }

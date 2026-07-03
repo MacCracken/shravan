@@ -30,9 +30,14 @@ Make the CELT encoder produce *good* frames, not just valid ones (2.6.5 uses fix
   (short blocks), ✅ **transient *detection*** (`celt_transient_analysis`, `celt_encoder.c:267`
   float path, `inv_table` byte-exact; `celt_encode` auto-detects `isTransient` via the −1
   sentinel — steady tone → long, onset → short; adversarially verified faithful to libopus).
-- Remaining: `feat(opus): tf_analysis (real per-band tf_res + tf_select), dynalloc boosts`.
-  Verify the encoded frame's rate/quality against libopus on the same input; keep the
-  encode→decode round-trip exact. Cut 2.6.6 once tf_analysis + dynalloc land.
+- ✅ **tf_analysis** (`celt_tf_analysis`, `celt_encoder.c:663` float path): per-band `tf_res`
+  via L1-metric Haar-level search + dual Viterbi (`tf_select` + backtrace), `importance=13`
+  uniform (dynalloc-off fallback). Replaces the all-zeros `tf_res` in `celt_encode_frame_ec`;
+  round-trips through `celt_tf_encode`/`celt_tf_decode` (encoder remap == decoder remap, same
+  bits) and *improved* every spectrum correlation (frame 0.968→0.990, transient 0.898→0.943).
+- Remaining: `feat(opus): dynalloc boosts` (real per-band `offsets` from `dynalloc_analysis`
+  + the real `importance[]` it feeds back into tf_analysis). Verify rate/quality against libopus;
+  keep the encode→decode round-trip exact. **Cut 2.6.6 once dynalloc lands.**
 
 ### v2.6.7 — CELT stereo encode · medium
 - `feat(opus): stereo_split / intensity_stereo, quant_band_stereo N==2 sign encode, dual-stereo

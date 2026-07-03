@@ -10543,6 +10543,123 @@ fn celt_tf_encode(tf_res, isTransient, tf_select, ec, start, end) {
     return 0;
 }
 
+# l1_metric (celt_encoder.c:650, float path): L1 = Σ|tmp| then bias toward good frequency
+# resolution — L1 · (1 + lmb·bias). The float macros collapse ABS16(SHR32(x,NORM_SHIFT-14)) to
+# |x| and MAC16_32_Q15(L1, lmb·bias, L1) to L1 + (lmb·bias)·L1.
+fn _l1_metric(tmp, N, lmb, bias) {
+    var L1 = f64_from(0);
+    var i = 0;
+    while (i < N) { L1 = f64_add(L1, f64_abs(load64(tmp + i * 8))); i = i + 1; }
+    return f64_mul(L1, f64_add(F64_ONE, f64_mul(f64_from(lmb), bias)));
+}
+
+fn _iabs(x) { if (x < 0) { return 0 - x; } return x; }
+
+# celt_tf_analysis (celt_encoder.c:663, float path) — pick each band's time/freq resolution.
+# Per band: copy the normalized coeffs, walk Haar levels, score each with the L1 metric, keep the
+# level with the smallest (freq-biased) L1 → per-band metric in Q1. Then a dual Viterbi (over the
+# two tf_select rows) chooses tf_select, and a second Viterbi (with backtrace) fills tf_res[0..len)
+# with the 0/1 change flags — smoothed by `lambda` (bit cost of a tf change). importance is the
+# uniform 13 (dynalloc-off fallback, celt_encoder.c:1269). Uses the LM=3 _celt_tfsel row (the
+# CELT-only fullband 20 ms encoder target — same table celt_tf_encode/decode use). Returns tf_select.
+fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, tf_res) {
+    # bias = 0.04 · max(-0.25, 0.5 − tf_estimate)
+    var b_arg = f64_sub(F64_HALF, tf_estimate);
+    var neg025 = f64_neg(f64_div(f64_from(1), f64_from(4)));
+    if (f64_lt(b_arg, neg025) != 0) { b_arg = neg025; }
+    var bias = f64_mul(f64_div(f64_from(4), f64_from(100)), b_arg);
+    var metric = alloc(len * 8);
+    var path0 = alloc(len * 8);
+    var path1 = alloc(len * 8);
+    var tmp = alloc(960 * 8);
+    var tmp1 = alloc(960 * 8);
+    var i = 0;
+    while (i < len) {
+        var w = load64(_celt_eBands + (i + 1) * 8) - load64(_celt_eBands + i * 8);
+        var N = w << LM;
+        var narrow = 0; if (w == 1) { narrow = 1; }
+        var off = (load64(_celt_eBands + i * 8) << LM) + tf_chan * N0;
+        var j = 0; while (j < N) { store64(tmp + j * 8, load64(X + (off + j) * 8)); j = j + 1; }
+        var lm0 = 0; if (isTransient != 0) { lm0 = LM; }
+        var best_L1 = _l1_metric(tmp, N, lm0, bias);
+        var best_level = 0;
+        if ((isTransient != 0) & (narrow == 0)) {                # the LM=-1 case for transients
+            j = 0; while (j < N) { store64(tmp1 + j * 8, load64(tmp + j * 8)); j = j + 1; }
+            haar1(tmp1, N >> LM, 1 << LM);
+            var La = _l1_metric(tmp1, N, LM + 1, bias);
+            if (f64_lt(La, best_L1) != 0) { best_L1 = La; best_level = 0 - 1; }
+        }
+        var kmax = LM;                                           # LM + !(isTransient||narrow)
+        if ((isTransient == 0) & (narrow == 0)) { kmax = LM + 1; }
+        var k = 0;
+        while (k < kmax) {
+            var B = k + 1; if (isTransient != 0) { B = LM - k - 1; }
+            haar1(tmp, N >> k, 1 << k);                          # progressive Haar levels
+            var Lb = _l1_metric(tmp, N, B, bias);
+            if (f64_lt(Lb, best_L1) != 0) { best_L1 = Lb; best_level = k + 1; }
+            k = k + 1;
+        }
+        var m = 0 - 2 * best_level; if (isTransient != 0) { m = 2 * best_level; }
+        if ((narrow != 0) & ((m == 0) | (m == (0 - 2 * LM)))) { m = m - 1; }  # nudge off the mid-point
+        store64(metric + i * 8, m);
+        i = i + 1;
+    }
+    var base = 4 * isTransient;
+    # Choose tf_select: run each of the two rows through the Viterbi, take the cheaper (transients only)
+    var tf_select = 0;
+    var selcost0 = 0; var selcost1 = 0;
+    var sel = 0;
+    while (sel < 2) {
+        var t0 = load64(_celt_tfsel + (base + 2 * sel + 0) * 8);
+        var t1 = load64(_celt_tfsel + (base + 2 * sel + 1) * 8);
+        var lam0 = lambda; if (isTransient != 0) { lam0 = 0; }
+        var cost0 = 13 * _iabs(load64(metric + 0) - 2 * t0);
+        var cost1 = 13 * _iabs(load64(metric + 0) - 2 * t1) + lam0;
+        var ii = 1;
+        while (ii < len) {
+            var c0 = cost0; var a0 = cost1 + lambda; if (a0 < c0) { c0 = a0; }
+            var c1 = cost1; var a1 = cost0 + lambda; if (a1 < c1) { c1 = a1; }
+            cost0 = c0 + 13 * _iabs(load64(metric + ii * 8) - 2 * t0);
+            cost1 = c1 + 13 * _iabs(load64(metric + ii * 8) - 2 * t1);
+            ii = ii + 1;
+        }
+        var fin = cost0; if (cost1 < fin) { fin = cost1; }
+        if (sel == 0) { selcost0 = fin; } else { selcost1 = fin; }
+        sel = sel + 1;
+    }
+    if ((selcost1 < selcost0) & (isTransient != 0)) { tf_select = 1; }
+    # Viterbi forward pass with the chosen tf_select, recording the backtrace
+    var s0 = load64(_celt_tfsel + (base + 2 * tf_select + 0) * 8);
+    var s1 = load64(_celt_tfsel + (base + 2 * tf_select + 1) * 8);
+    var lamf = lambda; if (isTransient != 0) { lamf = 0; }
+    var cost0 = 13 * _iabs(load64(metric + 0) - 2 * s0);
+    var cost1 = 13 * _iabs(load64(metric + 0) - 2 * s1) + lamf;
+    var ii = 1;
+    while (ii < len) {
+        var from0 = cost0; var from1 = cost1 + lambda;
+        var curr0 = from1; store64(path0 + ii * 8, 1);
+        if (from0 < from1) { curr0 = from0; store64(path0 + ii * 8, 0); }
+        from0 = cost0 + lambda; from1 = cost1;
+        var curr1 = from1; store64(path1 + ii * 8, 1);
+        if (from0 < from1) { curr1 = from0; store64(path1 + ii * 8, 0); }
+        cost0 = curr0 + 13 * _iabs(load64(metric + ii * 8) - 2 * s0);
+        cost1 = curr1 + 13 * _iabs(load64(metric + ii * 8) - 2 * s1);
+        ii = ii + 1;
+    }
+    var last = 1; if (cost0 < cost1) { last = 0; }
+    store64(tf_res + (len - 1) * 8, last);
+    var bi = len - 2;                                            # backward pass over the backtrace
+    while (bi >= 0) {
+        if (load64(tf_res + (bi + 1) * 8) == 1) {
+            store64(tf_res + bi * 8, load64(path1 + (bi + 1) * 8));
+        } else {
+            store64(tf_res + bi * 8, load64(path0 + (bi + 1) * 8));
+        }
+        bi = bi - 1;
+    }
+    return tf_select;
+}
+
 # clt_compute_allocation + interp_bits2pulses (rate.c). start=0,end=21.
 # Fills pulses[](1/8-bit shape budget), ebits[](fine bits), fine_priority[];
 # writes *intensity_out,*dual_out,*balance_out; returns codedBands.
@@ -13012,7 +13129,10 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var chosen_intra = quant_coarse_energy(start, end, bandLogE, oldBandE, error, ec, C, LM, force_intra, len);  # R5 (writes intra+coarse)
     var tf = alloc(21 * 8);
     var ti = 0; while (ti < 21) { store64(tf + ti * 8, 0); ti = ti + 1; }
-    celt_tf_encode(tf, isTransient, 0, ec, start, end);                          # R6 tf (all 0)
+    var lambda = 20480 / len + 2; if (lambda < 80) { lambda = 80; }              # rate.c-style tf-change cost
+    var tfc = _celt_tf_chan; if (tfc >= C) { tfc = 0; }
+    var tf_select = celt_tf_analysis(X, N, end, isTransient, LM, _celt_tf_estimate, tfc, lambda, tf);
+    celt_tf_encode(tf, isTransient, tf_select, ec, start, end);                  # R6 tf (real per-band)
     var spread_avg = alloc(8); store64(spread_avg, 0);
     var spread = celt_spreading_decision(X, end, C, LM, spread_avg, 2);   # R7 spread (adaptive)
     tell = ec_tell(ec);
