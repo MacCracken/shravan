@@ -1,6 +1,10 @@
 # Development Roadmap
 
-> **v2.6.2** — 11345 tests, Cyrius 6.3.x. **Opus hybrid is real**: shravan decodes actual
+> **v2.6.3** — 11354 tests, Cyrius 6.3.x. **Opus stereo is real**: shravan decodes actual
+> libopus **stereo** `.opus` — SILK mid/side stereo (config 1/9) + stereo hybrid (13/15),
+> 20 ms — at **per-channel correlation 1.0000/0.9999 vs libopus**. **Every 20 ms Opus config
+> now decodes** (mono + stereo). Prior:
+> **v2.6.2** — **Opus hybrid is real**: shravan decodes actual
 > libopus **hybrid** `.opus` (SILK low band + CELT high band over one shared range coder,
 > SWB/FB 20 ms mono) at **correlation 0.9999 vs libopus**; the CELT refactor also lit up the
 > CELT-only 20 ms configs (NB/WB/SWB). Prior:
@@ -56,7 +60,12 @@ path. The lists below are the *current* verified state, not the original audit.
   band + CELT high band, one shared range coder; config 13 SWB / 15 FB, 20 ms mono) decodes at
   **correlation 0.9999 vs a libopus golden**, per-frame ≥ 0.99993. The CELT decoder is now
   band-range/accumulate parameterized, so **CELT-only 20 ms configs 19/23/27** (NB/WB/SWB)
-  decode too (config-23 bit-exact vs libopus). Not yet: hybrid **10 ms**/stereo, **encoder** (2.6.3).
+  decode too (config-23 bit-exact vs libopus).
+- **Opus stereo → PCM, RFC-6716** *(2.6.3)* — SILK mid/side stereo (config 1/9) and stereo
+  hybrid (config 13/15), 20 ms, decode at **per-channel correlation 1.0000 / 0.9999 vs a
+  libopus golden** (`silk_stereo_decode_pred` bit-exact; `silk_stereo_ms_to_lr` +
+  `silk_decode_stereo` + CELT stereo high band). **Every 20 ms config now decodes** (mono +
+  stereo, all bandwidths). Not yet: **10 ms** frames (2.6.4), **encoder** (2.6.5).
 - **MP3 decode → PCM** *(2.5.11 + 2.5.12)* — `mp3_decode` produces real samples for
   **all three layers and all MPEG versions**, verified sample-exact vs minimp3:
   MPEG-1/2/2.5 **Layer III** (mono/stereo/M-S/intensity; bit reservoir; block switching),
@@ -118,13 +127,14 @@ lit up **CELT-only 20 ms configs 19 (NB) / 23 (WB) / 27 (SWB)** — config-23 ve
   **stereo** hybrid (needs SILK MS stereo), and redundant-frame audio. CELT-only non-20 ms
   frame sizes remain too.
 
-### v2.6.3 — Opus SILK stereo · medium–large (unlocks stereo SILK + stereo hybrid)
-CELT stereo already decodes (config 31 stereo, 2.6.0). The gap is SILK's mid/side (MS) stereo.
-- `feat(opus): SILK MS stereo decode — silk_stereo_decode_pred (prediction weights, 2 stages
-  + interpolation), two channel states (mid + side) each decoded as a mono SILK frame,
-  silk_stereo_MS_to_LR reconstruction with the sMid/sSide 2-sample history + per-sample weight
-  smoothing`. Unlocks stereo config 1/9 (SILK) and stereo config 13/15 (hybrid — CELT high
-  band already does stereo). Verify per-channel vs a libopus golden.
+### v2.6.3 — Opus stereo · ✅ SHIPPED (SILK stereo + stereo hybrid)
+SILK mid/side stereo landed: `silk_stereo_decode_pred` (bit-exact), `silk_stereo_ms_to_lr`
+(3-tap predictor interpolation + MS→LR with `sMid`/`sSide` history), and `silk_decode_stereo`
+(both channels' VAD → predictors → mid + side frames → MS→LR → resample each). Wired for
+**stereo config 1/9** (SILK) and **stereo config 13/15** (hybrid: SILK stereo low band + CELT
+stereo `C=2, start=17` high band over the shared ec). Verified **per-channel corr 1.0000**
+(SILK stereo) / **0.9999** (stereo hybrid) vs a libopus golden. A VAD-flag refactor kept mono
++ hybrid **bit-exact**. **Every 20 ms Opus config now decodes** (mono + stereo, all bandwidths).
 
 ### v2.6.4 — Opus 10 ms frames · medium (config 12/14 + CELT LM=2)
 20 ms is done; add the 10 ms frame size.

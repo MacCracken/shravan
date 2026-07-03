@@ -5654,6 +5654,44 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                     handled = 1;
                 }
             }
+            # Hybrid 20ms STEREO: config 13/15 + stereo bit. SILK stereo (mid/side → L/R,
+            # WB) low band from the front of the shared ec; CELT stereo (C=2, start=17)
+            # high band from the same ec, accumulated onto the interleaved L/R.
+            if ((handled == 0) & (stbit == 1) & (code == 0) & (plen >= 2) & (channels == 2)) {
+                if ((config == 13) | (config == 15)) {
+                    if (sk_sfs != 16) {
+                        sk_st0 = silk_decoder_init(16);
+                        sk_st1 = silk_decoder_init(16);
+                        sk_rstL = silk_resampler_init(16);
+                        sk_rstR = silk_resampler_init(16);
+                        sk_stereo = alloc(6 * 8);
+                        var hsz = 0; while (hsz < 6) { store64(sk_stereo + hsz * 8, 0); hsz = hsz + 1; }
+                        sk_sfs = 16;
+                    }
+                    var hsbe = 21;
+                    if (config == 13) { hsbe = 19; }
+                    var hsec = ec_dec_new(pdata + 1, plen - 1);
+                    silk_decode_stereo(sk_st0, sk_st1, sk_rstL, sk_rstR, sk_stereo, hsec, 16, sk_outL, sk_outR);
+                    var hsq = 0;
+                    while (hsq < 960) {
+                        store64(pcm + (hsq * 2 + 0) * 8, f64_div(f64_from(load64(sk_outL + hsq * 8)), F64_32768));
+                        store64(pcm + (hsq * 2 + 1) * 8, f64_div(f64_from(load64(sk_outR + hsq * 8)), F64_32768));
+                        hsq = hsq + 1;
+                    }
+                    var hslen = plen - 1;
+                    if (ec_tell(hsec) + 17 + 20 <= 8 * hslen) {
+                        if (ec_dec_bit_logp(hsec, 12) != 0) {
+                            var hscts = ec_dec_bit_logp(hsec, 1);
+                            var hsrb = ec_dec_uint(hsec, 256) + 2;
+                            hslen = hslen - hsrb;
+                            store64(hsec + 8, load64(hsec + 8) - hsrb);
+                        }
+                    }
+                    # CELT stereo high band from the same ec, accumulated onto L/R.
+                    celt_decode_frame_ec(st, hsec, hslen, 2, 17, hsbe, 1, pcm);
+                    handled = 1;
+                }
+            }
             if (handled == 0) {
                 var zz = 0;
                 while (zz < 2 * 960) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
@@ -5694,214 +5732,4 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
 
     var fi = fmtinfo_new(FMT_OPUS, 48000, channels, 16, duration_secs, total_samples);
     return decode_result_new(fi, samples);
-}
-
-# ================================================================
-# Tests
-# ================================================================
-
-fn test_opus_head_parse_valid() {
-    test_group("opus: parse valid OpusHead");
-
-    var buf = alloc(19);
-    opus_serialize_head(2, 312, 48000, buf);
-
-    var h = opus_parse_head(buf, 19);
-    assert(is_err(h) == 0, "parse succeeds");
-    assert_eq(opus_head_version(h), 1, "version");
-    assert_eq(opus_head_channels(h), 2, "channels");
-    assert_eq(opus_head_pre_skip(h), 312, "pre_skip");
-    assert_eq(opus_head_sample_rate(h), 48000, "sample_rate");
-    assert_eq(opus_head_output_gain(h), 0, "output_gain");
-    assert_eq(opus_head_mapping(h), 0, "mapping_family");
-
-    return 0;
-}
-
-fn test_opus_head_reject_wrong_magic() {
-    test_group("opus: reject wrong magic");
-
-    var buf = alloc(19);
-    opus_serialize_head(2, 312, 48000, buf);
-    # Corrupt magic
-    store8(buf, 0x00);
-    var h = opus_parse_head(buf, 19);
-    assert(is_err(h) == 1, "wrong magic rejected");
-
-    return 0;
-}
-
-fn test_opus_head_reject_short() {
-    test_group("opus: reject short data");
-
-    var buf = alloc(10);
-    memcpy(buf, "OpusHead12", 10);
-    var h = opus_parse_head(buf, 10);
-    assert(is_err(h) == 1, "short data rejected");
-
-    return 0;
-}
-
-fn test_opus_head_reject_zero_channels() {
-    test_group("opus: reject zero channels");
-
-    var buf = alloc(19);
-    opus_serialize_head(0, 312, 48000, buf);
-    # Channel byte is at offset 9, already 0
-    var h = opus_parse_head(buf, 19);
-    assert(is_err(h) == 1, "zero channels rejected");
-
-    return 0;
-}
-
-fn test_opus_head_roundtrip() {
-    test_group("opus: serialize+parse roundtrip");
-
-    var buf = alloc(19);
-    opus_serialize_head(1, 200, 44100, buf);
-    var h = opus_parse_head(buf, 19);
-    assert(is_err(h) == 0, "roundtrip parse ok");
-    assert_eq(opus_head_channels(h), 1, "rt channels");
-    assert_eq(opus_head_pre_skip(h), 200, "rt pre_skip");
-    assert_eq(opus_head_sample_rate(h), 44100, "rt sample_rate");
-
-    return 0;
-}
-
-fn test_opus_tags_parseable() {
-    test_group("opus: tags serialization");
-
-    var buf = alloc(23);
-    var len = opus_serialize_tags(buf);
-    assert_eq(len, 23, "tags length");
-
-    # Check magic "OpusTags"
-    assert_eq(load8(buf), 0x4F, "O");
-    assert_eq(load8(buf + 1), 0x70, "p");
-    assert_eq(load8(buf + 7), 0x73, "s");
-
-    return 0;
-}
-
-fn test_opus_encode_rejects_bad_rate() {
-    test_group("opus: encode rejects wrong sample rate");
-
-    var samples = vec_new();
-    var out = alloc(65536);
-    var result = opus_encode(samples, 44100, 1, 64000, out);
-    assert(is_err(result) == 1, "wrong rate rejected");
-
-    return 0;
-}
-
-fn test_opus_encode_rejects_bad_channels() {
-    test_group("opus: encode rejects bad channels");
-
-    var samples = vec_new();
-    var out = alloc(65536);
-
-    var r1 = opus_encode(samples, 48000, 0, 64000, out);
-    assert(is_err(r1) == 1, "0 channels rejected");
-
-    var r2 = opus_encode(samples, 48000, 3, 64000, out);
-    assert(is_err(r2) == 1, "3 channels rejected");
-
-    return 0;
-}
-
-fn test_opus_encode_rejects_bad_bitrate() {
-    test_group("opus: encode rejects bad bitrate");
-
-    var samples = vec_new();
-    var out = alloc(65536);
-
-    var r1 = opus_encode(samples, 48000, 1, 1000, out);
-    assert(is_err(r1) == 1, "low bitrate rejected");
-
-    var r2 = opus_encode(samples, 48000, 1, 500000, out);
-    assert(is_err(r2) == 1, "high bitrate rejected");
-
-    return 0;
-}
-
-fn test_opus_range_encoder_basic() {
-    test_group("opus: range encoder basic");
-
-    var rc = opus_range_enc_init();
-    opus_range_enc_bit(rc, 1);
-    opus_range_enc_bit(rc, 0);
-    opus_range_enc_uint(rc, 3, 8);
-    var result = opus_range_enc_flush(rc);
-    assert(str_len(result) > 0, "range encoder produces output");
-
-    return 0;
-}
-
-fn test_opus_encode_produces_ogg() {
-    test_group("opus: encode produces valid Ogg");
-
-    # Initialize deps
-    if (_celt_band_edges == 0) { _opus_init_bands(); }
-
-    # Build 960 silence samples (1 frame, mono)
-    var samples = vec_new();
-    var si = 0;
-    while (si < 960) {
-        vec_push(samples, F64_ZERO);
-        si = si + 1;
-    }
-
-    var out = alloc(131072);
-    var result = opus_encode(samples, 48000, 1, 64000, out);
-    assert(is_err(result) == 0, "encode succeeds");
-    assert(result > 0, "produces bytes");
-
-    # Check OggS magic
-    assert_eq(load8(out), 0x4F, "OggS[0]='O'");
-    assert_eq(load8(out + 1), 0x67, "OggS[1]='g'");
-    assert_eq(load8(out + 2), 0x67, "OggS[2]='g'");
-    assert_eq(load8(out + 3), 0x53, "OggS[3]='S'");
-
-    # Extract packets and verify OpusHead
-    var packets = ogg_extract_packets(out, result);
-    assert(is_err(packets) == 0, "extract packets ok");
-    assert(vec_len(packets) >= 3, "at least 3 packets");
-
-    # First packet should be OpusHead (19 bytes)
-    var p0 = vec_get(packets, 0);
-    var head = opus_parse_head(str_data(p0), str_len(p0));
-    assert(is_err(head) == 0, "parse head from ogg ok");
-    assert_eq(opus_head_channels(head), 1, "mono");
-    assert_eq(opus_head_sample_rate(head), 48000, "48kHz");
-
-    # Second packet should start with "OpusTags"
-    var p1 = vec_get(packets, 1);
-    assert_eq(load8(str_data(p1)), 0x4F, "tags[0]='O'");
-    assert_eq(load8(str_data(p1) + 7), 0x73, "tags[7]='s'");
-
-    return 0;
-}
-
-fn test_opus_all() {
-    fft_init();
-    if (_celt_band_edges == 0) { _opus_init_bands(); }
-
-    test_opus_head_parse_valid();
-    test_opus_head_reject_wrong_magic();
-    test_opus_head_reject_short();
-    test_opus_head_reject_zero_channels();
-    test_opus_head_roundtrip();
-    test_opus_tags_parseable();
-    test_opus_encode_rejects_bad_rate();
-    test_opus_encode_rejects_bad_channels();
-    test_opus_encode_rejects_bad_bitrate();
-    test_opus_range_encoder_basic();
-    test_opus_encode_produces_ogg();
-    test_opus_encoder_config();
-    test_opus_select_bandwidth();
-    test_opus_select_mode();
-    test_opus_toc_byte();
-    test_opus_encode_frame_dispatch();
-    test_opus_pvq_all();
-    return 0;
 }

@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.3] - 2026-07-02
+
+**Opus stereo is real.** shravan now decodes actual libopus-encoded **stereo** `.opus` —
+SILK mid/side stereo (config 1/9) and stereo hybrid (config 13/15), 20 ms. Verified
+**per-channel correlation 1.0000 vs a libopus golden** (SILK stereo) and **0.9999**
+(stereo hybrid); a real stereo SILK file decodes at L 0.999958 / R 0.999975 vs ffmpeg.
+Combined with 2.6.0–2.6.2, **every 20 ms Opus config now decodes** (mono + stereo).
+11354 assertions.
+
+### Added — Opus SILK stereo decode (`src/silk.cyr`, `src/opus.cyr`)
+
+- **`silk_stereo_decode_pred`** — the mid/side prediction weights (joint iCDF + two
+  uniform stages + sub-step interpolation, `pred[0] -= pred[1]`) and
+  **`silk_stereo_decode_mid_only`**. Bit-exact vs libopus (`test_opus_silk_stereo_pred_rfc`).
+- **`silk_stereo_ms_to_lr`** — the 3-tap predictor interpolation over `STEREO_INTERP_LEN_MS·fs`
+  samples + mid/side → L/R reconstruction, with the 2-sample `sMid`/`sSide` history.
+- **`silk_decode_stereo`** — the full stereo pipeline: packet header (both channels'
+  VAD/LBRR) → predictors + mid-only → decode mid + side as mono frames → MS→LR →
+  resample each channel to 48 kHz.
+- **VAD refactor** — `silk_decode_indices_ec` / `silk_decode_frame_ec` take a pre-read
+  VAD flag (stereo reads both channels' flags up front; mono/hybrid read inline). Mono
+  and hybrid stay **bit-exact** (zero behavior change).
+- **Dispatch**: `opus_decode_from_packets` routes stereo SILK (config 1/9, stereo bit)
+  through `silk_decode_stereo`, and **stereo hybrid** (config 13/15, stereo bit) through
+  `silk_decode_stereo` (low band) + CELT stereo (`C=2, start=17`, accumulate) over the
+  shared range coder. In-suite guards: `test_opus_silk_stereo_rfc`, `test_opus_hybrid_stereo_rfc`.
+
+### Not yet (honest status)
+
+- **10 ms** frames (config 12/14 + CELT LM=2) and non-20 ms CELT-only sizes remain
+  (**2.6.4**). SILK MB / 10/40/60 ms mono. **Encoder** is 2.6.5. Redundant-frame audio.
+  Claim: "real Opus 20 ms decode, mono + stereo, all bandwidths, verified vs libopus."
+
 ## [2.6.2] - 2026-07-02
 
 **Opus hybrid is real.** shravan now decodes actual libopus-encoded **hybrid** `.opus`
