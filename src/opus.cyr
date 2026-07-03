@@ -557,6 +557,8 @@ fn ec_tell_frac(ec) {
 
 var _celt_eprob_inter = 0;    # e_prob_model[3][0], 42 bytes (LM=3 inter)
 var _celt_eprob_intra = 0;    # e_prob_model[3][1], 42 bytes (LM=3 intra)
+var _celt_eprob_inter2 = 0;   # e_prob_model[2][0], 42 bytes (LM=2 / 10ms inter)
+var _celt_eprob_intra2 = 0;   # e_prob_model[2][1], 42 bytes (LM=2 / 10ms intra)
 var _celt_small_en_icdf = 0;  # small_energy_icdf = {2,1,0}
 var CELT_LM = 3;
 var CELT_NB_EBANDS = 21;
@@ -565,6 +567,8 @@ var CELT_MAX_FINE_BITS = 8;
 var CELT_PRED_COEF3 = 0;      # 0.5
 var CELT_BETA_COEF3 = 0;      # 0.20001220703125
 var CELT_BETA_INTRA = 0;      # 0.149993896484375
+var CELT_PRED_COEF2 = 0;      # 21248/32768 = 0.6484375 (LM=2)
+var CELT_BETA_COEF2 = 0;      # 12124/32768 = 0.369873046875 (LM=2)
 
 fn _celt_energy_tables_init() {
     _celt_eprob_inter = alloc(42);
@@ -607,6 +611,16 @@ fn _celt_energy_tables_init() {
     CELT_PRED_COEF3 = f64_div(f64_from(16384), f64_from(32768));   # 0.5
     CELT_BETA_COEF3 = f64_div(f64_from(6554),  f64_from(32768));   # 0.20001220703125
     CELT_BETA_INTRA = f64_div(f64_from(4915),  f64_from(32768));   # 0.149993896484375
+    _celt_eprob_inter2 = alloc(42);
+    store8(_celt_eprob_inter2 + 0, 61); store8(_celt_eprob_inter2 + 1, 90); store8(_celt_eprob_inter2 + 2, 93); store8(_celt_eprob_inter2 + 3, 60); store8(_celt_eprob_inter2 + 4, 105); store8(_celt_eprob_inter2 + 5, 42); store8(_celt_eprob_inter2 + 6, 107); store8(_celt_eprob_inter2 + 7, 41); store8(_celt_eprob_inter2 + 8, 110); store8(_celt_eprob_inter2 + 9, 45); store8(_celt_eprob_inter2 + 10, 116); store8(_celt_eprob_inter2 + 11, 38); store8(_celt_eprob_inter2 + 12, 113); store8(_celt_eprob_inter2 + 13, 38);
+    store8(_celt_eprob_inter2 + 14, 112); store8(_celt_eprob_inter2 + 15, 38); store8(_celt_eprob_inter2 + 16, 124); store8(_celt_eprob_inter2 + 17, 26); store8(_celt_eprob_inter2 + 18, 132); store8(_celt_eprob_inter2 + 19, 27); store8(_celt_eprob_inter2 + 20, 136); store8(_celt_eprob_inter2 + 21, 19); store8(_celt_eprob_inter2 + 22, 140); store8(_celt_eprob_inter2 + 23, 20); store8(_celt_eprob_inter2 + 24, 155); store8(_celt_eprob_inter2 + 25, 14); store8(_celt_eprob_inter2 + 26, 159); store8(_celt_eprob_inter2 + 27, 16);
+    store8(_celt_eprob_inter2 + 28, 158); store8(_celt_eprob_inter2 + 29, 18); store8(_celt_eprob_inter2 + 30, 170); store8(_celt_eprob_inter2 + 31, 13); store8(_celt_eprob_inter2 + 32, 177); store8(_celt_eprob_inter2 + 33, 10); store8(_celt_eprob_inter2 + 34, 187); store8(_celt_eprob_inter2 + 35, 8); store8(_celt_eprob_inter2 + 36, 192); store8(_celt_eprob_inter2 + 37, 6); store8(_celt_eprob_inter2 + 38, 175); store8(_celt_eprob_inter2 + 39, 9); store8(_celt_eprob_inter2 + 40, 159); store8(_celt_eprob_inter2 + 41, 10);
+    _celt_eprob_intra2 = alloc(42);
+    store8(_celt_eprob_intra2 + 0, 21); store8(_celt_eprob_intra2 + 1, 178); store8(_celt_eprob_intra2 + 2, 59); store8(_celt_eprob_intra2 + 3, 110); store8(_celt_eprob_intra2 + 4, 71); store8(_celt_eprob_intra2 + 5, 86); store8(_celt_eprob_intra2 + 6, 75); store8(_celt_eprob_intra2 + 7, 85); store8(_celt_eprob_intra2 + 8, 84); store8(_celt_eprob_intra2 + 9, 83); store8(_celt_eprob_intra2 + 10, 91); store8(_celt_eprob_intra2 + 11, 66); store8(_celt_eprob_intra2 + 12, 88); store8(_celt_eprob_intra2 + 13, 73);
+    store8(_celt_eprob_intra2 + 14, 87); store8(_celt_eprob_intra2 + 15, 72); store8(_celt_eprob_intra2 + 16, 92); store8(_celt_eprob_intra2 + 17, 75); store8(_celt_eprob_intra2 + 18, 98); store8(_celt_eprob_intra2 + 19, 72); store8(_celt_eprob_intra2 + 20, 105); store8(_celt_eprob_intra2 + 21, 58); store8(_celt_eprob_intra2 + 22, 107); store8(_celt_eprob_intra2 + 23, 54); store8(_celt_eprob_intra2 + 24, 115); store8(_celt_eprob_intra2 + 25, 52); store8(_celt_eprob_intra2 + 26, 114); store8(_celt_eprob_intra2 + 27, 55);
+    store8(_celt_eprob_intra2 + 28, 112); store8(_celt_eprob_intra2 + 29, 56); store8(_celt_eprob_intra2 + 30, 129); store8(_celt_eprob_intra2 + 31, 51); store8(_celt_eprob_intra2 + 32, 132); store8(_celt_eprob_intra2 + 33, 40); store8(_celt_eprob_intra2 + 34, 150); store8(_celt_eprob_intra2 + 35, 33); store8(_celt_eprob_intra2 + 36, 140); store8(_celt_eprob_intra2 + 37, 29); store8(_celt_eprob_intra2 + 38, 98); store8(_celt_eprob_intra2 + 39, 35); store8(_celt_eprob_intra2 + 40, 77); store8(_celt_eprob_intra2 + 41, 42);
+    CELT_PRED_COEF2 = f64_div(f64_from(21248), f64_from(32768));
+    CELT_BETA_COEF2 = f64_div(f64_from(12124), f64_from(32768));
     return 0;
 }
 
@@ -651,19 +665,22 @@ fn ec_laplace_decode(ec, fs, decay) {
 
 # unquant_coarse_energy: fills oldEBands[0..C*21) with base-2 log energies.
 # `intra` is decoded by the caller (orchestration) and passed in.
-fn celt_unquant_coarse_energy(oldEBands, intra, ec, C, start, end) {
+fn celt_unquant_coarse_energy(oldEBands, intra, ec, C, start, end, LM) {
     if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
     var prob = 0;
     var coef = F64_ZERO;
     var beta = F64_ZERO;
+    # Energy model + prediction coefficients are per-frame-size (LM). beta_intra shared.
     if (intra != 0) {
         prob = _celt_eprob_intra;
+        if (LM == 2) { prob = _celt_eprob_intra2; }
         coef = F64_ZERO;
         beta = CELT_BETA_INTRA;
     } else {
         prob = _celt_eprob_inter;
         coef = CELT_PRED_COEF3;
         beta = CELT_BETA_COEF3;
+        if (LM == 2) { prob = _celt_eprob_inter2; coef = CELT_PRED_COEF2; beta = CELT_BETA_COEF2; }
     }
     var budget = load64(ec + 8) * 8;
     var prev0 = F64_ZERO;
@@ -1309,17 +1326,16 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
 # scalar results. Returns the ec_dec state (positioned at quant_all_bands).
 # Payload wrapper: CELT-only fullband prefix (fresh ec, start=0, end=21).
 fn celt_decode_frame_prefix(payload, len, C, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal) {
-    return celt_decode_frame_prefix_ec(ec_dec_new(payload, len), len, C, 0, 21, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal);
+    return celt_decode_frame_prefix_ec(ec_dec_new(payload, len), len, C, 3, 0, 21, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal);
 }
 
 # ec-taking core: decode the CELT frame header (silence, postfilter, transient, intra,
 # coarse+fine energy, tf, spread, dynalloc, allocation) over bands [start,end) from a
 # caller-owned range decoder. Postfilter is only present when start==0 (hybrid skips it).
-fn celt_decode_frame_prefix_ec(ec, len, C, start, end, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal) {
+fn celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal) {
     if (_celt_allocVec == 0) { _celt_alloc_tables_init(); }
     if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
-    var LM = 3;
-    var M = 8;
+    var M = 1 << LM;
     var total_bits = len * 8;
     # [C==1] fold stored 2nd-channel energy into channel 0
     if (C == 1) {
@@ -1362,7 +1378,7 @@ fn celt_decode_frame_prefix_ec(ec, len, C, start, end, oldBandE, tf_res, offsets
     var intra = 0;
     if (tell + 3 <= total_bits) { intra = ec_dec_bit_logp(ec, 3); }
     # R5 coarse energy
-    celt_unquant_coarse_energy(oldBandE, intra, ec, C, start, end);
+    celt_unquant_coarse_energy(oldBandE, intra, ec, C, start, end, LM);
     # R6 tf_decode
     celt_tf_decode(tf_res, isTransient, ec, start, end);
     # R7 spread
@@ -2394,9 +2410,9 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
 }
 
 # denormalise_bands (bands.c:188): freq[j] = X[j]*2^(bandLogE[i]+eMeans[i]).
-fn denormalise_bands(X, freq, bandLogE, silence, start, end) {
-    var M = 8;
-    var N = 960;
+fn denormalise_bands(X, freq, bandLogE, silence, start, end, LM) {
+    var M = 1 << LM;
+    var N = 120 << LM;
     var bound = M * load64(_celt_eBands + end * 8);
     if (silence != 0) { bound = 0; }
     # Zero bands below `start` (hybrid: CELT contributes nothing to the SILK-covered
@@ -2574,20 +2590,21 @@ fn clt_mdct_backward(inp, in_stride, out, shift) {
 }
 
 # celt_synthesis: per channel denormalise + IMDCT into decode_mem+1088.
-fn celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end) {
-    var N = 960;
+fn celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end, LM) {
+    var N = 120 << LM;
     var B = 1;
-    var NB = 960;
-    var shift = 0;
-    if (isTransient != 0) { B = 8; NB = 120; shift = 3; }
+    var NB = 120 << LM;
+    var shift = 3 - LM;
+    if (isTransient != 0) { B = 1 << LM; NB = 120; shift = 3; }
+    var osoff = 2048 - N;
     var freq = alloc(N * 8);
     var c = 0;
     while (c < C) {
         var Xc = X + c * N * 8;
         var dm = dm0;
         if (c == 1) { dm = dm1; }
-        var os = dm + 1088 * 8;
-        denormalise_bands(Xc, freq, oldBandE + c * 21 * 8, silence, start, end);
+        var os = dm + osoff * 8;
+        denormalise_bands(Xc, freq, oldBandE + c * 21 * 8, silence, start, end, LM);
         var b = 0;
         while (b < B) {
             clt_mdct_backward(freq + b * 8, B, os + NB * b * 8, shift);
@@ -2600,8 +2617,7 @@ fn celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end) {
 
 
 # anti_collapse (bands.c:259) — refill collapsed short blocks with scaled noise.
-fn anti_collapse(X, collapse_masks, C, size, logE, prevLogE, prevLogE2, pulses, seed_ptr, start, end) {
-    var LM = 3;
+fn anti_collapse(X, collapse_masks, C, size, logE, prevLogE, prevLogE2, pulses, seed_ptr, start, end, LM) {
     var i = start;
     while (i < end) {
         var eb0 = load64(_celt_eBands + i * 8);
@@ -2623,7 +2639,7 @@ fn anti_collapse(X, collapse_masks, C, size, logE, prevLogE, prevLogE2, pulses, 
             var Ediff = f64_sub(load64(logE + (c * 21 + i) * 8), minp);
             if (f64_lt(Ediff, F64_ZERO) == 1) { Ediff = F64_ZERO; }
             var r = f64_mul(F64_TWO, _celt_exp2(f64_neg(Ediff)));
-            r = f64_mul(r, f64_div(f64_from(141421356), f64_from(100000000)));   # sqrt(2), LM==3
+            if (LM == 3) { r = f64_mul(r, f64_div(f64_from(141421356), f64_from(100000000))); }   # *sqrt(2), only LM==3 (bands.c:329)
             if (f64_lt(thresh, r) == 1) { r = thresh; }
             r = f64_mul(r, sqrt_1);
             var Xc = X + (c * size + (eb0 << LM)) * 8;
@@ -2653,10 +2669,11 @@ fn anti_collapse(X, collapse_masks, C, size, logE, prevLogE, prevLogE2, pulses, 
 }
 
 # deemphasis: out_syn -> interleaved pcm[j*CC+c], with persistent IIR memory.
-fn celt_deemphasis(out_syn, pcm, c, CC, preemph_ptr, accum) {
+fn celt_deemphasis(out_syn, pcm, c, CC, preemph_ptr, accum, LM) {
     var m = load64(preemph_ptr + c * 8);
     var j = 0;
-    while (j < 960) {
+    var N = 120 << LM;
+    while (j < N) {
         var tmp = f64_add(f64_add(load64(out_syn + j * 8), F64_1E30INV), m);
         m = f64_mul(CELT_DEEMPH, tmp);
         var v = f64_div(tmp, f64_from(32768));
@@ -2788,28 +2805,30 @@ fn celt_dec_state_new() {
 
 # Payload wrapper: CELT-only fullband (start=0, end=21, no accumulate, fresh ec).
 fn celt_decode_frame(st, payload, len, C, pcm_out) {
-    return celt_decode_frame_ec(st, ec_dec_new(payload, len), len, C, 0, 21, 0, pcm_out);
+    return celt_decode_frame_ec(st, ec_dec_new(payload, len), len, C, 0, 21, 0, 3, pcm_out);
 }
 
 # ec-taking core: decode CELT bands [start,end) from a caller-owned range decoder,
 # optionally accumulating onto pcm_out (hybrid: start=17, accum=1). Config-31 passes
 # (start=0, end=21, accum=0) for bit-identical behaviour.
-fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, pcm_out) {
+fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
     var oldBandE = load64(st + 0);
     var oldLogE = load64(st + 8);
     var oldLogE2 = load64(st + 16);
     var dm0 = load64(st + 24);
     var dm1 = load64(st + 32);
     var preemph = load64(st + 40);
-    var N = 960;
-    var M = 8;
-    # R14 slide history: OPUS_MOVE(dm, dm+960, 1208)
+    var N = 120 << LM;                # frame size: 480 (10ms) or 960 (20ms)
+    var M = 1 << LM;
+    var dmove = 2168 - N;             # decode_mem slide length (2168 = DECODE_BUFFER_SIZE+overlap)
+    var osoff = 2048 - N;             # out_syn offset into decode_mem
+    # R14 slide history: OPUS_MOVE(dm, dm+N, 2168-N)
     var c0 = 0;
     while (c0 < C) {
         var dm = dm0;
         if (c0 == 1) { dm = dm1; }
         var mi = 0;
-        while (mi < 1208) { store64(dm + mi * 8, load64(dm + (mi + 960) * 8)); mi = mi + 1; }
+        while (mi < dmove) { store64(dm + mi * 8, load64(dm + (mi + N) * 8)); mi = mi + 1; }
         c0 = c0 + 1;
     }
     var tf = alloc(21 * 8);
@@ -2819,7 +2838,7 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, pcm_out) {
     var fp = alloc(21 * 8);
     var cap = alloc(21 * 8);
     var scal = alloc(16 * 8);
-    celt_decode_frame_prefix_ec(ec, len, C, start, end, oldBandE, tf, off, pul, fq, fp, cap, scal);
+    celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf, off, pul, fq, fp, cap, scal);
     var silence = load64(scal + 0);
     var isTransient = load64(scal + 8);
     var acr = load64(scal + 40);
@@ -2835,18 +2854,18 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, pcm_out) {
     var shortBlocks = 0;
     if (isTransient != 0) { shortBlocks = M; }
     var total_bits = len * 64 - acr;
-    quant_all_bands(X, Y, collapse, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, 3, load64(scal + 48), st + 48, 0, C, start, end);
+    quant_all_bands(X, Y, collapse, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, LM, load64(scal + 48), st + 48, 0, C, start, end);
     var anti_collapse_on = 0;
     if (acr > 0) { anti_collapse_on = ec_dec_bits(ec, 1); }
     celt_unquant_energy_finalise(oldBandE, fq, fp, len * 8 - ec_tell(ec), ec, C, start, end);
     if (anti_collapse_on != 0) {
-        anti_collapse(X, collapse, C, N, oldBandE, oldLogE, oldLogE2, pul, st + 48, start, end);
+        anti_collapse(X, collapse, C, N, oldBandE, oldLogE, oldLogE2, pul, st + 48, start, end, LM);
     }
     if (silence != 0) {
         var s = 0;
         while (s < C * 21) { store64(oldBandE + s * 8, f64_neg(f64_from(28))); s = s + 1; }
     }
-    celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end);
+    celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end, LM);
     # R22 postfilter (comb_filter) — in place on out_syn = dm+1088
     var pperiod = load64(st + 56);
     var pperiod_old = load64(st + 64);
@@ -2860,7 +2879,7 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, pcm_out) {
     while (c < C) {
         var dm = dm0;
         if (c == 1) { dm = dm1; }
-        var os = dm + 1088 * 8;
+        var os = dm + osoff * 8;
         comb_filter(os, os, pperiod_old, pperiod, 120, pgain_old, pgain, ptap_old, ptap, 120);
         comb_filter(os + 120 * 8, os + 120 * 8, pperiod, pf_pitch, N - 120, pgain, pf_gain, ptap, pf_tapset, 120);
         c = c + 1;
@@ -2870,7 +2889,7 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, pcm_out) {
     while (c < C) {
         var dm2 = dm0;
         if (c == 1) { dm2 = dm1; }
-        celt_deemphasis(dm2 + 1088 * 8, pcm_out, c, C, preemph, accum);
+        celt_deemphasis(dm2 + osoff * 8, pcm_out, c, C, preemph, accum, LM);
         c = c + 1;
     }
     # R23 energy memory rotation
@@ -5552,19 +5571,26 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             var config = 0;
             var stbit = 0;
             if (plen >= 1) { var toc = load8(pdata); config = (toc >> 3) & 0x1F; stbit = (toc >> 2) & 1; }
+            # Per-frame output sample count (48 kHz): 10 ms configs = 480, else 20 ms = 960.
+            var fsamp = 960;
+            if ((config >= 16) & ((config & 3) == 2)) { fsamp = 480; }   # CELT-only 10ms
+            if ((config == 12) | (config == 14)) { fsamp = 480; }        # hybrid 10ms
             var Cf = 1;
             if (stbit != 0) { Cf = 2; }
             var code = 0;
             if (plen >= 1) { code = load8(pdata) & 3; }
             var handled = 0;
-            # CELT-only 20ms: config 19 (NB, end=13), 23 (WB, 17), 27 (SWB, 19), 31 (FB, 21).
-            if ((config == 19) | (config == 23) | (config == 27) | (config == 31)) {
+            # CELT-only 10/20ms: configs 18/22/26/30 (LM=2, 10ms) + 19/23/27/31 (LM=3, 20ms).
+            # LM = config&3 (2 or 3); bandwidth = (config>>2)&3 → end band NB13/WB17/SWB19/FB21.
+            if ((config >= 18) & (config <= 31) & (((config & 3) == 2) | ((config & 3) == 3))) {
                 if (plen >= 2) {
+                    var clm = config & 3;
+                    var cbw = (config >> 2) & 3;
                     var ceb = 21;
-                    if (config == 19) { ceb = 13; }
-                    if (config == 23) { ceb = 17; }
-                    if (config == 27) { ceb = 19; }
-                    celt_decode_frame_ec(st, ec_dec_new(pdata + 1, plen - 1), plen - 1, Cf, 0, ceb, 0, pcm);
+                    if (cbw == 0) { ceb = 13; }
+                    if (cbw == 1) { ceb = 17; }
+                    if (cbw == 2) { ceb = 19; }
+                    celt_decode_frame_ec(st, ec_dec_new(pdata + 1, plen - 1), plen - 1, Cf, 0, ceb, 0, clm, pcm);
                     handled = 1;
                 }
             }
@@ -5650,7 +5676,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                         }
                     }
                     # CELT high band from the same ec, accumulated onto the SILK low band.
-                    celt_decode_frame_ec(st, hec, hlen, 1, 17, hb_end, 1, pcm);
+                    celt_decode_frame_ec(st, hec, hlen, 1, 17, hb_end, 1, 3, pcm);
                     handled = 1;
                 }
             }
@@ -5688,7 +5714,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                         }
                     }
                     # CELT stereo high band from the same ec, accumulated onto L/R.
-                    celt_decode_frame_ec(st, hsec, hslen, 2, 17, hsbe, 1, pcm);
+                    celt_decode_frame_ec(st, hsec, hslen, 2, 17, hsbe, 1, 3, pcm);
                     handled = 1;
                 }
             }
@@ -5697,7 +5723,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                 while (zz < 2 * 960) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
             }
             var i = 0;
-            while (i < 960) {
+            while (i < fsamp) {
                 var cc = 0;
                 while (cc < channels) {
                     var v = F64_ZERO;

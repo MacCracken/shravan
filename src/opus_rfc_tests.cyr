@@ -12818,7 +12818,7 @@ fn test_opus_hybrid_rfc() {
             store64(hec + 8, load64(hec + 8) - hrb);
         }
     }
-    celt_decode_frame_ec(hcst, hec, 69, 1, 17, 21, 1, hpcm);
+    celt_decode_frame_ec(hcst, hec, 69, 1, 17, 21, 1, 3, hpcm);
     # golden = libopus combined output (int16-scale); _celt_corr applies f64_from itself.
     var hg = alloc(960 * 8);
     store64(hg + 0 * 8, 0); store64(hg + 1 * 8, 0); store64(hg + 2 * 8, 0); store64(hg + 3 * 8, 0); store64(hg + 4 * 8, 0); store64(hg + 5 * 8, 0); store64(hg + 6 * 8, 0); store64(hg + 7 * 8, 0);
@@ -12962,7 +12962,7 @@ fn test_opus_celtwb_rfc() {
     store8(pl + 112, 87); store8(pl + 113, 107); store8(pl + 114, 198); store8(pl + 115, 131); store8(pl + 116, 61); store8(pl + 117, 243); store8(pl + 118, 177);
     var cst = celt_dec_state_new();
     var cpcm = alloc(960 * 8);
-    celt_decode_frame_ec(cst, ec_dec_new(pl, 119), 119, 1, 0, 17, 0, cpcm);
+    celt_decode_frame_ec(cst, ec_dec_new(pl, 119), 119, 1, 0, 17, 0, 3, cpcm);
     var cg = alloc(960 * 8);
     store64(cg + 0 * 8, 0); store64(cg + 1 * 8, 0); store64(cg + 2 * 8, 2); store64(cg + 3 * 8, 4); store64(cg + 4 * 8, 3); store64(cg + 5 * 8, 0); store64(cg + 6 * 8, 0 - 4); store64(cg + 7 * 8, 0 - 4);
     store64(cg + 8 * 8, 2); store64(cg + 9 * 8, 9); store64(cg + 10 * 8, 13); store64(cg + 11 * 8, 13); store64(cg + 12 * 8, 12); store64(cg + 13 * 8, 15); store64(cg + 14 * 8, 21); store64(cg + 15 * 8, 30);
@@ -13417,7 +13417,7 @@ fn test_opus_hybrid_stereo_rfc() {
     var pcm = alloc(2 * 960 * 8); var j = 0;
     while (j < 960) { store64(pcm + (j * 2 + 0) * 8, f64_div(f64_from(load64(oL + j * 8)), f64_from(32768))); store64(pcm + (j * 2 + 1) * 8, f64_div(f64_from(load64(oR + j * 8)), f64_from(32768))); j = j + 1; }
     if (ec_tell(ec) + 37 <= 8 * 119) { if (ec_dec_bit_logp(ec, 12) != 0) { var ct = ec_dec_bit_logp(ec, 1); var rb = ec_dec_uint(ec, 256) + 2; store64(ec + 8, load64(ec + 8) - rb); } }
-    celt_decode_frame_ec(cst, ec, 119, 2, 17, 21, 1, pcm);
+    celt_decode_frame_ec(cst, ec, 119, 2, 17, 21, 1, 3, pcm);
     var Lf = alloc(960 * 8); var Rf = alloc(960 * 8);
     j = 0; while (j < 960) { store64(Lf + j * 8, load64(pcm + (j * 2 + 0) * 8)); store64(Rf + j * 8, load64(pcm + (j * 2 + 1) * 8)); j = j + 1; }
     var gL = alloc(960 * 8);
@@ -13669,6 +13669,86 @@ fn test_opus_hybrid_stereo_rfc() {
     return 0;
 }
 
+# CELT-only 10ms (config 30 FB, LM=2, N=480), frame 0: verifies the LM parameterization
+# (energy tables, IMDCT size, decode-mem offsets) added for 10ms frames.
+fn test_opus_celt10_rfc() {
+    test_group("opus: CELT-only 10ms (config 30, LM=2) correlation vs libopus");
+    var pl = alloc(79);
+    store8(pl + 0, 181); store8(pl + 1, 69); store8(pl + 2, 176); store8(pl + 3, 151); store8(pl + 4, 237); store8(pl + 5, 33); store8(pl + 6, 46); store8(pl + 7, 228); store8(pl + 8, 101); store8(pl + 9, 98); store8(pl + 10, 49); store8(pl + 11, 34); store8(pl + 12, 166); store8(pl + 13, 91); store8(pl + 14, 118); store8(pl + 15, 4);
+    store8(pl + 16, 5); store8(pl + 17, 177); store8(pl + 18, 30); store8(pl + 19, 11); store8(pl + 20, 162); store8(pl + 21, 196); store8(pl + 22, 232); store8(pl + 23, 186); store8(pl + 24, 109); store8(pl + 25, 194); store8(pl + 26, 188); store8(pl + 27, 135); store8(pl + 28, 168); store8(pl + 29, 169); store8(pl + 30, 245); store8(pl + 31, 144);
+    store8(pl + 32, 102); store8(pl + 33, 183); store8(pl + 34, 114); store8(pl + 35, 158); store8(pl + 36, 139); store8(pl + 37, 41); store8(pl + 38, 193); store8(pl + 39, 219); store8(pl + 40, 29); store8(pl + 41, 37); store8(pl + 42, 19); store8(pl + 43, 246); store8(pl + 44, 219); store8(pl + 45, 191); store8(pl + 46, 90); store8(pl + 47, 42);
+    store8(pl + 48, 39); store8(pl + 49, 232); store8(pl + 50, 243); store8(pl + 51, 79); store8(pl + 52, 70); store8(pl + 53, 113); store8(pl + 54, 187); store8(pl + 55, 165); store8(pl + 56, 93); store8(pl + 57, 97); store8(pl + 58, 210); store8(pl + 59, 143); store8(pl + 60, 230); store8(pl + 61, 135); store8(pl + 62, 53); store8(pl + 63, 138);
+    store8(pl + 64, 77); store8(pl + 65, 17); store8(pl + 66, 14); store8(pl + 67, 16); store8(pl + 68, 221); store8(pl + 69, 73); store8(pl + 70, 147); store8(pl + 71, 65); store8(pl + 72, 243); store8(pl + 73, 137); store8(pl + 74, 171); store8(pl + 75, 196); store8(pl + 76, 142); store8(pl + 77, 89); store8(pl + 78, 113);
+    var cst = celt_dec_state_new();
+    var cpcm = alloc(480 * 8);
+    celt_decode_frame_ec(cst, ec_dec_new(pl, 79), 79, 1, 0, 21, 0, 2, cpcm);
+    var cg = alloc(480 * 8);
+    store64(cg + 0 * 8, 0); store64(cg + 1 * 8, 1); store64(cg + 2 * 8, 0); store64(cg + 3 * 8, 0 - 2); store64(cg + 4 * 8, 0 - 4); store64(cg + 5 * 8, 1); store64(cg + 6 * 8, 14); store64(cg + 7 * 8, 16);
+    store64(cg + 8 * 8, 12); store64(cg + 9 * 8, 16); store64(cg + 10 * 8, 15); store64(cg + 11 * 8, 36); store64(cg + 12 * 8, 56); store64(cg + 13 * 8, 41); store64(cg + 14 * 8, 39); store64(cg + 15 * 8, 5);
+    store64(cg + 16 * 8, 0 - 8); store64(cg + 17 * 8, 93); store64(cg + 18 * 8, 122); store64(cg + 19 * 8, 64); store64(cg + 20 * 8, 60); store64(cg + 21 * 8, 70); store64(cg + 22 * 8, 125); store64(cg + 23 * 8, 220);
+    store64(cg + 24 * 8, 284); store64(cg + 25 * 8, 204); store64(cg + 26 * 8, 9); store64(cg + 27 * 8, 59); store64(cg + 28 * 8, 306); store64(cg + 29 * 8, 372); store64(cg + 30 * 8, 224); store64(cg + 31 * 8, 44);
+    store64(cg + 32 * 8, 101); store64(cg + 33 * 8, 288); store64(cg + 34 * 8, 333); store64(cg + 35 * 8, 395); store64(cg + 36 * 8, 378); store64(cg + 37 * 8, 267); store64(cg + 38 * 8, 335); store64(cg + 39 * 8, 386);
+    store64(cg + 40 * 8, 462); store64(cg + 41 * 8, 587); store64(cg + 42 * 8, 426); store64(cg + 43 * 8, 219); store64(cg + 44 * 8, 243); store64(cg + 45 * 8, 387); store64(cg + 46 * 8, 386); store64(cg + 47 * 8, 175);
+    store64(cg + 48 * 8, 153); store64(cg + 49 * 8, 244); store64(cg + 50 * 8, 226); store64(cg + 51 * 8, 362); store64(cg + 52 * 8, 527); store64(cg + 53 * 8, 403); store64(cg + 54 * 8, 167); store64(cg + 55 * 8, 208);
+    store64(cg + 56 * 8, 536); store64(cg + 57 * 8, 558); store64(cg + 58 * 8, 0 - 21); store64(cg + 59 * 8, 0 - 400); store64(cg + 60 * 8, 50); store64(cg + 61 * 8, 569); store64(cg + 62 * 8, 371); store64(cg + 63 * 8, 0 - 100);
+    store64(cg + 64 * 8, 0 - 165); store64(cg + 65 * 8, 80); store64(cg + 66 * 8, 128); store64(cg + 67 * 8, 0 - 191); store64(cg + 68 * 8, 0 - 405); store64(cg + 69 * 8, 0 - 371); store64(cg + 70 * 8, 0 - 493); store64(cg + 71 * 8, 0 - 426);
+    store64(cg + 72 * 8, 0 - 102); store64(cg + 73 * 8, 0 - 188); store64(cg + 74 * 8, 0 - 495); store64(cg + 75 * 8, 0 - 530); store64(cg + 76 * 8, 0 - 159); store64(cg + 77 * 8, 19); store64(cg + 78 * 8, 0 - 419); store64(cg + 79 * 8, 0 - 670);
+    store64(cg + 80 * 8, 0 - 821); store64(cg + 81 * 8, 0 - 979); store64(cg + 82 * 8, 0 - 683); store64(cg + 83 * 8, 0 - 703); store64(cg + 84 * 8, 0 - 941); store64(cg + 85 * 8, 0 - 1086); store64(cg + 86 * 8, 0 - 1618); store64(cg + 87 * 8, 0 - 1606);
+    store64(cg + 88 * 8, 0 - 798); store64(cg + 89 * 8, 0 - 298); store64(cg + 90 * 8, 0 - 747); store64(cg + 91 * 8, 0 - 1846); store64(cg + 92 * 8, 0 - 1825); store64(cg + 93 * 8, 0 - 660); store64(cg + 94 * 8, 0 - 340); store64(cg + 95 * 8, 0 - 903);
+    store64(cg + 96 * 8, 0 - 1556); store64(cg + 97 * 8, 0 - 1810); store64(cg + 98 * 8, 0 - 1697); store64(cg + 99 * 8, 0 - 1491); store64(cg + 100 * 8, 0 - 876); store64(cg + 101 * 8, 0 - 1217); store64(cg + 102 * 8, 0 - 2270); store64(cg + 103 * 8, 0 - 1750);
+    store64(cg + 104 * 8, 0 - 1058); store64(cg + 105 * 8, 0 - 968); store64(cg + 106 * 8, 0 - 685); store64(cg + 107 * 8, 0 - 1189); store64(cg + 108 * 8, 0 - 1663); store64(cg + 109 * 8, 0 - 1485); store64(cg + 110 * 8, 0 - 1488); store64(cg + 111 * 8, 0 - 1191);
+    store64(cg + 112 * 8, 0 - 1278); store64(cg + 113 * 8, 0 - 2261); store64(cg + 114 * 8, 0 - 2448); store64(cg + 115 * 8, 0 - 1614); store64(cg + 116 * 8, 0 - 679); store64(cg + 117 * 8, 0 - 300); store64(cg + 118 * 8, 0 - 1335); store64(cg + 119 * 8, 0 - 2072);
+    store64(cg + 120 * 8, 382); store64(cg + 121 * 8, 4891); store64(cg + 122 * 8, 7233); store64(cg + 123 * 8, 6132); store64(cg + 124 * 8, 5308); store64(cg + 125 * 8, 6954); store64(cg + 126 * 8, 9357); store64(cg + 127 * 8, 9568);
+    store64(cg + 128 * 8, 5358); store64(cg + 129 * 8, 358); store64(cg + 130 * 8, 0 - 572); store64(cg + 131 * 8, 1990); store64(cg + 132 * 8, 4824); store64(cg + 133 * 8, 4136); store64(cg + 134 * 8, 2014); store64(cg + 135 * 8, 4095);
+    store64(cg + 136 * 8, 9697); store64(cg + 137 * 8, 15310); store64(cg + 138 * 8, 17490); store64(cg + 139 * 8, 15516); store64(cg + 140 * 8, 14279); store64(cg + 141 * 8, 16678); store64(cg + 142 * 8, 19328); store64(cg + 143 * 8, 17772);
+    store64(cg + 144 * 8, 12545); store64(cg + 145 * 8, 8013); store64(cg + 146 * 8, 7125); store64(cg + 147 * 8, 8880); store64(cg + 148 * 8, 9446); store64(cg + 149 * 8, 7631); store64(cg + 150 * 8, 6076); store64(cg + 151 * 8, 7443);
+    store64(cg + 152 * 8, 12012); store64(cg + 153 * 8, 16794); store64(cg + 154 * 8, 18264); store64(cg + 155 * 8, 16391); store64(cg + 156 * 8, 14984); store64(cg + 157 * 8, 16221); store64(cg + 158 * 8, 17690); store64(cg + 159 * 8, 16081);
+    store64(cg + 160 * 8, 10405); store64(cg + 161 * 8, 4348); store64(cg + 162 * 8, 2334); store64(cg + 163 * 8, 3557); store64(cg + 164 * 8, 4208); store64(cg + 165 * 8, 1986); store64(cg + 166 * 8, 0 - 653); store64(cg + 167 * 8, 149);
+    store64(cg + 168 * 8, 4383); store64(cg + 169 * 8, 9046); store64(cg + 170 * 8, 10103); store64(cg + 171 * 8, 7501); store64(cg + 172 * 8, 5538); store64(cg + 173 * 8, 6123); store64(cg + 174 * 8, 7168); store64(cg + 175 * 8, 5105);
+    store64(cg + 176 * 8, 0 - 483); store64(cg + 177 * 8, 0 - 6176); store64(cg + 178 * 8, 0 - 8900); store64(cg + 179 * 8, 0 - 8265); store64(cg + 180 * 8, 0 - 7468); store64(cg + 181 * 8, 0 - 9042); store64(cg + 182 * 8, 0 - 11402); store64(cg + 183 * 8, 0 - 11300);
+    store64(cg + 184 * 8, 0 - 7379); store64(cg + 185 * 8, 0 - 2703); store64(cg + 186 * 8, 0 - 1300); store64(cg + 187 * 8, 0 - 3672); store64(cg + 188 * 8, 0 - 6169); store64(cg + 189 * 8, 0 - 5390); store64(cg + 190 * 8, 0 - 3858); store64(cg + 191 * 8, 0 - 5289);
+    store64(cg + 192 * 8, 0 - 10073); store64(cg + 193 * 8, 0 - 15794); store64(cg + 194 * 8, 0 - 18128); store64(cg + 195 * 8, 0 - 16639); store64(cg + 196 * 8, 0 - 15228); store64(cg + 197 * 8, 0 - 16679); store64(cg + 198 * 8, 0 - 19345); store64(cg + 199 * 8, 0 - 18739);
+    store64(cg + 200 * 8, 0 - 13885); store64(cg + 201 * 8, 0 - 8433); store64(cg + 202 * 8, 0 - 6813); store64(cg + 203 * 8, 0 - 8996); store64(cg + 204 * 8, 0 - 10176); store64(cg + 205 * 8, 0 - 8142); store64(cg + 206 * 8, 0 - 5629); store64(cg + 207 * 8, 0 - 6779);
+    store64(cg + 208 * 8, 0 - 11935); store64(cg + 209 * 8, 0 - 16844); store64(cg + 210 * 8, 0 - 18071); store64(cg + 211 * 8, 0 - 15975); store64(cg + 212 * 8, 0 - 14446); store64(cg + 213 * 8, 0 - 15777); store64(cg + 214 * 8, 0 - 17323); store64(cg + 215 * 8, 0 - 15407);
+    store64(cg + 216 * 8, 0 - 9438); store64(cg + 217 * 8, 0 - 3404); store64(cg + 218 * 8, 0 - 1412); store64(cg + 219 * 8, 0 - 2971); store64(cg + 220 * 8, 0 - 3761); store64(cg + 221 * 8, 0 - 1097); store64(cg + 222 * 8, 1633); store64(cg + 223 * 8, 498);
+    store64(cg + 224 * 8, 0 - 4436); store64(cg + 225 * 8, 0 - 9342); store64(cg + 226 * 8, 0 - 9477); store64(cg + 227 * 8, 0 - 6028); store64(cg + 228 * 8, 0 - 4047); store64(cg + 229 * 8, 0 - 5512); store64(cg + 230 * 8, 0 - 7165); store64(cg + 231 * 8, 0 - 4356);
+    store64(cg + 232 * 8, 2329); store64(cg + 233 * 8, 8529); store64(cg + 234 * 8, 10342); store64(cg + 235 * 8, 8260); store64(cg + 236 * 8, 7597); store64(cg + 237 * 8, 10342); store64(cg + 238 * 8, 13099); store64(cg + 239 * 8, 11863);
+    store64(cg + 240 * 8, 6439); store64(cg + 241 * 8, 1540); store64(cg + 242 * 8, 1248); store64(cg + 243 * 8, 4667); store64(cg + 244 * 8, 7014); store64(cg + 245 * 8, 5763); store64(cg + 246 * 8, 3975); store64(cg + 247 * 8, 5749);
+    store64(cg + 248 * 8, 11764); store64(cg + 249 * 8, 17599); store64(cg + 250 * 8, 18687); store64(cg + 251 * 8, 16063); store64(cg + 252 * 8, 14300); store64(cg + 253 * 8, 16326); store64(cg + 254 * 8, 19110); store64(cg + 255 * 8, 17905);
+    store64(cg + 256 * 8, 12705); store64(cg + 257 * 8, 7309); store64(cg + 258 * 8, 6033); store64(cg + 259 * 8, 8554); store64(cg + 260 * 8, 10178); store64(cg + 261 * 8, 8347); store64(cg + 262 * 8, 5521); store64(cg + 263 * 8, 6239);
+    store64(cg + 264 * 8, 11037); store64(cg + 265 * 8, 16161); store64(cg + 266 * 8, 17405); store64(cg + 267 * 8, 14404); store64(cg + 268 * 8, 12140); store64(cg + 269 * 8, 13354); store64(cg + 270 * 8, 15283); store64(cg + 271 * 8, 13969);
+    store64(cg + 272 * 8, 8257); store64(cg + 273 * 8, 2048); store64(cg + 274 * 8, 0 - 225); store64(cg + 275 * 8, 1437); store64(cg + 276 * 8, 2777); store64(cg + 277 * 8, 552); store64(cg + 278 * 8, 0 - 2619); store64(cg + 279 * 8, 0 - 2477);
+    store64(cg + 280 * 8, 1950); store64(cg + 281 * 8, 6952); store64(cg + 282 * 8, 7660); store64(cg + 283 * 8, 4541); store64(cg + 284 * 8, 1975); store64(cg + 285 * 8, 2758); store64(cg + 286 * 8, 4472); store64(cg + 287 * 8, 2517);
+    store64(cg + 288 * 8, 0 - 3372); store64(cg + 289 * 8, 0 - 9435); store64(cg + 290 * 8, 0 - 11567); store64(cg + 291 * 8, 0 - 9987); store64(cg + 292 * 8, 0 - 9069); store64(cg + 293 * 8, 0 - 11179); store64(cg + 294 * 8, 0 - 14092); store64(cg + 295 * 8, 0 - 13486);
+    store64(cg + 296 * 8, 0 - 8775); store64(cg + 297 * 8, 0 - 3900); store64(cg + 298 * 8, 0 - 2910); store64(cg + 299 * 8, 0 - 6005); store64(cg + 300 * 8, 0 - 8202); store64(cg + 301 * 8, 0 - 6726); store64(cg + 302 * 8, 0 - 4826); store64(cg + 303 * 8, 0 - 6486);
+    store64(cg + 304 * 8, 0 - 12270); store64(cg + 305 * 8, 0 - 17963); store64(cg + 306 * 8, 0 - 19361); store64(cg + 307 * 8, 0 - 17185); store64(cg + 308 * 8, 0 - 15789); store64(cg + 309 * 8, 0 - 17765); store64(cg + 310 * 8, 0 - 20068); store64(cg + 311 * 8, 0 - 18664);
+    store64(cg + 312 * 8, 0 - 13184); store64(cg + 313 * 8, 0 - 7490); store64(cg + 314 * 8, 0 - 6206); store64(cg + 315 * 8, 0 - 8490); store64(cg + 316 * 8, 0 - 9763); store64(cg + 317 * 8, 0 - 7611); store64(cg + 318 * 8, 0 - 4842); store64(cg + 319 * 8, 0 - 6105);
+    store64(cg + 320 * 8, 0 - 11381); store64(cg + 321 * 8, 0 - 16569); store64(cg + 322 * 8, 0 - 17449); store64(cg + 323 * 8, 0 - 14494); store64(cg + 324 * 8, 0 - 12621); store64(cg + 325 * 8, 0 - 13906); store64(cg + 326 * 8, 0 - 15556); store64(cg + 327 * 8, 0 - 13374);
+    store64(cg + 328 * 8, 0 - 7031); store64(cg + 329 * 8, 0 - 903); store64(cg + 330 * 8, 1169); store64(cg + 331 * 8, 0 - 517); store64(cg + 332 * 8, 0 - 1367); store64(cg + 333 * 8, 1163); store64(cg + 334 * 8, 3928); store64(cg + 335 * 8, 3120);
+    store64(cg + 336 * 8, 0 - 1685); store64(cg + 337 * 8, 0 - 6390); store64(cg + 338 * 8, 0 - 6834); store64(cg + 339 * 8, 0 - 3786); store64(cg + 340 * 8, 0 - 1449); store64(cg + 341 * 8, 0 - 2402); store64(cg + 342 * 8, 0 - 3719); store64(cg + 343 * 8, 0 - 1336);
+    store64(cg + 344 * 8, 4803); store64(cg + 345 * 8, 11029); store64(cg + 346 * 8, 13051); store64(cg + 347 * 8, 11483); store64(cg + 348 * 8, 10688); store64(cg + 349 * 8, 12839); store64(cg + 350 * 8, 15493); store64(cg + 351 * 8, 14447);
+    store64(cg + 352 * 8, 9590); store64(cg + 353 * 8, 4768); store64(cg + 354 * 8, 3859); store64(cg + 355 * 8, 6691); store64(cg + 356 * 8, 8674); store64(cg + 357 * 8, 7558); store64(cg + 358 * 8, 5891); store64(cg + 359 * 8, 7550);
+    store64(cg + 360 * 8, 13179); store64(cg + 361 * 8, 18716); store64(cg + 362 * 8, 20282); store64(cg + 363 * 8, 18103); store64(cg + 364 * 8, 16485); store64(cg + 365 * 8, 18197); store64(cg + 366 * 8, 20357); store64(cg + 367 * 8, 19089);
+    store64(cg + 368 * 8, 13740); store64(cg + 369 * 8, 8069); store64(cg + 370 * 8, 6465); store64(cg + 371 * 8, 8412); store64(cg + 372 * 8, 9785); store64(cg + 373 * 8, 7833); store64(cg + 374 * 8, 5137); store64(cg + 375 * 8, 6022);
+    store64(cg + 376 * 8, 10790); store64(cg + 377 * 8, 15888); store64(cg + 378 * 8, 16888); store64(cg + 379 * 8, 14038); store64(cg + 380 * 8, 11889); store64(cg + 381 * 8, 12826); store64(cg + 382 * 8, 14520); store64(cg + 383 * 8, 12581);
+    store64(cg + 384 * 8, 6525); store64(cg + 385 * 8, 313); store64(cg + 386 * 8, 0 - 2011); store64(cg + 387 * 8, 0 - 392); store64(cg + 388 * 8, 479); store64(cg + 389 * 8, 0 - 1926); store64(cg + 390 * 8, 0 - 4902); store64(cg + 391 * 8, 0 - 4464);
+    store64(cg + 392 * 8, 176); store64(cg + 393 * 8, 4863); store64(cg + 394 * 8, 5478); store64(cg + 395 * 8, 2356); store64(cg + 396 * 8, 0 - 176); store64(cg + 397 * 8, 744); store64(cg + 398 * 8, 2135); store64(cg + 399 * 8, 4);
+    store64(cg + 400 * 8, 0 - 6098); store64(cg + 401 * 8, 0 - 12380); store64(cg + 402 * 8, 0 - 14364); store64(cg + 403 * 8, 0 - 12718); store64(cg + 404 * 8, 0 - 11758); store64(cg + 405 * 8, 0 - 14055); store64(cg + 406 * 8, 0 - 16941); store64(cg + 407 * 8, 0 - 15998);
+    store64(cg + 408 * 8, 0 - 11131); store64(cg + 409 * 8, 0 - 6111); store64(cg + 410 * 8, 0 - 5252); store64(cg + 411 * 8, 0 - 8168); store64(cg + 412 * 8, 0 - 10049); store64(cg + 413 * 8, 0 - 8681); store64(cg + 414 * 8, 0 - 6667); store64(cg + 415 * 8, 0 - 8354);
+    store64(cg + 416 * 8, 0 - 14118); store64(cg + 417 * 8, 0 - 19701); store64(cg + 418 * 8, 0 - 21165); store64(cg + 419 * 8, 0 - 18748); store64(cg + 420 * 8, 0 - 17235); store64(cg + 421 * 8, 0 - 19090); store64(cg + 422 * 8, 0 - 21233); store64(cg + 423 * 8, 0 - 19708);
+    store64(cg + 424 * 8, 0 - 13925); store64(cg + 425 * 8, 0 - 8183); store64(cg + 426 * 8, 0 - 6679); store64(cg + 427 * 8, 0 - 8748); store64(cg + 428 * 8, 0 - 9998); store64(cg + 429 * 8, 0 - 7674); store64(cg + 430 * 8, 0 - 4954); store64(cg + 431 * 8, 0 - 6017);
+    store64(cg + 432 * 8, 0 - 11066); store64(cg + 433 * 8, 0 - 16214); store64(cg + 434 * 8, 0 - 16915); store64(cg + 435 * 8, 0 - 13946); store64(cg + 436 * 8, 0 - 11830); store64(cg + 437 * 8, 0 - 12960); store64(cg + 438 * 8, 0 - 14623); store64(cg + 439 * 8, 0 - 12317);
+    store64(cg + 440 * 8, 0 - 6019); store64(cg + 441 * 8, 319); store64(cg + 442 * 8, 2497); store64(cg + 443 * 8, 833); store64(cg + 444 * 8, 176); store64(cg + 445 * 8, 2687); store64(cg + 446 * 8, 5676); store64(cg + 447 * 8, 4983);
+    store64(cg + 448 * 8, 167); store64(cg + 449 * 8, 0 - 4495); store64(cg + 450 * 8, 0 - 5139); store64(cg + 451 * 8, 0 - 2045); store64(cg + 452 * 8, 253); store64(cg + 453 * 8, 0 - 758); store64(cg + 454 * 8, 0 - 2051); store64(cg + 455 * 8, 144);
+    store64(cg + 456 * 8, 6338); store64(cg + 457 * 8, 12521); store64(cg + 458 * 8, 14539); store64(cg + 459 * 8, 13036); store64(cg + 460 * 8, 12083); store64(cg + 461 * 8, 14271); store64(cg + 462 * 8, 16802); store64(cg + 463 * 8, 15692);
+    store64(cg + 464 * 8, 10833); store64(cg + 465 * 8, 5786); store64(cg + 466 * 8, 4795); store64(cg + 467 * 8, 7324); store64(cg + 468 * 8, 9103); store64(cg + 469 * 8, 7933); store64(cg + 470 * 8, 6145); store64(cg + 471 * 8, 7878);
+    store64(cg + 472 * 8, 13313); store64(cg + 473 * 8, 18734); store64(cg + 474 * 8, 20295); store64(cg + 475 * 8, 18081); store64(cg + 476 * 8, 16579); store64(cg + 477 * 8, 18015); store64(cg + 478 * 8, 19906); store64(cg + 479 * 8, 18414);
+    var cc = _celt_corr(cpcm, cg, 480);
+    syscall(1, 2, "celt10_corr_x10000=", 19); fmt_int_fd(2, f64_to(f64_mul(cc, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    assert(f64_gt(cc, f64_div(f64_from(999), f64_from(1000))) == 1, "CELT 10ms frame 0 correlation > 0.999");
+    return 0;
+}
+
 fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_laplace_rfc_vectors();
@@ -13686,6 +13766,7 @@ fn test_opus_rfc_all() {
     test_opus_silk_stereo_pred_rfc();
     test_opus_silk_stereo_rfc();
     test_opus_hybrid_stereo_rfc();
+    test_opus_celt10_rfc();
     return 0;
 }
 
