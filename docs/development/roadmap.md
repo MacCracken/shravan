@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.6.5.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.6.6.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -8,11 +8,12 @@
   libopus `.opus` — CELT + SILK + hybrid, mono **and** stereo, 10 ms **and** 20 ms, all
   bandwidths — bit-exact vs libopus (correlation ~1.0 vs ffmpeg). Plus WAV, AIFF, FLAC (enc+dec),
   Ogg, MP3 (MPEG-1/2/2.5 Layer I/II/III), AAC-LC, MP4/M4A demux, ALAC (decoder present).
-- **Encode is real for CELT (the hard half started).** shravan encodes a real RFC-6716 **CELT**
-  frame (mono, 20 ms, non-transient) that **libopus decodes sample-identical** to shravan's own
-  decoder (correlation 1.000000). The whole chain — forward MDCT → band energy → coarse/fine
-  energy → allocation → PVQ search+encode → range coder — is the verified inverse of the decoder.
-- 11460 assertions, 0 failing. Cyrius toolchain pinned at 6.3.27.
+- **Encode is real for CELT, mono, at quality (v2.6.6).** shravan encodes a real RFC-6716 **CELT**
+  frame that **libopus decodes sample-identical** to shravan's own decoder (correlation 1.000000),
+  now with the full encoder-quality decision surface: adaptive spread, 2-pass coarse-energy race,
+  transient detection + short-block encode, per-band tf_analysis, and masking-driven dynalloc
+  boosts — every knob ported from libopus's float build and adversarially verified faithful.
+- 11,484 assertions, 0 failing. Cyrius toolchain pinned at 6.3.27.
 
 The remaining distance is (1) finishing the Opus encoder, (2) closing the small decode gaps, and
 (3) bringing the non-Opus codecs and the whole suite to production/interop quality. That is the
@@ -20,27 +21,9 @@ path to **3.0.0**, below.
 
 ## Path to 3.0.0
 
-Two patches finish the CELT encoder; three minors then complete Opus encode, mature the rest of
-the suite, and harden everything; **3.0.0** is the major bump when the suite is complete, fully
-interoperable both directions, and fuzz-clean.
-
-### v2.6.6 — CELT encoder quality · medium
-Make the CELT encoder produce *good* frames, not just valid ones (2.6.5 uses fixed defaults).
-- ✅ spread decision, ✅ 2-pass coarse-energy intra/inter size race, ✅ transient *encode*
-  (short blocks), ✅ **transient *detection*** (`celt_transient_analysis`, `celt_encoder.c:267`
-  float path, `inv_table` byte-exact; `celt_encode` auto-detects `isTransient` via the −1
-  sentinel — steady tone → long, onset → short; adversarially verified faithful to libopus).
-- ✅ **tf_analysis** (`celt_tf_analysis`, `celt_encoder.c:663` float path): per-band `tf_res`
-  via L1-metric Haar-level search + dual Viterbi (`tf_select` + backtrace), `importance=13`
-  uniform (dynalloc-off fallback). Replaces the all-zeros `tf_res` in `celt_encode_frame_ec`;
-  round-trips through `celt_tf_encode`/`celt_tf_decode` (encoder remap == decoder remap, same
-  bits) and *improved* every spectrum correlation (frame 0.968→0.990, transient 0.898→0.943).
-- ✅ **dynalloc boosts** (`celt_dynalloc_analysis`, `celt_encoder.c:1049` float path): a masking
-  follower (forward/backward + median-of-5 filter, noise-floor bounded) → per-band `offsets` (bit
-  units = boost_count·quanta, so the R9 boost loop reproduces them exactly) + the real `importance[]`
-  that now feeds tf_analysis. Mono; stereo keeps the flat fallback. Flat spectrum → no boosts /
-  importance 13; a spectral peak → boost + higher importance (verified exact: peak offset 384,
-  importance 208); pcm round-trip 0.997→0.999. **v2.6.6 is feature-complete — ready to cut.**
+One patch finishes the CELT encoder (stereo); three minors then complete Opus encode, mature the
+rest of the suite, and harden everything; **3.0.0** is the major bump when the suite is complete,
+fully interoperable both directions, and fuzz-clean.
 
 ### v2.6.7 — CELT stereo encode · medium
 - `feat(opus): stereo_split / intensity_stereo, quant_band_stereo N==2 sign encode, dual-stereo

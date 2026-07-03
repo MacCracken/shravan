@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.6] - 2026-07-03
+
+**CELT encoder quality: the encoder now makes real, signal-driven decisions.** Where 2.6.5
+shipped a valid-but-plain CELT frame (fixed `tf_res=0`, no dynalloc, default spread/trim,
+single-pass energy), 2.6.6 fills in the full encoder-quality decision surface — every knob
+ported from libopus's **float build** (where `SHR32`/`PSHR32`/`SROUND16` collapse to no-ops, so
+the port replicates what the macros *evaluate to*) and adversarially verified faithful. Net
+effect on the in-suite round-trips: frame spectrum **0.968→0.991**, transient **0.898→0.943**,
+PCM **0.997→0.999**; libopus still decodes shravan's frames sample-identically. 11,484 assertions.
+
+### Added — CELT encoder-quality knobs (`src/opus.cyr`)
+
+- **Adaptive spread decision** (`celt_spreading_decision`, `bands.c`) — the signal-driven tapset
+  replaces the fixed default (interop verified 1.0).
+- **2-pass coarse-energy intra/inter race** (`quant_coarse_energy`) — encodes both the intra and
+  inter energy predictors into scratch range-coder state and keeps the cheaper (e.g. inter 40 vs
+  intra 55 bits) instead of always coding intra.
+- **Transient encode** (short blocks) — `isTransient=1` frames MDCT into M short blocks with the
+  anti-collapse reservation, `celt_tf_encode`, and the short-block `quant_all_bands` path.
+- **Transient detection** (`celt_transient_analysis`, `celt_encoder.c:267`) — the encoder's own
+  short-block decision from the pre-emphasized signal (HP filter → forward/backward masking →
+  integer mask metric `>200`), `inv_table[128]` byte-exact vs libopus. `celt_encode` auto-detects
+  `isTransient` via a `−1` sentinel (steady tone → long, sudden onset → short).
+  `test_celt_transient_analysis_rfc`.
+- **tf_analysis** (`celt_tf_analysis`, `celt_encoder.c:663`) — real per-band `tf_res` via an
+  L1-metric Haar-level search + a dual Viterbi (`tf_select` + backtrace), smoothed by `lambda =
+  max(80, 20480/bytes+2)`. Replaces the all-zeros `tf_res`; round-trips through `celt_tf_encode`/
+  `celt_tf_decode` (encoder remap == decoder remap, identical bits). `test_celt_tf_analysis_rfc`.
+- **dynalloc boosts** (`celt_dynalloc_analysis`, `celt_encoder.c:1049`) — a masking follower
+  (forward/backward passes + median-of-5 filter, noise-floor bounded) → per-band bit `offsets`
+  (output in accumulated 1/64-bit units = `boost_count·quanta`, so the R9 boost loop reproduces
+  them exactly) + the real `importance[]` that now weights tf_analysis. Mono; stereo keeps the
+  flat fallback. `test_celt_dynalloc_analysis_rfc` (flat spectrum → no boosts; a lone peak → boost
+  384 + importance 208, matching a hand trace).
+
+### Changed
+
+- **Test suite split into three harness binaries** so no single build overflows the ~3.15 MB
+  Cyrius code buffer: `src/main.cyr` → `build/shravan` (core codecs + Opus decode + API, 1039),
+  `src/main_encoder.cyr` → `build/shravan-encoder` (CELT encoder, 127), `src/main_silk.cyr` →
+  `build/shravan-silk` (SILK decode golden vectors, 10318). `scripts/test-all.sh` builds + runs
+  all three; the shared assertion/correlation helpers moved to `src/opus_test_helpers.cyr`. Total
+  assertions preserved.
+
+### Verified
+
+- Each stage was ported from a from-source libopus reference and checked by fan-out
+  adversarial-verification workflows (transient / tf / dynalloc), each stage confirmed faithful to
+  the float build. The one flagged finding (R9 dynalloc-encode `tb2` budget) was **refuted against
+  source** — libopus's gate is `tell+(dll<<BITRES) < total_bits − total_boost`
+  (`celt_encoder.c:2373`), which shravan's `tb2 -= quanta` folds into one running budget. Every
+  decode / SILK test stayed green throughout.
+
+### Not yet (honest status)
+
+- **CELT encode is mono only.** Stereo encode (`stereo_split`/`intensity_stereo`,
+  `quant_band_stereo` N==2 sign), **SILK** encode, and **hybrid** encode remain (2.6.7+).
+
 ## [2.6.5] - 2026-07-03
 
 **Opus encode is real (CELT): libopus decodes shravan's output.** shravan now *encodes* a
