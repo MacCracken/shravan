@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.4] - 2026-07-03
+
+**Opus 10 ms frames are real.** shravan now decodes actual libopus-encoded **10 ms**
+`.opus` across every mode: SILK-only (NB config 0 / WB config 8), hybrid (SWB config 12
+/ FB config 14), and CELT-only 10 ms (config 18/22/26/30) — mono **and** stereo.
+Verified **hybrid-10 ms frame-0 correlation 0.9999 vs a libopus golden** (sample-exact
+after a real bit-exact fix, below). Combined with 2.6.0–2.6.3, shravan decodes **10 ms
+and 20 ms** Opus, all bandwidths, mono + stereo. 11357 assertions.
+
+### Fixed — `special_hybrid_folding` (RFC 6716 / `bands.c:1579`), a real bit-exact bug
+
+- `quant_all_bands` was **missing `special_hybrid_folding`**: in hybrid mode the second
+  coded CELT band has no lower band to fold from, so libopus duplicates enough of the
+  first band's fold data (`norm[n1 .. n2] ← norm[2·n1−n2 ..]`) before decoding it. shravan
+  left that region zero, so a **folded** second band (0 pulses) decoded wrong. It stayed
+  hidden until 10 ms hybrid, where that band *is* folded — the CELT high band's
+  time-domain output was scrambled (frame-0 correlation **0.9662**). With the fold added
+  it is **0.9999** (bit-exact vs the from-source libopus reference, traced stage-by-stage:
+  energy/allocation/PVQ/`X` all matched; only the fold source differed). Benefits **all**
+  hybrid decodes — it is a shared-path correctness fix, not 10 ms-specific.
+
+### Added — Opus 10 ms decode (`src/opus.cyr`)
+
+- **SILK 10 ms** (`nb_subfr = 2`): `opus_decode_from_packets` routes config 0 (NB) / 8 (WB)
+  mono and their stereo variants through `silk_decode_pcm` / `silk_decode_stereo` inited
+  with `nb_subfr = 2`; the state cache keys on `(fs, nb_subfr)` so a stream can mix frame
+  sizes. In-suite: `test_opus_silk10_rfc` (config 8, correlation 1.0000).
+- **Hybrid 10 ms**: config 12 (SWB, CELT end = 19) / 14 (FB, end = 21) decode the SILK low
+  band (WB 16 kHz, `nb_subfr = 2`) + CELT high band (`start = 17`, **`LM = 2`**, accumulate)
+  over the shared range coder, mono + stereo. In-suite: `test_opus_hybrid10_rfc`
+  (config 14, correlation 0.9999).
+- **CELT-only 10 ms** (config 18/22/26/30, `LM = 2`) was landed in 2.6.3's LM refactor and
+  is exercised by `test_opus_celt10_rfc` (correlation 1.0000).
+
+### Changed — module split to hold the distlib cap (`src/opus_legacy.cyr`)
+
+- Extracted the **legacy 2.5.x bespoke CELT encoder + Opus encoder framework** (~100 KB,
+  91 functions, entirely off the RFC-6716 decode path) from `src/opus.cyr` into a new
+  **`src/opus_legacy.cyr`**. It is included by `src/main.cyr` (its PVQ/energy/transient/
+  encoder tests still run) but **excluded from the `[lib]` bundle** — the distlib consumer
+  ships only the RFC decoder. This drops `opus.cyr` from **261 KB → 162 KB**, well under
+  the 256 KB per-module distlib read cap (which had begun truncating the bundle), leaving
+  room for the 10 ms dispatch and future decode work.
+
+### Not yet (honest status)
+
+- Non-10/20 ms CELT-only sizes (2.5 ms / 5 ms, `LM = 0/1`). SILK MB, and 40/60 ms mono.
+  **Encoder** (real `ec_enc` + RFC-6716 CELT encode so libopus decodes shravan's output)
+  is **2.6.5**. Redundant-frame audio. Claim today: "real Opus 10 ms + 20 ms decode, mono
+  + stereo, all bandwidths, verified vs libopus."
+
 ## [2.6.3] - 2026-07-02
 
 **Opus stereo is real.** shravan now decodes actual libopus-encoded **stereo** `.opus` —

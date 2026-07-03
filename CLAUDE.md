@@ -69,7 +69,8 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM). Sample-exact vs minimp3 (one edge: MPEG-2.5 8 kHz low-bitrate short blocks) |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
-| opus | src/opus.cyr | Opus CELT-mode encoder + encoder framework (mode/bandwidth select, RFC 6716 TOC byte, dispatch); SILK/hybrid = 2.5.x |
+| opus | src/opus.cyr | RFC-6716 Opus decode → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, verified bit-exact vs libopus). Opus CELT-mode encoder framework (mode/bandwidth select, TOC byte). |
+| opus_legacy | src/opus_legacy.cyr | Legacy 2.5.x bespoke CELT encoder/decoder + Opus encoder framework — **off the RFC decode path**, kept for its tests, included by `main.cyr` but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
 | aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
 | mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |

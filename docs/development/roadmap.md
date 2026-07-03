@@ -1,6 +1,14 @@
 # Development Roadmap
 
-> **v2.6.3** — 11354 tests, Cyrius 6.3.x. **Opus stereo is real**: shravan decodes actual
+> **v2.6.4** — 11357 tests, Cyrius 6.3.x. **Opus 10 ms frames are real**: shravan decodes
+> actual libopus **10 ms** `.opus` — SILK-only (config 0/8), hybrid (config 12/14, CELT
+> LM=2), CELT-only (config 18/22/26/30) — mono + stereo, at **hybrid-10 ms correlation
+> 0.9999 vs libopus**. Fixed a real bit-exact bug (**`special_hybrid_folding`** was missing
+> from `quant_all_bands` — hybrid's second CELT band folded from a zeroed region; benefits
+> all hybrid decodes). Split the legacy 2.5.x encoder out of `opus.cyr` (→ `opus_legacy.cyr`,
+> not bundled) to hold the 256 KB distlib cap. shravan now decodes **10 ms + 20 ms** Opus,
+> all bandwidths, mono + stereo. Prior:
+> **v2.6.3** — **Opus stereo is real**: shravan decodes actual
 > libopus **stereo** `.opus` — SILK mid/side stereo (config 1/9) + stereo hybrid (13/15),
 > 20 ms — at **per-channel correlation 1.0000/0.9999 vs libopus**. **Every 20 ms Opus config
 > now decodes** (mono + stereo). Prior:
@@ -136,11 +144,23 @@ stereo `C=2, start=17` high band over the shared ec). Verified **per-channel cor
 (SILK stereo) / **0.9999** (stereo hybrid) vs a libopus golden. A VAD-flag refactor kept mono
 + hybrid **bit-exact**. **Every 20 ms Opus config now decodes** (mono + stereo, all bandwidths).
 
-### v2.6.4 — Opus 10 ms frames · medium (config 12/14 + CELT LM=2)
-20 ms is done; add the 10 ms frame size.
-- `feat(opus): CELT LM=2 (480-sample frames, N=480, M=4, short=120) — parameterize the
-  N=960/M=8/LM=3 hardcodes; SILK 10 ms (nb_subfr=2); wire hybrid config 12 (SWB 10 ms) /
-  14 (FB 10 ms) + the 10 ms CELT-only configs (18/22/26/30)`. Verify vs libopus.
+### v2.6.4 — Opus 10 ms frames · ✅ SHIPPED (SILK/hybrid/CELT 10 ms, mono + stereo)
+20 ms was done; 2.6.4 adds the 10 ms frame size across every mode. CELT LM=2 (N=480, M=4,
+short=120) was parameterized in the 2.6.3 refactor; 2.6.4 threads `nb_subfr=2` through SILK
+and wires the dispatch: SILK-only config 0 (NB) / 8 (WB); hybrid config 12 (SWB, end=19) /
+14 (FB, end=21) with SILK WB low band + CELT `LM=2, start=17` high band; CELT-only
+18/22/26/30 — each mono **and** stereo, state cache keyed on `(fs, nb_subfr)`.
+- **Real bit-exact fix — `special_hybrid_folding`** (`bands.c:1579`): hybrid's second CELT
+  band has no lower band to fold from, so libopus duplicates the first band's fold data
+  (`norm[n1..n2] ← norm[2·n1−n2..]`); shravan left it zero. Only bites when that band is
+  *folded* (0 pulses), which is exactly the 10 ms hybrid case — traced stage-by-stage
+  (energy/alloc/PVQ/`X` all matched, only the fold source differed), correlation
+  **0.9662 → 0.9999**. Shared-path fix (helps all hybrid decodes).
+- **Module split**: legacy 2.5.x bespoke encoder (~100 KB, 91 fns, off the decode path)
+  moved to `src/opus_legacy.cyr` (included by `main.cyr`, **not** in `[lib]`), dropping
+  `opus.cyr` 261 → 162 KB under the 256 KB distlib cap.
+- In-suite guards: `test_opus_silk10_rfc` (1.0000), `test_opus_hybrid10_rfc` (0.9999),
+  `test_opus_celt10_rfc` (1.0000).
 
 ### v2.6.5 — Opus encoder conformance (libopus decodes OURS) · large
 The decode side is real (2.6.0–2.6.4); make the encode side real too.
