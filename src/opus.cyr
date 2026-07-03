@@ -2209,6 +2209,164 @@ fn extract_collapse_mask(iy, N, B) {
     return mask;
 }
 
+# ================================================================
+# CELT PVQ ENCODE (vq.c / cwrs.c) — inverse of the decode path above.
+# ================================================================
+# exp_rotation forward (dir>=0): the encoder rotates INTO the search domain (angle-negated,
+# reversed stage order vs the decode exp_rotation).
+fn exp_rotation_enc(X, len, stride, K, spread) {
+    if ((2 * K >= len) | (spread == 0)) { return 0; }
+    if (_celt_spreadF == 0) { _celt_bands_tables_init(); }
+    var factor = load64(_celt_spreadF + (spread - 1) * 8);
+    var gain = f64_div(f64_from(len), f64_from(len + factor * K));
+    var theta = f64_mul(F64_HALF, f64_mul(gain, gain));
+    var halfpi = f64_mul(F64_HALF, F64_PI);
+    var c = f64_cos(f64_mul(halfpi, theta));
+    var s = f64_cos(f64_mul(halfpi, f64_sub(F64_ONE, theta)));
+    var stride2 = 0;
+    if (len >= 8 * stride) {
+        stride2 = 1;
+        while ((stride2 * stride2 + stride2) * stride + (stride >> 2) < len) { stride2 = stride2 + 1; }
+    }
+    var blocklen = len / stride;
+    var ns = f64_neg(s);
+    var nc = f64_neg(c);
+    var b = 0;
+    while (b < stride) {
+        var Xb = X + b * blocklen * 8;
+        exp_rotation1(Xb, blocklen, 1, c, ns);
+        if (stride2 != 0) { exp_rotation1(Xb, blocklen, stride2, s, nc); }
+        b = b + 1;
+    }
+    return 0;
+}
+
+# op_pvq_search (vq.c): find the K-pulse integer vector iy that best matches X (max
+# Rxy^2/Ryy), via a projection pre-search (K>N/2) + greedy one-pulse-at-a-time refinement.
+# X is overwritten with |X| (sign restored into iy). Returns yy = sum(iy^2).
+fn op_pvq_search(X, iy, K, N) {
+    var y = alloc(N * 8);
+    var signx = alloc(N * 8);
+    var j = 0;
+    while (j < N) {
+        var xj = load64(X + j * 8);
+        var sg = 0;
+        if (f64_lt(xj, F64_ZERO) == 1) { sg = 1; xj = f64_neg(xj); }
+        store64(signx + j * 8, sg);
+        store64(X + j * 8, xj);
+        store64(iy + j * 8, 0);
+        store64(y + j * 8, F64_ZERO);
+        j = j + 1;
+    }
+    var xy = F64_ZERO;
+    var yy = F64_ZERO;
+    var pulsesLeft = K;
+    if (K > (N >> 1)) {
+        var sum = F64_ZERO;
+        j = 0;
+        while (j < N) { sum = f64_add(sum, load64(X + j * 8)); j = j + 1; }
+        var ok = 0;
+        if ((f64_gt(sum, F64_1E30INV) == 1) & (f64_lt(sum, f64_from(64)) == 1)) { ok = 1; }
+        if (ok == 0) {
+            store64(X + 0, F64_ONE);
+            var jj = 1; while (jj < N) { store64(X + jj * 8, F64_ZERO); jj = jj + 1; }
+            sum = F64_ONE;
+        }
+        var rcp = f64_div(f64_add(f64_from(K), f64_div(f64_from(8), f64_from(10))), sum);   # (K+0.8)/sum
+        j = 0;
+        while (j < N) {
+            var xj = load64(X + j * 8);
+            var iyj = f64_to(f64_mul(rcp, xj));    # floor (rcp*X >= 0)
+            store64(iy + j * 8, iyj);
+            var yj = f64_from(iyj);
+            yy = f64_add(yy, f64_mul(yj, yj));
+            xy = f64_add(xy, f64_mul(xj, yj));
+            store64(y + j * 8, f64_mul(yj, F64_TWO));
+            pulsesLeft = pulsesLeft - iyj;
+            j = j + 1;
+        }
+    }
+    if (pulsesLeft > N + 3) {
+        var tmp = f64_from(pulsesLeft);
+        yy = f64_add(yy, f64_mul(tmp, tmp));
+        yy = f64_add(yy, f64_mul(tmp, load64(y + 0)));
+        store64(iy + 0, load64(iy + 0) + pulsesLeft);
+        pulsesLeft = 0;
+    }
+    var i = 0;
+    while (i < pulsesLeft) {
+        yy = f64_add(yy, F64_ONE);
+        var best_id = 0;
+        var Rxy0 = f64_add(xy, load64(X + 0));
+        var Ryy0 = f64_add(yy, load64(y + 0));
+        Rxy0 = f64_mul(Rxy0, Rxy0);
+        var best_den = Ryy0;
+        var best_num = Rxy0;
+        j = 1;
+        while (j < N) {
+            var Rxyj = f64_add(xy, load64(X + j * 8));
+            var Ryyj = f64_add(yy, load64(y + j * 8));
+            Rxyj = f64_mul(Rxyj, Rxyj);
+            if (f64_gt(f64_mul(best_den, Rxyj), f64_mul(Ryyj, best_num)) == 1) {
+                best_den = Ryyj;
+                best_num = Rxyj;
+                best_id = j;
+            }
+            j = j + 1;
+        }
+        xy = f64_add(xy, load64(X + best_id * 8));
+        yy = f64_add(yy, load64(y + best_id * 8));
+        store64(y + best_id * 8, f64_add(load64(y + best_id * 8), F64_TWO));
+        store64(iy + best_id * 8, load64(iy + best_id * 8) + 1);
+        i = i + 1;
+    }
+    j = 0;
+    while (j < N) {
+        if (load64(signx + j * 8) == 1) { store64(iy + j * 8, 0 - load64(iy + j * 8)); }
+        j = j + 1;
+    }
+    return f64_to(yy);   # yy is an exact integer (sum iy^2); return as int for normalise_residual
+}
+
+# icwrs (cwrs.c): pulse vector y -> combinatorial index (inverse of celt_cwrsi).
+fn icwrs(n, y) {
+    var j = n - 1;
+    var yj = load64(y + j * 8);
+    var i = 0;
+    if (yj < 0) { i = 1; }
+    var k = yj; if (k < 0) { k = 0 - k; }
+    var cont = 1;
+    while (cont == 1) {
+        j = j - 1;
+        i = i + celt_pvq_u(n - j, k);
+        var yv = load64(y + j * 8);
+        var av = yv; if (av < 0) { av = 0 - av; }
+        k = k + av;
+        if (yv < 0) { i = i + celt_pvq_u(n - j, k + 1); }
+        if (j > 0) { cont = 1; } else { cont = 0; }
+    }
+    return i;
+}
+
+# celt_encode_pulses: encode the pulse vector index (inverse of celt_decode_pulses).
+fn celt_encode_pulses(enc, n, k, y) {
+    ec_enc_uint(enc, icwrs(n, y), celt_pvq_v(n, k));
+    return 0;
+}
+
+# alg_quant (encode): rotate into search domain -> PVQ search -> encode pulses ->
+# resynth the quantized unit shape into X (rotate back). Returns the collapse mask.
+fn alg_quant(X, N, K, spread, B, enc, gain) {
+    var iy = alloc((N + 3) * 8);
+    exp_rotation_enc(X, N, B, K, spread);
+    var yy = op_pvq_search(X, iy, K, N);
+    var collapse_mask = extract_collapse_mask(iy, N, B);
+    celt_encode_pulses(enc, N, K, iy);
+    normalise_residual(iy, X, N, yy, gain);
+    exp_rotation(X, N, B, K, spread);
+    return collapse_mask;
+}
+
 # alg_unquant (decode): decode_pulses -> normalise -> rotation -> collapse mask.
 fn alg_unquant(ec, X, N, K, spread, B, gain) {
     var iy = alloc(N * 8);

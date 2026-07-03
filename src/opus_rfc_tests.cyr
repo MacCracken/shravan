@@ -644,6 +644,60 @@ fn test_celt_energy_encode_rfc() {
     return 0;
 }
 
+fn test_celt_pvq_encode_rfc() {
+    test_group("opus: alg_quant (PVQ search+encode) -> alg_unquant round-trip");
+    var X = alloc(16 * 8); var Xo = alloc(16 * 8);
+    store64(X + 0 * 8, f64_div(f64_from(3510), f64_from(10000))); store64(Xo + 0 * 8, f64_div(f64_from(3510), f64_from(10000)));
+    store64(X + 1 * 8, f64_div(f64_from(8573), f64_from(10000))); store64(Xo + 1 * 8, f64_div(f64_from(8573), f64_from(10000)));
+    store64(X + 2 * 8, f64_div(f64_from(11482), f64_from(10000))); store64(Xo + 2 * 8, f64_div(f64_from(11482), f64_from(10000)));
+    store64(X + 3 * 8, f64_div(f64_from(11000), f64_from(10000))); store64(Xo + 3 * 8, f64_div(f64_from(11000), f64_from(10000)));
+    store64(X + 4 * 8, f64_div(f64_from(7038), f64_from(10000))); store64(Xo + 4 * 8, f64_div(f64_from(7038), f64_from(10000)));
+    store64(X + 5 * 8, f64_div(f64_from(698), f64_from(10000))); store64(Xo + 5 * 8, f64_div(f64_from(698), f64_from(10000)));
+    store64(X + 6 * 8, f64_div(f64_from(-6090), f64_from(10000))); store64(Xo + 6 * 8, f64_div(f64_from(-6090), f64_from(10000)));
+    store64(X + 7 * 8, f64_div(f64_from(-11228), f64_from(10000))); store64(Xo + 7 * 8, f64_div(f64_from(-11228), f64_from(10000)));
+    store64(X + 8 * 8, f64_div(f64_from(-13166), f64_from(10000))); store64(Xo + 8 * 8, f64_div(f64_from(-13166), f64_from(10000)));
+    store64(X + 9 * 8, f64_div(f64_from(-11425), f64_from(10000))); store64(Xo + 9 * 8, f64_div(f64_from(-11425), f64_from(10000)));
+    store64(X + 10 * 8, f64_div(f64_from(-6754), f64_from(10000))); store64(Xo + 10 * 8, f64_div(f64_from(-6754), f64_from(10000)));
+    store64(X + 11 * 8, f64_div(f64_from(-861), f64_from(10000))); store64(Xo + 11 * 8, f64_div(f64_from(-861), f64_from(10000)));
+    store64(X + 12 * 8, f64_div(f64_from(4191), f64_from(10000))); store64(Xo + 12 * 8, f64_div(f64_from(4191), f64_from(10000)));
+    store64(X + 13 * 8, f64_div(f64_from(6703), f64_from(10000))); store64(Xo + 13 * 8, f64_div(f64_from(6703), f64_from(10000)));
+    store64(X + 14 * 8, f64_div(f64_from(5931), f64_from(10000))); store64(Xo + 14 * 8, f64_div(f64_from(5931), f64_from(10000)));
+    store64(X + 15 * 8, f64_div(f64_from(2337), f64_from(10000))); store64(Xo + 15 * 8, f64_div(f64_from(2337), f64_from(10000)));
+    # direct icwrs <-> celt_cwrsi round-trip on a known 7-pulse vector
+    var ty = alloc(16 * 8); var ti = 0; while (ti < 16) { store64(ty + ti * 8, 0); ti = ti + 1; }
+    store64(ty + 0 * 8, 3); store64(ty + 2 * 8, 0 - 2); store64(ty + 4 * 8, 1); store64(ty + 6 * 8, 0 - 1);
+    var ty2 = alloc(16 * 8); celt_cwrsi(16, 7, icwrs(16, ty), ty2);
+    var tk = 0; var teq = 1;
+    while (tk < 16) { if (load64(ty + tk * 8) != load64(ty2 + tk * 8)) { teq = 0; } tk = tk + 1; }
+    assert(teq == 1, "icwrs <-> celt_cwrsi round-trip");
+    # full PVQ encode -> decode round-trip (fixed 16-byte packet)
+    var buf = alloc(16);
+    var e = ec_enc_new(buf, 16);
+    var cm = alg_quant(X, 16, 7, 2, 1, e, F64_ONE);
+    ec_enc_done(e);
+    assert(load64(e + 88) == 0, "pvq enc: no error");
+    var X2 = alloc(16 * 8);
+    var d = ec_dec_new(buf, 16);
+    var cm2 = alg_unquant(d, X2, 16, 7, 2, 1, F64_ONE);
+    assert(cm == cm2, "pvq: collapse mask enc==dec");
+    var maxd = F64_ZERO; var i = 0;
+    while (i < 16) {
+        var dd = f64_sub(load64(X + i * 8), load64(X2 + i * 8));
+        if (f64_lt(dd, F64_ZERO) == 1) { dd = f64_neg(dd); }
+        if (f64_gt(dd, maxd) == 1) { maxd = dd; }
+        i = i + 1;
+    }
+    assert(f64_lt(maxd, f64_div(f64_from(1), f64_from(1000000))) == 1, "pvq: resynth enc==dec (bit-exact)");
+    var dot = F64_ZERO; var nx = F64_ZERO; var no = F64_ZERO; i = 0;
+    while (i < 16) {
+        var xv = load64(X + i * 8); var ov = load64(Xo + i * 8);
+        dot = f64_add(dot, f64_mul(xv, ov)); nx = f64_add(nx, f64_mul(xv, xv)); no = f64_add(no, f64_mul(ov, ov));
+        i = i + 1;
+    }
+    var cosim = f64_div(dot, f64_sqrt(f64_mul(nx, no)));
+    assert(f64_gt(cosim, f64_div(f64_from(85), f64_from(100))) == 1, "pvq: quantized shape cosine > 0.85");
+    return 0;
+}
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14482,6 +14536,7 @@ fn test_opus_rfc_all() {
     test_ec_enc_rfc();
     test_ec_laplace_encode_rfc();
     test_celt_energy_encode_rfc();
+    test_celt_pvq_encode_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();
