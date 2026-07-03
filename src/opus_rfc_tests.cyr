@@ -698,6 +698,37 @@ fn test_celt_pvq_encode_rfc() {
     assert(f64_gt(cosim, f64_div(f64_from(85), f64_from(100))) == 1, "pvq: quantized shape cosine > 0.85");
     return 0;
 }
+fn test_celt_compute_theta_rfc() {
+    test_group("opus: compute_theta encode -> decode round-trip (mono split angle)");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    var N = 8; var b = 240; var B = 1; var B0 = 1; var LM = 3;
+    var Xd = alloc(16 * 8);
+    var j = 0; while (j < 8) { store64(Xd + j * 8, F64_ONE); j = j + 1; }
+    while (j < 16) { store64(Xd + j * 8, f64_div(f64_from(35), f64_from(100))); j = j + 1; }
+    # --- encode ---
+    var buf = alloc(16); var ee = ec_enc_new(buf, 16);
+    var ctxe = alloc(96); var ci = 0; while (ci < 12) { store64(ctxe + ci * 8, 0); ci = ci + 1; }
+    store64(ctxe + 0, ee); store64(ctxe + 16, 10000); store64(ctxe + 24, 10); store64(ctxe + 32, 2); store64(ctxe + 48, 100); store64(ctxe + 72, 1);
+    var sctxe = alloc(64);
+    compute_theta(ctxe, Xd, Xd + 8 * 8, N, b, B, B0, LM, 0, 15, sctxe);
+    ec_enc_done(ee);
+    var itheta_e = load64(sctxe + 24);
+    # --- decode ---
+    var dd = ec_dec_new(buf, 16);
+    var ctxd = alloc(96); ci = 0; while (ci < 12) { store64(ctxd + ci * 8, 0); ci = ci + 1; }
+    store64(ctxd + 0, dd); store64(ctxd + 16, 10000); store64(ctxd + 24, 10); store64(ctxd + 32, 2); store64(ctxd + 48, 100); store64(ctxd + 72, 0);
+    var sctxd = alloc(64);
+    compute_theta(ctxd, 0, 0, N, b, B, B0, LM, 0, 15, sctxd);
+    var itheta_d = load64(sctxd + 24);
+    syscall(1, 2, "theta_enc=", 10); fmt_int_fd(2, itheta_e); syscall(1, 2, " theta_dec=", 11); fmt_int_fd(2, itheta_d); syscall(1, 2, "\n", 1);
+    assert(itheta_e != 0, "compute_theta: itheta actually coded (qn>1)");
+    assert(itheta_e == itheta_d, "compute_theta: itheta enc==dec");
+    assert(load64(sctxe + 0) == load64(sctxd + 0), "compute_theta: imid enc==dec");
+    assert(load64(sctxe + 8) == load64(sctxd + 8), "compute_theta: iside enc==dec");
+    assert(load64(sctxe + 16) == load64(sctxd + 16), "compute_theta: delta enc==dec");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14537,6 +14568,7 @@ fn test_opus_rfc_all() {
     test_ec_laplace_encode_rfc();
     test_celt_energy_encode_rfc();
     test_celt_pvq_encode_rfc();
+    test_celt_compute_theta_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();

@@ -2490,12 +2490,49 @@ fn stereo_merge(X, Y, mid, N) {
     return 0;
 }
 
-# compute_theta (bands.c:700) — decode angle, fill sctx[0..7]:
-#  imid,iside,delta,itheta,qalloc,inv,new_b,new_fill
-fn compute_theta(ctx, N, b, B, B0, LM, stereo, fill, sctx) {
+# stereo_itheta (vq.c): the split angle in Q30 from the two sides' energies. Encoder-side —
+# mono split uses X (first half) vs Y (second half); stereo uses (X+Y)/(X-Y). We use the
+# exact atan2 (the decoder reconstructs from the *quantized* itheta, so bit-exactness of the
+# pre-quant angle isn't required). itheta_q30 = round(2^30 * (2/pi)*atan2(side, mid)).
+fn stereo_itheta(X, Y, stereo, N) {
+    var Emid = F64_ZERO;
+    var Eside = F64_ZERO;
+    var i = 0;
+    if (stereo != 0) {
+        while (i < N) {
+            var xi = load64(X + i * 8);
+            var yi = load64(Y + i * 8);
+            var m = f64_add(xi, yi);
+            var s = f64_sub(xi, yi);
+            Emid = f64_add(Emid, f64_mul(m, m));
+            Eside = f64_add(Eside, f64_mul(s, s));
+            i = i + 1;
+        }
+    } else {
+        while (i < N) {
+            var xi = load64(X + i * 8);
+            Emid = f64_add(Emid, f64_mul(xi, xi));
+            var yi = load64(Y + i * 8);
+            Eside = f64_add(Eside, f64_mul(yi, yi));
+            i = i + 1;
+        }
+    }
+    var mid = f64_sqrt(Emid);
+    var side = f64_sqrt(Eside);
+    var norm = f64_mul(f64_atan2(side, mid), f64_div(F64_TWO, F64_PI));   # (2/pi)*atan2 in [0,1]
+    var scaled = f64_mul(norm, f64_from(1073741824));                     # * 2^30
+    return f64_to(f64_add(scaled, F64_HALF));                            # round; scaled>=0
+}
+
+# compute_theta (bands.c:700) — encode/decode the split angle, fill sctx[0..7]:
+#  imid,iside,delta,itheta,qalloc,inv,new_b,new_fill. `encode` (ctx+72) selects direction;
+#  X/Y supply the angle on encode. theta_round at ctx+80 (0 for CELT mono/decode).
+fn compute_theta(ctx, X, Y, N, b, B, B0, LM, stereo, fill, sctx) {
     var ec = load64(ctx + 0);
     var ii = load64(ctx + 24);
     var intensity = load64(ctx + 48);
+    var encode = load64(ctx + 72);
+    var theta_round = load64(ctx + 80);
     var pulse_cap = load64(_celt_logN + ii * 8) + LM * 8;
     var qoff = 4;
     if ((stereo != 0) & (N == 2)) { qoff = 16; }
@@ -2504,47 +2541,91 @@ fn compute_theta(ctx, N, b, B, B0, LM, stereo, fill, sctx) {
     if ((stereo != 0) & (ii >= intensity)) { qn = 1; }
     var tell = ec_tell_frac(ec);
     var itheta = 0;
+    if (encode != 0) { itheta = stereo_itheta(X, Y, stereo, N) >> 16; }
     var inv = 0;
     if (qn != 1) {
+        if (encode != 0) {
+            # quantize itheta (Q14 angle) to [0, qn]
+            if ((stereo == 0) | (theta_round == 0)) {
+                itheta = (itheta * qn + 8192) >> 14;
+                if ((stereo == 0) & (load64(ctx + 64) != 0) & (itheta > 0) & (itheta < qn)) {
+                    var unq = (itheta * 16384) / qn;
+                    var im0 = bitexact_cos(unq);
+                    var is0 = bitexact_cos(16384 - unq);
+                    var dl0 = frac_mul16((N - 1) << 7, bitexact_log2tan(is0, im0));
+                    if (dl0 > b) { itheta = qn; } else { if (dl0 < 0 - b) { itheta = 0; } }
+                }
+            } else {
+                var bias = 0 - (32767 / qn);
+                if (itheta > 8192) { bias = 32767 / qn; }
+                var down = (itheta * qn + bias) >> 14;
+                if (down < 0) { down = 0; }
+                if (down > qn - 1) { down = qn - 1; }
+                itheta = down;
+                if (theta_round >= 0) { itheta = down + 1; }
+            }
+        }
         if ((stereo != 0) & (N > 2)) {
             var p0 = 3;
             var x0 = qn / 2;
             var ft = p0 * (x0 + 1) + x0;
-            var fs = ec_decode(ec, ft);
-            var x = 0;
-            if (fs < (x0 + 1) * p0) { x = fs / p0; } else { x = x0 + 1 + (fs - (x0 + 1) * p0); }
-            var fl = 0;
-            var fh = 0;
-            if (x <= x0) { fl = p0 * x; fh = p0 * (x + 1); }
-            else { fl = (x - 1 - x0) + (x0 + 1) * p0; fh = (x - x0) + (x0 + 1) * p0; }
-            ec_dec_update(ec, fl, fh, ft);
-            itheta = x;
+            if (encode != 0) {
+                var xe = itheta;
+                var fle = 0; var fhe = 0;
+                if (xe <= x0) { fle = p0 * xe; fhe = p0 * (xe + 1); }
+                else { fle = (xe - 1 - x0) + (x0 + 1) * p0; fhe = (xe - x0) + (x0 + 1) * p0; }
+                ec_encode(ec, fle, fhe, ft);
+            } else {
+                var fs = ec_decode(ec, ft);
+                var x = 0;
+                if (fs < (x0 + 1) * p0) { x = fs / p0; } else { x = x0 + 1 + (fs - (x0 + 1) * p0); }
+                var fl = 0;
+                var fh = 0;
+                if (x <= x0) { fl = p0 * x; fh = p0 * (x + 1); }
+                else { fl = (x - 1 - x0) + (x0 + 1) * p0; fh = (x - x0) + (x0 + 1) * p0; }
+                ec_dec_update(ec, fl, fh, ft);
+                itheta = x;
+            }
         } else {
             if ((B0 > 1) | (stereo != 0)) {
-                itheta = ec_dec_uint(ec, qn + 1);
+                if (encode != 0) { ec_enc_uint(ec, itheta, qn + 1); }
+                else { itheta = ec_dec_uint(ec, qn + 1); }
             } else {
                 var ft2 = ((qn >> 1) + 1) * ((qn >> 1) + 1);
-                var fm = ec_decode(ec, ft2);
-                var fl2 = 0;
-                var fs2 = 0;
-                var thr = ((qn >> 1) * ((qn >> 1) + 1)) >> 1;
-                if (fm < thr) {
-                    itheta = (isqrt32(8 * fm + 1) - 1) >> 1;
-                    fs2 = itheta + 1;
-                    fl2 = (itheta * (itheta + 1)) >> 1;
+                if (encode != 0) {
+                    var fse = 0; var fle2 = 0;
+                    if (itheta <= (qn >> 1)) { fse = itheta + 1; fle2 = (itheta * (itheta + 1)) >> 1; }
+                    else { fse = qn + 1 - itheta; fle2 = ft2 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1); }
+                    ec_encode(ec, fle2, fle2 + fse, ft2);
                 } else {
-                    itheta = (2 * (qn + 1) - isqrt32(8 * (ft2 - fm - 1) + 1)) >> 1;
-                    fs2 = qn + 1 - itheta;
-                    fl2 = ft2 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                    var fm = ec_decode(ec, ft2);
+                    var fl2 = 0;
+                    var fs2 = 0;
+                    var thr = ((qn >> 1) * ((qn >> 1) + 1)) >> 1;
+                    if (fm < thr) {
+                        itheta = (isqrt32(8 * fm + 1) - 1) >> 1;
+                        fs2 = itheta + 1;
+                        fl2 = (itheta * (itheta + 1)) >> 1;
+                    } else {
+                        itheta = (2 * (qn + 1) - isqrt32(8 * (ft2 - fm - 1) + 1)) >> 1;
+                        fs2 = qn + 1 - itheta;
+                        fl2 = ft2 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                    }
+                    ec_dec_update(ec, fl2, fl2 + fs2, ft2);
                 }
-                ec_dec_update(ec, fl2, fl2 + fs2, ft2);
             }
         }
         itheta = (itheta * 16384) / qn;
     } else {
         if (stereo != 0) {
-            if ((b > 16) & (load64(ctx + 16) > 16)) { inv = ec_dec_bit_logp(ec, 2); } else { inv = 0; }
-            if (load64(ctx + 56) != 0) { inv = 0; }
+            if (encode != 0) {
+                # stereo inv (side-inversion) encode is a follow-up; write inv=0 symmetrically.
+                if ((b > 16) & (load64(ctx + 16) > 16) & (load64(ctx + 56) == 0)) { ec_enc_bit_logp(ec, 0, 2); }
+                inv = 0;
+            } else {
+                if ((b > 16) & (load64(ctx + 16) > 16)) { inv = ec_dec_bit_logp(ec, 2); } else { inv = 0; }
+                if (load64(ctx + 56) != 0) { inv = 0; }
+            }
             itheta = 0;
         }
     }
@@ -2614,7 +2695,7 @@ fn quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill) {
         if (B == 1) { fill = (fill & 1) | (fill << 1); }
         var Bn = (B + 1) >> 1;
         var sctx = alloc(64);
-        compute_theta(ctx, Nh, b, Bn, B0, LMn, 0, fill, sctx);
+        compute_theta(ctx, X, Y, Nh, b, Bn, B0, LMn, 0, fill, sctx);
         var imid = load64(sctx + 0);
         var iside = load64(sctx + 8);
         var delta = load64(sctx + 16);
@@ -2774,7 +2855,7 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
     if (N == 1) { return quant_band_n1(ctx, X, Y, lowband_out); }
     var orig_fill = fill;
     var sctx = alloc(64);
-    compute_theta(ctx, N, b, B, B, LM, 1, fill, sctx);
+    compute_theta(ctx, X, Y, N, b, B, B, LM, 1, fill, sctx);
     var inv = load64(sctx + 40);
     var imid = load64(sctx + 0);
     var iside = load64(sctx + 8);
@@ -2853,7 +2934,7 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     # (start=17) never folds from the un-decoded low region. Zero for config-31.
     var norm_offset = M * load64(_celt_eBands + start * 8);
     var lowband_scratch_base = X_ + M * load64(_celt_eBands + 20 * 8) * 8;
-    var ctx = alloc(72);
+    var ctx = alloc(96);
     store64(ctx + 0, ec);
     store64(ctx + 8, load64(seed_ptr));
     store64(ctx + 32, spread);
@@ -2862,6 +2943,8 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     var avoid = 0;
     if (Bf > 1) { avoid = 1; }
     store64(ctx + 64, avoid);
+    store64(ctx + 72, 0);   # encode = 0 (this is the decode path)
+    store64(ctx + 80, 0);   # theta_round = 0
     var lowband_offset = 0;
     var update_lowband = 1;
     var i = start;
