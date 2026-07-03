@@ -548,6 +548,204 @@ fn ec_tell_frac(ec) {
 }
 
 # ================================================================
+# CELT range ENCODER (ec_enc) — RFC 6716 §4.1 / entenc.c port (the inverse of ec_dec).
+# ================================================================
+# Writes range-coded symbols to the FRONT of buf and raw bits to the END, sharing the
+# ec_ctx offset layout with the decoder so ec_dec_new() reads the encoder's output directly:
+#   ec+0 buf  +8 storage  +16 end_offs  +24 end_window  +32 nend_bits  +40 nbits_total
+#   +48 offs  +56 rng  +64 val  +72 ext(carry counter)  +80 rem  +88 error
+# Constants: EC_SYM_MAX=255, EC_SYM_BITS=8, EC_CODE_TOP=1<<31, EC_CODE_BOT=1<<23,
+#   EC_CODE_SHIFT=23, EC_UINT_BITS=8, EC_WINDOW_SIZE=32. val/rng are uint32 (& EC_U32).
+
+fn ec_enc_new(buf, size) {
+    var ec = alloc(96);
+    memset(ec, 0, 96);
+    store64(ec + 0, buf);            # buf
+    store64(ec + 8, size);           # storage
+    store64(ec + 40, 33);            # nbits_total = EC_CODE_BITS+1
+    store64(ec + 56, 0x80000000);    # rng = EC_CODE_TOP
+    store64(ec + 80, 0 - 1);         # rem = -1
+    return ec;                        # end_offs/end_window/nend_bits/offs/val/ext/error = 0
+}
+
+fn ec_write_byte(ec, value) {
+    if (load64(ec + 48) + load64(ec + 16) >= load64(ec + 8)) { return 0 - 1; }
+    store8(load64(ec + 0) + load64(ec + 48), value & 255);
+    store64(ec + 48, load64(ec + 48) + 1);
+    return 0;
+}
+
+fn ec_write_byte_at_end(ec, value) {
+    if (load64(ec + 48) + load64(ec + 16) >= load64(ec + 8)) { return 0 - 1; }
+    store64(ec + 16, load64(ec + 16) + 1);
+    store8(load64(ec + 0) + load64(ec + 8) - load64(ec + 16), value & 255);
+    return 0;
+}
+
+# ec_enc_carry_out: emit a symbol with a carry bit, buffering runs of 0xFF until the
+# carry is resolved (rem = last buffered byte, ext = count of pending 0xFF symbols).
+fn ec_enc_carry_out(ec, c) {
+    if (c != 255) {
+        var carry = c >> 8;
+        if (load64(ec + 80) >= 0) {
+            store64(ec + 88, load64(ec + 88) | ec_write_byte(ec, load64(ec + 80) + carry));
+        }
+        if (load64(ec + 72) > 0) {
+            var sym = (255 + carry) & 255;
+            var cont = 1;
+            while (cont == 1) {
+                store64(ec + 88, load64(ec + 88) | ec_write_byte(ec, sym));
+                store64(ec + 72, load64(ec + 72) - 1);
+                if (load64(ec + 72) > 0) { cont = 1; } else { cont = 0; }
+            }
+        }
+        store64(ec + 80, c & 255);
+    } else {
+        store64(ec + 72, load64(ec + 72) + 1);
+    }
+    return 0;
+}
+
+fn ec_enc_normalize(ec) {
+    while (load64(ec + 56) <= 0x800000) {
+        ec_enc_carry_out(ec, load64(ec + 64) >> 23);
+        store64(ec + 64, (load64(ec + 64) << 8) & 0x7FFFFFFF);
+        store64(ec + 56, (load64(ec + 56) << 8) & EC_U32);
+        store64(ec + 40, load64(ec + 40) + 8);
+    }
+    return 0;
+}
+
+fn ec_encode(ec, fl, fh, ft) {
+    var r = load64(ec + 56) / ft;
+    if (fl > 0) {
+        store64(ec + 64, (load64(ec + 64) + load64(ec + 56) - (r * (ft - fl))) & EC_U32);
+        store64(ec + 56, (r * (fh - fl)) & EC_U32);
+    } else {
+        store64(ec + 56, (load64(ec + 56) - (r * (ft - fh))) & EC_U32);
+    }
+    ec_enc_normalize(ec);
+    return 0;
+}
+
+fn ec_encode_bin(ec, fl, fh, bits) {
+    var r = load64(ec + 56) >> bits;
+    if (fl > 0) {
+        store64(ec + 64, (load64(ec + 64) + load64(ec + 56) - (r * ((1 << bits) - fl))) & EC_U32);
+        store64(ec + 56, (r * (fh - fl)) & EC_U32);
+    } else {
+        store64(ec + 56, (load64(ec + 56) - (r * ((1 << bits) - fh))) & EC_U32);
+    }
+    ec_enc_normalize(ec);
+    return 0;
+}
+
+# Encode one bit with P(one) = 1/(1<<logp).
+fn ec_enc_bit_logp(ec, val, logp) {
+    var r = load64(ec + 56);
+    var l = load64(ec + 64);
+    var s = r >> logp;
+    r = r - s;
+    if (val != 0) { store64(ec + 64, (l + r) & EC_U32); store64(ec + 56, s); }
+    else { store64(ec + 56, r); }
+    ec_enc_normalize(ec);
+    return 0;
+}
+
+fn ec_enc_icdf(ec, s, icdf, ftb) {
+    var r = load64(ec + 56) >> ftb;
+    if (s > 0) {
+        store64(ec + 64, (load64(ec + 64) + load64(ec + 56) - (r * load8(icdf + s - 1))) & EC_U32);
+        store64(ec + 56, (r * (load8(icdf + s - 1) - load8(icdf + s))) & EC_U32);
+    } else {
+        store64(ec + 56, (load64(ec + 56) - (r * load8(icdf + s))) & EC_U32);
+    }
+    ec_enc_normalize(ec);
+    return 0;
+}
+
+# Encode `bits` raw bits at the END of the buffer (LSB-first window, mirrors ec_dec_bits).
+fn ec_enc_bits(ec, fl, bits) {
+    var window = load64(ec + 24);
+    var used = load64(ec + 32);
+    if (used + bits > 32) {
+        var cont = 1;
+        while (cont == 1) {
+            store64(ec + 88, load64(ec + 88) | ec_write_byte_at_end(ec, window & 255));
+            window = window >> 8;
+            used = used - 8;
+            if (used >= 8) { cont = 1; } else { cont = 0; }
+        }
+    }
+    window = (window | (fl << used)) & EC_U32;
+    used = used + bits;
+    store64(ec + 24, window);
+    store64(ec + 32, used);
+    store64(ec + 40, load64(ec + 40) + bits);
+    return 0;
+}
+
+# Encode a uniformly-distributed integer fl in [0, ft) (ft > 1).
+fn ec_enc_uint(ec, fl, ft) {
+    ft = ft - 1;
+    var ftb = ec_ilog(ft);
+    if (ftb > 8) {
+        ftb = ftb - 8;
+        var ftv = (ft >> ftb) + 1;
+        var flv = fl >> ftb;
+        ec_encode(ec, flv, flv + 1, ftv);
+        ec_enc_bits(ec, fl & ((1 << ftb) - 1), ftb);
+    } else {
+        ec_encode(ec, fl, fl + 1, ft + 1);
+    }
+    return 0;
+}
+
+# Finalize: emit the minimum bits so the symbols decode correctly, flush buffered
+# carry + raw bits, zero the gap, and OR trailing raw bits into the last byte.
+fn ec_enc_done(ec) {
+    var l = 32 - ec_ilog(load64(ec + 56));
+    var msk = 0x7FFFFFFF >> l;
+    var end = (load64(ec + 64) + msk) & ((0 - 1 - msk) & EC_U32);
+    if ((end | msk) >= ((load64(ec + 64) + load64(ec + 56)) & EC_U32)) {
+        l = l + 1;
+        msk = msk >> 1;
+        end = (load64(ec + 64) + msk) & ((0 - 1 - msk) & EC_U32);
+    }
+    while (l > 0) {
+        ec_enc_carry_out(ec, end >> 23);
+        end = (end << 8) & 0x7FFFFFFF;
+        l = l - 8;
+    }
+    if ((load64(ec + 80) >= 0) | (load64(ec + 72) > 0)) { ec_enc_carry_out(ec, 0); }
+    var window = load64(ec + 24);
+    var used = load64(ec + 32);
+    while (used >= 8) {
+        store64(ec + 88, load64(ec + 88) | ec_write_byte_at_end(ec, window & 255));
+        window = window >> 8;
+        used = used - 8;
+    }
+    if (load64(ec + 88) == 0) {
+        var gap = load64(ec + 8) - load64(ec + 48) - load64(ec + 16);
+        var g = 0;
+        while (g < gap) { store8(load64(ec + 0) + load64(ec + 48) + g, 0); g = g + 1; }
+        if (used > 0) {
+            if (load64(ec + 16) >= load64(ec + 8)) { store64(ec + 88, 0 - 1); }
+            else {
+                l = 0 - l;
+                if ((load64(ec + 48) + load64(ec + 16) >= load64(ec + 8)) & (l < used)) {
+                    window = window & ((1 << l) - 1);
+                    store64(ec + 88, 0 - 1);
+                }
+                var lb = load64(ec + 0) + load64(ec + 8) - load64(ec + 16) - 1;
+                store8(lb, load8(lb) | (window & 255));
+            }
+        }
+    }
+    return 0;
+}
+
+# ================================================================
 # CELT band-energy decode (RFC 6716 §4.3) — float-build port of quant_bands.c
 # ================================================================
 # Energy is stored as base-2 log with the per-band mean (eMeans) removed
