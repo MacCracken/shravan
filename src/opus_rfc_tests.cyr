@@ -13090,6 +13090,37 @@ fn test_opus_celtwb_rfc() {
     return 0;
 }
 
+# SILK stereo predictor decode (stereo config 9, frame 0): the packet header reads
+# VAD0/LBRR0/VAD1/LBRR1, then silk_stereo_decode_pred → MS predictors (Q13). Bit-exact
+# vs a libopus golden (SSPRED dump).
+fn test_opus_silk_stereo_pred_rfc() {
+    test_group("opus: SILK stereo predictor decode bit-exact vs libopus");
+    var pl = alloc(148);
+    store8(pl + 0, 168); store8(pl + 1, 201); store8(pl + 2, 185); store8(pl + 3, 230); store8(pl + 4, 237); store8(pl + 5, 140); store8(pl + 6, 156); store8(pl + 7, 185); store8(pl + 8, 205); store8(pl + 9, 231); store8(pl + 10, 62); store8(pl + 11, 176); store8(pl + 12, 146); store8(pl + 13, 1); store8(pl + 14, 124); store8(pl + 15, 174);
+    store8(pl + 16, 208); store8(pl + 17, 242); store8(pl + 18, 239); store8(pl + 19, 132); store8(pl + 20, 173); store8(pl + 21, 133); store8(pl + 22, 72); store8(pl + 23, 158); store8(pl + 24, 213); store8(pl + 25, 162); store8(pl + 26, 174); store8(pl + 27, 212); store8(pl + 28, 159); store8(pl + 29, 120); store8(pl + 30, 252); store8(pl + 31, 170);
+    store8(pl + 32, 247); store8(pl + 33, 76); store8(pl + 34, 11); store8(pl + 35, 120); store8(pl + 36, 38); store8(pl + 37, 171); store8(pl + 38, 182); store8(pl + 39, 152); store8(pl + 40, 241); store8(pl + 41, 204); store8(pl + 42, 209); store8(pl + 43, 62); store8(pl + 44, 222); store8(pl + 45, 18); store8(pl + 46, 140); store8(pl + 47, 251);
+    store8(pl + 48, 5); store8(pl + 49, 199); store8(pl + 50, 218); store8(pl + 51, 210); store8(pl + 52, 138); store8(pl + 53, 227); store8(pl + 54, 144); store8(pl + 55, 46); store8(pl + 56, 48); store8(pl + 57, 215); store8(pl + 58, 58); store8(pl + 59, 93); store8(pl + 60, 146); store8(pl + 61, 104); store8(pl + 62, 102); store8(pl + 63, 182);
+    store8(pl + 64, 63); store8(pl + 65, 144); store8(pl + 66, 185); store8(pl + 67, 79); store8(pl + 68, 67); store8(pl + 69, 113); store8(pl + 70, 80); store8(pl + 71, 8); store8(pl + 72, 36); store8(pl + 73, 193); store8(pl + 74, 44); store8(pl + 75, 104); store8(pl + 76, 33); store8(pl + 77, 110); store8(pl + 78, 206); store8(pl + 79, 72);
+    store8(pl + 80, 219); store8(pl + 81, 238); store8(pl + 82, 249); store8(pl + 83, 2); store8(pl + 84, 69); store8(pl + 85, 50); store8(pl + 86, 22); store8(pl + 87, 241); store8(pl + 88, 3); store8(pl + 89, 153); store8(pl + 90, 185); store8(pl + 91, 65); store8(pl + 92, 213); store8(pl + 93, 87); store8(pl + 94, 155); store8(pl + 95, 173);
+    store8(pl + 96, 78); store8(pl + 97, 193); store8(pl + 98, 138); store8(pl + 99, 2); store8(pl + 100, 246); store8(pl + 101, 192); store8(pl + 102, 37); store8(pl + 103, 98); store8(pl + 104, 67); store8(pl + 105, 181); store8(pl + 106, 117); store8(pl + 107, 141); store8(pl + 108, 155); store8(pl + 109, 232); store8(pl + 110, 15); store8(pl + 111, 252);
+    store8(pl + 112, 254); store8(pl + 113, 113); store8(pl + 114, 197); store8(pl + 115, 240); store8(pl + 116, 196); store8(pl + 117, 154); store8(pl + 118, 74); store8(pl + 119, 192); store8(pl + 120, 216); store8(pl + 121, 150); store8(pl + 122, 97); store8(pl + 123, 37); store8(pl + 124, 152); store8(pl + 125, 105); store8(pl + 126, 176); store8(pl + 127, 93);
+    store8(pl + 128, 90); store8(pl + 129, 31); store8(pl + 130, 168); store8(pl + 131, 161); store8(pl + 132, 27); store8(pl + 133, 118); store8(pl + 134, 128); store8(pl + 135, 104); store8(pl + 136, 117); store8(pl + 137, 220); store8(pl + 138, 241); store8(pl + 139, 191); store8(pl + 140, 206); store8(pl + 141, 37); store8(pl + 142, 248); store8(pl + 143, 129);
+    store8(pl + 144, 228); store8(pl + 145, 48); store8(pl + 146, 238); store8(pl + 147, 192);
+    var ec = ec_dec_new(pl, 148);
+    var vad0 = ec_dec_bit_logp(ec, 1);
+    var lbrr0 = ec_dec_bit_logp(ec, 1);
+    var vad1 = ec_dec_bit_logp(ec, 1);
+    var lbrr1 = ec_dec_bit_logp(ec, 1);
+    var pred = alloc(2 * 8);
+    silk_stereo_decode_pred(ec, pred);
+    assert_eq(vad0, 1, "st vad0");
+    assert_eq(vad1, 1, "st vad1");
+    assert_eq(load64(pred + 0), 328, "st pred0");
+    assert_eq(load64(pred + 8), 328, "st pred1");
+    assert_eq(ec_tell(ec), 15, "st tell");
+    return 0;
+}
+
 fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_laplace_rfc_vectors();
@@ -13104,5 +13135,6 @@ fn test_opus_rfc_all() {
     test_silk_isort_rfc();
     test_opus_hybrid_rfc();
     test_opus_celtwb_rfc();
+    test_opus_silk_stereo_pred_rfc();
     return 0;
 }

@@ -1796,3 +1796,58 @@ fn silk_decode_pcm_ec(st, rst, sMid, ec, out48) {
     silk_resampler(rst, out48, rin, frame_length);
     return 0;
 }
+
+# ---- SILK stereo: prediction weights + mid-only flag (stereo_decode_pred.c) ----
+var _silk_stereo_pred_joint = 0;
+var _silk_stereo_only_mid = 0;
+var _silk_uniform3 = 0;
+var _silk_uniform5 = 0;
+var _silk_stereo_pred_q13 = 0;
+
+fn _silk_stereo_tables_init() {
+    _silk_stereo_pred_joint = alloc(25);
+    store8(_silk_stereo_pred_joint + 0, 249); store8(_silk_stereo_pred_joint + 1, 247); store8(_silk_stereo_pred_joint + 2, 246); store8(_silk_stereo_pred_joint + 3, 245); store8(_silk_stereo_pred_joint + 4, 244); store8(_silk_stereo_pred_joint + 5, 234); store8(_silk_stereo_pred_joint + 6, 210); store8(_silk_stereo_pred_joint + 7, 202); store8(_silk_stereo_pred_joint + 8, 201); store8(_silk_stereo_pred_joint + 9, 200); store8(_silk_stereo_pred_joint + 10, 197); store8(_silk_stereo_pred_joint + 11, 174); store8(_silk_stereo_pred_joint + 12, 82); store8(_silk_stereo_pred_joint + 13, 59); store8(_silk_stereo_pred_joint + 14, 56); store8(_silk_stereo_pred_joint + 15, 55); store8(_silk_stereo_pred_joint + 16, 54); store8(_silk_stereo_pred_joint + 17, 46); store8(_silk_stereo_pred_joint + 18, 22); store8(_silk_stereo_pred_joint + 19, 12); store8(_silk_stereo_pred_joint + 20, 11); store8(_silk_stereo_pred_joint + 21, 10); store8(_silk_stereo_pred_joint + 22, 9); store8(_silk_stereo_pred_joint + 23, 7); store8(_silk_stereo_pred_joint + 24, 0);
+    _silk_stereo_only_mid = alloc(2);
+    store8(_silk_stereo_only_mid + 0, 64); store8(_silk_stereo_only_mid + 1, 0);
+    _silk_uniform3 = alloc(3);
+    store8(_silk_uniform3 + 0, 171); store8(_silk_uniform3 + 1, 85); store8(_silk_uniform3 + 2, 0);
+    _silk_uniform5 = alloc(5);
+    store8(_silk_uniform5 + 0, 205); store8(_silk_uniform5 + 1, 154); store8(_silk_uniform5 + 2, 102); store8(_silk_uniform5 + 3, 51); store8(_silk_uniform5 + 4, 0);
+    _silk_stereo_pred_q13 = alloc(16 * 8);
+    store64(_silk_stereo_pred_q13 + 0 * 8, 0 - 13732); store64(_silk_stereo_pred_q13 + 1 * 8, 0 - 10050); store64(_silk_stereo_pred_q13 + 2 * 8, 0 - 8266); store64(_silk_stereo_pred_q13 + 3 * 8, 0 - 7526); store64(_silk_stereo_pred_q13 + 4 * 8, 0 - 6500); store64(_silk_stereo_pred_q13 + 5 * 8, 0 - 5000); store64(_silk_stereo_pred_q13 + 6 * 8, 0 - 2950); store64(_silk_stereo_pred_q13 + 7 * 8, 0 - 820);
+    store64(_silk_stereo_pred_q13 + 8 * 8, 820); store64(_silk_stereo_pred_q13 + 9 * 8, 2950); store64(_silk_stereo_pred_q13 + 10 * 8, 5000); store64(_silk_stereo_pred_q13 + 11 * 8, 6500); store64(_silk_stereo_pred_q13 + 12 * 8, 7526); store64(_silk_stereo_pred_q13 + 13 * 8, 8266); store64(_silk_stereo_pred_q13 + 14 * 8, 10050); store64(_silk_stereo_pred_q13 + 15 * 8, 13732);
+    return 0;
+}
+# silk_smlabb(a,b,c) = a + (int16)b * (int16)c  (SMLABB, no overflow concern here).
+fn silk_smlabb(a, b, c) { return silk_sx32(a + _i16(b) * _i16(c)); }
+
+# silk_stereo_decode_pred: decode the 2 mid/side predictors into pred_out[2] (Q13).
+fn silk_stereo_decode_pred(ec, pred_out) {
+    if (_silk_stereo_pred_q13 == 0) { _silk_stereo_tables_init(); }
+    var n = ec_dec_icdf(ec, _silk_stereo_pred_joint, 8);
+    var ix02 = n / 5;                       # DIV32_16 (n >= 0, truncating)
+    var ix12 = n - 5 * ix02;
+    var ix00 = ec_dec_icdf(ec, _silk_uniform3, 8);
+    var ix01 = ec_dec_icdf(ec, _silk_uniform5, 8);
+    var ix10 = ec_dec_icdf(ec, _silk_uniform3, 8);
+    var ix11 = ec_dec_icdf(ec, _silk_uniform5, 8);
+    # dequant channel 0
+    ix00 = ix00 + 3 * ix02;
+    var low0 = load64(_silk_stereo_pred_q13 + ix00 * 8);
+    var step0 = silk_smulwb(load64(_silk_stereo_pred_q13 + (ix00 + 1) * 8) - low0, 6554);
+    store64(pred_out + 0, silk_smlabb(low0, step0, 2 * ix01 + 1));
+    # dequant channel 1
+    ix10 = ix10 + 3 * ix12;
+    var low1 = load64(_silk_stereo_pred_q13 + ix10 * 8);
+    var step1 = silk_smulwb(load64(_silk_stereo_pred_q13 + (ix10 + 1) * 8) - low1, 6554);
+    store64(pred_out + 8, silk_smlabb(low1, step1, 2 * ix11 + 1));
+    # subtract second from first predictor
+    store64(pred_out + 0, load64(pred_out + 0) - load64(pred_out + 8));
+    return 0;
+}
+
+# silk_stereo_decode_mid_only: 1 = only the mid channel is coded.
+fn silk_stereo_decode_mid_only(ec) {
+    if (_silk_stereo_only_mid == 0) { _silk_stereo_tables_init(); }
+    return ec_dec_icdf(ec, _silk_stereo_only_mid, 8);
+}

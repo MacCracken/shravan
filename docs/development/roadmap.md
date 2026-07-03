@@ -118,16 +118,30 @@ lit up **CELT-only 20 ms configs 19 (NB) / 23 (WB) / 27 (SWB)** — config-23 ve
   **stereo** hybrid (needs SILK MS stereo), and redundant-frame audio. CELT-only non-20 ms
   frame sizes remain too.
 
-### v2.6.3 — Opus encoder conformance (libopus decodes OURS) · large
-The decode side is real (2.6.0–2.6.2); make the encode side real too.
+### v2.6.3 — Opus SILK stereo · medium–large (unlocks stereo SILK + stereo hybrid)
+CELT stereo already decodes (config 31 stereo, 2.6.0). The gap is SILK's mid/side (MS) stereo.
+- `feat(opus): SILK MS stereo decode — silk_stereo_decode_pred (prediction weights, 2 stages
+  + interpolation), two channel states (mid + side) each decoded as a mono SILK frame,
+  silk_stereo_MS_to_LR reconstruction with the sMid/sSide 2-sample history + per-sample weight
+  smoothing`. Unlocks stereo config 1/9 (SILK) and stereo config 13/15 (hybrid — CELT high
+  band already does stereo). Verify per-channel vs a libopus golden.
+
+### v2.6.4 — Opus 10 ms frames · medium (config 12/14 + CELT LM=2)
+20 ms is done; add the 10 ms frame size.
+- `feat(opus): CELT LM=2 (480-sample frames, N=480, M=4, short=120) — parameterize the
+  N=960/M=8/LM=3 hardcodes; SILK 10 ms (nb_subfr=2); wire hybrid config 12 (SWB 10 ms) /
+  14 (FB 10 ms) + the 10 ms CELT-only configs (18/22/26/30)`. Verify vs libopus.
+
+### v2.6.5 — Opus encoder conformance (libopus decodes OURS) · large
+The decode side is real (2.6.0–2.6.4); make the encode side real too.
 - `feat(opus): real ec_enc + RFC-6716 CELT encode (band energy quant, allocation, PVQ
   search/encode via icwrs, TOC)` — goal: a shravan-encoded `.opus` decodes correctly in
   libopus/ffmpeg. Supersedes the bespoke 2.5.9 encoder. (SILK/hybrid encode follow.)
 
-### v2.6.4 — Opus CELT completion · medium (refinements from 2.5.9)
+### v2.6.6 — Opus CELT completion · medium (refinements from 2.5.9)
 - `feat(opus): true overlapping short-window transient coding + two-pass VBR`.
 
-### v2.6.5 — ALAC live + the open correctness bugs · medium
+### v2.6.7 — ALAC live + the open correctness bugs · medium
 Make the dead code live and close every low-severity bug.
 - `feat(alac): wire detect_format ALAC branch + codec_open FMT_ALAC dispatch + ALAC-in-MP4 routing (mp4 → alac_decode); verify on a real ALAC frame with a value-level test` — the decoder exists but is unreachable today.
 - `fix(mp3): MPEG-2.5 8 kHz low-bitrate short blocks (~0.7 today; sfb tables + reservoir are byte-verified, 8 kHz is exact at higher bitrate — a narrow short-block interaction)`.
@@ -135,18 +149,18 @@ Make the dead code live and close every low-severity bug.
 - `fix(wav): WAVE_FORMAT_EXTENSIBLE container-bytes vs valid-bits (24-in-32 mis-decode)`.
 - `chore(core): resolve the detect_format/sankoch symbol collision (namespace shravan's) — clears the build warning + consumer hazard`.
 
-### v2.6.6 — untrusted-input fuzz coverage · small–medium
+### v2.6.8 — untrusted-input fuzz coverage · small–medium
 Close the fuzz gaps opened since 2.5.2 (decoders that parse hostile input but have no fuzz target).
 - `test/fuzz: AAC-decode, MP4-demux, and Opus-decode fuzz targets (vendor the codec chain into the standalone harness); harden anything they surface. Target ≥90K calls / 0 crashes each.`
 
-### v2.6.7 — MP4/M4A container completeness · medium (real-world `.m4a`)
+### v2.6.9 — MP4/M4A container completeness · medium (real-world `.m4a`)
 - `feat(mp4): esds/AudioSpecificConfig parse (drop the hardcoded LC config), AudioSampleEntry v1/v2, multi-track + edit-list (elst/stts gapless trim), co64/largesize (>4 GiB)`.
 
-### v2.6.8 — FLAC encoder completion · medium–large
+### v2.6.10 — FLAC encoder completion · medium–large
 Today FLAC encodes Fixed-prediction only; make it a real encoder + verify the decoder.
 - `feat(flac): LPC encoder (autocorrelation + Levinson-Durbin + quantized coefficients), partitioned Rice, adaptive stereo-mode choice, CONSTANT subframe, SEEKTABLE emit, decoder MD5 signature verify`.
 
-### v2.6.9 — AAC quality completion · medium
+### v2.6.11 — AAC quality completion · medium
 Refinements deferred from 2.5.10 (AAC already produces audio).
 - `feat(aac): re-enable TNS with proper prediction-gain-gated noise shaping (disabled today — it amplified quant noise) + short-window + stereo/CPE`.
 - `feat(aac): real HCB6 tables (reuses HCB5 today; our encoder never selects cb6) + psychoacoustic ATH floor + tonality-adjusted SMR; optional rate/distortion scale-factor loop (replaces the peak heuristic)`.
