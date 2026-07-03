@@ -5601,7 +5601,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                     var sfs = 8;
                     if (config == 9) { sfs = 16; }
                     if (silk_fs != sfs) {
-                        silk_st = silk_decoder_init(sfs);
+                        silk_st = silk_decoder_init(sfs, 4);
                         silk_rst = silk_resampler_init(sfs);
                         silk_mid = alloc(2 * 8);
                         store64(silk_mid + 0, 0); store64(silk_mid + 8, 0);
@@ -5623,8 +5623,8 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                     var ssfs = 8;
                     if (config == 9) { ssfs = 16; }
                     if (sk_sfs != ssfs) {
-                        sk_st0 = silk_decoder_init(ssfs);
-                        sk_st1 = silk_decoder_init(ssfs);
+                        sk_st0 = silk_decoder_init(ssfs, 4);
+                        sk_st1 = silk_decoder_init(ssfs, 4);
                         sk_rstL = silk_resampler_init(ssfs);
                         sk_rstR = silk_resampler_init(ssfs);
                         sk_stereo = alloc(6 * 8);
@@ -5648,7 +5648,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             if ((handled == 0) & (stbit == 0) & (code == 0) & (plen >= 2)) {
                 if ((config == 13) | (config == 15)) {
                     if (silk_fs != 16) {
-                        silk_st = silk_decoder_init(16);
+                        silk_st = silk_decoder_init(16, 4);
                         silk_rst = silk_resampler_init(16);
                         silk_mid = alloc(2 * 8);
                         store64(silk_mid + 0, 0); store64(silk_mid + 8, 0);
@@ -5686,8 +5686,8 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             if ((handled == 0) & (stbit == 1) & (code == 0) & (plen >= 2) & (channels == 2)) {
                 if ((config == 13) | (config == 15)) {
                     if (sk_sfs != 16) {
-                        sk_st0 = silk_decoder_init(16);
-                        sk_st1 = silk_decoder_init(16);
+                        sk_st0 = silk_decoder_init(16, 4);
+                        sk_st1 = silk_decoder_init(16, 4);
                         sk_rstL = silk_resampler_init(16);
                         sk_rstR = silk_resampler_init(16);
                         sk_stereo = alloc(6 * 8);

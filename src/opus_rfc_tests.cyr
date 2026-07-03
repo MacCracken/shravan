@@ -2853,13 +2853,13 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 38 * 8), 28, "sw1 LTPI3");
     # sw1 pitch + LTP (voiced, WB) bit-exact vs libopus decode_pitch/decode_parameters
     var pl = alloc(4 * 8);
-    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 16, pl);
+    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 16, pl, 4);
     assert_eq(load64(pl + 0 * 8), 145, "sw1 pitchL0");
     assert_eq(load64(pl + 1 * 8), 145, "sw1 pitchL1");
     assert_eq(load64(pl + 2 * 8), 145, "sw1 pitchL2");
     assert_eq(load64(pl + 3 * 8), 145, "sw1 pitchL3");
     var ltpc = alloc(20 * 8);
-    silk_decode_ltp(load64(out + 14 * 8), out + 35 * 8, ltpc);
+    silk_decode_ltp(load64(out + 14 * 8), out + 35 * 8, ltpc, 4);
     assert_eq(load64(ltpc + 0 * 8), 0, "sw1 LTP0");
     assert_eq(load64(ltpc + 1 * 8), 0 - 768, "sw1 LTP1");
     assert_eq(load64(ltpc + 2 * 8), 15360, "sw1 LTP2");
@@ -3188,10 +3188,10 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(out + 31 * 8), 29, "sn1 LTPI2");
     assert_eq(load64(out + 32 * 8), 29, "sn1 LTPI3");
     # sn1 pitch + LTP (voiced, NB) bit-exact vs libopus
-    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 8, pl);
+    silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), 8, pl, 4);
     assert_eq(load64(pl + 0 * 8), 73, "sn1 pitchL0");
     assert_eq(load64(pl + 3 * 8), 73, "sn1 pitchL3");
-    silk_decode_ltp(load64(out + 14 * 8), out + 29 * 8, ltpc);
+    silk_decode_ltp(load64(out + 14 * 8), out + 29 * 8, ltpc, 4);
     # subfr0 = idx29
     assert_eq(load64(ltpc + 0 * 8), 0 - 1664, "sn1 LTP0");
     assert_eq(load64(ltpc + 1 * 8), 5632, "sn1 LTP1");
@@ -3219,7 +3219,7 @@ fn test_silk_indices_rfc() {
     sn1_zi = 0; while (sn1_zi < 160) { assert_eq(load64(sn1_ex + sn1_zi * 8), load64(sn1_ee + sn1_zi * 8), "sn1 exc"); sn1_zi = sn1_zi + 1; }
     # ---- stateful frame decode (indices+pulses+params+core, cross-frame state) ----
     # WB: decode frame 0 then voiced frame 1 with shared decoder state
-    var wst = silk_decoder_init(16);
+    var wst = silk_decoder_init(16, 4);
     var wxq = alloc(320 * 8);
     silk_decode_frame(wst, sw0_p, 29, wxq);
     var fwb0e = alloc(320 * 8); var fwb0z = 0; while (fwb0z < 320) { store64(fwb0e + fwb0z * 8, 0); fwb0z = fwb0z + 1; }
@@ -3867,7 +3867,7 @@ fn test_silk_indices_rfc() {
     store64(fwb1e + 319 * 8, 0 - 3511);
     fwb1z = 0; while (fwb1z < 320) { assert_eq(load64(wxq + fwb1z * 8), load64(fwb1e + fwb1z * 8), "fwb1 fxq"); fwb1z = fwb1z + 1; }
     # NB: decode frame 0 then voiced frame 1
-    var nst = silk_decoder_init(8);
+    var nst = silk_decoder_init(8, 4);
     var nxq = alloc(160 * 8);
     silk_decode_frame(nst, sn0_p, 19, nxq);
     var fnb0e = alloc(160 * 8); var fnb0z = 0; while (fnb0z < 160) { store64(fnb0e + fnb0z * 8, 0); fnb0z = fnb0z + 1; }
@@ -4196,7 +4196,7 @@ fn test_silk_indices_rfc() {
     store64(fnb1e + 159 * 8, 0 - 3631);
     fnb1z = 0; while (fnb1z < 160) { assert_eq(load64(nxq + fnb1z * 8), load64(fnb1e + fnb1z * 8), "fnb1 fxq"); fnb1z = fnb1z + 1; }
     # ---- full SILK decode (bits -> 48kHz) via silk_decode_pcm, end-to-end vs libopus ----
-    var dwst = silk_decoder_init(16); var dwrst = silk_resampler_init(16);
+    var dwst = silk_decoder_init(16, 4); var dwrst = silk_resampler_init(16);
     var dwmid = alloc(2 * 8); store64(dwmid + 0, 0); store64(dwmid + 8, 0);
     var dwo = alloc(960 * 8);
     silk_decode_pcm(dwst, dwrst, dwmid, sw0_p, 29, dwo);
@@ -6090,7 +6090,7 @@ fn test_silk_indices_rfc() {
     store64(dwr1 + 958 * 8, 1494);
     store64(dwr1 + 959 * 8, 1239);
     dwr1q = 0; while (dwr1q < 960) { assert_eq(load64(dwo + dwr1q * 8), load64(dwr1 + dwr1q * 8), "dec wb1"); dwr1q = dwr1q + 1; }
-    var dnst = silk_decoder_init(8); var dnrst = silk_resampler_init(8);
+    var dnst = silk_decoder_init(8, 4); var dnrst = silk_resampler_init(8);
     var dnmid = alloc(2 * 8); store64(dnmid + 0, 0); store64(dnmid + 8, 0);
     var dno = alloc(960 * 8);
     silk_decode_pcm(dnst, dnrst, dnmid, sn0_p, 19, dno);
@@ -12804,7 +12804,7 @@ fn test_opus_hybrid_rfc() {
     store8(pl + 32, 198); store8(pl + 33, 123); store8(pl + 34, 51); store8(pl + 35, 221); store8(pl + 36, 202); store8(pl + 37, 200); store8(pl + 38, 31); store8(pl + 39, 235); store8(pl + 40, 18); store8(pl + 41, 163); store8(pl + 42, 75); store8(pl + 43, 65); store8(pl + 44, 111); store8(pl + 45, 104); store8(pl + 46, 85); store8(pl + 47, 42);
     store8(pl + 48, 110); store8(pl + 49, 23); store8(pl + 50, 168); store8(pl + 51, 124); store8(pl + 52, 38); store8(pl + 53, 72); store8(pl + 54, 26); store8(pl + 55, 155); store8(pl + 56, 40); store8(pl + 57, 222); store8(pl + 58, 84); store8(pl + 59, 39); store8(pl + 60, 26); store8(pl + 61, 4); store8(pl + 62, 185); store8(pl + 63, 83);
     store8(pl + 64, 166); store8(pl + 65, 147); store8(pl + 66, 236); store8(pl + 67, 107); store8(pl + 68, 106);
-    var hst = silk_decoder_init(16); var hrst = silk_resampler_init(16);
+    var hst = silk_decoder_init(16, 4); var hrst = silk_resampler_init(16);
     var hmid = alloc(2 * 8); store64(hmid + 0, 0); store64(hmid + 8, 0);
     var hcst = celt_dec_state_new();
     var hec = ec_dec_new(pl, 69);
@@ -13136,7 +13136,7 @@ fn test_opus_silk_stereo_rfc() {
     store8(pl + 112, 254); store8(pl + 113, 113); store8(pl + 114, 197); store8(pl + 115, 240); store8(pl + 116, 196); store8(pl + 117, 154); store8(pl + 118, 74); store8(pl + 119, 192); store8(pl + 120, 216); store8(pl + 121, 150); store8(pl + 122, 97); store8(pl + 123, 37); store8(pl + 124, 152); store8(pl + 125, 105); store8(pl + 126, 176); store8(pl + 127, 93);
     store8(pl + 128, 90); store8(pl + 129, 31); store8(pl + 130, 168); store8(pl + 131, 161); store8(pl + 132, 27); store8(pl + 133, 118); store8(pl + 134, 128); store8(pl + 135, 104); store8(pl + 136, 117); store8(pl + 137, 220); store8(pl + 138, 241); store8(pl + 139, 191); store8(pl + 140, 206); store8(pl + 141, 37); store8(pl + 142, 248); store8(pl + 143, 129);
     store8(pl + 144, 228); store8(pl + 145, 48); store8(pl + 146, 238); store8(pl + 147, 192);
-    var s0 = silk_decoder_init(16); var s1 = silk_decoder_init(16);
+    var s0 = silk_decoder_init(16, 4); var s1 = silk_decoder_init(16, 4);
     var rL = silk_resampler_init(16); var rR = silk_resampler_init(16);
     var sst = alloc(6 * 8); var zz = 0; while (zz < 6) { store64(sst + zz * 8, 0); zz = zz + 1; }
     var ec = ec_dec_new(pl, 148);
@@ -13407,7 +13407,7 @@ fn test_opus_hybrid_stereo_rfc() {
     store8(pl + 80, 102); store8(pl + 81, 50); store8(pl + 82, 144); store8(pl + 83, 61); store8(pl + 84, 132); store8(pl + 85, 199); store8(pl + 86, 235); store8(pl + 87, 36); store8(pl + 88, 50); store8(pl + 89, 156); store8(pl + 90, 20); store8(pl + 91, 240); store8(pl + 92, 220); store8(pl + 93, 122); store8(pl + 94, 211); store8(pl + 95, 144);
     store8(pl + 96, 57); store8(pl + 97, 69); store8(pl + 98, 125); store8(pl + 99, 238); store8(pl + 100, 52); store8(pl + 101, 146); store8(pl + 102, 58); store8(pl + 103, 98); store8(pl + 104, 239); store8(pl + 105, 199); store8(pl + 106, 167); store8(pl + 107, 42); store8(pl + 108, 116); store8(pl + 109, 229); store8(pl + 110, 77); store8(pl + 111, 47);
     store8(pl + 112, 25); store8(pl + 113, 130); store8(pl + 114, 8); store8(pl + 115, 80); store8(pl + 116, 66); store8(pl + 117, 72); store8(pl + 118, 87);
-    var s0 = silk_decoder_init(16); var s1 = silk_decoder_init(16);
+    var s0 = silk_decoder_init(16, 4); var s1 = silk_decoder_init(16, 4);
     var rL = silk_resampler_init(16); var rR = silk_resampler_init(16);
     var sst = alloc(6 * 8); var zz = 0; while (zz < 6) { store64(sst + zz * 8, 0); zz = zz + 1; }
     var cst = celt_dec_state_new();
@@ -13749,6 +13749,87 @@ fn test_opus_celt10_rfc() {
     return 0;
 }
 
+# SILK 10ms (config 8 WB, nb_subfr=2, frame_length=160), frame 0: verifies the
+# nb_subfr threading (2 gains, NInterp forced 4, 2 LTP, 10ms pitch codebooks).
+fn test_opus_silk10_rfc() {
+    test_group("opus: SILK 10ms (config 8, nb_subfr=2) correlation vs libopus");
+    var pl = alloc(27);
+    store8(pl + 0, 132); store8(pl + 1, 39); store8(pl + 2, 87); store8(pl + 3, 193); store8(pl + 4, 194); store8(pl + 5, 104); store8(pl + 6, 201); store8(pl + 7, 17); store8(pl + 8, 185); store8(pl + 9, 55); store8(pl + 10, 203); store8(pl + 11, 13); store8(pl + 12, 83); store8(pl + 13, 180); store8(pl + 14, 90); store8(pl + 15, 212);
+    store8(pl + 16, 58); store8(pl + 17, 235); store8(pl + 18, 199); store8(pl + 19, 124); store8(pl + 20, 219); store8(pl + 21, 191); store8(pl + 22, 42); store8(pl + 23, 232); store8(pl + 24, 3); store8(pl + 25, 15); store8(pl + 26, 99);
+    var st = silk_decoder_init(16, 2); var rst = silk_resampler_init(16);
+    var sMid = alloc(2 * 8); store64(sMid + 0, 0); store64(sMid + 8, 0);
+    var ec = ec_dec_new(pl, 27);
+    var o48 = alloc(480 * 8);
+    silk_decode_pcm_ec(st, rst, sMid, ec, o48);
+    var of = alloc(480 * 8); var j = 0;
+    while (j < 480) { store64(of + j * 8, f64_from(load64(o48 + j * 8))); j = j + 1; }
+    var g = alloc(480 * 8);
+    store64(g + 0 * 8, 0); store64(g + 1 * 8, 0); store64(g + 2 * 8, 0); store64(g + 3 * 8, 0); store64(g + 4 * 8, 0); store64(g + 5 * 8, 0); store64(g + 6 * 8, 0); store64(g + 7 * 8, 0);
+    store64(g + 8 * 8, 0); store64(g + 9 * 8, 0); store64(g + 10 * 8, 0); store64(g + 11 * 8, 0); store64(g + 12 * 8, 0); store64(g + 13 * 8, 0); store64(g + 14 * 8, 0); store64(g + 15 * 8, 0);
+    store64(g + 16 * 8, 0); store64(g + 17 * 8, 0); store64(g + 18 * 8, 0); store64(g + 19 * 8, 0); store64(g + 20 * 8, 0); store64(g + 21 * 8, 0); store64(g + 22 * 8, 0); store64(g + 23 * 8, 0);
+    store64(g + 24 * 8, 0); store64(g + 25 * 8, 0); store64(g + 26 * 8, 0); store64(g + 27 * 8, 0); store64(g + 28 * 8, 0); store64(g + 29 * 8, 0); store64(g + 30 * 8, 0); store64(g + 31 * 8, 0);
+    store64(g + 32 * 8, 0); store64(g + 33 * 8, 2); store64(g + 34 * 8, 6); store64(g + 35 * 8, 15); store64(g + 36 * 8, 30); store64(g + 37 * 8, 54); store64(g + 38 * 8, 89); store64(g + 39 * 8, 134);
+    store64(g + 40 * 8, 187); store64(g + 41 * 8, 243); store64(g + 42 * 8, 299); store64(g + 43 * 8, 351); store64(g + 44 * 8, 393); store64(g + 45 * 8, 420); store64(g + 46 * 8, 428); store64(g + 47 * 8, 416);
+    store64(g + 48 * 8, 387); store64(g + 49 * 8, 348); store64(g + 50 * 8, 303); store64(g + 51 * 8, 256); store64(g + 52 * 8, 209); store64(g + 53 * 8, 163); store64(g + 54 * 8, 122); store64(g + 55 * 8, 93);
+    store64(g + 56 * 8, 81); store64(g + 57 * 8, 87); store64(g + 58 * 8, 106); store64(g + 59 * 8, 133); store64(g + 60 * 8, 166); store64(g + 61 * 8, 206); store64(g + 62 * 8, 257); store64(g + 63 * 8, 317);
+    store64(g + 64 * 8, 381); store64(g + 65 * 8, 438); store64(g + 66 * 8, 473); store64(g + 67 * 8, 480); store64(g + 68 * 8, 458); store64(g + 69 * 8, 413); store64(g + 70 * 8, 351); store64(g + 71 * 8, 280);
+    store64(g + 72 * 8, 207); store64(g + 73 * 8, 141); store64(g + 74 * 8, 93); store64(g + 75 * 8, 69); store64(g + 76 * 8, 72); store64(g + 77 * 8, 96); store64(g + 78 * 8, 133); store64(g + 79 * 8, 173);
+    store64(g + 80 * 8, 210); store64(g + 81 * 8, 237); store64(g + 82 * 8, 250); store64(g + 83 * 8, 247); store64(g + 84 * 8, 225); store64(g + 85 * 8, 187); store64(g + 86 * 8, 137); store64(g + 87 * 8, 86);
+    store64(g + 88 * 8, 41); store64(g + 89 * 8, 11); store64(g + 90 * 8, 0); store64(g + 91 * 8, 6); store64(g + 92 * 8, 27); store64(g + 93 * 8, 57); store64(g + 94 * 8, 92); store64(g + 95 * 8, 126);
+    store64(g + 96 * 8, 153); store64(g + 97 * 8, 165); store64(g + 98 * 8, 146); store64(g + 99 * 8, 83); store64(g + 100 * 8, 0 - 26); store64(g + 101 * 8, 0 - 165); store64(g + 102 * 8, 0 - 297); store64(g + 103 * 8, 0 - 383);
+    store64(g + 104 * 8, 0 - 397); store64(g + 105 * 8, 0 - 341); store64(g + 106 * 8, 0 - 241); store64(g + 107 * 8, 0 - 133); store64(g + 108 * 8, 0 - 42); store64(g + 109 * 8, 30); store64(g + 110 * 8, 95); store64(g + 111 * 8, 159);
+    store64(g + 112 * 8, 212); store64(g + 113 * 8, 236); store64(g + 114 * 8, 221); store64(g + 115 * 8, 172); store64(g + 116 * 8, 112); store64(g + 117 * 8, 61); store64(g + 118 * 8, 32); store64(g + 119 * 8, 19);
+    store64(g + 120 * 8, 13); store64(g + 121 * 8, 9); store64(g + 122 * 8, 16); store64(g + 123 * 8, 44); store64(g + 124 * 8, 98); store64(g + 125 * 8, 174); store64(g + 126 * 8, 261); store64(g + 127 * 8, 349);
+    store64(g + 128 * 8, 431); store64(g + 129 * 8, 505); store64(g + 130 * 8, 567); store64(g + 131 * 8, 607); store64(g + 132 * 8, 618); store64(g + 133 * 8, 596); store64(g + 134 * 8, 547); store64(g + 135 * 8, 483);
+    store64(g + 136 * 8, 415); store64(g + 137 * 8, 352); store64(g + 138 * 8, 299); store64(g + 139 * 8, 262); store64(g + 140 * 8, 243); store64(g + 141 * 8, 246); store64(g + 142 * 8, 273); store64(g + 143 * 8, 321);
+    store64(g + 144 * 8, 382); store64(g + 145 * 8, 443); store64(g + 146 * 8, 491); store64(g + 147 * 8, 518); store64(g + 148 * 8, 518); store64(g + 149 * 8, 490); store64(g + 150 * 8, 438); store64(g + 151 * 8, 362);
+    store64(g + 152 * 8, 266); store64(g + 153 * 8, 155); store64(g + 154 * 8, 37); store64(g + 155 * 8, 0 - 79); store64(g + 156 * 8, 0 - 182); store64(g + 157 * 8, 0 - 264); store64(g + 158 * 8, 0 - 321); store64(g + 159 * 8, 0 - 353);
+    store64(g + 160 * 8, 0 - 362); store64(g + 161 * 8, 0 - 351); store64(g + 162 * 8, 0 - 324); store64(g + 163 * 8, 0 - 287); store64(g + 164 * 8, 0 - 246); store64(g + 165 * 8, 0 - 207); store64(g + 166 * 8, 0 - 178); store64(g + 167 * 8, 0 - 165);
+    store64(g + 168 * 8, 0 - 169); store64(g + 169 * 8, 0 - 189); store64(g + 170 * 8, 0 - 221); store64(g + 171 * 8, 0 - 260); store64(g + 172 * 8, 0 - 297); store64(g + 173 * 8, 0 - 332); store64(g + 174 * 8, 0 - 361); store64(g + 175 * 8, 0 - 383);
+    store64(g + 176 * 8, 0 - 399); store64(g + 177 * 8, 0 - 404); store64(g + 178 * 8, 0 - 394); store64(g + 179 * 8, 0 - 369); store64(g + 180 * 8, 0 - 334); store64(g + 181 * 8, 0 - 294); store64(g + 182 * 8, 0 - 257); store64(g + 183 * 8, 0 - 227);
+    store64(g + 184 * 8, 0 - 203); store64(g + 185 * 8, 0 - 186); store64(g + 186 * 8, 0 - 177); store64(g + 187 * 8, 0 - 183); store64(g + 188 * 8, 0 - 213); store64(g + 189 * 8, 0 - 267); store64(g + 190 * 8, 0 - 342); store64(g + 191 * 8, 0 - 428);
+    store64(g + 192 * 8, 0 - 514); store64(g + 193 * 8, 0 - 589); store64(g + 194 * 8, 0 - 650); store64(g + 195 * 8, 0 - 693); store64(g + 196 * 8, 0 - 712); store64(g + 197 * 8, 0 - 705); store64(g + 198 * 8, 0 - 673); store64(g + 199 * 8, 0 - 624);
+    store64(g + 200 * 8, 0 - 569); store64(g + 201 * 8, 0 - 519); store64(g + 202 * 8, 0 - 477); store64(g + 203 * 8, 0 - 442); store64(g + 204 * 8, 0 - 411); store64(g + 205 * 8, 0 - 382); store64(g + 206 * 8, 0 - 358); store64(g + 207 * 8, 0 - 345);
+    store64(g + 208 * 8, 0 - 355); store64(g + 209 * 8, 0 - 399); store64(g + 210 * 8, 0 - 485); store64(g + 211 * 8, 0 - 607); store64(g + 212 * 8, 0 - 745); store64(g + 213 * 8, 0 - 866); store64(g + 214 * 8, 0 - 933); store64(g + 215 * 8, 0 - 921);
+    store64(g + 216 * 8, 0 - 833); store64(g + 217 * 8, 0 - 698); store64(g + 218 * 8, 0 - 550); store64(g + 219 * 8, 0 - 416); store64(g + 220 * 8, 0 - 300); store64(g + 221 * 8, 0 - 194); store64(g + 222 * 8, 0 - 90); store64(g + 223 * 8, 4);
+    store64(g + 224 * 8, 68); store64(g + 225 * 8, 88); store64(g + 226 * 8, 63); store64(g + 227 * 8, 6); store64(g + 228 * 8, 0 - 67); store64(g + 229 * 8, 0 - 149); store64(g + 230 * 8, 0 - 240); store64(g + 231 * 8, 0 - 347);
+    store64(g + 232 * 8, 0 - 467); store64(g + 233 * 8, 0 - 585); store64(g + 234 * 8, 0 - 682); store64(g + 235 * 8, 0 - 744); store64(g + 236 * 8, 0 - 766); store64(g + 237 * 8, 0 - 749); store64(g + 238 * 8, 0 - 698); store64(g + 239 * 8, 0 - 620);
+    store64(g + 240 * 8, 0 - 524); store64(g + 241 * 8, 0 - 419); store64(g + 242 * 8, 0 - 316); store64(g + 243 * 8, 0 - 224); store64(g + 244 * 8, 0 - 143); store64(g + 245 * 8, 0 - 72); store64(g + 246 * 8, 0 - 8); store64(g + 247 * 8, 46);
+    store64(g + 248 * 8, 84); store64(g + 249 * 8, 99); store64(g + 250 * 8, 91); store64(g + 251 * 8, 64); store64(g + 252 * 8, 26); store64(g + 253 * 8, 0 - 17); store64(g + 254 * 8, 0 - 63); store64(g + 255 * 8, 0 - 104);
+    store64(g + 256 * 8, 0 - 135); store64(g + 257 * 8, 0 - 147); store64(g + 258 * 8, 0 - 138); store64(g + 259 * 8, 0 - 108); store64(g + 260 * 8, 0 - 65); store64(g + 261 * 8, 0 - 23); store64(g + 262 * 8, 11); store64(g + 263 * 8, 32);
+    store64(g + 264 * 8, 39); store64(g + 265 * 8, 33); store64(g + 266 * 8, 19); store64(g + 267 * 8, 1); store64(g + 268 * 8, 0 - 15); store64(g + 269 * 8, 0 - 21); store64(g + 270 * 8, 0 - 13); store64(g + 271 * 8, 10);
+    store64(g + 272 * 8, 47); store64(g + 273 * 8, 93); store64(g + 274 * 8, 143); store64(g + 275 * 8, 190); store64(g + 276 * 8, 227); store64(g + 277 * 8, 250); store64(g + 278 * 8, 257); store64(g + 279 * 8, 249);
+    store64(g + 280 * 8, 232); store64(g + 281 * 8, 209); store64(g + 282 * 8, 176); store64(g + 283 * 8, 126); store64(g + 284 * 8, 51); store64(g + 285 * 8, 0 - 47); store64(g + 286 * 8, 0 - 155); store64(g + 287 * 8, 0 - 253);
+    store64(g + 288 * 8, 0 - 320); store64(g + 289 * 8, 0 - 340); store64(g + 290 * 8, 0 - 310); store64(g + 291 * 8, 0 - 237); store64(g + 292 * 8, 0 - 130); store64(g + 293 * 8, 0 - 2); store64(g + 294 * 8, 134); store64(g + 295 * 8, 264);
+    store64(g + 296 * 8, 377); store64(g + 297 * 8, 469); store64(g + 298 * 8, 539); store64(g + 299 * 8, 593); store64(g + 300 * 8, 633); store64(g + 301 * 8, 654); store64(g + 302 * 8, 648); store64(g + 303 * 8, 609);
+    store64(g + 304 * 8, 540); store64(g + 305 * 8, 463); store64(g + 306 * 8, 424); store64(g + 307 * 8, 488); store64(g + 308 * 8, 739); store64(g + 309 * 8, 1258); store64(g + 310 * 8, 2093); store64(g + 311 * 8, 3225);
+    store64(g + 312 * 8, 4546); store64(g + 313 * 8, 5867); store64(g + 314 * 8, 6955); store64(g + 315 * 8, 7610); store64(g + 316 * 8, 7726); store64(g + 317 * 8, 7329); store64(g + 318 * 8, 6562); store64(g + 319 * 8, 5633);
+    store64(g + 320 * 8, 4735); store64(g + 321 * 8, 4009); store64(g + 322 * 8, 3529); store64(g + 323 * 8, 3344); store64(g + 324 * 8, 3501); store64(g + 325 * 8, 4056); store64(g + 326 * 8, 5041); store64(g + 327 * 8, 6415);
+    store64(g + 328 * 8, 8043); store64(g + 329 * 8, 9727); store64(g + 330 * 8, 11268); store64(g + 331 * 8, 12527); store64(g + 332 * 8, 13445); store64(g + 333 * 8, 14017); store64(g + 334 * 8, 14251); store64(g + 335 * 8, 14138);
+    store64(g + 336 * 8, 13651); store64(g + 337 * 8, 12789); store64(g + 338 * 8, 11606); store64(g + 339 * 8, 10234); store64(g + 340 * 8, 8858); store64(g + 341 * 8, 7675); store64(g + 342 * 8, 6850); store64(g + 343 * 8, 6482);
+    store64(g + 344 * 8, 6608); store64(g + 345 * 8, 7204); store64(g + 346 * 8, 8198); store64(g + 347 * 8, 9480); store64(g + 348 * 8, 10901); store64(g + 349 * 8, 12280); store64(g + 350 * 8, 13433); store64(g + 351 * 8, 14192);
+    store64(g + 352 * 8, 14447); store64(g + 353 * 8, 14166); store64(g + 354 * 8, 13389); store64(g + 355 * 8, 12220); store64(g + 356 * 8, 10787); store64(g + 357 * 8, 9223); store64(g + 358 * 8, 7655); store64(g + 359 * 8, 6200);
+    store64(g + 360 * 8, 4960); store64(g + 361 * 8, 4013); store64(g + 362 * 8, 3405); store64(g + 363 * 8, 3138); store64(g + 364 * 8, 3174); store64(g + 365 * 8, 3463); store64(g + 366 * 8, 3953); store64(g + 367 * 8, 4588);
+    store64(g + 368 * 8, 5307); store64(g + 369 * 8, 6008); store64(g + 370 * 8, 6563); store64(g + 371 * 8, 6831); store64(g + 372 * 8, 6700); store64(g + 373 * 8, 6127); store64(g + 374 * 8, 5131); store64(g + 375 * 8, 3785);
+    store64(g + 376 * 8, 2185); store64(g + 377 * 8, 435); store64(g + 378 * 8, 0 - 1350); store64(g + 379 * 8, 0 - 3039); store64(g + 380 * 8, 0 - 4487); store64(g + 381 * 8, 0 - 5566); store64(g + 382 * 8, 0 - 6197); store64(g + 383 * 8, 0 - 6374);
+    store64(g + 384 * 8, 0 - 6165); store64(g + 385 * 8, 0 - 5687); store64(g + 386 * 8, 0 - 5048); store64(g + 387 * 8, 0 - 4337); store64(g + 388 * 8, 0 - 3628); store64(g + 389 * 8, 0 - 3004); store64(g + 390 * 8, 0 - 2581); store64(g + 391 * 8, 0 - 2495);
+    store64(g + 392 * 8, 0 - 2854); store64(g + 393 * 8, 0 - 3687); store64(g + 394 * 8, 0 - 4925); store64(g + 395 * 8, 0 - 6433); store64(g + 396 * 8, 0 - 8051); store64(g + 397 * 8, 0 - 9644); store64(g + 398 * 8, 0 - 11103); store64(g + 399 * 8, 0 - 12327);
+    store64(g + 400 * 8, 0 - 13218); store64(g + 401 * 8, 0 - 13704); store64(g + 402 * 8, 0 - 13763); store64(g + 403 * 8, 0 - 13456); store64(g + 404 * 8, 0 - 12885); store64(g + 405 * 8, 0 - 12155); store64(g + 406 * 8, 0 - 11340); store64(g + 407 * 8, 0 - 10488);
+    store64(g + 408 * 8, 0 - 9663); store64(g + 409 * 8, 0 - 8964); store64(g + 410 * 8, 0 - 8525); store64(g + 411 * 8, 0 - 8462); store64(g + 412 * 8, 0 - 8829); store64(g + 413 * 8, 0 - 9602); store64(g + 414 * 8, 0 - 10690); store64(g + 415 * 8, 0 - 11975);
+    store64(g + 416 * 8, 0 - 13332); store64(g + 417 * 8, 0 - 14626); store64(g + 418 * 8, 0 - 15722); store64(g + 419 * 8, 0 - 16494); store64(g + 420 * 8, 0 - 16848); store64(g + 421 * 8, 0 - 16755); store64(g + 422 * 8, 0 - 16244); store64(g + 423 * 8, 0 - 15386);
+    store64(g + 424 * 8, 0 - 14275); store64(g + 425 * 8, 0 - 13013); store64(g + 426 * 8, 0 - 11709); store64(g + 427 * 8, 0 - 10480); store64(g + 428 * 8, 0 - 9441); store64(g + 429 * 8, 0 - 8691); store64(g + 430 * 8, 0 - 8294); store64(g + 431 * 8, 0 - 8287);
+    store64(g + 432 * 8, 0 - 8674); store64(g + 433 * 8, 0 - 9430); store64(g + 434 * 8, 0 - 10491); store64(g + 435 * 8, 0 - 11725); store64(g + 436 * 8, 0 - 12949); store64(g + 437 * 8, 0 - 13959); store64(g + 438 * 8, 0 - 14578); store64(g + 439 * 8, 0 - 14711);
+    store64(g + 440 * 8, 0 - 14349); store64(g + 441 * 8, 0 - 13550); store64(g + 442 * 8, 0 - 12398); store64(g + 443 * 8, 0 - 10975); store64(g + 444 * 8, 0 - 9357); store64(g + 445 * 8, 0 - 7635); store64(g + 446 * 8, 0 - 5930); store64(g + 447 * 8, 0 - 4391);
+    store64(g + 448 * 8, 0 - 3168); store64(g + 449 * 8, 0 - 2372); store64(g + 450 * 8, 0 - 2047); store64(g + 451 * 8, 0 - 2162); store64(g + 452 * 8, 0 - 2644); store64(g + 453 * 8, 0 - 3400); store64(g + 454 * 8, 0 - 4334); store64(g + 455 * 8, 0 - 5352);
+    store64(g + 456 * 8, 0 - 6331); store64(g + 457 * 8, 0 - 7112); store64(g + 458 * 8, 0 - 7513); store64(g + 459 * 8, 0 - 7375); store64(g + 460 * 8, 0 - 6623); store64(g + 461 * 8, 0 - 5301); store64(g + 462 * 8, 0 - 3563); store64(g + 463 * 8, 0 - 1625);
+    store64(g + 464 * 8, 313); store64(g + 465 * 8, 2110); store64(g + 466 * 8, 3688); store64(g + 467 * 8, 4995); store64(g + 468 * 8, 5966); store64(g + 469 * 8, 6524); store64(g + 470 * 8, 6620); store64(g + 471 * 8, 6279);
+    store64(g + 472 * 8, 5622); store64(g + 473 * 8, 4812); store64(g + 474 * 8, 4003); store64(g + 475 * 8, 3296); store64(g + 476 * 8, 2752); store64(g + 477 * 8, 2441); store64(g + 478 * 8, 2457); store64(g + 479 * 8, 2905);
+    var cc = _celt_corr(of, g, 480);
+    syscall(1, 2, "silk10_corr_x10000=", 19); fmt_int_fd(2, f64_to(f64_mul(cc, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    assert(f64_gt(cc, f64_div(f64_from(999), f64_from(1000))) == 1, "SILK 10ms frame 0 correlation > 0.999");
+    return 0;
+}
+
 fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_laplace_rfc_vectors();
@@ -13767,6 +13848,7 @@ fn test_opus_rfc_all() {
     test_opus_silk_stereo_rfc();
     test_opus_hybrid_stereo_rfc();
     test_opus_celt10_rfc();
+    test_opus_silk10_rfc();
     return 0;
 }
 

@@ -237,16 +237,17 @@ fn silk_decode_indices(payload, len, fs_kHz, lastgain_ptr, out) {
     var ec = ec_dec_new(payload, len);
     var vad = ec_dec_bit_logp(ec, 1);   # LP header: VAD flag
     var lbrr = ec_dec_bit_logp(ec, 1);  # LP header: LBRR flag (unused; LBRR not handled)
-    return silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad);
+    return silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad, 4);
 }
 
 # ec-taking core: decode LP header + indices from an externally-owned range decoder
 # (shared with CELT in hybrid mode). Returns the ec so the caller can continue (pulses).
 # ec-taking core with a PRE-READ `vad` flag (the LP-header VAD/LBRR flags are read by the
 # caller — mono/hybrid read them here per-frame; stereo reads both channels' flags up front).
-fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
+fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad, nb_subfr) {
     if (_silk_type_VAD == 0) { _silk_tables_init(); }
     if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
+    if (_silk_contour_10_wb == 0) { _silk_tables6_init(); }
     var order = 16;
     if (fs_kHz == 8) { order = 10; }
     # A: signal type
@@ -261,9 +262,9 @@ fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
     g0 = g0 + ec_dec_icdf(ec, _silk_uniform8, 8);
     store64(GI + 0, g0);
     var i = 1;
-    while (i < 4) { store64(GI + i * 8, ec_dec_icdf(ec, _silk_delta_gain, 8)); i = i + 1; }
+    while (i < nb_subfr) { store64(GI + i * 8, ec_dec_icdf(ec, _silk_delta_gain, 8)); i = i + 1; }
     var gains = alloc(4 * 8);
-    _silk_gains_dequant_impl(GI, gains, lastgain_ptr, 0, 4);
+    _silk_gains_dequant_impl(GI, gains, lastgain_ptr, 0, nb_subfr);
     # C: NLSF stage-1 index
     var cb1 = _silk_cb1_wb;
     if (fs_kHz == 8) { cb1 = _silk_cb1_nb; }
@@ -284,8 +285,9 @@ fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
         store64(NLSF + (i + 1) * 8, Ix2 - 4);
         i = i + 1;
     }
-    # E: interpolation factor (nb_subfr == 4)
-    var NInterp = ec_dec_icdf(ec, _silk_nlsf_interp, 8);
+    # E: interpolation factor — only coded for nb_subfr==4 (20ms); else forced to 4.
+    var NInterp = 4;
+    if (nb_subfr == 4) { NInterp = ec_dec_icdf(ec, _silk_nlsf_interp, 8); }
     # F: voiced block
     var lag = 0;
     var cont = 0;
@@ -293,21 +295,26 @@ fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
     var LTPsc = 0;
     var LTPI = alloc(4 * 8);
     var kk = 0;
-    while (kk < 4) { store64(LTPI + kk * 8, 0); kk = kk + 1; }
+    while (kk < nb_subfr) { store64(LTPI + kk * 8, 0); kk = kk + 1; }
     if (signalType == 2) {
         lag = ec_dec_icdf(ec, _silk_pitch_lag, 8) * (fs_kHz >> 1);
         var lowbits = _silk_uniform8;
         if (fs_kHz == 8) { lowbits = _silk_uniform4; }
         lag = lag + ec_dec_icdf(ec, lowbits, 8);
-        var contour = _silk_pitch_contour;
-        if (fs_kHz == 8) { contour = _silk_pitch_contour_nb; }
+        # contour codebook depends on both bandwidth (NB/WB) and frame size (10/20ms).
+        var contour = _silk_pitch_contour;                       # WB 20ms
+        if (fs_kHz == 8) { contour = _silk_pitch_contour_nb; }   # NB 20ms
+        if (nb_subfr == 2) {
+            contour = _silk_contour_10_wb;                       # WB 10ms
+            if (fs_kHz == 8) { contour = _silk_contour_10_nb; }  # NB 10ms
+        }
         cont = ec_dec_icdf(ec, contour, 8);
         PER = ec_dec_icdf(ec, _silk_ltp_per, 8);
         var ltpgain = _silk_ltp_gain0;
         if (PER == 1) { ltpgain = _silk_ltp_gain1; }
         if (PER == 2) { ltpgain = _silk_ltp_gain2; }
         kk = 0;
-        while (kk < 4) { store64(LTPI + kk * 8, ec_dec_icdf(ec, ltpgain, 8)); kk = kk + 1; }
+        while (kk < nb_subfr) { store64(LTPI + kk * 8, ec_dec_icdf(ec, ltpgain, 8)); kk = kk + 1; }
         LTPsc = ec_dec_icdf(ec, _silk_ltpscale, 8);
     }
     # G: seed
@@ -316,9 +323,9 @@ fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
     store64(out + 0 * 8, signalType);
     store64(out + 1 * 8, quantOffset);
     var j = 0;
-    while (j < 4) { store64(out + (2 + j) * 8, load64(GI + j * 8)); j = j + 1; }
+    while (j < nb_subfr) { store64(out + (2 + j) * 8, load64(GI + j * 8)); j = j + 1; }
     j = 0;
-    while (j < 4) { store64(out + (6 + j) * 8, load64(gains + j * 8)); j = j + 1; }
+    while (j < nb_subfr) { store64(out + (6 + j) * 8, load64(gains + j * 8)); j = j + 1; }
     store64(out + 10 * 8, nlsf0);
     store64(out + 11 * 8, NInterp);
     store64(out + 12 * 8, lag);
@@ -331,7 +338,7 @@ fn silk_decode_indices_ec(ec, fs_kHz, lastgain_ptr, out, vad) {
     while (j <= order) { store64(out + (18 + j) * 8, load64(NLSF + j * 8)); j = j + 1; }
     var lbase = 19 + order;
     j = 0;
-    while (j < 4) { store64(out + (lbase + j) * 8, load64(LTPI + j * 8)); j = j + 1; }
+    while (j < nb_subfr) { store64(out + (lbase + j) * 8, load64(LTPI + j * 8)); j = j + 1; }
     return ec;
 }
 
@@ -998,16 +1005,22 @@ fn _silk_tables4_init() {
 # ---- pitch lag + LTP coefficient decode (decode_pitch.c / decode_parameters.c) ----
 # silk_decode_pitch: contour codebook maps (subframe, contourIndex) -> lag offset.
 # nb_subfr fixed at 4 (20 ms). pitchL_out[4].
-fn silk_decode_pitch(lagIndex, contourIndex, fs_kHz, pitchL_out) {
+fn silk_decode_pitch(lagIndex, contourIndex, fs_kHz, pitchL_out, nb_subfr) {
     if (_silk_cblags2 == 0) { _silk_tables4_init(); }
+    if (_silk_cblags3_10 == 0) { _silk_tables6_init(); }
+    # lag codebook depends on bandwidth (NB stage2 / WB stage3) and frame size (10/20ms).
     var lag_cb = _silk_cblags3;
     var cbk_size = 34;
-    if (fs_kHz == 8) { lag_cb = _silk_cblags2; cbk_size = 11; }
+    if (nb_subfr == 2) { lag_cb = _silk_cblags3_10; cbk_size = 12; }
+    if (fs_kHz == 8) {
+        lag_cb = _silk_cblags2; cbk_size = 11;
+        if (nb_subfr == 2) { lag_cb = _silk_cblags2_10; cbk_size = 3; }
+    }
     var min_lag = 2 * fs_kHz;
     var max_lag = 18 * fs_kHz;
     var lag = min_lag + lagIndex;
     var k = 0;
-    while (k < 4) {
+    while (k < nb_subfr) {
         var pl = lag + load64(lag_cb + (k * cbk_size + contourIndex) * 8);
         store64(pitchL_out + k * 8, silk_limit(pl, min_lag, max_lag));
         k = k + 1;
@@ -1017,13 +1030,13 @@ fn silk_decode_pitch(lagIndex, contourIndex, fs_kHz, pitchL_out) {
 
 # silk_decode_ltp: fill LTPCoef_Q14[4*5] from PERIndex + per-subframe LTPIndex.
 # ltp_idx points at LTPIndex[0] (4 consecutive i64 slots).
-fn silk_decode_ltp(PERIndex, ltp_idx, ltpcoef_out) {
+fn silk_decode_ltp(PERIndex, ltp_idx, ltpcoef_out, nb_subfr) {
     if (_silk_ltpvq0 == 0) { _silk_tables4_init(); }
     var cbk = _silk_ltpvq0;
     if (PERIndex == 1) { cbk = _silk_ltpvq1; }
     if (PERIndex == 2) { cbk = _silk_ltpvq2; }
     var k = 0;
-    while (k < 4) {
+    while (k < nb_subfr) {
         var Ix = load64(ltp_idx + k * 8);
         var i = 0;
         while (i < 5) {
@@ -1487,19 +1500,19 @@ fn silk_decode_core(st, ctrl, xq, pulses) {
 # ---- stateful frame orchestration (decode_frame.c / dec_API.c) ----
 # Extended st layout adds: 13 LastGainIndex, 14 prevNLSF(ptr,order), 15 first_frame_after_reset.
 # silk_decoder_init: allocate persistent buffers and reset state for sampling rate fs_kHz.
-fn silk_decoder_init(fs_kHz) {
+fn silk_decoder_init(fs_kHz, nb_subfr) {
     var order = 16;
     if (fs_kHz == 8) { order = 10; }
-    var frame_length = 20 * fs_kHz;
     var subfr_length = 5 * fs_kHz;
-    var ltp_mem = 20 * fs_kHz;
+    var frame_length = subfr_length * nb_subfr;   # 10ms (nb_subfr=2) or 20ms (nb_subfr=4)
+    var ltp_mem = 20 * fs_kHz;                     # LTP memory is always 20ms
     var st = alloc(16 * 8);
     store64(st + 0 * 8, fs_kHz);
     store64(st + 1 * 8, order);
     store64(st + 2 * 8, frame_length);
     store64(st + 3 * 8, subfr_length);
     store64(st + 4 * 8, ltp_mem);
-    store64(st + 5 * 8, 4);
+    store64(st + 5 * 8, nb_subfr);
     store64(st + 6 * 8, 65536);          # prev_gain_Q16
     store64(st + 7 * 8, 0);              # prevSignalType
     store64(st + 8 * 8, 0);              # lagPrev
@@ -1539,12 +1552,13 @@ fn silk_decode_frame_ec_vad(st, ec, xq, vad) {
     var fs_kHz = load64(st + 0 * 8);
     var order = load64(st + 1 * 8);
     var frame_length = load64(st + 2 * 8);
+    var nb_subfr = load64(st + 5 * 8);
     var lg_ptr = st + 13 * 8;
     var prevNLSF = load64(st + 14 * 8);
     var first_frame = load64(st + 15 * 8);
 
     var out = alloc(40 * 8);
-    silk_decode_indices_ec(ec, fs_kHz, lg_ptr, out, vad);
+    silk_decode_indices_ec(ec, fs_kHz, lg_ptr, out, vad, nb_subfr);
     var signalType = load64(out + 0 * 8);
     var quantOffset = load64(out + 1 * 8);
     var ninterp = load64(out + 11 * 8);
@@ -1584,8 +1598,8 @@ fn silk_decode_frame_ec_vad(st, ec, xq, vad) {
     while (z < 4) { store64(pitchL + z * 8, 0); z = z + 1; }
     z = 0; while (z < 20) { store64(ltpcoef + z * 8, 0); z = z + 1; }
     if (signalType == 2) {
-        silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), fs_kHz, pitchL);
-        silk_decode_ltp(load64(out + 14 * 8), out + (19 + order) * 8, ltpcoef);
+        silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), fs_kHz, pitchL, nb_subfr);
+        silk_decode_ltp(load64(out + 14 * 8), out + (19 + order) * 8, ltpcoef, nb_subfr);
         ltpscale = silk_ltp_scale(load64(out + 15 * 8));
     }
 
@@ -1605,14 +1619,19 @@ fn silk_decode_frame_ec_vad(st, ec, xq, vad) {
     store64(ctrl + 9 * 8, ninterp);
     silk_decode_core(st, ctrl, xq, pulses);
 
-    # Update output buffer: mv_len = ltp_mem - frame_length == 0, so outBuf = xq.
+    # Update output buffer: shift left by frame_length, append xq. mv_len = ltp_mem -
+    # frame_length (0 for 20ms → outBuf=xq; 160 for WB 10ms → shift + append).
     var outBuf = load64(st + 12 * 8);
+    var ltp_mem = load64(st + 4 * 8);
+    var mv_len = ltp_mem - frame_length;
+    var mvi = 0;
+    while (mvi < mv_len) { store64(outBuf + mvi * 8, load64(outBuf + (frame_length + mvi) * 8)); mvi = mvi + 1; }
     z = 0;
-    while (z < frame_length) { store64(outBuf + z * 8, load64(xq + z * 8)); z = z + 1; }
+    while (z < frame_length) { store64(outBuf + (mv_len + z) * 8, load64(xq + z * 8)); z = z + 1; }
 
     store64(st + 15 * 8, 0);                                  # first_frame_after_reset = 0
     store64(st + 7 * 8, signalType);                          # prevSignalType
-    store64(st + 8 * 8, load64(pitchL + 3 * 8));              # lagPrev
+    store64(st + 8 * 8, load64(pitchL + (nb_subfr - 1) * 8)); # lagPrev = pitchL[nb_subfr-1]
     return 0;
 }
 
@@ -1953,5 +1972,21 @@ fn silk_decode_stereo(st0, st1, rstL, rstR, sStereo, ec, fs_kHz, outL, outR) {
     # Resample each reconstructed channel (L at x1[1..], R at x2[1..]) to 48 kHz.
     silk_resampler(rstL, outL, x1 + 1 * 8, frame_length);
     silk_resampler(rstR, outR, x2 + 1 * 8, frame_length);
+    return 0;
+}
+
+# ---- 10ms (nb_subfr=2) pitch contour + CB_lags tables (verbatim libopus) ----
+var _silk_contour_10_wb = 0;
+var _silk_contour_10_nb = 0;
+var _silk_cblags2_10 = 0;
+var _silk_cblags3_10 = 0;
+
+fn _silk_tables6_init() {
+    _silk_contour_10_wb = alloc(12); store8(_silk_contour_10_wb + 0, 165); store8(_silk_contour_10_wb + 1, 119); store8(_silk_contour_10_wb + 2, 80); store8(_silk_contour_10_wb + 3, 61); store8(_silk_contour_10_wb + 4, 47); store8(_silk_contour_10_wb + 5, 35); store8(_silk_contour_10_wb + 6, 27); store8(_silk_contour_10_wb + 7, 20); store8(_silk_contour_10_wb + 8, 14); store8(_silk_contour_10_wb + 9, 9); store8(_silk_contour_10_wb + 10, 4); store8(_silk_contour_10_wb + 11, 0);
+    _silk_contour_10_nb = alloc(3); store8(_silk_contour_10_nb + 0, 113); store8(_silk_contour_10_nb + 1, 63); store8(_silk_contour_10_nb + 2, 0);
+    _silk_cblags2_10 = alloc(6 * 8);
+    store64(_silk_cblags2_10 + 0 * 8, 0); store64(_silk_cblags2_10 + 1 * 8, 1); store64(_silk_cblags2_10 + 2 * 8, 0); store64(_silk_cblags2_10 + 3 * 8, 0); store64(_silk_cblags2_10 + 4 * 8, 0); store64(_silk_cblags2_10 + 5 * 8, 1);
+    _silk_cblags3_10 = alloc(24 * 8);
+    store64(_silk_cblags3_10 + 0 * 8, 0); store64(_silk_cblags3_10 + 1 * 8, 0); store64(_silk_cblags3_10 + 2 * 8, 1); store64(_silk_cblags3_10 + 3 * 8, 0 - 1); store64(_silk_cblags3_10 + 4 * 8, 1); store64(_silk_cblags3_10 + 5 * 8, 0 - 1); store64(_silk_cblags3_10 + 6 * 8, 2); store64(_silk_cblags3_10 + 7 * 8, 0 - 2); store64(_silk_cblags3_10 + 8 * 8, 2); store64(_silk_cblags3_10 + 9 * 8, 0 - 2); store64(_silk_cblags3_10 + 10 * 8, 3); store64(_silk_cblags3_10 + 11 * 8, 0 - 3); store64(_silk_cblags3_10 + 12 * 8, 0); store64(_silk_cblags3_10 + 13 * 8, 1); store64(_silk_cblags3_10 + 14 * 8, 0); store64(_silk_cblags3_10 + 15 * 8, 1); store64(_silk_cblags3_10 + 16 * 8, 0 - 1); store64(_silk_cblags3_10 + 17 * 8, 2); store64(_silk_cblags3_10 + 18 * 8, 0 - 1); store64(_silk_cblags3_10 + 19 * 8, 2); store64(_silk_cblags3_10 + 20 * 8, 0 - 2); store64(_silk_cblags3_10 + 21 * 8, 3); store64(_silk_cblags3_10 + 22 * 8, 0 - 2); store64(_silk_cblags3_10 + 23 * 8, 3);
     return 0;
 }
