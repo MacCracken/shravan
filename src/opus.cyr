@@ -2805,6 +2805,98 @@ fn clt_mdct_backward(inp, in_stride, out, shift) {
     return 0;
 }
 
+# clt_mdct_forward — forward MDCT (mdct.c float path), inverse of clt_mdct_backward.
+# Windows/folds `in` (frame + 120-sample overlap) into N4 complex, pre-rotates (scale
+# = 1/N4), runs the same direct N4-point DFT as the backward transform, post-rotates
+# into `out` (N2 real coeffs, stride out_stride). N = 1920>>shift, N2=N/2, N4=N/4.
+fn clt_mdct_forward(inp, out, out_stride, shift) {
+    _mdct_cache_init(shift);
+    var N = 1920 >> shift;
+    var N2 = N >> 1;
+    var N4 = N >> 2;
+    var t = load64(_mdct_trig + shift * 8);
+    var dc = load64(_mdct_dc + shift * 8);
+    var ds = load64(_mdct_ds + shift * 8);
+    var w = _celt_window;
+    var scale = f64_div(F64_ONE, f64_from(N4));
+    var f = alloc(N2 * 8);          # interleaved re/im: N4 complex
+    var Cr = alloc(N4 * 8);
+    var Ci = alloc(N4 * 8);
+    # --- window / shuffle / fold: input [a,b,c,d] -> f ---
+    var nfirst = (120 + 3) >> 2;    # (overlap+3)>>2 = 30
+    var xp1 = 60;                   # in + overlap/2
+    var xp2 = N2 - 1 + 60;          # in + N2-1 + overlap/2
+    var wp1 = 60;                   # window + overlap/2
+    var wp2 = 59;                   # window + overlap/2 - 1
+    var yp = 0;
+    var i = 0;
+    while (i < nfirst) {
+        store64(f + yp * 8, f64_add(f64_mul(load64(inp + (xp1 + N2) * 8), load64(w + wp2 * 8)), f64_mul(load64(inp + xp2 * 8), load64(w + wp1 * 8))));
+        store64(f + (yp + 1) * 8, f64_sub(f64_mul(load64(inp + xp1 * 8), load64(w + wp1 * 8)), f64_mul(load64(inp + (xp2 - N2) * 8), load64(w + wp2 * 8))));
+        xp1 = xp1 + 2; xp2 = xp2 - 2; wp1 = wp1 + 2; wp2 = wp2 - 2; yp = yp + 2;
+        i = i + 1;
+    }
+    while (i < N4 - nfirst) {
+        store64(f + yp * 8, load64(inp + xp2 * 8));
+        store64(f + (yp + 1) * 8, load64(inp + xp1 * 8));
+        xp1 = xp1 + 2; xp2 = xp2 - 2; yp = yp + 2;
+        i = i + 1;
+    }
+    var wp1b = 0;                   # window
+    var wp2b = 119;                 # window + overlap - 1
+    while (i < N4) {
+        store64(f + yp * 8, f64_add(f64_neg(f64_mul(load64(inp + (xp1 - N2) * 8), load64(w + wp1b * 8))), f64_mul(load64(inp + xp2 * 8), load64(w + wp2b * 8))));
+        store64(f + (yp + 1) * 8, f64_add(f64_mul(load64(inp + xp1 * 8), load64(w + wp2b * 8)), f64_mul(load64(inp + (xp2 + N2) * 8), load64(w + wp1b * 8))));
+        xp1 = xp1 + 2; xp2 = xp2 - 2; wp1b = wp1b + 2; wp2b = wp2b - 2; yp = yp + 2;
+        i = i + 1;
+    }
+    # --- pre-rotation (+ scale) ---
+    i = 0;
+    while (i < N4) {
+        var re = load64(f + (2 * i) * 8);
+        var im = load64(f + (2 * i + 1) * 8);
+        var t0 = load64(t + i * 8);
+        var t1 = load64(t + (N4 + i) * 8);
+        store64(Cr + i * 8, f64_mul(f64_sub(f64_mul(re, t0), f64_mul(im, t1)), scale));
+        store64(Ci + i * 8, f64_mul(f64_add(f64_mul(im, t0), f64_mul(re, t1)), scale));
+        i = i + 1;
+    }
+    # --- N4-point forward DFT (same kernel as backward) ---
+    var Fr = alloc(N4 * 8);
+    var Fi = alloc(N4 * 8);
+    var k = 0;
+    while (k < N4) {
+        var sr = F64_ZERO;
+        var si = F64_ZERO;
+        i = 0;
+        while (i < N4) {
+            var m = (k * i) % N4;
+            var cs = load64(dc + m * 8);
+            var sn = load64(ds + m * 8);
+            var cri = load64(Cr + i * 8);
+            var cii = load64(Ci + i * 8);
+            sr = f64_add(sr, f64_add(f64_mul(cri, cs), f64_mul(cii, sn)));
+            si = f64_add(si, f64_sub(f64_mul(cii, cs), f64_mul(cri, sn)));
+            i = i + 1;
+        }
+        store64(Fr + k * 8, sr);
+        store64(Fi + k * 8, si);
+        k = k + 1;
+    }
+    # --- post-rotation -> out (stride) ---
+    i = 0;
+    while (i < N4) {
+        var fr = load64(Fr + i * 8);
+        var fi = load64(Fi + i * 8);
+        var pt0 = load64(t + i * 8);
+        var pt1 = load64(t + (N4 + i) * 8);
+        store64(out + (2 * i) * out_stride * 8, f64_sub(f64_mul(fi, pt1), f64_mul(fr, pt0)));
+        store64(out + (N2 - 1 - 2 * i) * out_stride * 8, f64_add(f64_mul(fr, pt1), f64_mul(fi, pt0)));
+        i = i + 1;
+    }
+    return 0;
+}
+
 # celt_synthesis: per channel denormalise + IMDCT into decode_mem+1088.
 fn celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end, LM) {
     var N = 120 << LM;
