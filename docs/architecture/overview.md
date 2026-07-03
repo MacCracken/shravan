@@ -25,7 +25,11 @@ shravan/
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)
     stream.cyr      -- Streaming decoders (WAV, FLAC, AIFF, chunked output)
     serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo/... (bayan, #derive(Serialize))
-    main.cyr        -- test harness entry (includes shravan.cyr + codecs, runs tests + init)
+    main.cyr        -- test harness: core codecs + Opus decode + API   -> build/shravan
+    main_encoder.cyr -- test harness: Opus CELT RFC-6716 encoder        -> build/shravan-encoder
+    main_silk.cyr   -- test harness: SILK decode golden vectors        -> build/shravan-silk
+    *_tests.cyr     -- test suites (opus_rfc/opus_encoder/silk) + opus_test_helpers; split so no
+                       single build overflows the ~3.15 MB code buffer; NOT in [lib]
     bench.cyr       -- benchmarks (clock_gettime timing)
   dist/
     shravan.cyr     -- distlib bundle (all src [lib] modules concatenated; consumers include this)

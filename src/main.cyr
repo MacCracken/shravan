@@ -18,6 +18,7 @@ include "src/dither.cyr"
 include "src/simd.cyr"
 include "src/stream.cyr"
 include "src/serde.cyr"
+include "src/opus_test_helpers.cyr"
 include "src/opus_rfc_tests.cyr"
 
 # ================================================================

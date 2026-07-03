@@ -17,23 +17,30 @@
 All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
-codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
-the **test harness** — it `include`s the library + codecs and runs the 11460-assertion
-suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
-the **self-contained bundle consumers include** (they supply stdlib + bayan +
-sankoch from their own manifest).
+codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
+is split into three entry points** — each `include`s the same library + codecs but
+runs a different test subset, so no single build overflows the Cyrius code buffer
+(~3.15 MB): `src/main.cyr` (core codecs + Opus decode + API), `src/main_encoder.cyr`
+(Opus CELT RFC-6716 encoder), `src/main_silk.cyr` (SILK decode golden vectors). The
+11,469-assertion suite is 1039 / 112 / 10318 across the three. `cyrius distlib`
+concatenates the `[lib]` modules into `dist/shravan.cyr`, the **self-contained bundle
+consumers include** (they supply stdlib + bayan + sankoch from their own manifest);
+none of the test files are in `[lib]`.
 
 ```
 cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, [lib] bundle, version = ${file:VERSION})
 cyrius.lock      -- per-file stdlib hash lock (committed)
 src/shravan.cyr  -- the library (core + codec dispatch); first [lib] module
 src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, silk, opus_legacy, aac, mp4, resample, dither, simd, stream, serde)
-src/main.cyr     -- test harness entry (includes shravan.cyr + codecs, runs tests)
+src/main.cyr     -- test harness: core codecs + Opus decode + API  -> build/shravan
+src/main_encoder.cyr -- test harness: Opus CELT RFC-6716 encoder   -> build/shravan-encoder
+src/main_silk.cyr    -- test harness: SILK decode golden vectors   -> build/shravan-silk
+src/*_tests.cyr / opus_test_helpers.cyr -- test suites (opus_rfc_tests, opus_encoder_tests, silk_tests); NOT in [lib]
 src/bench.cyr    -- benchmarks (clock_gettime timing)
 dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyrius distlib`)
 lib/             -- vendored Cyrius stdlib snapshot ONLY (cyrius lib sync)
 build/           -- compiled binaries (gitignored)
-scripts/         -- bench-history.sh, version-bump.sh
+scripts/         -- test-all.sh, bench-history.sh, version-bump.sh
 docs/            -- architecture, roadmap
 ```
 
@@ -47,8 +54,13 @@ bump only on explicit instruction. Bumping the pin requires re-vendoring stdlib:
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.27)
-./build/shravan                             # run tests (11460 assertions)
+./scripts/test-all.sh                       # build + run ALL three test binaries (11,469 assertions)
+cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.3.27)
+./build/shravan                             # run core codecs + Opus decode + API (1039 assertions)
+cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
+./build/shravan-encoder                     # run encoder tests (112 assertions)
+cyrius build src/main_silk.cyr build/shravan-silk        # SILK decode golden-vector suite
+./build/shravan-silk                        # run SILK tests (10318 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -71,7 +83,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
 | opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
 | silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
-| opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by `main.cyr` but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
+| opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by the test harnesses but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
 | aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
 | mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
@@ -96,7 +108,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 11460 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,469 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
@@ -109,7 +121,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 ### Work Loop (continuous)
 
 1. Work phase -- new codecs, improvements, optimizations
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, all tests pass
+2. Cleanliness check: `./scripts/test-all.sh` (all three harnesses), all tests pass
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Internal review -- correctness, performance, memory safety

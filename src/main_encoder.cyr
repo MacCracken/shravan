@@ -1,0 +1,60 @@
+# shravan — Opus ENCODER test harness entry point.
+# Split out of src/main.cyr so the RFC-6716 CELT encoder conformance tests build
+# as their own binary (build/shravan-encoder) — keeps any single build under the
+# Cyrius code-buffer limit as the encoder grows (2.6.6+). Includes the full
+# library + codec modules (shravan.cyr's dispatch references flac/mp3/aac/mp4/ogg)
+# plus the encoder tests + shared helpers. NOT the consumer bundle.
+include "src/shravan.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
+include "src/opus.cyr"
+include "src/opus_legacy.cyr"
+include "src/silk.cyr"
+include "src/aac.cyr"
+include "src/mp4.cyr"
+include "src/resample.cyr"
+include "src/dither.cyr"
+include "src/simd.cyr"
+include "src/stream.cyr"
+include "src/serde.cyr"
+include "src/opus_test_helpers.cyr"
+include "src/opus_encoder_tests.cyr"
+
+fn print_summary() {
+    syscall(1, 1, "\n", 1);
+    syscall(1, 1, "shravan encoder tests: ", 23);
+    fmt_int(_assert_pass);
+    syscall(1, 1, " passed, ", 9);
+    fmt_int(_assert_fail);
+    syscall(1, 1, " failed, ", 9);
+    fmt_int(_assert_total);
+    syscall(1, 1, " total\n", 7);
+    return 0;
+}
+
+# ================================================================
+# Entry point — top-level statements
+# ================================================================
+
+alloc_init();
+shravan_init_constants();
+flac_init();
+ogg_init();
+mp3_init();
+fft_init();
+aac_init();
+resample_init();
+
+syscall(1, 1, "shravan encoder tests — Opus CELT RFC-6716 (Cyrius)\n", 52);
+syscall(1, 1, "running tests...\n", 17);
+syscall(1, 1, "\n", 1);
+
+test_opus_encoder_all();
+
+print_summary();
+
+if (_assert_fail > 0) { syscall(60, 1); }
+syscall(60, 0);

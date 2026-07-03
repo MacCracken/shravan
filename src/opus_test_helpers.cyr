@@ -1,0 +1,54 @@
+# ================================================================
+# opus_test_helpers.cyr — shared assertion/correlation helpers for the Opus
+# test suites (decode / encoder / silk). Included by each main_* harness.
+# NOT part of the [lib] distlib bundle.
+# ================================================================
+
+fn _celt_corr(a, refs, n) {
+    var dot = F64_ZERO; var na = F64_ZERO; var nb = F64_ZERO; var i = 0;
+    while (i < n) {
+        var av = load64(a + i * 8); var bv = f64_from(load64(refs + i * 8));
+        dot = f64_add(dot, f64_mul(av, bv)); na = f64_add(na, f64_mul(av, av)); nb = f64_add(nb, f64_mul(bv, bv));
+        i = i + 1;
+    }
+    var den = f64_mul(f64_sqrt(na), f64_sqrt(nb));
+    if (f64_lt(den, f64_div(F64_ONE, f64_from(1000000))) == 1) { return F64_ONE; }
+    return f64_div(dot, den);
+}
+
+fn _celt_assert_arr(got, exp, n, msg) {
+    var i = 0;
+    var ok = 1;
+    while (i < n) {
+        if (load64(got + i * 8) != load64(exp + i * 8)) { ok = 0; }
+        i = i + 1;
+    }
+    assert(ok == 1, msg);
+    return 0;
+}
+
+fn _celt_assert_bytes(got, exp, n, msg) {
+    var i = 0; var ok = 1;
+    while (i < n) { if (load8(got + i) != load8(exp + i)) { ok = 0; } i = i + 1; }
+    assert(ok == 1, msg); return 0;
+}
+
+fn _celt_run_qab(payload, plen, C, oldBandE, seed_in, exp_rng, exp_tell, exp_cm, tag) {
+    var tf = alloc(21 * 8); var off = alloc(21 * 8); var pul = alloc(21 * 8);
+    var fq = alloc(21 * 8); var fp = alloc(21 * 8); var cap = alloc(21 * 8); var scal = alloc(16 * 8);
+    var ec = celt_decode_frame_prefix(payload, plen, C, oldBandE, tf, off, pul, fq, fp, cap, scal);
+    var N = 960; var M = 8;
+    var X = alloc(C * N * 8); var z = 0; while (z < C * N) { store64(X + z * 8, F64_ZERO); z = z + 1; }
+    var Y = 0; if (C == 2) { Y = X + N * 8; }
+    var cm = alloc(C * 21);
+    var shortBlocks = 0; if (load64(scal + 8) != 0) { shortBlocks = M; }
+    var total_bits = plen * 64 - load64(scal + 40);
+    var seedp = alloc(8); store64(seedp, seed_in);
+    var di = 0;
+    quant_all_bands(X, Y, cm, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, 3, load64(scal + 48), seedp, di, C, 0, 21, 0);
+    assert_eq(load64(ec + 56), exp_rng, tag);
+    assert_eq(ec_tell(ec), exp_tell, tag);
+    _celt_assert_bytes(cm, exp_cm, C * 21, tag);
+    return 0;
+}
+

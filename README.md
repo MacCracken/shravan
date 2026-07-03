@@ -11,11 +11,13 @@ dependencies. Pure Cyrius.
 ## Quick start
 
 ```sh
-# Build
-cyrius build src/main.cyr build/shravan
+# Build + run the full test suite (three harness binaries, 11,469 assertions)
+./scripts/test-all.sh
 
-# Run tests (11460 assertions)
-./build/shravan
+# Or build/run one suite at a time:
+cyrius build src/main.cyr build/shravan && ./build/shravan                  # core codecs + Opus decode + API
+cyrius build src/main_encoder.cyr build/shravan-encoder && ./build/shravan-encoder  # Opus CELT encoder
+cyrius build src/main_silk.cyr build/shravan-silk && ./build/shravan-silk    # SILK decode golden vectors
 
 # Benchmarks
 cyrius build src/bench.cyr build/bench
