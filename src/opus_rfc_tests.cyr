@@ -773,6 +773,55 @@ fn test_celt_quant_band_rfc() {
     return 0;
 }
 
+fn test_celt_tf_encode_rfc() {
+    test_group("opus: celt_tf_encode -> celt_tf_decode round-trip (LM=3)");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    var tfe = alloc(21 * 8);
+    store64(tfe + 0 * 8, 0);
+    store64(tfe + 1 * 8, 0);
+    store64(tfe + 2 * 8, 1);
+    store64(tfe + 3 * 8, 0);
+    store64(tfe + 4 * 8, 1);
+    store64(tfe + 5 * 8, 1);
+    store64(tfe + 6 * 8, 0);
+    store64(tfe + 7 * 8, 0);
+    store64(tfe + 8 * 8, 1);
+    store64(tfe + 9 * 8, 0);
+    store64(tfe + 10 * 8, 0);
+    store64(tfe + 11 * 8, 1);
+    store64(tfe + 12 * 8, 0);
+    store64(tfe + 13 * 8, 0);
+    store64(tfe + 14 * 8, 0);
+    store64(tfe + 15 * 8, 1);
+    store64(tfe + 16 * 8, 0);
+    store64(tfe + 17 * 8, 0);
+    store64(tfe + 18 * 8, 1);
+    store64(tfe + 19 * 8, 0);
+    store64(tfe + 20 * 8, 0);
+    var buf = alloc(16); var ee = ec_enc_new(buf, 16);
+    celt_tf_encode(tfe, 0, 0, ee, 0, 21);
+    ec_enc_done(ee);
+    assert(load64(ee + 88) == 0, "tf_encode: no error");
+    var dd = ec_dec_new(buf, 16);
+    var tfd = alloc(21 * 8);
+    celt_tf_decode(tfd, 0, dd, 0, 21);
+    var i = 0; var ok = 1;
+    while (i < 21) { if (load64(tfe + i * 8) != load64(tfd + i * 8)) { ok = 0; } i = i + 1; }
+    assert(ok == 1, "tf_encode->tf_decode round-trip (mapped tf_res)");
+    var tfe2 = alloc(21 * 8); var j = 0;
+    while (j < 21) { store64(tfe2 + j * 8, (j * 7) & 1); j = j + 1; }
+    var buf2 = alloc(16); var ee2 = ec_enc_new(buf2, 16);
+    celt_tf_encode(tfe2, 1, 1, ee2, 0, 21);
+    ec_enc_done(ee2);
+    var dd2 = ec_dec_new(buf2, 16);
+    var tfd2 = alloc(21 * 8);
+    celt_tf_decode(tfd2, 1, dd2, 0, 21);
+    i = 0; var ok2 = 1;
+    while (i < 21) { if (load64(tfe2 + i * 8) != load64(tfd2 + i * 8)) { ok2 = 0; } i = i + 1; }
+    assert(ok2 == 1, "tf_encode->tf_decode round-trip (transient, tf_select=1)");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14614,6 +14663,7 @@ fn test_opus_rfc_all() {
     test_celt_pvq_encode_rfc();
     test_celt_compute_theta_rfc();
     test_celt_quant_band_rfc();
+    test_celt_tf_encode_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();
