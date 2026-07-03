@@ -47,7 +47,7 @@ fn _celt_run_qab(payload, plen, C, oldBandE, seed_in, exp_rng, exp_tell, exp_cm,
     var total_bits = plen * 64 - load64(scal + 40);
     var seedp = alloc(8); store64(seedp, seed_in);
     var di = 0;
-    quant_all_bands(X, Y, cm, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, 3, load64(scal + 48), seedp, di, C);
+    quant_all_bands(X, Y, cm, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, 3, load64(scal + 48), seedp, di, C, 0, 21);
     assert_eq(load64(ec + 56), exp_rng, tag);
     assert_eq(ec_tell(ec), exp_tell, tag);
     _celt_assert_bytes(cm, exp_cm, C * 21, tag);
