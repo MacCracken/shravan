@@ -2625,6 +2625,58 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     return 0;
 }
 
+# compute_band_energies (bands.c, float path): bandE[i] = sqrt(1e-27 + sum X[j]^2)
+# over each band — the L2 norm of the band's MDCT coefficients (encoder side).
+fn compute_band_energies(X, bandE, end, C, LM) {
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    var M = 1 << LM;
+    var N = 120 << LM;
+    var eps = f64_mul(f64_div(F64_ONE, f64_from(1000000000)), f64_div(F64_ONE, f64_from(1000000000000000000)));  # 1e-27
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var j = M * load64(_celt_eBands + i * 8);
+            var j1 = M * load64(_celt_eBands + (i + 1) * 8);
+            var sum = eps;
+            while (j < j1) {
+                var x = load64(X + (c * N + j) * 8);
+                sum = f64_add(sum, f64_mul(x, x));
+                j = j + 1;
+            }
+            store64(bandE + (i + c * 21) * 8, f64_sqrt(sum));
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# normalise_bands (bands.c, float path): X[j] = freq[j] / (1e-27 + bandE[i]) — the
+# unit-norm spectral shape the PVQ then quantizes (inverse of denormalise_bands).
+fn normalise_bands(freq, X, bandE, end, C, LM) {
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    var M = 1 << LM;
+    var N = 120 << LM;
+    var eps = f64_mul(f64_div(F64_ONE, f64_from(1000000000)), f64_div(F64_ONE, f64_from(1000000000000000000)));  # 1e-27
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var g = f64_div(F64_ONE, f64_add(eps, load64(bandE + (i + c * 21) * 8)));
+            var j = M * load64(_celt_eBands + i * 8);
+            var j1 = M * load64(_celt_eBands + (i + 1) * 8);
+            while (j < j1) {
+                store64(X + (c * N + j) * 8, f64_mul(load64(freq + (c * N + j) * 8), g));
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
 # denormalise_bands (bands.c:188): freq[j] = X[j]*2^(bandLogE[i]+eMeans[i]).
 fn denormalise_bands(X, freq, bandLogE, silence, start, end, LM) {
     var M = 1 << LM;
