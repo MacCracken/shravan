@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.5] - 2026-07-03
+
+**Opus encode is real (CELT): libopus decodes shravan's output.** shravan now *encodes* a
+real RFC-6716 **CELT** frame, and a **libopus** decoder decodes it **sample-identical** to
+shravan's own verified decoder (**correlation 1.000000**, rms/scale exactly matched). The
+whole encode chain — forward MDCT → band energies → coarse/fine energy encode → bit
+allocation → PVQ shape search+encode → range coder — was built from scratch as the exact
+inverse of the verified decode path and proven by encode→decode round-trips at every stage.
+An end-to-end frame (spectrum → 160-byte packet → decode) reconstructs the input spectrum at
+**correlation 0.968** (the residual is quantization, as expected). This is the encoder
+counterpart of v2.6.0's "Opus is real" (CELT-only mono first). 11460 assertions.
+
+### Added — CELT encoder (`src/opus.cyr`), each stage inverse of the verified decoder
+
+- **Range encoder** `ec_enc_*` (`entenc.c` port): `ec_encode`/`_bin`/`_bit_logp`/`_icdf`/
+  `_uint`/`_bits`/`_done` + the carry-propagation (`ec_enc_carry_out`) with uint32-wrap
+  masking. Byte-identical to libopus for a fixed symbol sequence, and round-trips through
+  `ec_dec` (`test_ec_enc_rfc`).
+- **Forward MDCT** `clt_mdct_forward` (`mdct.c`): window/fold → pre-rotate (scale 1/N4) →
+  the same direct DFT as the backward transform → post-rotate. Coeff-exact vs libopus
+  (`test_celt_mdct_forward_rfc`).
+- **Band energy + shape**: `compute_band_energies` (L2 norm) + `normalise_bands` (unit shape);
+  energies match libopus, each normalized band has unit norm (`test_celt_band_energy_rfc`).
+- **Energy encode**: `ec_laplace_encode` (byte-identical, `test_ec_laplace_encode_rfc`) +
+  `quant_coarse_energy_impl`/`quant_coarse_energy` (single-pass) + `quant_fine_energy` +
+  `quant_energy_finalise`. Full energy encode→decode round-trip is **bit-exact**
+  (`test_celt_energy_encode_rfc`).
+- **PVQ encode**: `op_pvq_search` (projection + greedy pulse search), `icwrs`,
+  `celt_encode_pulses`, `exp_rotation_enc`, `alg_quant`. Resynth is bit-exact vs the decoder
+  (`test_celt_pvq_encode_rfc`).
+- **Band coding** made bidirectional: `stereo_itheta` + `compute_theta` encode branch
+  (`test_celt_compute_theta_rfc`), the `quant_partition`/`quant_band`/`quant_band_n1` encode
+  paths (`test_celt_quant_band_rfc`), `celt_tf_encode` (`test_celt_tf_encode_rfc`), and the
+  `celt_compute_allocation` encode path (skip/intensity/dual-stereo). **Every decode test
+  stayed bit-exact (11455→11460) throughout the shared-code refactor.**
+- **Frame assembler** `celt_encode_frame_ec`: the full non-transient mono prefix (silence /
+  postfilter / transient flags → coarse energy → tf → spread → dynalloc → alloc_trim →
+  allocation → fine energy) + `quant_all_bands` encode + finalise. Milestone:
+  `test_celt_encode_frame_rfc` (0.968 spectrum round-trip; libopus interop verified
+  externally, correlation 1.0).
+- A **fan-out adversarial-verification workflow** (7 agents) over the whole encoder found a
+  real latent `quant_band_n1` N==1-band encode gap (fixed) that the round-trip tests missed.
+
+### Not yet (honest status)
+
+- **CELT encode only, mono, 20 ms, non-transient**, with simple encoder decisions
+  (`tf_res=0`, no dynalloc boosts, `spread`/`trim` defaults, single-pass intra/inter). The
+  bitstream is valid and libopus-decodable; the **encoder-quality** knobs (transient +
+  `tf_analysis`, dynalloc, the 2-pass coarse-energy race, spread decision) are refinements.
+- **Stereo** encode (`stereo_split`/`intensity_stereo`, `quant_band_stereo` N==2 sign),
+  **SILK** encode, and **hybrid** encode remain — the encoder counterparts of 2.6.1–2.6.3.
+
 ## [2.6.4] - 2026-07-03
 
 **Opus 10 ms frames are real.** shravan now decodes actual libopus-encoded **10 ms**

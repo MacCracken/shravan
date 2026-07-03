@@ -1474,7 +1474,7 @@ fn celt_tf_encode(tf_res, isTransient, tf_select, ec, start, end) {
 # clt_compute_allocation + interp_bits2pulses (rate.c). start=0,end=21.
 # Fills pulses[](1/8-bit shape budget), ebits[](fine bits), fine_priority[];
 # writes *intensity_out,*dual_out,*balance_out; returns codedBands.
-fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, total_in, balance_out, pulses, ebits, fine_priority, C, LM, ec, start, end) {
+fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, total_in, balance_out, pulses, ebits, fine_priority, C, LM, ec, start, end, encode, prev, signalBandwidth) {
     var len = 21;
     var nbAllocVectors = 11;
     var total = total_in;
@@ -1630,11 +1630,20 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
             if (afl > thr) { thr = afl; }
             var stop = 0;
             if (band_bits >= thr) {
-                if (ec_dec_bit_logp(ec, 1) != 0) {
-                    stop = 1;
+                if (encode != 0) {
+                    var depth_threshold = 0;
+                    if (codedBands > 17) { depth_threshold = 9; if (jb < prev) { depth_threshold = 7; } }
+                    var keep = 0;
+                    if ((codedBands <= start + 2) | ((band_bits > (((depth_threshold * bw) << LM << 3) >> 4)) & (jb <= signalBandwidth))) { keep = 1; }
+                    if (keep == 1) { ec_enc_bit_logp(ec, 1, 1); stop = 1; }
+                    else { ec_enc_bit_logp(ec, 0, 1); psum3 = psum3 + 8; band_bits = band_bits - 8; }
                 } else {
-                    psum3 = psum3 + 8;
-                    band_bits = band_bits - 8;
+                    if (ec_dec_bit_logp(ec, 1) != 0) {
+                        stop = 1;
+                    } else {
+                        psum3 = psum3 + 8;
+                        band_bits = band_bits - 8;
+                    }
                 }
             }
             if (stop == 1) {
@@ -1657,7 +1666,8 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
     }
     # intensity + dual_stereo
     if (intensity_rsv > 0) {
-        store64(intensity_out, start + ec_dec_uint(ec, codedBands + 1 - start));
+        if (encode != 0) { ec_enc_uint(ec, load64(intensity_out) - start, codedBands + 1 - start); }
+        else { store64(intensity_out, start + ec_dec_uint(ec, codedBands + 1 - start)); }
     } else {
         store64(intensity_out, 0);
     }
@@ -1666,7 +1676,8 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
         dual_stereo_rsv = 0;
     }
     if (dual_stereo_rsv > 0) {
-        store64(dual_out, ec_dec_bit_logp(ec, 1));
+        if (encode != 0) { ec_enc_bit_logp(ec, load64(dual_out), 1); }
+        else { store64(dual_out, ec_dec_bit_logp(ec, 1)); }
     } else {
         store64(dual_out, 0);
     }
@@ -1882,7 +1893,7 @@ fn celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf_res, off
     var intensity = alloc(8);
     var dual = alloc(8);
     var balance = alloc(8);
-    var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, intensity, dual, bits, balance, pulses, fine_quant, fine_priority, C, LM, ec, start, end);
+    var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, intensity, dual, bits, balance, pulses, fine_quant, fine_priority, C, LM, ec, start, end, 0, 0, end);
     # R13 fine energy
     celt_unquant_fine_energy(oldBandE, fine_quant, ec, C, start, end);
     store64(scal + 0 * 8, silence);
@@ -2976,7 +2987,7 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
 }
 
 # quant_all_bands driver (decode). X_/Y_ byte pointers; collapse_masks byte array.
-fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_stereo, intensity, tf_res, total_bits, balance, ec, LM, codedBands, seed_ptr, disable_inv, C, start, end) {
+fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_stereo, intensity, tf_res, total_bits, balance, ec, LM, codedBands, seed_ptr, disable_inv, C, start, end, encode) {
     if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
     var M = 1 << LM;
     var Bf = 1;
@@ -2998,7 +3009,7 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     var avoid = 0;
     if (Bf > 1) { avoid = 1; }
     store64(ctx + 64, avoid);
-    store64(ctx + 72, 0);   # encode = 0 (this is the decode path)
+    store64(ctx + 72, encode);
     store64(ctx + 80, 0);   # theta_round = 0
     var lowband_offset = 0;
     var update_lowband = 1;
@@ -3667,6 +3678,108 @@ fn celt_decode_frame(st, payload, len, C, pcm_out) {
     return celt_decode_frame_ec(st, ec_dec_new(payload, len), len, C, 0, 21, 0, 3, pcm_out);
 }
 
+# celt_encode_frame_ec — encode CELT bands [start,end) into a caller-owned range ENCODER.
+# `freq` holds the C*N MDCT coefficients. Non-transient mono/stereo, no dynalloc boosts,
+# default spread/trim — a first correct-and-decodable frame (the encoder-quality knobs
+# tf/spread/dynalloc/intra-race are refinements). Mirrors celt_decode_frame_ec's prefix.
+fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end) {
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    var M = 1 << LM;
+    var N = 120 << LM;
+    var len = load64(ec + 8);
+    var total_bits = len * 8;
+    var oldBandE = load64(st + 0);
+    # --- band energies -> log, normalize ---
+    var bandE = alloc(C * 21 * 8);
+    compute_band_energies(freq, bandE, end, C, LM);
+    var bandLogE = alloc(C * 21 * 8);
+    var c0 = 0;
+    while (c0 < C) {
+        var bi = 0;
+        while (bi < end) {
+            var e = load64(bandE + (bi + c0 * 21) * 8);
+            store64(bandLogE + (bi + c0 * 21) * 8, f64_sub(f64_log2(e), load64(_celt_eMeans + bi * 8)));
+            bi = bi + 1;
+        }
+        c0 = c0 + 1;
+    }
+    var X = alloc(C * N * 8);
+    normalise_bands(freq, X, bandE, end, C, LM);
+    # --- prefix ---
+    var isTransient = 0;
+    var tell = ec_tell(ec);
+    if (tell == 1) { ec_enc_bit_logp(ec, 0, 15); }                              # R1 silence=0
+    tell = ec_tell(ec);
+    if ((start == 0) & (tell + 16 <= total_bits)) { ec_enc_bit_logp(ec, 0, 1); }  # R2 postfilter=0
+    tell = ec_tell(ec);
+    if (tell + 3 <= total_bits) { ec_enc_bit_logp(ec, isTransient, 3); }         # R3 transient=0
+    var error = alloc(C * 21 * 8);
+    quant_coarse_energy(start, end, bandLogE, oldBandE, error, ec, C, LM, 1, len);  # R5 (writes intra+coarse)
+    var tf = alloc(21 * 8);
+    var ti = 0; while (ti < 21) { store64(tf + ti * 8, 0); ti = ti + 1; }
+    celt_tf_encode(tf, isTransient, 0, ec, start, end);                          # R6 tf (all 0)
+    var spread = 2;
+    tell = ec_tell(ec);
+    if (tell + 4 <= total_bits) { ec_enc_icdf(ec, spread, _celt_spreadIcdf, 5); }  # R7 spread
+    var cap = alloc(21 * 8);
+    celt_init_caps(cap, LM, C);                                                  # R8 caps
+    # R9 dynalloc — no boosts
+    var offsets = alloc(21 * 8);
+    var oi = 0; while (oi < 21) { store64(offsets + oi * 8, 0); oi = oi + 1; }
+    var dynalloc_logp = 6;
+    var tb2 = total_bits << 3;
+    tell = ec_tell_frac(ec);
+    var i2 = start;
+    while (i2 < end) {
+        var width = (C * (load64(_celt_eBands + (i2 + 1) * 8) - load64(_celt_eBands + i2 * 8))) << LM;
+        var q1 = width << 3;
+        var q2m = 48; if (width > q2m) { q2m = width; }
+        var quanta = q1; if (q2m < quanta) { quanta = q2m; }
+        var dll = dynalloc_logp;
+        var boost = 0;
+        var loopc = 1;
+        while (loopc == 1) {
+            if ((tell + (dll << 3) < tb2) & (boost < load64(cap + i2 * 8))) {
+                var flag = 0;
+                if (boost < load64(offsets + i2 * 8)) { flag = 1; }
+                ec_enc_bit_logp(ec, flag, dll);
+                tell = ec_tell_frac(ec);
+                if (flag == 0) { loopc = 0; }
+                else { boost = boost + quanta; tb2 = tb2 - quanta; dll = 1; }
+            } else { loopc = 0; }
+        }
+        store64(offsets + i2 * 8, boost);
+        if (boost > 0) { dynalloc_logp = dynalloc_logp - 1; if (dynalloc_logp < 2) { dynalloc_logp = 2; } }
+        i2 = i2 + 1;
+    }
+    var alloc_trim = 5;
+    if (tell + 48 <= tb2) { ec_enc_icdf(ec, alloc_trim, _celt_trimIcdf, 7); }     # R10 alloc_trim
+    var bits = (total_bits << 3) - ec_tell_frac(ec) - 1;                          # R11 budget
+    var acr = 0;
+    if ((isTransient != 0) & (LM >= 2) & (bits >= ((LM + 2) << 3))) { acr = 8; }
+    bits = bits - acr;
+    var pulses = alloc(21 * 8);
+    var fine_quant = alloc(21 * 8);
+    var fine_priority = alloc(21 * 8);
+    var intensity = alloc(8);
+    var dual = alloc(8);
+    var balance = alloc(8);
+    store64(intensity, 0); store64(dual, 0);
+    var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, intensity, dual, bits, balance, pulses, fine_quant, fine_priority, C, LM, ec, start, end, 1, 0, end);  # R12
+    quant_fine_energy(oldBandE, error, fine_quant, ec, C, start, end);            # R13 fine
+    # --- bands ---
+    var shortBlocks = 0;
+    if (isTransient != 0) { shortBlocks = M; }
+    var collapse = alloc(C * 21);
+    var Y = 0;
+    if (C == 2) { Y = X + N * 8; }
+    store64(st + 48, 0);   # fold-noise seed (matches decode)
+    quant_all_bands(X, Y, collapse, pulses, shortBlocks, spread, load64(dual), load64(intensity), tf, len * 64 - acr, load64(balance), ec, LM, codedBands, st + 48, 0, C, start, end, 1);
+    if (acr > 0) { ec_enc_bits(ec, 0, 1); }                                       # anti-collapse off
+    quant_energy_finalise(oldBandE, error, fine_quant, fine_priority, len * 8 - ec_tell(ec), ec, C, start, end);
+    return 0;
+}
+
 # ec-taking core: decode CELT bands [start,end) from a caller-owned range decoder,
 # optionally accumulating onto pcm_out (hybrid: start=17, accum=1). Config-31 passes
 # (start=0, end=21, accum=0) for bit-identical behaviour.
@@ -3713,7 +3826,7 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
     var shortBlocks = 0;
     if (isTransient != 0) { shortBlocks = M; }
     var total_bits = len * 64 - acr;
-    quant_all_bands(X, Y, collapse, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, LM, load64(scal + 48), st + 48, 0, C, start, end);
+    quant_all_bands(X, Y, collapse, pul, shortBlocks, load64(scal + 24), load64(scal + 64), load64(scal + 56), tf, total_bits, load64(scal + 72), ec, LM, load64(scal + 48), st + 48, 0, C, start, end, 0);
     var anti_collapse_on = 0;
     if (acr > 0) { anti_collapse_on = ec_dec_bits(ec, 1); }
     celt_unquant_energy_finalise(oldBandE, fq, fp, len * 8 - ec_tell(ec), ec, C, start, end);

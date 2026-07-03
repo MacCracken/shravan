@@ -1,5 +1,12 @@
 # Development Roadmap
 
+> **v2.6.5** — 11460 tests, Cyrius 6.3.x. **Opus ENCODE is real (CELT)**: shravan now encodes
+> a real RFC-6716 CELT frame that **libopus decodes sample-identical** to shravan's own
+> decoder (correlation **1.000000**). The whole encode chain — forward MDCT → band energies →
+> coarse/fine energy encode → allocation → PVQ search+encode → range coder — was built as the
+> exact inverse of the verified decode path, bit-exact by round-trip at every stage; an
+> end-to-end frame reconstructs the input spectrum at **0.968**. CELT-only, mono, 20 ms,
+> non-transient (the encoder counterpart of v2.6.0). Prior:
 > **v2.6.4** — 11357 tests, Cyrius 6.3.x. **Opus 10 ms frames are real**: shravan decodes
 > actual libopus **10 ms** `.opus` — SILK-only (config 0/8), hybrid (config 12/14, CELT
 > LM=2), CELT-only (config 18/22/26/30) — mono + stereo, at **hybrid-10 ms correlation
@@ -162,11 +169,25 @@ and wires the dispatch: SILK-only config 0 (NB) / 8 (WB); hybrid config 12 (SWB,
 - In-suite guards: `test_opus_silk10_rfc` (1.0000), `test_opus_hybrid10_rfc` (0.9999),
   `test_opus_celt10_rfc` (1.0000).
 
-### v2.6.5 — Opus encoder conformance (libopus decodes OURS) · large
-The decode side is real (2.6.0–2.6.4); make the encode side real too.
-- `feat(opus): real ec_enc + RFC-6716 CELT encode (band energy quant, allocation, PVQ
-  search/encode via icwrs, TOC)` — goal: a shravan-encoded `.opus` decodes correctly in
-  libopus/ffmpeg. Supersedes the bespoke 2.5.9 encoder. (SILK/hybrid encode follow.)
+### v2.6.5 — Opus encoder conformance (libopus decodes OURS) · ✅ SHIPPED (CELT mono)
+The decode side is real (2.6.0–2.6.4); the **encode** side is now real too, CELT-first.
+- **`ec_enc` (`entenc.c`)** + **`clt_mdct_forward`** + **`compute_band_energies`/`normalise_bands`**
+  + energy encode (`ec_laplace_encode`, `quant_coarse_energy`/`_fine`/`_finalise`) + **PVQ**
+  (`op_pvq_search`/`icwrs`/`alg_quant`) + band coding made bidirectional (`compute_theta`/
+  `quant_partition`/`quant_band`/`quant_band_n1`/`quant_all_bands` encode, `celt_tf_encode`,
+  `celt_compute_allocation` encode) + **`celt_encode_frame_ec`** (full prefix + bands + finalise).
+  Every stage inverse of the verified decoder, proven by encode→decode round-trips; the shared-code
+  refactor kept **all decode tests bit-exact**.
+- **Proof**: a shravan-encoded CELT frame wrapped as an Opus packet (config 31) **decodes in
+  libopus sample-identical to shravan's own decoder (corr 1.000000)**; end-to-end spectrum
+  round-trip 0.968. In-suite: `test_ec_enc_rfc`, `test_ec_laplace_encode_rfc`,
+  `test_celt_mdct_forward_rfc`, `test_celt_band_energy_rfc`, `test_celt_energy_encode_rfc`,
+  `test_celt_pvq_encode_rfc`, `test_celt_compute_theta_rfc`, `test_celt_quant_band_rfc`,
+  `test_celt_tf_encode_rfc`, `test_celt_encode_frame_rfc`.
+- **Remaining (encoder-quality + coverage)**: transient + `tf_analysis`, dynalloc boosts, the
+  2-pass coarse-energy intra/inter race, spread decision; then **stereo** encode
+  (`stereo_split`/`intensity_stereo`), **SILK** encode, **hybrid** encode — the encoder
+  counterparts of 2.6.1–2.6.3. Supersedes the bespoke 2.5.9 encoder (now `opus_legacy.cyr`).
 
 ### v2.6.6 — Opus CELT completion · medium (refinements from 2.5.9)
 - `feat(opus): true overlapping short-window transient coding + two-pass VBR`.
