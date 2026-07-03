@@ -5492,14 +5492,22 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
     if (num_frames < 0) { num_frames = 0; }
 
     # Decode audio with the real RFC-6716 CELT decoder (config 31, CELT-only fullband
-    # 20ms). Each packet carries one frame (code 0). Non-config-31 packets (SILK/hybrid)
-    # are not yet decoded (v2.6.2/2.6.3) and emit silence for their frame so the sample
-    # timeline stays aligned. Pre-skip is trimmed and the output is capped to the granule.
+    # 20ms). SILK-only 20ms mono packets (config 1 NB / 9 WB) are decoded to 48kHz via
+    # the real RFC-6716 SILK decoder. Other configs (MB SILK, hybrid, multi-frame) emit
+    # silence for their frame so the timeline stays aligned. Pre-skip trimmed, capped to granule.
     if (num_frames > 0) {
         var st = celt_dec_state_new();
         var pcm = alloc(2 * 960 * 8);
         var maxsamp = num_frames * 960;
         var allpcm = alloc(maxsamp * channels * 8);
+        # Persistent SILK decode state (created lazily on first SILK packet; the SILK
+        # decoder, resampler and 1-sample mid history all carry across packets).
+        var silk_st = 0;
+        var silk_rst = 0;
+        var silk_mid = 0;
+        var silk_fs = 0;
+        var silk_out = alloc(960 * 8);
+        var F64_32768 = f64_from(32768);
         var wpos = 0;
         var f = 0;
         while (f < num_frames) {
@@ -5511,9 +5519,36 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             if (plen >= 1) { var toc = load8(pdata); config = (toc >> 3) & 0x1F; stbit = (toc >> 2) & 1; }
             var Cf = 1;
             if (stbit != 0) { Cf = 2; }
+            var code = 0;
+            if (plen >= 1) { code = load8(pdata) & 3; }
+            var handled = 0;
             if ((config == 31) & (plen >= 2)) {
                 celt_decode_frame(st, pdata + 1, plen - 1, Cf, pcm);
-            } else {
+                handled = 1;
+            }
+            # SILK-only 20ms mono: config 1 (NB, 8kHz internal) or 9 (WB, 16kHz).
+            # code 0 (one frame/packet), mono only. Real .opus voice decode → 48kHz.
+            if ((handled == 0) & (stbit == 0) & (code == 0) & (plen >= 2)) {
+                if ((config == 1) | (config == 9)) {
+                    var sfs = 8;
+                    if (config == 9) { sfs = 16; }
+                    if (silk_fs != sfs) {
+                        silk_st = silk_decoder_init(sfs);
+                        silk_rst = silk_resampler_init(sfs);
+                        silk_mid = alloc(2 * 8);
+                        store64(silk_mid + 0, 0); store64(silk_mid + 8, 0);
+                        silk_fs = sfs;
+                    }
+                    silk_decode_pcm(silk_st, silk_rst, silk_mid, pdata + 1, plen - 1, silk_out);
+                    var q = 0;
+                    while (q < 960) {
+                        store64(pcm + q * 8, f64_div(f64_from(load64(silk_out + q * 8)), F64_32768));
+                        q = q + 1;
+                    }
+                    handled = 1;
+                }
+            }
+            if (handled == 0) {
                 var zz = 0;
                 while (zz < 2 * 960) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
             }

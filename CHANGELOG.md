@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-07-02
+
+**SILK is real.** shravan now decodes actual libopus-encoded SILK-mode `.opus` files
+(RFC 6716, voice: TOC config 1 = NB / config 9 = WB, 20 ms mono) end-to-end to 48 kHz
+PCM — **correlation 0.999994 vs ffmpeg's libopus decoder** on a real file (the residual
+is sub-sample delay/pre-skip phase, not decode error). Every internal stage is proven
+**bit-exact against libopus** via a from-source reference decoder (`opusdec_dump`,
+built with per-stage `SILK_DUMP` instrumentation) — 11343 assertions total. Built
+foundation-up as an exact fixed-point port (int16/int32 widths, arithmetic shifts and
+saturation emulated in Cyrius i64).
+
+### Added — real RFC-6716 SILK decoder (`src/silk.cyr`)
+
+- **LP-layer header + `silk_decode_indices`** — VAD/LBRR flags, signal type, gains
+  (with `silk_gains_dequant` LastGainIndex state), NLSF stage-1/stage-2 indices,
+  interpolation factor, and the voiced block (pitch lag, contour, LTP period + taps,
+  LTP scale, seed). Bit-exact for NB (order 10) + WB (order 16) (`test_silk_indices_rfc`).
+- **NLSF → LPC** — `silk_nlsf_decode` (predictive residual dequant + inverse-weighted
+  CB1 + `silk_nlsf_stabilize`) → `pNLSF_Q15`, then `silk_nlsf2a` (LSF cosine-table
+  `find_poly` P/Q convolution → `silk_lpc_fit` int16 fitting → the QA=24
+  `silk_lpc_inv_pred_gain` stability/bandwidth-expansion loop) → `PredCoef_Q12`.
+  Bit-exact vs the reference `PredCoef_Q12` dump, NB + WB.
+- **Pitch + LTP** — `silk_decode_pitch` (lag + contour-codebook offset, clamped),
+  `silk_decode_ltp` (per-subframe taps from the PER codebook, Q7→Q14), `silk_ltp_scale`.
+  Bit-exact on voiced frames.
+- **Excitation** — `silk_decode_pulses`: rate level, per-block sum-of-pulses with the
+  LSB-shift escape, the 15-node `silk_shell_decoder` split tree over shell-code tables
+  0–3, and `silk_decode_signs`. Every sample of 4 excitation vectors bit-exact.
+- **Synthesis** — `silk_decode_core`: excitation reconstruction (`silk_RAND` LCG,
+  quant-offset, sign), LTP long-term prediction, re-whitening via
+  `silk_lpc_analysis_filter`, LPC short-term synthesis (order 10/16), gain scaling.
+  Internal-rate output bit-exact for unvoiced (frame 0) and voiced (frame 1) frames.
+- **Resampler** — `silk_resampler` (internal 8/16 kHz → 48 kHz): 2× all-pass HQ
+  upsampler (`silk_resampler_up2_hq`) + 8-tap fractional FIR interpolation over the
+  `frac_FIR_12` ROM, with the 1 ms input-delay buffer. Output bit-exact vs libopus.
+- **Orchestration** — `silk_decoder_init` / `silk_decode_frame` / `silk_decode_pcm`:
+  the full stateful per-frame pipeline (indices → pulses → NLSF interpolation for
+  `NInterp<4` → pitch/LTP → core → resample) with cross-frame state (outBuf, sLPC,
+  prev_gain, LastGainIndex, prevNLSF, sMid delay). End-to-end bit-exact bits → 48 kHz.
+
+### Changed
+
+- `opus_decode_from_packets` (`src/opus.cyr`) now routes SILK-only 20 ms mono packets
+  (config 1 NB / 9 WB, code 0) through the real SILK decoder → 48 kHz, alongside the
+  2.6.0 CELT config-31 path. Other configs (MB SILK, 10/40/60 ms, hybrid, stereo SILK)
+  still emit timeline-aligned silence.
+
+### Fixed
+
+- `ogg_decode` now lazy-inits the CRC32 table, so consumers calling `decode_file()` on
+  an Ogg/Opus file without the full init sequence no longer dereference a null table.
+- `silk_isort_i16` (the NLSF-stabilizer insertion-sort fallback) mistranslated the C
+  loop's stop condition — it clobbered the loop index on the `a[j] <= value` exit and
+  wrote every element to index 0, corrupting the sort. Caught by an adversarial audit of
+  the port against the libopus C reference; the fallback fires only when the 20-loop
+  iterative stabilizer fails to converge on extreme NLSF vectors, so it is off the
+  common path but reachable from arbitrary valid bitstreams. Now sorts correctly, with a
+  direct unit test (`test_silk_isort_rfc`).
+
+### Not yet (honest status)
+
+- SILK **MB** (12 kHz internal, config 4–7), **10/40/60 ms** frame sizes, and **stereo**
+  (MS) SILK are not decoded (silence). **Hybrid** (2.6.2) and the **encoder** (2.6.3)
+  remain. Claim: "real CELT + SILK 20 ms mono `.opus` decode"; not "Opus complete".
+
 ## [2.6.0] - 2026-07-02
 
 **Opus is real.** shravan now decodes actual libopus-encoded `.opus` files

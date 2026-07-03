@@ -1,6 +1,9 @@
 # Development Roadmap
 
-> **v2.6.0** — 1033 tests, Cyrius 6.3.x. **Opus is real**: shravan decodes actual
+> **v2.6.1** — 11343 tests, Cyrius 6.3.x. **SILK is real**: shravan decodes actual
+> libopus SILK-mode `.opus` files (voice, NB/WB 20 ms mono) to 48 kHz at correlation
+> **0.999994 vs ffmpeg**, every internal stage bit-exact vs libopus. Prior:
+> **v2.6.0** — **Opus is real**: shravan decodes actual
 > libopus `.opus` files (CELT-only fullband) at correlation 1.0 / SNR ~131 dB vs ffmpeg.
 > Prior: **v2.5.12** — MP3 decode comprehensive: MPEG-1/2/2.5
 > **Layer III** + **Layer II** + **Layer I**, all verified sample-exact against minimp3
@@ -37,7 +40,14 @@ path. The lists below are the *current* verified state, not the original audit.
   **correlation 1.000000 / SNR ~131 dB vs ffmpeg**, sample-accurate to ~1e-7. Every decode
   stage is bit-exact vs libopus (range coder, energy, allocation, PVQ/CWRS, MDCT, postfilter).
   The bespoke non-RFC encoder (2.5.9) is retained as legacy for the 2.6.3 encoder work but
-  is off the file-decode path. Not yet: **SILK** (voice, 2.6.1), **hybrid** (2.6.2), **encoder** (2.6.3).
+  is off the file-decode path.
+- **Opus SILK decode → PCM, RFC-6716** *(2.6.1)* — `opus_decode_from_packets` decodes real
+  libopus-encoded SILK-mode `.opus` files (voice: config 1 NB / 9 WB, 20 ms mono) end-to-end
+  to 48 kHz at **correlation 0.999994 vs ffmpeg** (residual is sub-sample delay/pre-skip
+  phase). Every stage bit-exact vs a from-source libopus reference decoder: `decode_indices`,
+  `NLSF_decode`, `NLSF2A`, pitch/LTP, `decode_pulses` (shell coder), `decode_core` (LTP+LPC
+  synthesis), and the internal→48 kHz resampler. Not yet: SILK **MB** (12 kHz), **10/40/60 ms**
+  frames, **stereo** (MS) SILK; **hybrid** (2.6.2), **encoder** (2.6.3).
 - **MP3 decode → PCM** *(2.5.11 + 2.5.12)* — `mp3_decode` produces real samples for
   **all three layers and all MPEG versions**, verified sample-exact vs minimp3:
   MPEG-1/2/2.5 **Layer III** (mono/stereo/M-S/intensity; bit reservoir; block switching),
@@ -77,13 +87,15 @@ is how the old suite hid the silence. Each commit builds clean
 (`cyrius build src/main.cyr build/shravan`) and keeps the suite green. **Never skip
 benchmarks** on a perf claim.
 
-### v2.6.1 — Opus SILK mode · large (voice `.opus`)
-Fullband music (`config 31`, CELT-only) decodes today (2.6.0). SILK covers the
-low-bitrate / voice configs (TOC 0–11) that real-world speech `.opus` uses.
-- `feat(opus): SILK decode — LSF/NLSF → LPC, LTP (long-term prediction), excitation
-  (shell/pulse coding + the shared range decoder), gains, subframe reconstruction, the
-  NB/MB/WB internal rates + resampling`. Verify against libopus-encoded voice `.opus`
-  (correlation vs ffmpeg), the same way CELT was proven in 2.6.0.
+### v2.6.1 — Opus SILK mode · ✅ SHIPPED (voice `.opus`)
+SILK NB/WB 20 ms mono decode landed: `decode_indices` → `NLSF_decode` → `NLSF2A` →
+pitch/LTP → `decode_pulses` (shell coder) → `decode_core` (LTP+LPC synthesis) →
+internal→48 kHz resampler, every stage **bit-exact vs a from-source libopus reference**
+(11343 assertions), and a real libopus SILK `.opus` decodes at **correlation 0.999994
+vs ffmpeg**. Wired into `opus_decode_from_packets` (config 1 NB / 9 WB, code 0, mono).
+- **Remaining SILK surface** (folded forward, not silently dropped): **MB** (12 kHz
+  internal, config 4–7), **10/40/60 ms** frame sizes (multi-SILK-frame packets), and
+  **stereo** (MS prediction). These currently emit timeline-aligned silence.
 
 ### v2.6.2 — Opus hybrid mode · large (SILK low-band + CELT high-band)
 - `feat(opus): hybrid decode — SILK codes the low band and CELT the high band over one

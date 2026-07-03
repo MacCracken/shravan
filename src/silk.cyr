@@ -535,17 +535,21 @@ fn silk_add_sat16(a, b) {
 }
 
 # In-place insertion sort ascending over `n` int16 values at i64 ptr `p`.
+# C stop condition (sort.c): stop when j<0 OR a[j]<=value, leaving j intact so the
+# trailing write lands at j+1. Cyrius has no `break`/`&&`, so capture the insertion
+# slot in `pos` before exiting rather than clobbering `j` (which would force index 0).
 fn silk_isort_i16(p, n) {
     var i = 1;
     while (i < n) {
         var v = load64(p + i * 8);
         var j = i - 1;
+        var pos = 0;
         while (j >= 0) {
             var pv = load64(p + j * 8);
-            if (pv <= v) { j = 0 - 1; }
+            if (pv <= v) { pos = j + 1; j = 0 - 1; }
             else { store64(p + (j + 1) * 8, pv); j = j - 1; }
         }
-        store64(p + (j + 1) * 8, v);
+        store64(p + pos * 8, v);
         i = i + 1;
     }
     return 0;
@@ -1585,5 +1589,191 @@ fn silk_decode_frame(st, payload, plen, xq) {
     store64(st + 15 * 8, 0);                                  # first_frame_after_reset = 0
     store64(st + 7 * 8, signalType);                          # prevSignalType
     store64(st + 8 * 8, load64(pitchL + 3 * 8));              # lagPrev
+    return 0;
+}
+
+# ---- resampler ROM tables ----
+var _silk_frac_fir12 = 0;
+var _silk_up2c0 = 0;
+var _silk_up2c1 = 0;
+
+fn _silk_resampler_tables_init() {
+    _silk_frac_fir12 = alloc(48 * 8);
+    store64(_silk_frac_fir12 + 0 * 8, 189); store64(_silk_frac_fir12 + 1 * 8, 0 - 600); store64(_silk_frac_fir12 + 2 * 8, 617); store64(_silk_frac_fir12 + 3 * 8, 30567); store64(_silk_frac_fir12 + 4 * 8, 117); store64(_silk_frac_fir12 + 5 * 8, 0 - 159); store64(_silk_frac_fir12 + 6 * 8, 0 - 1070); store64(_silk_frac_fir12 + 7 * 8, 29704);
+    store64(_silk_frac_fir12 + 8 * 8, 52); store64(_silk_frac_fir12 + 9 * 8, 221); store64(_silk_frac_fir12 + 10 * 8, 0 - 2392); store64(_silk_frac_fir12 + 11 * 8, 28276); store64(_silk_frac_fir12 + 12 * 8, 0 - 4); store64(_silk_frac_fir12 + 13 * 8, 529); store64(_silk_frac_fir12 + 14 * 8, 0 - 3350); store64(_silk_frac_fir12 + 15 * 8, 26341);
+    store64(_silk_frac_fir12 + 16 * 8, 0 - 48); store64(_silk_frac_fir12 + 17 * 8, 758); store64(_silk_frac_fir12 + 18 * 8, 0 - 3956); store64(_silk_frac_fir12 + 19 * 8, 23973); store64(_silk_frac_fir12 + 20 * 8, 0 - 80); store64(_silk_frac_fir12 + 21 * 8, 905); store64(_silk_frac_fir12 + 22 * 8, 0 - 4235); store64(_silk_frac_fir12 + 23 * 8, 21254);
+    store64(_silk_frac_fir12 + 24 * 8, 0 - 99); store64(_silk_frac_fir12 + 25 * 8, 972); store64(_silk_frac_fir12 + 26 * 8, 0 - 4222); store64(_silk_frac_fir12 + 27 * 8, 18278); store64(_silk_frac_fir12 + 28 * 8, 0 - 107); store64(_silk_frac_fir12 + 29 * 8, 967); store64(_silk_frac_fir12 + 30 * 8, 0 - 3957); store64(_silk_frac_fir12 + 31 * 8, 15143);
+    store64(_silk_frac_fir12 + 32 * 8, 0 - 103); store64(_silk_frac_fir12 + 33 * 8, 896); store64(_silk_frac_fir12 + 34 * 8, 0 - 3487); store64(_silk_frac_fir12 + 35 * 8, 11950); store64(_silk_frac_fir12 + 36 * 8, 0 - 91); store64(_silk_frac_fir12 + 37 * 8, 773); store64(_silk_frac_fir12 + 38 * 8, 0 - 2865); store64(_silk_frac_fir12 + 39 * 8, 8798);
+    store64(_silk_frac_fir12 + 40 * 8, 0 - 71); store64(_silk_frac_fir12 + 41 * 8, 611); store64(_silk_frac_fir12 + 42 * 8, 0 - 2143); store64(_silk_frac_fir12 + 43 * 8, 5784); store64(_silk_frac_fir12 + 44 * 8, 0 - 46); store64(_silk_frac_fir12 + 45 * 8, 425); store64(_silk_frac_fir12 + 46 * 8, 0 - 1375); store64(_silk_frac_fir12 + 47 * 8, 2996);
+    _silk_up2c0 = alloc(3 * 8); store64(_silk_up2c0 + 0, 1746); store64(_silk_up2c0 + 8, 14986); store64(_silk_up2c0 + 16, 0 - 26453);
+    _silk_up2c1 = alloc(3 * 8); store64(_silk_up2c1 + 0, 6854); store64(_silk_up2c1 + 8, 25769); store64(_silk_up2c1 + 16, 0 - 9994);
+    return 0;
+}
+
+# ---- resampler: SILK internal rate -> 48 kHz (resampler.c, IIR_FIR path, up2x) ----
+# silk_resampler_private_up2_HQ: 6-state all-pass 2x upsampler (Q10). out has 2*len samples.
+fn silk_resampler_up2_hq(S, out, inp, len) {
+    var c0a = load64(_silk_up2c0 + 0);  var c0b = load64(_silk_up2c0 + 8);  var c0c = load64(_silk_up2c0 + 16);
+    var c1a = load64(_silk_up2c1 + 0);  var c1b = load64(_silk_up2c1 + 8);  var c1c = load64(_silk_up2c1 + 16);
+    var k = 0;
+    while (k < len) {
+        var in32 = load64(inp + k * 8) << 10;
+        # even sample
+        var Y = in32 - load64(S + 0 * 8);
+        var X = silk_smulwb(Y, c0a);
+        var o1 = load64(S + 0 * 8) + X;
+        store64(S + 0 * 8, in32 + X);
+        Y = o1 - load64(S + 1 * 8);
+        X = silk_smulwb(Y, c0b);
+        var o2 = load64(S + 1 * 8) + X;
+        store64(S + 1 * 8, o1 + X);
+        Y = o2 - load64(S + 2 * 8);
+        X = silk_smlawb(Y, Y, c0c);
+        o1 = load64(S + 2 * 8) + X;
+        store64(S + 2 * 8, o2 + X);
+        store64(out + (2 * k) * 8, silk_sat16(silk_rshift_round(o1, 10)));
+        # odd sample
+        Y = in32 - load64(S + 3 * 8);
+        X = silk_smulwb(Y, c1a);
+        o1 = load64(S + 3 * 8) + X;
+        store64(S + 3 * 8, in32 + X);
+        Y = o1 - load64(S + 4 * 8);
+        X = silk_smulwb(Y, c1b);
+        o2 = load64(S + 4 * 8) + X;
+        store64(S + 4 * 8, o1 + X);
+        Y = o2 - load64(S + 5 * 8);
+        X = silk_smlawb(Y, Y, c1c);
+        o1 = load64(S + 5 * 8) + X;
+        store64(S + 5 * 8, o2 + X);
+        store64(out + (2 * k + 1) * 8, silk_sat16(silk_rshift_round(o1, 10)));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# INTERPOL: 8-tap fractional FIR over buf; writes to out; returns #samples written.
+fn silk_resampler_interpol(out, buf, max_index_Q16, incr_Q16) {
+    var n = 0;
+    var index_Q16 = 0;
+    while (index_Q16 < max_index_Q16) {
+        var ti = silk_smulwb(index_Q16 & 0xFFFF, 12);
+        var bp = buf + (sar(index_Q16, 16)) * 8;
+        var ta = _silk_frac_fir12 + ti * 4 * 8;         # frac[ti][0..3]
+        var tb = _silk_frac_fir12 + (11 - ti) * 4 * 8;  # frac[11-ti][0..3]
+        var res = silk_smulbb(load64(bp + 0 * 8), load64(ta + 0 * 8));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 1 * 8), load64(ta + 1 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 2 * 8), load64(ta + 2 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 3 * 8), load64(ta + 3 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 4 * 8), load64(tb + 3 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 5 * 8), load64(tb + 2 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 6 * 8), load64(tb + 1 * 8)));
+        res = silk_sx32(res + silk_smulbb(load64(bp + 7 * 8), load64(tb + 0 * 8)));
+        store64(out + n * 8, silk_sat16(silk_rshift_round(res, 15)));
+        n = n + 1;
+        index_Q16 = index_Q16 + incr_Q16;
+    }
+    return n;
+}
+
+# silk_resampler_private_IIR_FIR: batched 2x-up + FIR. out receives resampled samples.
+# rst layout: 0 Fs_in_kHz 1 Fs_out_kHz 2 batchSize 3 inputDelay 4 invRatio 5 (unused)
+#   6 sIIR(ptr,6) 7 sFIR(ptr,8) 8 delayBuf(ptr)
+fn silk_resampler_iir_fir(rst, out, inp, inLen) {
+    var batchSize = load64(rst + 2 * 8);
+    var invRatio = load64(rst + 4 * 8);
+    var sIIR = load64(rst + 6 * 8);
+    var sFIR = load64(rst + 7 * 8);
+    var buf = alloc((2 * batchSize + 8) * 8);
+    var i = 0;
+    while (i < 8) { store64(buf + i * 8, load64(sFIR + i * 8)); i = i + 1; }
+    var out_off = 0;
+    var in_off = 0;
+    var done = 0;
+    while (done == 0) {
+        var nSamplesIn = inLen;
+        if (batchSize < nSamplesIn) { nSamplesIn = batchSize; }
+        silk_resampler_up2_hq(sIIR, buf + 8 * 8, inp + in_off * 8, nSamplesIn);
+        var max_index = nSamplesIn << 17;
+        var wrote = silk_resampler_interpol(out + out_off * 8, buf, max_index, invRatio);
+        out_off = out_off + wrote;
+        in_off = in_off + nSamplesIn;
+        inLen = inLen - nSamplesIn;
+        if (inLen > 0) {
+            i = 0;
+            while (i < 8) { store64(buf + i * 8, load64(buf + (nSamplesIn * 2 + i) * 8)); i = i + 1; }
+        } else {
+            done = 1;
+            # save FIR state = buf[2*nSamplesIn .. +8]
+            i = 0;
+            while (i < 8) { store64(sFIR + i * 8, load64(buf + (nSamplesIn * 2 + i) * 8)); i = i + 1; }
+        }
+    }
+    return out_off;
+}
+
+# silk_resampler: top-level, handles the 1 ms input-delay buffer split.
+fn silk_resampler(rst, out, inp, inLen) {
+    var Fs_in = load64(rst + 0 * 8);
+    var Fs_out = load64(rst + 1 * 8);
+    var inputDelay = load64(rst + 3 * 8);
+    var delayBuf = load64(rst + 8 * 8);
+    var nSamples = Fs_in - inputDelay;
+    var i = 0;
+    while (i < nSamples) { store64(delayBuf + (inputDelay + i) * 8, load64(inp + i * 8)); i = i + 1; }
+    silk_resampler_iir_fir(rst, out, delayBuf, Fs_in);
+    silk_resampler_iir_fir(rst, out + Fs_out * 8, inp + nSamples * 8, inLen - Fs_in);
+    i = 0;
+    while (i < inputDelay) { store64(delayBuf + i * 8, load64(inp + (inLen - inputDelay + i) * 8)); i = i + 1; }
+    return 0;
+}
+
+# silk_resampler_init: set up state for internal fs_kHz -> 48 kHz decode.
+fn silk_resampler_init(fs_kHz) {
+    if (_silk_frac_fir12 == 0) { _silk_resampler_tables_init(); }
+    var rst = alloc(9 * 8);
+    var Fs_in = fs_kHz * 1000;
+    var Fs_out = 48000;
+    store64(rst + 0 * 8, fs_kHz);
+    store64(rst + 1 * 8, 48);
+    store64(rst + 2 * 8, fs_kHz * 10);          # batchSize
+    # delay_matrix_dec[rateID(in)][rateID(48000)]: 8kHz->0, 12kHz->4, 16kHz->7.
+    var inputDelay = 7;                          # WB (16 kHz)
+    if (fs_kHz == 8) { inputDelay = 0; }        # NB
+    if (fs_kHz == 12) { inputDelay = 4; }       # MB (for when config 4-7 is wired)
+    store64(rst + 3 * 8, inputDelay);
+    # invRatio_Q16 = LSHIFT(DIV32(LSHIFT(Fs_in,15), Fs_out), 2), rounded up (up2x=1)
+    var invRatio = silk_div_trunc(Fs_in << 15, Fs_out) << 2;
+    while (silk_smulww(invRatio, Fs_out) < (Fs_in << 1)) { invRatio = invRatio + 1; }
+    store64(rst + 4 * 8, invRatio);
+    store64(rst + 5 * 8, 0);
+    var sIIR = alloc(6 * 8);
+    var i = 0; while (i < 6) { store64(sIIR + i * 8, 0); i = i + 1; }
+    store64(rst + 6 * 8, sIIR);
+    var sFIR = alloc(8 * 8);
+    i = 0; while (i < 8) { store64(sFIR + i * 8, 0); i = i + 1; }
+    store64(rst + 7 * 8, sFIR);
+    var delayBuf = alloc(fs_kHz * 8);
+    i = 0; while (i < fs_kHz) { store64(delayBuf + i * 8, 0); i = i + 1; }
+    store64(rst + 8 * 8, delayBuf);
+    return rst;
+}
+
+# ---- full SILK decode: bitstream -> 48 kHz PCM (dec_API.c mono path) ----
+# silk_decode_pcm: decode one SILK frame and resample to 48 kHz.
+# st = silk_decoder_init(fs), rst = silk_resampler_init(fs), sMid = 2 i64 slots (init 0).
+# out48 receives 20 ms * 48 kHz = 960 int16 samples.
+fn silk_decode_pcm(st, rst, sMid, payload, plen, out48) {
+    var frame_length = load64(st + 2 * 8);
+    var xq = alloc(frame_length * 8);
+    silk_decode_frame(st, payload, plen, xq);
+    # Build resampler input: [sMid[1], xq[0..frame_length-2]] (1-sample delay via sStereo.sMid)
+    var rin = alloc(frame_length * 8);
+    store64(rin + 0, load64(sMid + 8));
+    var i = 1;
+    while (i < frame_length) { store64(rin + i * 8, load64(xq + (i - 1) * 8)); i = i + 1; }
+    # Update sMid = last two internal samples
+    store64(sMid + 0, load64(xq + (frame_length - 2) * 8));
+    store64(sMid + 8, load64(xq + (frame_length - 1) * 8));
+    silk_resampler(rst, out48, rin, frame_length);
     return 0;
 }
