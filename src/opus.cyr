@@ -861,6 +861,43 @@ fn ec_laplace_decode(ec, fs, decay) {
     return val;
 }
 
+# ec_laplace_encode (laplace.c): encode a signed value with a Laplace-ish PDF (fs = P(0),
+# decay). Inverse of ec_laplace_decode. Returns the (possibly clamped for the flat tail)
+# value the decoder will recover — the caller uses it for the fine-energy error.
+# LAPLACE_MINP=1, LAPLACE_LOG_MINP=0, LAPLACE_NMIN=16 (baked into _ec_laplace_get_freq1).
+fn ec_laplace_encode(enc, value, fs, decay) {
+    var fl = 0;
+    var val = value;
+    if (val != 0) {
+        var s = 0 - (val < 0);            # s = -(val<0)
+        val = (val + s) ^ s;              # abs(val)
+        fl = fs;
+        fs = _ec_laplace_get_freq1(fs, decay);
+        var i = 1;
+        while ((fs > 0) & (i < val)) {
+            fs = fs * 2;
+            fl = fl + fs + 2;             # fl += fs + 2*LAPLACE_MINP
+            fs = (fs * decay) >> 15;
+            i = i + 1;
+        }
+        if (fs == 0) {
+            var ndi_max = 32768 - fl;     # (32768-fl+MINP-1)>>LOG_MINP
+            ndi_max = (ndi_max - s) >> 1;
+            var di = val - i;
+            if (ndi_max - 1 < di) { di = ndi_max - 1; }
+            fl = fl + (2 * di + 1 + s);   # *LAPLACE_MINP
+            fs = 1;
+            if (32768 - fl < 1) { fs = 32768 - fl; }
+            value = (i + di + s) ^ s;
+        } else {
+            fs = fs + 1;                  # fs += LAPLACE_MINP
+            fl = fl + (fs & (0 - 1 - s)); # fl += fs & ~s
+        }
+    }
+    ec_encode_bin(enc, fl, fl + fs, 15);
+    return value;
+}
+
 # unquant_coarse_energy: fills oldEBands[0..C*21) with base-2 log energies.
 # `intra` is decoded by the caller (orchestration) and passed in.
 fn celt_unquant_coarse_energy(oldEBands, intra, ec, C, start, end, LM) {

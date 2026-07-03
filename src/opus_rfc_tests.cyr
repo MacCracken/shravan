@@ -569,6 +569,36 @@ fn compute_one_band_norm(X, bi) {
     return f64_sqrt(s);
 }
 
+fn test_ec_laplace_encode_rfc() {
+    test_group("opus: ec_laplace_encode — bit-exact vs libopus + round-trip");
+    var buf = alloc(32);
+    var e = ec_enc_new(buf, 32);
+    var m0 = ec_laplace_encode(e, 0, 15000, 8000);
+    var m1 = ec_laplace_encode(e, 1, 15000, 8000);
+    var m2 = ec_laplace_encode(e, 0 - 2, 12000, 6000);
+    var m3 = ec_laplace_encode(e, 3, 10000, 4000);
+    var m4 = ec_laplace_encode(e, 5, 8000, 2000);
+    var m5 = ec_laplace_encode(e, 0 - 1, 20000, 10000);
+    ec_enc_done(e);
+    assert(load64(e + 88) == 0, "laplace enc: no error");
+    assert(load64(e + 48) == 4, "laplace enc: offs == 4");
+    assert(load64(e + 16) == 0, "laplace enc: end_offs == 0");
+    assert(load8(buf + 0) == 83, "laplace byte0 == 83");
+    assert(load8(buf + 1) == 129, "laplace byte1 == 129");
+    assert(load8(buf + 2) == 128, "laplace byte2 == 128");
+    assert(load8(buf + 3) == 226, "laplace byte3 == 226");
+    assert(m0 == 0, "laplace mod0"); assert(m1 == 1, "laplace mod1"); assert(m2 == 0 - 2, "laplace mod2");
+    assert(m3 == 3, "laplace mod3"); assert(m4 == 5, "laplace mod4"); assert(m5 == 0 - 1, "laplace mod5");
+    var d = ec_dec_new(buf, 4);
+    assert(ec_laplace_decode(d, 15000, 8000) == 0, "rt lap 0");
+    assert(ec_laplace_decode(d, 15000, 8000) == 1, "rt lap 1");
+    assert(ec_laplace_decode(d, 12000, 6000) == 0 - 2, "rt lap -2");
+    assert(ec_laplace_decode(d, 10000, 4000) == 3, "rt lap 3");
+    assert(ec_laplace_decode(d, 8000, 2000) == 5, "rt lap 5");
+    assert(ec_laplace_decode(d, 20000, 10000) == 0 - 1, "rt lap -1");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14405,6 +14435,7 @@ fn test_opus_hybrid10_rfc() {
 fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_enc_rfc();
+    test_ec_laplace_encode_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();
