@@ -2,7 +2,11 @@
 
 **shravan** (Sanskrit: hearing / perception) -- Audio codecs for the AGNOS ecosystem.
 
-WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, and AAC-LC encoding/decoding. PCM sample format conversion, sinc resampling, FFT/MDCT, dithering, streaming decoders, and audio metadata tag reading/writing. Zero external dependencies. Pure Cyrius.
+WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, AAC-LC, and MP4/M4A. Full **Opus decode** (CELT + SILK +
+hybrid, mono/stereo, 10/20 ms, all bandwidths, bit-exact vs libopus) and a real **RFC-6716 CELT
+encoder** (libopus decodes shravan's frames sample-identically). PCM sample format conversion,
+sinc resampling, FFT/MDCT, dithering, streaming decoders, and audio metadata tags. Zero external
+dependencies. Pure Cyrius.
 
 ## Quick start
 
@@ -10,7 +14,7 @@ WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, and AAC-LC encoding/decoding. PCM sample f
 # Build
 cyrius build src/main.cyr build/shravan
 
-# Run tests (843 assertions)
+# Run tests (11460 assertions)
 ./build/shravan
 
 # Benchmarks
@@ -27,9 +31,12 @@ cyrius build src/bench.cyr build/bench
 | **aiff** | AIFF/AIFF-C encoder/decoder (big-endian, 80-bit extended sample rate) |
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |
-| **opus** | Opus CELT-mode encoder, header parsing, duration estimation |
-| **mp3** | MP3 frame header parsing, ID3v2 tag skipping |
+| **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo, 10/20 ms, all bandwidths, bit-exact vs libopus; RFC-6716 CELT-frame encoder (mono, 20 ms); header parsing, duration estimation |
+| **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus |
+| **mp3** | MP3 decoder to PCM (MPEG-1/2/2.5 Layer I/II/III — reservoir, Huffman, requant, IMDCT, polyphase synthesis); ID3v2 tag skipping |
 | **aac** | AAC-LC encoder/decoder (ADTS, Huffman codebooks, M/S stereo, short windows) |
+| **mp4** | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
+| **serde** | JSON serialization of format/pcm/error + codec config/metadata types |
 | **pcm** | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
 | **fft** | Mixed-radix FFT (2,3,5), forward/inverse MDCT |
 | **resample** | Windowed sinc interpolation (Draft/Good/Best quality) |
@@ -41,10 +48,12 @@ cyrius build src/bench.cyr build/bench
 
 ## Usage
 
-Include `src/main.cyr` in your project. All codecs are available via the unified `codec_open()` interface:
+Include the self-contained distlib bundle `dist/shravan.cyr` in your project (supply stdlib +
+bayan + sankoch from your own manifest). All codecs are available via the unified `codec_open()`
+interface:
 
 ```
-include "path/to/shravan/src/main.cyr"
+include "path/to/shravan/dist/shravan.cyr"
 
 # Auto-detect and decode
 var result = codec_open(data, len);

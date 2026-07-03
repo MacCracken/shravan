@@ -12,7 +12,7 @@ Thank you for your interest in contributing to shravan.
 
 ## Prerequisites
 
-- Cyrius 6.3.19 (`cyrius --version`; pinned in `cyrius.cyml [package].cyrius`)
+- Cyrius 6.3.27 (`cyrius --version`; pinned in `cyrius.cyml [package].cyrius`)
 - Linux x86_64
 
 ## Cleanliness Check
@@ -40,12 +40,12 @@ cyrius build src/bench.cyr build/bench
 - Entry point is top-level statements, not `fn main()`
 - Large buffers via `alloc()`, not stack arrays (code buffer limit)
 - Prefix all public functions: `wav_`, `flac_`, `aac_`, `tag_`, etc.
-- Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`)
+- Do not use reserved keywords as variable names (`match`, `default`, `shared`, `in`, `secret`)
 
 ## Adding a New Codec
 
-1. Create `lib/mycodec.cyr` with encode/decode functions
-2. Add `include "lib/mycodec.cyr"` in `src/main.cyr` before the codec module
+1. Create `src/mycodec.cyr` with encode/decode functions (all shravan source lives in `src/`; `lib/` holds ONLY the vendored stdlib snapshot)
+2. Add `include "src/mycodec.cyr"` in `src/main.cyr` (after `src/shravan.cyr`)
 3. Add format detection in `detect_format()` and dispatch in `codec_open()`
 4. Add tests (encode/decode roundtrip, error handling)
 5. Add benchmarks in `src/bench.cyr`
@@ -61,7 +61,7 @@ shravan is an audio codec library. It handles:
 
 It does NOT handle:
 - Audio I/O (playback, recording) -- that's dhvani
-- Media containers (MP4, MKV) -- that's tarang
+- Media containers (MKV, general muxing) -- that's tarang (shravan does demux MP4/M4A in src/mp4.cyr for AAC extraction)
 - Audio effects (reverb, EQ) -- that's dhvani
 
 ## License

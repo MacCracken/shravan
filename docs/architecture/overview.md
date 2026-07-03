@@ -9,10 +9,15 @@ shravan/
                        decode_file/reader (first [lib] bundle module)
     flac.cyr        -- FLAC encoder/decoder (all subframe types, SEEKTABLE, MD5)
     ogg.cyr         -- Ogg container parser/muxer (CRC-32, page extraction)
-    mp3.cyr         -- MP3 frame header parsing, ID3v2 skipping
+    mp3.cyr         -- MP3 decode -> PCM: MPEG-1/2/2.5 Layer I/II/III (reservoir, Huffman,
+                       requant, IMDCT, polyphase synth) + ID3v2 skipping
     tag.cyr         -- ID3v2 + Vorbis Comment reading and writing
     fft.cyr         -- Mixed-radix FFT (2,3,5), forward/inverse MDCT
-    opus.cyr        -- Opus CELT-mode encoder, OpusHead/OpusTags parsing
+    opus.cyr        -- Opus decode (CELT+SILK+hybrid, mono/stereo, 10/20 ms, all bandwidths,
+                       bit-exact vs libopus) + RFC-6716 CELT encode (mono 20 ms, interop-verified);
+                       OpusHead/OpusTags parsing
+    silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
+    opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, M/S, short windows)
     mp4.cyr         -- MP4/M4A container demux (box tree, sample table, AAC -> aac_decode)
     resample.cyr    -- Windowed sinc resampler (Draft/Good/Best)
@@ -40,7 +45,7 @@ Raw bytes --> codec_open()    --> decode_result (FormatInfo + samples vec)
                +-- aiff_decode()  --> parse FORM/COMM/SSND --> PCM to f64
                +-- alac_decode()  --> parse config/frames --> Rice/LPC --> f64
                +-- ogg_decode()   --> extract packets --> opus_decode_from_packets()
-               +-- mp3_decode()   --> frame scan --> FormatInfo (no audio)
+               +-- mp3_decode()   --> frame scan --> Layer I/II/III decode --> f64 PCM
                +-- aac_decode()   --> ADTS frames --> ICS/spectral/IMDCT --> f64
                +-- codec_open()   --> also handles FMT_ALAC, FMT_OPUS
 

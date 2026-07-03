@@ -1,6 +1,13 @@
 # ADR 0001 — Opus encoder framework
 
-**Status:** Accepted — framework landed in v2.4.4 (2026-07-01). Features roadmapped as 2.5.x.
+**Status:** SUPERSEDED (v2.6.5). The bespoke framework below was retired: its non-RFC CELT
+encoder now lives in `src/opus_legacy.cyr` (test-only, excluded from the `[lib]` distlib
+bundle). shravan now has a **real RFC-6716 encoder** — the range coder is `ec_enc` (bit-exact
+vs libopus), the spectral shape is full PVQ (`op_pvq_search`/`icwrs`/`alg_quant`), and
+`celt_encode_frame_ec` produces a CELT frame (mono, 20 ms) that **libopus decodes
+sample-identically** to shravan's own decoder. The remaining lifts (encoder-quality knobs,
+stereo/SILK/hybrid encode) are tracked in `docs/development/roadmap.md`. Original context below,
+kept as the historical record.
 
 ## Context
 

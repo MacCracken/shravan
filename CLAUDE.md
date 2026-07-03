@@ -10,7 +10,7 @@
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) -- takumi build recipes
-- **Ported from**: Rust (10,265 lines -> 11,780 lines Cyrius). Rust source removed at v2.0.0, preserved at tag `1.1.0` in git history. See `benchmarks-rust-v-cyrius.md`.
+- **Ported from**: Rust (10,265 Rust lines -> 11,780 Cyrius lines *at the v2.0.0 port*; src/ has since grown well past that). Rust source removed at v2.0.0, preserved at tag `1.1.0` in git history. See `benchmarks-rust-v-cyrius.md`.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. `src/main.cyr` is
-the **test harness** — it `include`s the library + codecs and runs the 843-assertion
+the **test harness** — it `include`s the library + codecs and runs the 11460-assertion
 suite. `cyrius distlib` concatenates the `[lib]` modules into `dist/shravan.cyr`,
 the **self-contained bundle consumers include** (they supply stdlib + bayan +
 sankoch from their own manifest).
@@ -27,7 +27,7 @@ sankoch from their own manifest).
 cyrius.cyml      -- manifest (toolchain pin, [deps].stdlib, [lib] bundle, version = ${file:VERSION})
 cyrius.lock      -- per-file stdlib hash lock (committed)
 src/shravan.cyr  -- the library (core + codec dispatch); first [lib] module
-src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, aac, mp4, resample, dither, simd, stream, serde)
+src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, silk, opus_legacy, aac, mp4, resample, dither, simd, stream, serde)
 src/main.cyr     -- test harness entry (includes shravan.cyr + codecs, runs tests)
 src/bench.cyr    -- benchmarks (clock_gettime timing)
 dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyrius distlib`)
@@ -48,7 +48,7 @@ bump only on explicit instruction. Bumping the pin requires re-vendoring stdlib:
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
 cyrius build src/main.cyr build/shravan    # compile (Cyrius 6.3.27)
-./build/shravan                             # run tests (727 assertions)
+./build/shravan                             # run tests (11460 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
 ```
@@ -69,8 +69,9 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM). Sample-exact vs minimp3 (one edge: MPEG-2.5 8 kHz low-bitrate short blocks) |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
-| opus | src/opus.cyr | RFC-6716 Opus decode → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, verified bit-exact vs libopus). Opus CELT-mode encoder framework (mode/bandwidth select, TOC byte). |
-| opus_legacy | src/opus_legacy.cyr | Legacy 2.5.x bespoke CELT encoder/decoder + Opus encoder framework — **off the RFC decode path**, kept for its tests, included by `main.cyr` but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
+| opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
+| silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
+| opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by `main.cyr` but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
 | aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
 | mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
@@ -95,7 +96,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 727 assertions pass
+2. Cleanliness check: `cyrius build src/main.cyr build/shravan`, verify all 11460 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
