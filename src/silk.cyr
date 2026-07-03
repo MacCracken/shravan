@@ -1471,3 +1471,119 @@ fn silk_decode_core(st, ctrl, xq, pulses) {
     store64(st + 6 * 8, prev_gain);
     return 0;
 }
+
+# ---- stateful frame orchestration (decode_frame.c / dec_API.c) ----
+# Extended st layout adds: 13 LastGainIndex, 14 prevNLSF(ptr,order), 15 first_frame_after_reset.
+# silk_decoder_init: allocate persistent buffers and reset state for sampling rate fs_kHz.
+fn silk_decoder_init(fs_kHz) {
+    var order = 16;
+    if (fs_kHz == 8) { order = 10; }
+    var frame_length = 20 * fs_kHz;
+    var subfr_length = 5 * fs_kHz;
+    var ltp_mem = 20 * fs_kHz;
+    var st = alloc(16 * 8);
+    store64(st + 0 * 8, fs_kHz);
+    store64(st + 1 * 8, order);
+    store64(st + 2 * 8, frame_length);
+    store64(st + 3 * 8, subfr_length);
+    store64(st + 4 * 8, ltp_mem);
+    store64(st + 5 * 8, 4);
+    store64(st + 6 * 8, 65536);          # prev_gain_Q16
+    store64(st + 7 * 8, 0);              # prevSignalType
+    store64(st + 8 * 8, 0);              # lagPrev
+    store64(st + 9 * 8, 0);              # lossCnt
+    store64(st + 10 * 8, alloc(frame_length * 8));            # exc_Q14
+    var slp = alloc(16 * 8);
+    var i = 0; while (i < 16) { store64(slp + i * 8, 0); i = i + 1; }
+    store64(st + 11 * 8, slp);           # sLPC_Q14_buf
+    var ob = alloc((ltp_mem + frame_length) * 8);
+    i = 0; while (i < ltp_mem + frame_length) { store64(ob + i * 8, 0); i = i + 1; }
+    store64(st + 12 * 8, ob);            # outBuf
+    store64(st + 13 * 8, 10);            # LastGainIndex
+    store64(st + 14 * 8, alloc(order * 8)); # prevNLSF_Q15
+    store64(st + 15 * 8, 1);             # first_frame_after_reset
+    return st;
+}
+
+# silk_decode_frame: full pipeline for one SILK frame using persistent state st.
+# Writes internal-rate output into xq (frame_length i64 slots). condCoding = INDEPENDENT.
+fn silk_decode_frame(st, payload, plen, xq) {
+    var fs_kHz = load64(st + 0 * 8);
+    var order = load64(st + 1 * 8);
+    var frame_length = load64(st + 2 * 8);
+    var lg_ptr = st + 13 * 8;
+    var prevNLSF = load64(st + 14 * 8);
+    var first_frame = load64(st + 15 * 8);
+
+    var out = alloc(40 * 8);
+    var ec = silk_decode_indices(payload, plen, fs_kHz, lg_ptr, out);
+    var signalType = load64(out + 0 * 8);
+    var quantOffset = load64(out + 1 * 8);
+    var ninterp = load64(out + 11 * 8);
+    if (first_frame == 1) { ninterp = 4; }
+
+    var pulses = alloc(frame_length * 8);
+    silk_decode_pulses(ec, pulses, signalType, quantOffset, frame_length);
+
+    # NLSF -> LPC; interpolation for PredCoef[0]
+    var pNLSF = alloc(order * 8);
+    silk_nlsf_decode(out + 18 * 8, fs_kHz, pNLSF);
+    var predcoef1 = alloc(order * 8);
+    silk_nlsf2a(predcoef1, pNLSF, order);
+    var predcoef0 = alloc(order * 8);
+    if (ninterp < 4) {
+        var nlsf0 = alloc(order * 8);
+        var i = 0;
+        while (i < order) {
+            var pv = load64(prevNLSF + i * 8);
+            store64(nlsf0 + i * 8, pv + sar(silk_mul(ninterp, load64(pNLSF + i * 8) - pv), 2));
+            i = i + 1;
+        }
+        silk_nlsf2a(predcoef0, nlsf0, order);
+    } else {
+        var i = 0;
+        while (i < order) { store64(predcoef0 + i * 8, load64(predcoef1 + i * 8)); i = i + 1; }
+    }
+    # save prevNLSF = pNLSF
+    var s = 0;
+    while (s < order) { store64(prevNLSF + s * 8, load64(pNLSF + s * 8)); s = s + 1; }
+
+    # pitch + LTP
+    var pitchL = alloc(4 * 8);
+    var ltpcoef = alloc(20 * 8);
+    var ltpscale = 0;
+    var z = 0;
+    while (z < 4) { store64(pitchL + z * 8, 0); z = z + 1; }
+    z = 0; while (z < 20) { store64(ltpcoef + z * 8, 0); z = z + 1; }
+    if (signalType == 2) {
+        silk_decode_pitch(load64(out + 12 * 8), load64(out + 13 * 8), fs_kHz, pitchL);
+        silk_decode_ltp(load64(out + 14 * 8), out + (19 + order) * 8, ltpcoef);
+        ltpscale = silk_ltp_scale(load64(out + 15 * 8));
+    }
+
+    # decode_core
+    var ctrl = alloc(10 * 8);
+    store64(ctrl + 0 * 8, predcoef0);
+    store64(ctrl + 1 * 8, predcoef1);
+    var gb = alloc(4 * 8);
+    z = 0; while (z < 4) { store64(gb + z * 8, load64(out + (6 + z) * 8)); z = z + 1; }
+    store64(ctrl + 2 * 8, gb);
+    store64(ctrl + 3 * 8, pitchL);
+    store64(ctrl + 4 * 8, ltpcoef);
+    store64(ctrl + 5 * 8, ltpscale);
+    store64(ctrl + 6 * 8, signalType);
+    store64(ctrl + 7 * 8, quantOffset);
+    store64(ctrl + 8 * 8, load64(out + 16 * 8));   # seed
+    store64(ctrl + 9 * 8, ninterp);
+    silk_decode_core(st, ctrl, xq, pulses);
+
+    # Update output buffer: mv_len = ltp_mem - frame_length == 0, so outBuf = xq.
+    var outBuf = load64(st + 12 * 8);
+    z = 0;
+    while (z < frame_length) { store64(outBuf + z * 8, load64(xq + z * 8)); z = z + 1; }
+
+    store64(st + 15 * 8, 0);                                  # first_frame_after_reset = 0
+    store64(st + 7 * 8, signalType);                          # prevSignalType
+    store64(st + 8 * 8, load64(pitchL + 3 * 8));              # lagPrev
+    return 0;
+}
