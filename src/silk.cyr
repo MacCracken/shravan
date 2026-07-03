@@ -1256,3 +1256,218 @@ fn silk_decode_pulses(ec, pulses, signalType, quantOffsetType, frame_length) {
     silk_decode_signs(ec, pulses, frame_length, signalType, quantOffsetType, sum_pulses);
     return 0;
 }
+
+# ---- LTP+LPC synthesis (decode_core.c) ----
+fn silk_sub32_ovflw(a, b) { return silk_sx32(a - b); }
+fn silk_lshift_ovflw(a, shift) { return silk_sx32(a << shift); }
+fn silk_add_sat32(a, b) { return silk_sat32(a + b); }
+
+# silk_DIV32_varQ: ~ (a32 << Qres) / b32, b32 != 0, Qres >= 0.
+fn silk_div32_varq(a32, b32, Qres) {
+    var a_hr = silk_clz32(silk_abs64(a32)) - 1;
+    var a_nrm = a32 << a_hr;
+    var b_hr = silk_clz32(silk_abs64(b32)) - 1;
+    var b_nrm = b32 << b_hr;
+    var b_inv = silk_div_trunc(sar(2147483647, 2), sar(b_nrm, 16));
+    var result = silk_smulwb(a_nrm, b_inv);
+    a_nrm = silk_sub32_ovflw(a_nrm, silk_lshift_ovflw(silk_smmul(b_nrm, result), 3));
+    result = silk_smlawb(result, a_nrm, b_inv);
+    var lshift = 29 + a_hr - b_hr - Qres;
+    if (lshift < 0) { return silk_lshift_sat32(result, 0 - lshift); }
+    if (lshift < 32) { return sar(result, lshift); }
+    return 0;
+}
+
+# silk_SMLABB_ovflw(a,b,c) = ADD32_ovflw(a, (int16)b * (int16)c)
+fn silk_smlabb_ovflw(a, b, c) { return silk_sx32(a + _i16(b) * _i16(c)); }
+
+# silk_LPC_analysis_filter (#else scalar branch): out[len] from in[len], MA coefs B[d] (Q12).
+# in/out are int16 values held in i64 slots.
+fn silk_lpc_analysis_filter(out, inp, B, len, d) {
+    var ix = d;
+    while (ix < len) {
+        # in_ptr = &in[ix-1]; out32_Q12 = sum_{j=0..d-1} in_ptr[-j]*B[j]  (ovflw)
+        var acc = silk_smulbb(load64(inp + (ix - 1) * 8), load64(B + 0));
+        var j = 1;
+        while (j < d) {
+            acc = silk_smlabb_ovflw(acc, load64(inp + (ix - 1 - j) * 8), load64(B + j * 8));
+            j = j + 1;
+        }
+        # out32_Q12 = (in[ix] << 12) - acc  (ovflw); out32 = RSHIFT_ROUND(.,12); SAT16
+        acc = silk_sub32_ovflw(load64(inp + ix * 8) << 12, acc);
+        store64(out + ix * 8, silk_sat16(silk_rshift_round(acc, 12)));
+        ix = ix + 1;
+    }
+    var z = 0;
+    while (z < d) { store64(out + z * 8, 0); z = z + 1; }
+    return 0;
+}
+
+# offset_Q10 lookup: silk_Quantization_Offsets_Q10[signalType>>1][quantOffsetType].
+fn silk_quant_offset(signalType, quantOffset) {
+    # {{100,240},{32,100}}
+    if ((signalType >> 1) == 0) {
+        if (quantOffset == 0) { return 100; }
+        return 240;
+    }
+    if (quantOffset == 0) { return 32; }
+    return 100;
+}
+
+# st layout (i64):  0 fs_kHz 1 LPC_order 2 frame_length 3 subfr_length 4 ltp_mem_length
+#   5 nb_subfr 6 prev_gain_Q16 7 prevSignalType 8 lagPrev 9 lossCnt
+#   10 exc_Q14(ptr) 11 sLPC_Q14_buf(ptr,16) 12 outBuf(ptr, ltp_mem_length+frame_length)
+# ctrl layout (i64): 0 PredCoef0(ptr) 1 PredCoef1(ptr) 2 Gains(ptr,4) 3 pitchL(ptr,4)
+#   4 LTPCoef(ptr,20) 5 LTPscale 6 signalType 7 quantOffset 8 seed 9 ninterp
+fn silk_decode_core(st, ctrl, xq, pulses) {
+    var LPC_order = load64(st + 1 * 8);
+    var frame_length = load64(st + 2 * 8);
+    var subfr_length = load64(st + 3 * 8);
+    var ltp_mem = load64(st + 4 * 8);
+    var nb_subfr = load64(st + 5 * 8);
+    var exc = load64(st + 10 * 8);
+    var sLPCbuf = load64(st + 11 * 8);
+    var outBuf = load64(st + 12 * 8);
+    var signalType = load64(ctrl + 6 * 8);
+    var quantOffset = load64(ctrl + 7 * 8);
+    var seed = load64(ctrl + 8 * 8);
+    var ninterp = load64(ctrl + 9 * 8);
+    var gains = load64(ctrl + 2 * 8);
+    var pitchL = load64(ctrl + 3 * 8);
+    var ltpcoef = load64(ctrl + 4 * 8);
+    var ltpscale = load64(ctrl + 5 * 8);
+
+    var sLTP = alloc(ltp_mem * 8);
+    var sLTP_Q15 = alloc((ltp_mem + frame_length) * 8);
+    var res = alloc(subfr_length * 8);
+    var sLPC = alloc((subfr_length + 16) * 8);
+
+    var offset_Q10 = silk_quant_offset(signalType, quantOffset);
+    var nlsf_interp_flag = 0;
+    if (ninterp < 4) { nlsf_interp_flag = 1; }
+
+    # Decode excitation into exc[]
+    var rand_seed = seed;
+    var i = 0;
+    while (i < frame_length) {
+        rand_seed = silk_sx32(907633515 + rand_seed * 196314165);   # silk_RAND
+        var e = load64(pulses + i * 8) << 14;
+        if (e > 0) { e = e - 1280; }
+        else { if (e < 0) { e = e + 1280; } }
+        e = e + (offset_Q10 << 4);
+        if (rand_seed < 0) { e = 0 - e; }
+        store64(exc + i * 8, e);
+        rand_seed = silk_sx32(rand_seed + load64(pulses + i * 8));   # ADD32_ovflw
+        i = i + 1;
+    }
+
+    # Copy LPC state
+    i = 0;
+    while (i < 16) { store64(sLPC + i * 8, load64(sLPCbuf + i * 8)); i = i + 1; }
+
+    var sLTP_buf_idx = ltp_mem;
+    var prev_gain = load64(st + 6 * 8);
+    var k = 0;
+    while (k < nb_subfr) {
+        var A = load64(ctrl + 0 * 8);
+        if ((k >> 1) == 1) { A = load64(ctrl + 1 * 8); }
+        var B = ltpcoef + (k * 5) * 8;
+        var gk = load64(gains + k * 8);
+        var Gain_Q10 = sar(gk, 6);
+        var inv_gain = silk_inverse32_varq(gk, 47);
+
+        var gain_adj = 1 << 16;
+        if (gk != prev_gain) {
+            gain_adj = silk_div32_varq(prev_gain, gk, 16);
+            var g = 0;
+            while (g < 16) { store64(sLPC + g * 8, silk_smulww(gain_adj, load64(sLPC + g * 8))); g = g + 1; }
+        }
+        prev_gain = gk;
+
+        # (PLC transition path omitted: lossCnt == 0 for clean decode)
+        var pexc_base = k * subfr_length;    # index into exc for this subframe
+
+        if (signalType == 2) {
+            var lag = load64(pitchL + k * 8);
+            if ((k == 0) | ((k == 2) & (nlsf_interp_flag == 1))) {
+                var start_idx = ltp_mem - lag - LPC_order - 2;
+                if (k == 2) {
+                    # outBuf[ltp_mem .. ltp_mem+2*subfr_length) = xq[0..2*subfr_length)
+                    var c = 0;
+                    while (c < 2 * subfr_length) { store64(outBuf + (ltp_mem + c) * 8, load64(xq + c * 8)); c = c + 1; }
+                }
+                silk_lpc_analysis_filter(sLTP + start_idx * 8,
+                    outBuf + (start_idx + k * subfr_length) * 8, A, ltp_mem - start_idx, LPC_order);
+                if (k == 0) {
+                    inv_gain = silk_smulwb(inv_gain, ltpscale) << 2;
+                }
+                i = 0;
+                while (i < lag + 2) {
+                    store64(sLTP_Q15 + (sLTP_buf_idx - i - 1) * 8,
+                        silk_smulwb(inv_gain, load64(sLTP + (ltp_mem - i - 1) * 8)));
+                    i = i + 1;
+                }
+            } else {
+                if (gain_adj != (1 << 16)) {
+                    i = 0;
+                    while (i < lag + 2) {
+                        store64(sLTP_Q15 + (sLTP_buf_idx - i - 1) * 8,
+                            silk_smulww(gain_adj, load64(sLTP_Q15 + (sLTP_buf_idx - i - 1) * 8)));
+                        i = i + 1;
+                    }
+                }
+            }
+        }
+
+        # Long-term prediction -> res[], or pres = exc for unvoiced
+        var pres_is_exc = 1;
+        if (signalType == 2) {
+            pres_is_exc = 0;
+            var lag2 = load64(pitchL + k * 8);
+            var plp = sLTP_buf_idx - lag2 + 2;    # pred_lag_ptr index base
+            i = 0;
+            while (i < subfr_length) {
+                var ltp = 2;
+                ltp = silk_smlawb(ltp, load64(sLTP_Q15 + (plp + i) * 8), load64(B + 0));
+                ltp = silk_smlawb(ltp, load64(sLTP_Q15 + (plp + i - 1) * 8), load64(B + 1 * 8));
+                ltp = silk_smlawb(ltp, load64(sLTP_Q15 + (plp + i - 2) * 8), load64(B + 2 * 8));
+                ltp = silk_smlawb(ltp, load64(sLTP_Q15 + (plp + i - 3) * 8), load64(B + 3 * 8));
+                ltp = silk_smlawb(ltp, load64(sLTP_Q15 + (plp + i - 4) * 8), load64(B + 4 * 8));
+                var pr = silk_sx32(load64(exc + (pexc_base + i) * 8) + (ltp << 1));
+                store64(res + i * 8, pr);
+                store64(sLTP_Q15 + sLTP_buf_idx * 8, pr << 1);
+                sLTP_buf_idx = sLTP_buf_idx + 1;
+                i = i + 1;
+            }
+        }
+
+        # Short-term (LPC) prediction + gain scale -> xq
+        i = 0;
+        while (i < subfr_length) {
+            var lpc = sar(LPC_order, 1);
+            var j = 0;
+            while (j < LPC_order) {
+                lpc = silk_smlawb(lpc, load64(sLPC + (16 + i - 1 - j) * 8), load64(A + j * 8));
+                j = j + 1;
+            }
+            var pr = load64(exc + (pexc_base + i) * 8);
+            if (pres_is_exc == 0) { pr = load64(res + i * 8); }
+            var s = silk_add_sat32(pr, silk_lshift_sat32(lpc, 4));
+            store64(sLPC + (16 + i) * 8, s);
+            store64(xq + (k * subfr_length + i) * 8,
+                silk_sat16(silk_rshift_round(silk_smulww(s, Gain_Q10), 8)));
+            i = i + 1;
+        }
+
+        # Shift LPC state: sLPC[0..15] = sLPC[subfr_length..subfr_length+15]
+        i = 0;
+        while (i < 16) { store64(sLPC + i * 8, load64(sLPC + (subfr_length + i) * 8)); i = i + 1; }
+        k = k + 1;
+    }
+
+    # Save LPC state + prev_gain
+    i = 0;
+    while (i < 16) { store64(sLPCbuf + i * 8, load64(sLPC + i * 8)); i = i + 1; }
+    store64(st + 6 * 8, prev_gain);
+    return 0;
+}
