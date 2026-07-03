@@ -2361,7 +2361,7 @@ fn test_silk_indices_rfc() {
     store8(sw0_p + 0, 129); store8(sw0_p + 1, 23); store8(sw0_p + 2, 177); store8(sw0_p + 3, 248); store8(sw0_p + 4, 92); store8(sw0_p + 5, 123); store8(sw0_p + 6, 184); store8(sw0_p + 7, 64); store8(sw0_p + 8, 62); store8(sw0_p + 9, 2); store8(sw0_p + 10, 172); store8(sw0_p + 11, 194); store8(sw0_p + 12, 182); store8(sw0_p + 13, 50);
     store8(sw0_p + 14, 216); store8(sw0_p + 15, 140); store8(sw0_p + 16, 54); store8(sw0_p + 17, 182); store8(sw0_p + 18, 247); store8(sw0_p + 19, 108); store8(sw0_p + 20, 54); store8(sw0_p + 21, 251); store8(sw0_p + 22, 199); store8(sw0_p + 23, 173); store8(sw0_p + 24, 157); store8(sw0_p + 25, 239); store8(sw0_p + 26, 213); store8(sw0_p + 27, 3);
     store8(sw0_p + 28, 144);
-    silk_decode_indices(sw0_p, 29, 16, lg, out);
+    var ec_sw0 = silk_decode_indices(sw0_p, 29, 16, lg, out);
     assert_eq(load64(out + 0 * 8), 1, "sw0 sig");
     assert_eq(load64(out + 1 * 8), 0, "sw0 qoff");
     assert_eq(load64(out + 2 * 8), 20, "sw0 GI0");
@@ -2434,11 +2434,48 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(aq + 13 * 8), 0 - 180, "sw0 LPC13");
     assert_eq(load64(aq + 14 * 8), 490, "sw0 LPC14");
     assert_eq(load64(aq + 15 * 8), 0 - 336, "sw0 LPC15");
+    # sw0 excitation (bit-exact vs libopus silk_decode_pulses)
+    var sw0_ex = alloc(320 * 8);
+    silk_decode_pulses(ec_sw0, sw0_ex, load64(out + 0 * 8), load64(out + 1 * 8), 320);
+    var sw0_ee = alloc(320 * 8);
+    var sw0_zi = 0; while (sw0_zi < 320) { store64(sw0_ee + sw0_zi * 8, 0); sw0_zi = sw0_zi + 1; }
+    store64(sw0_ee + 92 * 8, 0 - 1);
+    store64(sw0_ee + 93 * 8, 0 - 1);
+    store64(sw0_ee + 127 * 8, 1);
+    store64(sw0_ee + 130 * 8, 0 - 1);
+    store64(sw0_ee + 133 * 8, 1);
+    store64(sw0_ee + 135 * 8, 1);
+    store64(sw0_ee + 155 * 8, 0 - 1);
+    store64(sw0_ee + 171 * 8, 0 - 1);
+    store64(sw0_ee + 175 * 8, 1);
+    store64(sw0_ee + 178 * 8, 0 - 1);
+    store64(sw0_ee + 181 * 8, 0 - 1);
+    store64(sw0_ee + 190 * 8, 1);
+    store64(sw0_ee + 192 * 8, 0 - 1);
+    store64(sw0_ee + 194 * 8, 0 - 1);
+    store64(sw0_ee + 197 * 8, 0 - 1);
+    store64(sw0_ee + 203 * 8, 0 - 1);
+    store64(sw0_ee + 232 * 8, 0 - 1);
+    store64(sw0_ee + 236 * 8, 1);
+    store64(sw0_ee + 238 * 8, 0 - 1);
+    store64(sw0_ee + 240 * 8, 0 - 1);
+    store64(sw0_ee + 275 * 8, 0 - 1);
+    store64(sw0_ee + 277 * 8, 0 - 1);
+    store64(sw0_ee + 279 * 8, 0 - 1);
+    store64(sw0_ee + 281 * 8, 0 - 1);
+    store64(sw0_ee + 282 * 8, 0 - 1);
+    store64(sw0_ee + 284 * 8, 0 - 1);
+    store64(sw0_ee + 293 * 8, 0 - 1);
+    store64(sw0_ee + 296 * 8, 1);
+    store64(sw0_ee + 299 * 8, 1);
+    store64(sw0_ee + 302 * 8, 0 - 1);
+    store64(sw0_ee + 317 * 8, 0 - 1);
+    sw0_zi = 0; while (sw0_zi < 320) { assert_eq(load64(sw0_ex + sw0_zi * 8), load64(sw0_ee + sw0_zi * 8), "sw0 exc"); sw0_zi = sw0_zi + 1; }
     # sw1
     var sw1_p = alloc(28);
     store8(sw1_p + 0, 167); store8(sw1_p + 1, 33); store8(sw1_p + 2, 153); store8(sw1_p + 3, 115); store8(sw1_p + 4, 110); store8(sw1_p + 5, 47); store8(sw1_p + 6, 26); store8(sw1_p + 7, 189); store8(sw1_p + 8, 218); store8(sw1_p + 9, 230); store8(sw1_p + 10, 208); store8(sw1_p + 11, 14); store8(sw1_p + 12, 195); store8(sw1_p + 13, 190);
     store8(sw1_p + 14, 86); store8(sw1_p + 15, 186); store8(sw1_p + 16, 95); store8(sw1_p + 17, 251); store8(sw1_p + 18, 65); store8(sw1_p + 19, 131); store8(sw1_p + 20, 53); store8(sw1_p + 21, 149); store8(sw1_p + 22, 213); store8(sw1_p + 23, 88); store8(sw1_p + 24, 29); store8(sw1_p + 25, 230); store8(sw1_p + 26, 193); store8(sw1_p + 27, 32);
-    silk_decode_indices(sw1_p, 28, 16, lg, out);
+    var ec_sw1 = silk_decode_indices(sw1_p, 28, 16, lg, out);
     assert_eq(load64(out + 0 * 8), 2, "sw1 sig");
     assert_eq(load64(out + 1 * 8), 0, "sw1 qoff");
     assert_eq(load64(out + 2 * 8), 32, "sw1 GI0");
@@ -2490,12 +2527,36 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(ltpc + 15 * 8), 0, "sw1 LTP15");
     assert_eq(load64(ltpc + 19 * 8), 0 - 4608, "sw1 LTP19");
     assert_eq(silk_ltp_scale(load64(out + 15 * 8)), 15565, "sw1 LTPscale");
+    # sw1 excitation (bit-exact vs libopus silk_decode_pulses)
+    var sw1_ex = alloc(320 * 8);
+    silk_decode_pulses(ec_sw1, sw1_ex, load64(out + 0 * 8), load64(out + 1 * 8), 320);
+    var sw1_ee = alloc(320 * 8);
+    var sw1_zi = 0; while (sw1_zi < 320) { store64(sw1_ee + sw1_zi * 8, 0); sw1_zi = sw1_zi + 1; }
+    store64(sw1_ee + 47 * 8, 0 - 1);
+    store64(sw1_ee + 67 * 8, 0 - 1);
+    store64(sw1_ee + 85 * 8, 0 - 1);
+    store64(sw1_ee + 93 * 8, 0 - 1);
+    store64(sw1_ee + 111 * 8, 0 - 1);
+    store64(sw1_ee + 116 * 8, 1);
+    store64(sw1_ee + 120 * 8, 0 - 1);
+    store64(sw1_ee + 132 * 8, 0 - 1);
+    store64(sw1_ee + 136 * 8, 0 - 1);
+    store64(sw1_ee + 147 * 8, 2);
+    store64(sw1_ee + 150 * 8, 0 - 1);
+    store64(sw1_ee + 154 * 8, 1);
+    store64(sw1_ee + 166 * 8, 1);
+    store64(sw1_ee + 174 * 8, 0 - 1);
+    store64(sw1_ee + 204 * 8, 0 - 1);
+    store64(sw1_ee + 209 * 8, 0 - 1);
+    store64(sw1_ee + 249 * 8, 1);
+    store64(sw1_ee + 295 * 8, 1);
+    sw1_zi = 0; while (sw1_zi < 320) { assert_eq(load64(sw1_ex + sw1_zi * 8), load64(sw1_ee + sw1_zi * 8), "sw1 exc"); sw1_zi = sw1_zi + 1; }
     # sn0
     store64(lg, 0);
     var sn0_p = alloc(19);
     store8(sn0_p + 0, 129); store8(sn0_p + 1, 124); store8(sn0_p + 2, 73); store8(sn0_p + 3, 71); store8(sn0_p + 4, 36); store8(sn0_p + 5, 125); store8(sn0_p + 6, 71); store8(sn0_p + 7, 241); store8(sn0_p + 8, 175); store8(sn0_p + 9, 251); store8(sn0_p + 10, 171); store8(sn0_p + 11, 84); store8(sn0_p + 12, 93); store8(sn0_p + 13, 235);
     store8(sn0_p + 14, 187); store8(sn0_p + 15, 156); store8(sn0_p + 16, 131); store8(sn0_p + 17, 75); store8(sn0_p + 18, 128);
-    silk_decode_indices(sn0_p, 19, 8, lg, out);
+    var ec_sn0 = silk_decode_indices(sn0_p, 19, 8, lg, out);
     assert_eq(load64(out + 0 * 8), 1, "sn0 sig");
     assert_eq(load64(out + 1 * 8), 0, "sn0 qoff");
     assert_eq(load64(out + 2 * 8), 23, "sn0 GI0");
@@ -2548,11 +2609,34 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(aq + 7 * 8), 0 - 56, "sn0 LPC7");
     assert_eq(load64(aq + 8 * 8), 208, "sn0 LPC8");
     assert_eq(load64(aq + 9 * 8), 0 - 40, "sn0 LPC9");
+    # sn0 excitation (bit-exact vs libopus silk_decode_pulses)
+    var sn0_ex = alloc(160 * 8);
+    silk_decode_pulses(ec_sn0, sn0_ex, load64(out + 0 * 8), load64(out + 1 * 8), 160);
+    var sn0_ee = alloc(160 * 8);
+    var sn0_zi = 0; while (sn0_zi < 160) { store64(sn0_ee + sn0_zi * 8, 0); sn0_zi = sn0_zi + 1; }
+    store64(sn0_ee + 47 * 8, 0 - 1);
+    store64(sn0_ee + 48 * 8, 0 - 2);
+    store64(sn0_ee + 49 * 8, 0 - 1);
+    store64(sn0_ee + 65 * 8, 0 - 1);
+    store64(sn0_ee + 66 * 8, 1);
+    store64(sn0_ee + 67 * 8, 0 - 1);
+    store64(sn0_ee + 68 * 8, 0 - 1);
+    store64(sn0_ee + 69 * 8, 1);
+    store64(sn0_ee + 70 * 8, 0 - 1);
+    store64(sn0_ee + 71 * 8, 0 - 1);
+    store64(sn0_ee + 89 * 8, 0 - 1);
+    store64(sn0_ee + 91 * 8, 1);
+    store64(sn0_ee + 107 * 8, 0 - 1);
+    store64(sn0_ee + 110 * 8, 0 - 1);
+    store64(sn0_ee + 112 * 8, 0 - 1);
+    store64(sn0_ee + 117 * 8, 0 - 1);
+    store64(sn0_ee + 119 * 8, 1);
+    sn0_zi = 0; while (sn0_zi < 160) { assert_eq(load64(sn0_ex + sn0_zi * 8), load64(sn0_ee + sn0_zi * 8), "sn0 exc"); sn0_zi = sn0_zi + 1; }
     # sn1
     var sn1_p = alloc(16);
     store8(sn1_p + 0, 166); store8(sn1_p + 1, 148); store8(sn1_p + 2, 176); store8(sn1_p + 3, 15); store8(sn1_p + 4, 63); store8(sn1_p + 5, 212); store8(sn1_p + 6, 70); store8(sn1_p + 7, 179); store8(sn1_p + 8, 102); store8(sn1_p + 9, 77); store8(sn1_p + 10, 112); store8(sn1_p + 11, 201); store8(sn1_p + 12, 233); store8(sn1_p + 13, 158);
     store8(sn1_p + 14, 4); store8(sn1_p + 15, 128);
-    silk_decode_indices(sn1_p, 16, 8, lg, out);
+    var ec_sn1 = silk_decode_indices(sn1_p, 16, 8, lg, out);
     assert_eq(load64(out + 0 * 8), 2, "sn1 sig");
     assert_eq(load64(out + 1 * 8), 0, "sn1 qoff");
     assert_eq(load64(out + 2 * 8), 31, "sn1 GI0");
@@ -2599,6 +2683,18 @@ fn test_silk_indices_rfc() {
     assert_eq(load64(ltpc + 8 * 8), 7040, "sn1 LTP8");
     assert_eq(load64(ltpc + 9 * 8), 0 - 4608, "sn1 LTP9");
     assert_eq(silk_ltp_scale(load64(out + 15 * 8)), 15565, "sn1 LTPscale");
+    # sn1 excitation (bit-exact vs libopus silk_decode_pulses)
+    var sn1_ex = alloc(160 * 8);
+    silk_decode_pulses(ec_sn1, sn1_ex, load64(out + 0 * 8), load64(out + 1 * 8), 160);
+    var sn1_ee = alloc(160 * 8);
+    var sn1_zi = 0; while (sn1_zi < 160) { store64(sn1_ee + sn1_zi * 8, 0); sn1_zi = sn1_zi + 1; }
+    store64(sn1_ee + 5 * 8, 0 - 1);
+    store64(sn1_ee + 18 * 8, 0 - 1);
+    store64(sn1_ee + 22 * 8, 1);
+    store64(sn1_ee + 26 * 8, 1);
+    store64(sn1_ee + 34 * 8, 1);
+    store64(sn1_ee + 54 * 8, 0 - 1);
+    sn1_zi = 0; while (sn1_zi < 160) { assert_eq(load64(sn1_ex + sn1_zi * 8), load64(sn1_ee + sn1_zi * 8), "sn1 exc"); sn1_zi = sn1_zi + 1; }
     return 0;
 }
 
