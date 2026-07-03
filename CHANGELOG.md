@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.7] - 2026-07-03
+
+**CELT encode now covers stereo — mono AND stereo, closing the 2.6.x line.** `celt_encode(C=2)`
+produces real joint (mid/side) and dual stereo that shravan's own decoder (bit-exact vs libopus)
+reconstructs both channels of: correlated L/R → joint **0.998 / 0.997**, independent L/R → dual
+**0.996 / 0.996**, low-bitrate (80 B/frame) → **0.981 / 0.977**. Every stereo-encode stage was ported
+from libopus's float build and adversarially verified faithful. 11,495 assertions.
+
+### Added — CELT stereo encode (`src/opus.cyr`)
+
+- **`stereo_split`** (L/R → mid/side rotation by 1/√2) and **`intensity_stereo`** (fold Y into X for
+  intensity-coded bands), wired into `compute_theta`'s encode branch: `qn≠1` applies
+  `itheta==0 ? intensity_stereo : stereo_split`; `qn==1` (intensity band) does the `inv` side-inversion
+  decision (`itheta>8192 && !disable_inv`), the Y-negation, the intensity fold, and codes the `inv` bit.
+- **`quant_band_stereo`** N==2 side-sign encode (`sign = (x2[0]·y2[1] − x2[1]·y2[0]) < 0`) and the
+  `MIN_STEREO_ENERGY` (1e-10) preamble that copies the louder channel over a ~silent one.
+- **`stereo_analysis`** — the **dual-stereo decision** (L1 "entropy" of L/R vs M/S over the low bands)
+  → joint mid/side vs L/R-separate coding.
+- **Bitrate-driven `intensity`** via `hysteresis_decision` over `intensity_thresholds` /
+  `intensity_histeresis` — without it, `intensity=0` folded every band and destroyed the distinct L/R
+  shapes; with it, both channels reconstruct at ~0.99.
+- Band energies handed to `quant_all_bands` (`_celt_enc_bandE` → `band_ctx+88`) for the stereo transforms.
+
+### Fixed
+
+- **Range-coder desync on stereo intensity coding.** `celt_compute_allocation`'s encode path omitted the
+  `*intensity = min(*intensity, codedBands)` clamp (`rate.c:400`) before `ec_enc_uint`; when
+  `intensity > codedBands` the encoder coded an out-of-range symbol, desyncing the range coder so the
+  decoder mis-read intensity and every subsequent band. Found by adversarial verification. (Reachable
+  with a persistent intensity + VBR; the single-frame tests keep `intensity ≤ codedBands`.)
+- **`intensity_histeresis` table** was transcribed from a different libopus version; corrected to
+  byte-exact `{1×7, 2×7, 3, 3, 4, 5, 6, 8, 8}` (a programmatic table diff caught it).
+
+### Not yet (honest status)
+
+- **SILK** encode and **hybrid** encode remain (the encoder counterparts of 2.6.1–2.6.3) — tracked for
+  2.8.0. CELT stereo encode is fullband today; other bandwidths ride the `end` parameter.
+
 ## [2.6.6] - 2026-07-03
 
 **CELT encoder quality: the encoder now makes real, signal-driven decisions.** Where 2.6.5

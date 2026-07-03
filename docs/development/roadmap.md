@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.6.6.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.6.7.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -8,31 +8,23 @@
   libopus `.opus` — CELT + SILK + hybrid, mono **and** stereo, 10 ms **and** 20 ms, all
   bandwidths — bit-exact vs libopus (correlation ~1.0 vs ffmpeg). Plus WAV, AIFF, FLAC (enc+dec),
   Ogg, MP3 (MPEG-1/2/2.5 Layer I/II/III), AAC-LC, MP4/M4A demux, ALAC (decoder present).
-- **Encode is real for CELT, mono, at quality (v2.6.6).** shravan encodes a real RFC-6716 **CELT**
-  frame that **libopus decodes sample-identical** to shravan's own decoder (correlation 1.000000),
-  now with the full encoder-quality decision surface: adaptive spread, 2-pass coarse-energy race,
-  transient detection + short-block encode, per-band tf_analysis, and masking-driven dynalloc
-  boosts — every knob ported from libopus's float build and adversarially verified faithful.
-- 11,484 assertions, 0 failing. Cyrius toolchain pinned at 6.3.27.
+- **CELT encode is real and complete — mono AND stereo, at quality (v2.6.0–2.6.7).** shravan encodes
+  a real RFC-6716 **CELT** frame that **libopus decodes sample-identical** to shravan's own decoder
+  (correlation 1.000000), with the full decision surface: adaptive spread, 2-pass coarse-energy race,
+  transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
+  **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
+  libopus's float build and adversarially verified faithful.
+- 11,495 assertions, 0 failing. Cyrius toolchain pinned at 6.3.27.
 
-The remaining distance is (1) finishing the Opus encoder, (2) closing the small decode gaps, and
-(3) bringing the non-Opus codecs and the whole suite to production/interop quality. That is the
-path to **3.0.0**, below.
+The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
+decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
+That is the path to **3.0.0**, below.
 
 ## Path to 3.0.0
 
-One patch finishes the CELT encoder (stereo); three minors then complete Opus encode, mature the
-rest of the suite, and harden everything; **3.0.0** is the major bump when the suite is complete,
-fully interoperable both directions, and fuzz-clean.
-
-### v2.6.7 — CELT stereo encode · medium
-- ✅ **CELT stereo encode.** `stereo_split` / `intensity_stereo` in `compute_theta`'s encode branch,
-  the `quant_band_stereo` N==2 side-sign + `MIN_STEREO_ENERGY` guard, the bitrate-driven `intensity`
-  (hysteresis over `intensity_thresholds`), and the `stereo_analysis` **dual-stereo decision** (joint
-  mid/side vs L/R-separate). `celt_encode(C=2)` → shravan decode: both paths round-trip — correlated
-  L/R → joint (0.998/0.997), independent L/R → dual (0.996/0.996). Decode stayed bit-exact throughout.
-  Fullband today; other bandwidths ride the `end` param. **v2.6.7 (last of 2.6.x) feature-complete —
-  CELT encode now covers mono AND stereo. Ready to cut.**
+The CELT encoder is done (mono + stereo). Three minors then finish Opus encode (SILK + hybrid),
+mature the rest of the suite, and harden everything; **3.0.0** is the major bump when the suite is
+complete, fully interoperable both directions, and fuzz-clean.
 
 ### v2.7.0 — Opus decode completeness · small–medium (close the last decode gaps)
 The mainstream surface decodes; finish the long tail so *every* Opus config decodes.
