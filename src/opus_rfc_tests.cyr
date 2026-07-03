@@ -599,6 +599,51 @@ fn test_ec_laplace_encode_rfc() {
     return 0;
 }
 
+fn test_celt_energy_encode_rfc() {
+    test_group("opus: coarse+fine energy encode -> decode round-trip (bit-exact)");
+    var eB = alloc(21 * 8);
+    store64(eB + 0 * 8, f64_div(f64_from(80000), f64_from(10000))); store64(eB + 1 * 8, f64_div(f64_from(97677), f64_from(10000))); store64(eB + 2 * 8, f64_div(f64_from(110659), f64_from(10000)));
+    store64(eB + 3 * 8, f64_div(f64_from(115400), f64_from(10000))); store64(eB + 4 * 8, f64_div(f64_from(110372), f64_from(10000))); store64(eB + 5 * 8, f64_div(f64_from(96439), f64_from(10000)));
+    store64(eB + 6 * 8, f64_div(f64_from(76645), f64_from(10000))); store64(eB + 7 * 8, f64_div(f64_from(55469), f64_from(10000))); store64(eB + 8 * 8, f64_div(f64_from(37728), f64_from(10000)));
+    store64(eB + 9 * 8, f64_div(f64_from(27399), f64_from(10000))); store64(eB + 10 * 8, f64_div(f64_from(26643), f64_from(10000))); store64(eB + 11 * 8, f64_div(f64_from(35278), f64_from(10000)));
+    store64(eB + 12 * 8, f64_div(f64_from(50823), f64_from(10000))); store64(eB + 13 * 8, f64_div(f64_from(69105), f64_from(10000))); store64(eB + 14 * 8, f64_div(f64_from(85279), f64_from(10000)));
+    store64(eB + 15 * 8, f64_div(f64_from(95020), f64_from(10000))); store64(eB + 16 * 8, f64_div(f64_from(95574), f64_from(10000))); store64(eB + 17 * 8, f64_div(f64_from(86439), f64_from(10000)));
+    store64(eB + 18 * 8, f64_div(f64_from(69485), f64_from(10000))); store64(eB + 19 * 8, f64_div(f64_from(48494), f64_from(10000))); store64(eB + 20 * 8, f64_div(f64_from(28239), f64_from(10000)));
+    var fq = alloc(21 * 8); var fi = 0;
+    while (fi < 21) { store64(fq + fi * 8, 3); fi = fi + 1; }
+    # encode into a fixed 40-byte packet (as real CELT does — the byte budget is an input),
+    # so the range-coder front and raw-bit end share the boundary byte correctly.
+    var buf = alloc(40);
+    var e = ec_enc_new(buf, 40);
+    var oldE = alloc(21 * 8); var err = alloc(21 * 8);
+    var z = 0; while (z < 21) { store64(oldE + z * 8, F64_ZERO); z = z + 1; }
+    quant_coarse_energy(0, 21, eB, oldE, err, e, 1, 3, 1, 40);
+    quant_fine_energy(oldE, err, fq, e, 1, 0, 21);
+    ec_enc_done(e);
+    assert(load64(e + 88) == 0, "energy enc: no error");
+    var oldD = alloc(21 * 8); var z2 = 0; while (z2 < 21) { store64(oldD + z2 * 8, F64_ZERO); z2 = z2 + 1; }
+    var d = ec_dec_new(buf, 40);
+    var intra_r = ec_dec_bit_logp(d, 3);   # consume the intra flag the encoder wrote
+    assert(intra_r == 1, "energy: decoded intra flag == 1");
+    celt_unquant_coarse_energy(oldD, intra_r, d, 1, 0, 21, 3);
+    celt_unquant_fine_energy(oldD, fq, d, 1, 0, 21);
+    var maxd = F64_ZERO; var maxq = F64_ZERO; var i = 0;
+    while (i < 21) {
+        var de = f64_sub(load64(oldE + i * 8), load64(oldD + i * 8));
+        if (f64_lt(de, F64_ZERO) == 1) { de = f64_neg(de); }
+        if (f64_gt(de, maxd) == 1) { maxd = de; }
+        var qe = f64_sub(load64(oldD + i * 8), load64(eB + i * 8));
+        if (f64_lt(qe, F64_ZERO) == 1) { qe = f64_neg(qe); }
+        if (f64_gt(qe, maxq) == 1) { maxq = qe; }
+        i = i + 1;
+    }
+    syscall(1, 2, "energy_encdec_maxdiff_x1e9=", 27); fmt_int_fd(2, f64_to(f64_mul(maxd, f64_from(1000000000)))); syscall(1, 2, "\n", 1);
+    syscall(1, 2, "energy_quanterr_x1000=", 22); fmt_int_fd(2, f64_to(f64_mul(maxq, f64_from(1000)))); syscall(1, 2, "\n", 1);
+    assert(f64_lt(maxd, f64_div(f64_from(1), f64_from(1000000))) == 1, "energy round-trip enc==dec (bit-exact)");
+    assert(f64_lt(maxq, f64_div(f64_from(1), f64_from(10))) == 1, "quantized energy within coarse+3-bit-fine (<0.1)");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -14436,6 +14481,7 @@ fn test_opus_rfc_all() {
     test_ec_dec_rfc_vectors();
     test_ec_enc_rfc();
     test_ec_laplace_encode_rfc();
+    test_celt_energy_encode_rfc();
     test_celt_mdct_forward_rfc();
     test_celt_band_energy_rfc();
     test_ec_laplace_rfc_vectors();

@@ -1019,6 +1019,172 @@ fn celt_unquant_energy_finalise(oldEBands, fine_quant, fine_priority, bits_left,
 }
 
 # ================================================================
+# CELT band-energy ENCODE (quant_bands.c) — inverse of the unquant path above.
+# ================================================================
+# quant_coarse_energy_impl: encode target log-energies eBands[] with intra/inter prediction
+# + Laplace coding, updating oldEBands in place and writing the residual to error[]. Mirrors
+# celt_unquant_coarse_energy exactly. Returns "badness" (sum of clamp adjustments).
+fn quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob, error, enc, C, LM, intra, max_decay) {
+    var badness = 0;
+    var coef = F64_ZERO;
+    var beta = CELT_BETA_INTRA;
+    if (intra == 0) {
+        coef = CELT_PRED_COEF3; beta = CELT_BETA_COEF3;
+        if (LM == 2) { coef = CELT_PRED_COEF2; beta = CELT_BETA_COEF2; }
+    }
+    if (ec_tell(enc) + 3 <= budget) { ec_enc_bit_logp(enc, intra, 3); }
+    var prev0 = F64_ZERO;
+    var prev1 = F64_ZERO;
+    var neg9 = f64_neg(f64_from(9));
+    var neg28 = f64_neg(f64_from(28));
+    var i = start;
+    while (i < end) {
+        var c = 0;
+        while (c < C) {
+            var idx = i + c * CELT_NB_EBANDS;
+            var prevc = prev0;
+            if (c == 1) { prevc = prev1; }
+            var x = load64(eBands + idx * 8);
+            var oldEraw = load64(oldEBands + idx * 8);
+            var oldE = f64_max(neg9, oldEraw);
+            var f = f64_sub(f64_sub(x, f64_mul(coef, oldE)), prevc);
+            # qi = floor(0.5 + f)
+            var yv = f64_add(f, F64_HALF);
+            var qi = f64_to(yv);
+            if (f64_lt(yv, f64_from(qi)) == 1) { qi = qi - 1; }
+            # prevent energy dropping too fast
+            var decay_bound = f64_sub(f64_max(neg28, oldEraw), max_decay);
+            if ((qi < 0) & (f64_lt(x, decay_bound) == 1)) {
+                qi = qi + f64_to(f64_sub(decay_bound, x));
+                if (qi > 0) { qi = 0; }
+            }
+            var qi0 = qi;
+            var t2 = ec_tell(enc);
+            var bits_left = budget - t2 - 3 * C * (end - i);
+            if ((i != start) & (bits_left < 30)) {
+                if ((bits_left < 24) & (qi > 1)) { qi = 1; }
+                if ((bits_left < 16) & (qi < 0 - 1)) { qi = 0 - 1; }
+            }
+            if (budget - t2 >= 15) {
+                var pi = 2 * i;                 # 2*min(i,20), i<21
+                qi = ec_laplace_encode(enc, qi, load8(prob + pi) << 7, load8(prob + pi + 1) << 6);
+            } else {
+                if (budget - t2 >= 2) {
+                    if (qi > 1) { qi = 1; }
+                    if (qi < 0 - 1) { qi = 0 - 1; }
+                    ec_enc_icdf(enc, (2 * qi) ^ (0 - (qi < 0)), _celt_small_en_icdf, 2);
+                } else {
+                    if (budget - t2 >= 1) {
+                        if (qi > 0) { qi = 0; }
+                        ec_enc_bit_logp(enc, 0 - qi, 1);
+                    } else {
+                        qi = 0 - 1;
+                    }
+                }
+            }
+            var q = f64_from(qi);
+            store64(error + idx * 8, f64_sub(f, q));
+            var d = qi0 - qi;
+            if (d < 0) { d = 0 - d; }
+            badness = badness + d;
+            store64(oldEBands + idx * 8, f64_add(f64_add(f64_mul(coef, oldE), prevc), q));
+            var np = f64_add(prevc, f64_sub(q, f64_mul(beta, q)));
+            if (c == 1) { prev1 = np; } else { prev0 = np; }
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return badness;
+}
+
+# quant_coarse_energy: single-pass coarse-energy encode (choose intra via `force_intra` +
+# the budget guard; select the per-(LM,intra) probability model). The full libopus 2-pass
+# intra-vs-inter size race is a bit-allocation optimization on top of this and is a separate
+# step — this pass already produces a correct, decodable stream. budget/max_decay per libopus.
+fn quant_coarse_energy(start, end, eBands, oldEBands, error, enc, C, LM, force_intra, nbAvailableBytes) {
+    if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
+    var budget = load64(enc + 8) * 8;
+    var intra = force_intra;
+    if (ec_tell(enc) + 3 > budget) { intra = 0; }
+    var max_decay = f64_from(16);
+    if (end - start > 10) {
+        var md2 = f64_mul(f64_div(F64_ONE, f64_from(8)), f64_from(nbAvailableBytes));
+        if (f64_lt(md2, max_decay) == 1) { max_decay = md2; }
+    }
+    var prob = _celt_eprob_inter;
+    if (intra != 0) {
+        prob = _celt_eprob_intra;
+        if (LM == 2) { prob = _celt_eprob_intra2; }
+    } else {
+        if (LM == 2) { prob = _celt_eprob_inter2; }
+    }
+    quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob, error, enc, C, LM, intra, max_decay);
+    return intra;
+}
+
+# quant_fine_energy: encode the fine-resolution refinement bits (raw bits, prev=0 base path).
+fn quant_fine_energy(oldEBands, error, fine_quant, enc, C, start, end) {
+    var i = start;
+    while (i < end) {
+        var fq = load64(fine_quant + i * 8);
+        if (fq <= 0) {
+            i = i + 1;
+        } else {
+            if (ec_tell(enc) + C * fq > load64(enc + 8) * 8) {
+                i = i + 1;
+            } else {
+                var extra = 1 << fq;
+                var c = 0;
+                while (c < C) {
+                    var idx = i + c * CELT_NB_EBANDS;
+                    # q2 = floor((error+0.5)*extra), clamped to [0, extra-1]
+                    var q2 = f64_to(f64_mul(f64_add(load64(error + idx * 8), F64_HALF), f64_from(extra)));
+                    if (q2 > extra - 1) { q2 = extra - 1; }
+                    if (q2 < 0) { q2 = 0; }
+                    ec_enc_bits(enc, q2, fq);
+                    var offset = f64_sub(f64_div(f64_add(f64_from(q2), F64_HALF), f64_from(extra)), F64_HALF);
+                    store64(oldEBands + idx * 8, f64_add(load64(oldEBands + idx * 8), offset));
+                    store64(error + idx * 8, f64_sub(load64(error + idx * 8), offset));
+                    c = c + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# quant_energy_finalise: spend the remaining bits, 1 per band per priority pass.
+fn quant_energy_finalise(oldEBands, error, fine_quant, fine_priority, bits_left, enc, C, start, end) {
+    var prio = 0;
+    while (prio < 2) {
+        var i = start;
+        while ((i < end) & (bits_left >= C)) {
+            var fq = load64(fine_quant + i * 8);
+            if ((fq >= CELT_MAX_FINE_BITS) | (load64(fine_priority + i * 8) != prio)) {
+                i = i + 1;
+            } else {
+                var c = 0;
+                while (c < C) {
+                    var idx = i + c * CELT_NB_EBANDS;
+                    var q2 = 0;
+                    if (f64_lt(load64(error + idx * 8), F64_ZERO) == 0) { q2 = 1; }
+                    ec_enc_bits(enc, q2, 1);
+                    var offset = f64_div(f64_sub(f64_from(q2), F64_HALF), f64_from(1 << (fq + 1)));
+                    store64(oldEBands + idx * 8, f64_add(load64(oldEBands + idx * 8), offset));
+                    store64(error + idx * 8, f64_sub(load64(error + idx * 8), offset));
+                    bits_left = bits_left - 1;
+                    c = c + 1;
+                }
+                i = i + 1;
+            }
+        }
+        prio = prio + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # CELT allocation tables (extracted verbatim from libopus mode48000_960_120)
 # ================================================================
 var _celt_eBands = 0;
