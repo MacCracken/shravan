@@ -1640,6 +1640,73 @@ fn test_celt_encode_pcm_rfc() {
     return 0;
 }
 
+# celt_transient_analysis — the encoder's own short-block decision (celt_encoder.c:267).
+# A steady tone has a flat energy envelope → low mask metric → long blocks (best freq
+# resolution). A sudden onset spikes the envelope → mask metric > 200 → short blocks (no
+# pre-echo). Also proves the −1 sentinel path in celt_encode auto-detects: the auto frame
+# is byte-identical to the frame you'd get by forcing the flag the detector chose.
+fn test_celt_transient_analysis_rfc() {
+    test_group("opus: celt_transient_analysis — short-block decision + auto-detect wiring");
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    if (_celt_inv_table == 0) { _celt_bands_tables_init(); }
+    var nsamp = 1080;                                            # N(=960) + overlap(120), LM=3
+    var steady = alloc(nsamp * 8);
+    var trans = alloc(nsamp * 8);
+    var twopi = f64_mul(F64_TWO, F64_PI);
+    var n = 0;
+    while (n < nsamp) {
+        var ph = f64_div(f64_mul(twopi, f64_mul(f64_from(40), f64_from(n))), f64_from(960));  # ~2 kHz
+        var s = f64_mul(f64_div(f64_from(3), f64_from(10)), f64_sin(ph));     # steady 0.3 amplitude
+        store64(steady + n * 8, s);
+        var t = F64_ZERO;
+        if (n >= 720) { t = f64_mul(f64_div(f64_from(6), f64_from(10)), f64_sin(ph)); }  # silence→burst at 720
+        store64(trans + n * 8, t);
+        n = n + 1;
+    }
+    # Detector on the preemphasized signals (same domain the MDCT sees)
+    var pmemA = alloc(8); store64(pmemA, 0);
+    var preS = alloc(nsamp * 8); celt_preemphasis(steady, preS, nsamp, 1, pmemA);
+    var itS = celt_transient_analysis(preS, nsamp, 1);
+    syscall(1, 2, "transient_steady_flag=", 22); fmt_int_fd(2, itS); syscall(1, 2, "\n", 1);
+    assert(itS == 0, "steady tone -> long blocks (is_transient=0)");
+    var pmemB = alloc(8); store64(pmemB, 0);
+    var preT = alloc(nsamp * 8); celt_preemphasis(trans, preT, nsamp, 1, pmemB);
+    var itT = celt_transient_analysis(preT, nsamp, 1);
+    syscall(1, 2, "transient_onset_flag=", 21); fmt_int_fd(2, itT); syscall(1, 2, "\n", 1);
+    assert(itT == 1, "sudden onset -> short blocks (is_transient=1)");
+
+    # Auto-detect wired into celt_encode: −1 sentinel == the flag the detector chose, byte-for-byte
+    var b_auto = alloc(160); var b_forced = alloc(160);
+    var zz = 0; while (zz < 160) { store8(b_auto + zz, 0); store8(b_forced + zz, 0); zz = zz + 1; }
+    var s1 = celt_dec_state_new(); var m1 = alloc(8); store64(m1, 0);
+    var e1 = ec_enc_new(b_auto, 160); celt_encode(s1, e1, trans, 1, 3, 1, -1, m1); ec_enc_done(e1);
+    var s2 = celt_dec_state_new(); var m2 = alloc(8); store64(m2, 0);
+    var e2 = ec_enc_new(b_forced, 160); celt_encode(s2, e2, trans, 1, 3, 1, 1, m2); ec_enc_done(e2);
+    _celt_assert_bytes(b_auto, b_forced, 160, "auto(-1) onset frame == forced isTransient=1 frame");
+    var b_auto2 = alloc(160); var b_forced2 = alloc(160);
+    zz = 0; while (zz < 160) { store8(b_auto2 + zz, 0); store8(b_forced2 + zz, 0); zz = zz + 1; }
+    var s3 = celt_dec_state_new(); var m3 = alloc(8); store64(m3, 0);
+    var e3 = ec_enc_new(b_auto2, 160); celt_encode(s3, e3, steady, 1, 3, 1, -1, m3); ec_enc_done(e3);
+    var s4 = celt_dec_state_new(); var m4 = alloc(8); store64(m4, 0);
+    var e4 = ec_enc_new(b_forced2, 160); celt_encode(s4, e4, steady, 1, 3, 1, 0, m4); ec_enc_done(e4);
+    _celt_assert_bytes(b_auto2, b_forced2, 160, "auto(-1) steady frame == forced isTransient=0 frame");
+
+    # The auto-selected transient frame is a valid, decodable CELT frame (onset tracked)
+    var std = celt_dec_state_new(); var dd = ec_dec_new(b_auto, 160);
+    var pcmo = alloc(960 * 8);
+    celt_decode_frame_ec(std, dd, 160, 1, 0, 21, 0, 3, pcmo);
+    var dot = F64_ZERO; var na = F64_ZERO; var nb2 = F64_ZERO; var i = 720;
+    while (i < 840) {
+        var a = load64(trans + i * 8); var b = load64(pcmo + i * 8);
+        dot = f64_add(dot, f64_mul(a, b)); na = f64_add(na, f64_mul(a, a)); nb2 = f64_add(nb2, f64_mul(b, b));
+        i = i + 1;
+    }
+    var corr = f64_div(dot, f64_sqrt(f64_mul(na, nb2)));
+    syscall(1, 2, "transient_auto_roundtrip_corr_x1000=", 36); fmt_int_fd(2, f64_to(f64_mul(corr, f64_from(1000)))); syscall(1, 2, "\n", 1);
+    assert(f64_gt(corr, f64_div(f64_from(95), f64_from(100))) == 1, "auto transient frame decodes (onset corr > 0.95)");
+    return 0;
+}
+
 # Bit-exact conformance vs libopus's own range coder. The 16-byte vector below
 # was produced by libopus ec_enc (entenc.c) encoding this exact symbol sequence;
 # decoding it here must reproduce the identical values and ec_tell. This is the
@@ -1661,5 +1728,6 @@ fn test_opus_encoder_all() {
     test_celt_coarse_race_rfc();
     test_celt_encode_transient_rfc();
     test_celt_encode_pcm_rfc();
+    test_celt_transient_analysis_rfc();
     return 0;
 }

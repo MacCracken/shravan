@@ -2102,6 +2102,9 @@ var _celt_exp2_8 = 0;      # 8 int
 var _celt_ordery = 0;      # ordery_table (offsets: stride-2)
 var _celt_bitil = 0;       # bit_interleave_table[16]
 var _celt_bitdeil = 0;     # bit_deinterleave_table[16]
+var _celt_inv_table = 0;   # transient_analysis inv_table[128] (6*64/x, trained)
+var _celt_tf_estimate = 0; # last transient_analysis tf_estimate (f64, for tf/VBR)
+var _celt_tf_chan = 0;     # last transient_analysis dominant channel
 var F64_SQRT1_2 = 0;       # 0.70710678
 
 fn _celt_bands_tables_init() {
@@ -2141,6 +2144,25 @@ fn _celt_bands_tables_init() {
     store8(_celt_bitdeil+8,192); store8(_celt_bitdeil+9,195); store8(_celt_bitdeil+10,204); store8(_celt_bitdeil+11,207);
     store8(_celt_bitdeil+12,240); store8(_celt_bitdeil+13,243); store8(_celt_bitdeil+14,252); store8(_celt_bitdeil+15,255);
     F64_SQRT1_2 = f64_div(f64_from(70710678), f64_from(100000000));
+    # transient_analysis inv_table[128] — "6*64/x" trained (celt_encoder.c:286)
+    _celt_inv_table = alloc(128);
+    var iv = _celt_inv_table;
+    store8(iv+0,255); store8(iv+1,255); store8(iv+2,156); store8(iv+3,110); store8(iv+4,86); store8(iv+5,70); store8(iv+6,59); store8(iv+7,51);
+    store8(iv+8,45); store8(iv+9,40); store8(iv+10,37); store8(iv+11,33); store8(iv+12,31); store8(iv+13,28); store8(iv+14,26); store8(iv+15,25);
+    store8(iv+16,23); store8(iv+17,22); store8(iv+18,21); store8(iv+19,20); store8(iv+20,19); store8(iv+21,18); store8(iv+22,17); store8(iv+23,16);
+    store8(iv+24,16); store8(iv+25,15); store8(iv+26,15); store8(iv+27,14); store8(iv+28,13); store8(iv+29,13); store8(iv+30,12); store8(iv+31,12);
+    store8(iv+32,12); store8(iv+33,12); store8(iv+34,11); store8(iv+35,11); store8(iv+36,11); store8(iv+37,10); store8(iv+38,10); store8(iv+39,10);
+    store8(iv+40,9); store8(iv+41,9); store8(iv+42,9); store8(iv+43,9); store8(iv+44,9); store8(iv+45,9); store8(iv+46,8); store8(iv+47,8);
+    store8(iv+48,8); store8(iv+49,8); store8(iv+50,8); store8(iv+51,7); store8(iv+52,7); store8(iv+53,7); store8(iv+54,7); store8(iv+55,7);
+    store8(iv+56,7); store8(iv+57,6); store8(iv+58,6); store8(iv+59,6); store8(iv+60,6); store8(iv+61,6); store8(iv+62,6); store8(iv+63,6);
+    store8(iv+64,6); store8(iv+65,6); store8(iv+66,6); store8(iv+67,6); store8(iv+68,6); store8(iv+69,6); store8(iv+70,6); store8(iv+71,6);
+    store8(iv+72,6); store8(iv+73,5); store8(iv+74,5); store8(iv+75,5); store8(iv+76,5); store8(iv+77,5); store8(iv+78,5); store8(iv+79,5);
+    store8(iv+80,5); store8(iv+81,5); store8(iv+82,5); store8(iv+83,5); store8(iv+84,5); store8(iv+85,4); store8(iv+86,4); store8(iv+87,4);
+    store8(iv+88,4); store8(iv+89,4); store8(iv+90,4); store8(iv+91,4); store8(iv+92,4); store8(iv+93,4); store8(iv+94,4); store8(iv+95,4);
+    store8(iv+96,4); store8(iv+97,4); store8(iv+98,4); store8(iv+99,4); store8(iv+100,4); store8(iv+101,4); store8(iv+102,4); store8(iv+103,4);
+    store8(iv+104,4); store8(iv+105,4); store8(iv+106,4); store8(iv+107,4); store8(iv+108,4); store8(iv+109,4); store8(iv+110,3); store8(iv+111,3);
+    store8(iv+112,3); store8(iv+113,3); store8(iv+114,3); store8(iv+115,3); store8(iv+116,3); store8(iv+117,3); store8(iv+118,3); store8(iv+119,3);
+    store8(iv+120,3); store8(iv+121,3); store8(iv+122,3); store8(iv+123,3); store8(iv+124,3); store8(iv+125,3); store8(iv+126,3); store8(iv+127,2);
     return 0;
 }
 
@@ -3767,6 +3789,101 @@ fn celt_spreading_decision(X, end, C, LM, avg_ptr, last_decision) {
     return decision;
 }
 
+# celt_transient_analysis (celt_encoder.c:267, float path) — decides whether the frame
+# needs short blocks (a sudden energy jump = transient) so the encoder avoids pre-echo.
+# in_buf = preemphasized signal (C*len f64, per-channel stride len); returns is_transient
+# (0/1) and stashes tf_estimate/tf_chan in globals for later tf/VBR use. A steady tone
+# yields a low mask metric → long blocks (better frequency resolution). No weak-transient
+# or tone detection (allow_weak_transients=0, toneishness=0) — those only bite at very low
+# hybrid bitrate. The mask metric / threshold (>200) is integer, matching libopus exactly;
+# the float shifts (SHR32/PSHR32/SROUND16) are all no-ops in the float build (arch.h).
+fn celt_transient_analysis(in_buf, len, C) {
+    if (_celt_inv_table == 0) { _celt_bands_tables_init(); }
+    var len2 = len / 2;
+    var forward_decay = f64_div(f64_from(1), f64_from(16));       # 0.0625 (6.7 dB/ms fwd mask)
+    var one_m_fd = f64_div(f64_from(15), f64_from(16));           # 1 - forward_decay
+    var c_875 = f64_div(f64_from(7), f64_from(8));                # 0.875 (backward mask)
+    var c_125 = f64_div(f64_from(1), f64_from(8));                # 0.125
+    var eps = f64_div(f64_from(1), f64_from(1000000000000000));   # EPSILON 1e-15
+    var tmp = alloc(len * 8);
+    var mask_metric = 0;
+    var tf_chan = 0;
+    var c = 0;
+    while (c < C) {
+        # High-pass filter (1 - 2z^-1 + z^-2)/(1 - z^-1 + .5z^-2) — modified dep-chain form
+        var mem0 = f64_from(0);
+        var mem1 = f64_from(0);
+        var i = 0;
+        while (i < len) {
+            var x = load64(in_buf + (i + c * len) * 8);
+            var y = f64_add(mem0, x);
+            var mem00 = mem0;
+            mem0 = f64_add(f64_sub(mem0, x), f64_mul(F64_HALF, mem1));
+            mem1 = f64_sub(x, mem00);
+            store64(tmp + i * 8, y);                              # SROUND16(y,2) = y (float no-op)
+            i = i + 1;
+        }
+        i = 0;                                                    # first 12 = filter warm-up garbage
+        while (i < 12) { store64(tmp + i * 8, f64_from(0)); i = i + 1; }
+        # Forward pass: post-echo threshold (leaky integrator), grouping by two
+        var mean = f64_from(0);
+        mem0 = f64_from(0);
+        i = 0;
+        while (i < len2) {
+            var t0 = load64(tmp + (2 * i) * 8);
+            var t1 = load64(tmp + (2 * i + 1) * 8);
+            var x2 = f64_add(f64_mul(t0, t0), f64_mul(t1, t1));
+            mean = f64_add(mean, x2);
+            mem0 = f64_add(x2, f64_mul(one_m_fd, mem0));
+            store64(tmp + i * 8, f64_mul(forward_decay, mem0));
+            i = i + 1;
+        }
+        # Backward pass: pre-echo threshold; track max envelope
+        mem0 = f64_from(0);
+        var maxE = f64_from(0);
+        i = len2 - 1;
+        while (i >= 0) {
+            var ti = load64(tmp + i * 8);
+            mem0 = f64_add(ti, f64_mul(c_875, mem0));
+            var v = f64_mul(c_125, mem0);
+            store64(tmp + i * 8, v);
+            maxE = f64_max(maxE, v);
+            i = i - 1;
+        }
+        # Frame energy = geometric mean of energy and half the max; norm = inverse mean
+        var meanE = f64_sqrt(f64_mul(f64_mul(f64_mul(mean, maxE), F64_HALF), f64_from(len2)));
+        var norm = f64_div(f64_from(len2), f64_add(eps, meanE));
+        # Harmonic mean of the reliable interior, sampling 1/4 (integer accumulate)
+        var unmask = 0;
+        i = 12;
+        while (i < len2 - 5) {
+            var arg = f64_mul(f64_from(64), f64_mul(norm, f64_add(load64(tmp + i * 8), eps)));
+            var id = f64_to(f64_floor(arg));
+            if (id < 0) { id = 0; }
+            if (id > 127) { id = 127; }
+            unmask = unmask + load8(_celt_inv_table + id);
+            i = i + 4;
+        }
+        # Normalize: compensate 1/4 sampling + factor 6 in inv_table (integer division)
+        var um = (64 * unmask * 4) / (6 * (len2 - 17));
+        if (um > mask_metric) { tf_chan = c; mask_metric = um; }
+        c = c + 1;
+    }
+    var is_transient = 0;
+    if (mask_metric > 200) { is_transient = 1; }
+    # tf_estimate (tf/VBR hint): sqrt(max(0, 0.0069·min(163,tf_max) − 0.139)), tf_max=max(0,sqrt(27·mm)−42)
+    var tf_max = f64_sub(f64_sqrt(f64_from(27 * mask_metric)), f64_from(42));
+    if (f64_lt(tf_max, f64_from(0)) != 0) { tf_max = f64_from(0); }
+    if (f64_gt(tf_max, f64_from(163)) != 0) { tf_max = f64_from(163); }
+    var c_0069 = f64_div(f64_from(69), f64_from(10000));          # 0.0069
+    var c_0139 = f64_div(f64_from(139), f64_from(1000));          # 0.139
+    var tfe_arg = f64_sub(f64_mul(c_0069, tf_max), c_0139);
+    if (f64_lt(tfe_arg, f64_from(0)) != 0) { tfe_arg = f64_from(0); }
+    _celt_tf_estimate = f64_sqrt(tfe_arg);
+    _celt_tf_chan = tf_chan;
+    return is_transient;
+}
+
 # celt_preemphasis (celt_encoder.c): the exact inverse of the decoder's deemphasis IIR —
 # pre[n] = 32768·pcm[n] − coef·(32768·pcm[n−1]), coef = CELT_DEEMPH. mem_ptr[c] holds the
 # scaled previous sample (0 = fresh). Feeds the forward MDCT.
@@ -3812,14 +3929,21 @@ fn celt_compute_mdcts(pre, freq, C, LM, isTransient, nsamp) {
 # celt_encode — the PCM-in front-end: preemphasize (mem_ptr persists across frames; 0 = fresh)
 # → forward MDCT (long/short per isTransient) → celt_encode_frame_ec. pcm holds N+overlap
 # interleaved samples per channel (the frame plus 120-sample lookahead). Returns the chosen intra.
+# isTransient: 0/1 forces long/short blocks; a negative sentinel (−1) auto-detects via
+# celt_transient_analysis on the preemphasized signal (the encoder's own short-block decision).
 fn celt_encode(st, ec, pcm, C, LM, force_intra, isTransient, mem_ptr) {
     var N = 120 << LM;
     var nsamp = N + 120;
     var pre = alloc(C * nsamp * 8);
     celt_preemphasis(pcm, pre, nsamp, C, mem_ptr);
+    var it = isTransient;
+    if (it < 0) {                                    # sentinel: auto-detect from the signal
+        it = 0;
+        if (LM > 0) { it = celt_transient_analysis(pre, nsamp, C); }
+    }
     var freq = alloc(C * N * 8);
-    celt_compute_mdcts(pre, freq, C, LM, isTransient, nsamp);
-    return celt_encode_frame_ec(st, ec, freq, C, LM, 0, 21, force_intra, isTransient);
+    celt_compute_mdcts(pre, freq, C, LM, it, nsamp);
+    return celt_encode_frame_ec(st, ec, freq, C, LM, 0, 21, force_intra, it);
 }
 
 # celt_encode_frame_ec — encode CELT bands [start,end) into a caller-owned range ENCODER.

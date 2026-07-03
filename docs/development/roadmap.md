@@ -26,9 +26,13 @@ interoperable both directions, and fuzz-clean.
 
 ### v2.6.6 — CELT encoder quality · medium
 Make the CELT encoder produce *good* frames, not just valid ones (2.6.5 uses fixed defaults).
-- `feat(opus): transient detection + tf_analysis (real per-band tf_res), dynalloc boosts,
-  the 2-pass coarse-energy intra/inter size race, and the spread decision`. Verify the encoded
-  frame's rate/quality against libopus on the same input; keep the encode→decode round-trip exact.
+- ✅ spread decision, ✅ 2-pass coarse-energy intra/inter size race, ✅ transient *encode*
+  (short blocks), ✅ **transient *detection*** (`celt_transient_analysis`, `celt_encoder.c:267`
+  float path, `inv_table` byte-exact; `celt_encode` auto-detects `isTransient` via the −1
+  sentinel — steady tone → long, onset → short; adversarially verified faithful to libopus).
+- Remaining: `feat(opus): tf_analysis (real per-band tf_res + tf_select), dynalloc boosts`.
+  Verify the encoded frame's rate/quality against libopus on the same input; keep the
+  encode→decode round-trip exact. Cut 2.6.6 once tf_analysis + dynalloc land.
 
 ### v2.6.7 — CELT stereo encode · medium
 - `feat(opus): stereo_split / intensity_stereo, quant_band_stereo N==2 sign encode, dual-stereo
