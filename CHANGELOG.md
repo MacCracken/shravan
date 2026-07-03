@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-07-02
+
+**Opus hybrid is real.** shravan now decodes actual libopus-encoded **hybrid** `.opus`
+files (SILK low band + CELT high band over one shared range coder — TOC config 13 SWB /
+15 FB, 20 ms mono) end-to-end to 48 kHz, verified against a libopus golden at
+**correlation 0.9999**, per-frame ≥ 0.99993 across a real file. The same refactor
+generalizes the CELT decoder to arbitrary band ranges, so the remaining **CELT-only
+20 ms configs** (19 NB, 23 WB, 27 SWB — previously silence) now decode too, alongside the
+2.6.0 config-31 (FB). 11345 assertions.
+
+### Added — Opus hybrid decode (`src/opus.cyr`)
+
+- **CELT decoder now takes `(start, end, accum)` + a shared `ec`** — the entire decode
+  path (coarse/fine/finalise energy, `tf_decode`, allocation, `quant_all_bands`,
+  `denormalise_bands`, synthesis, `anti_collapse`, `deemphasis`, and both
+  `celt_decode_frame_ec`/`celt_decode_frame_prefix_ec`) decodes bands `[start,end)` from a
+  caller-owned range decoder, optionally accumulating onto the output. Config-31
+  (`start=0, end=21, accum=0`) stays **bit-exact**. The postfilter is gated on `start==0`.
+- **SILK decoder now takes a shared `ec`** — `silk_decode_indices_ec` /
+  `silk_decode_frame_ec` / `silk_decode_pcm_ec`, with backward-compatible payload wrappers.
+- **Hybrid orchestrator** in `opus_decode_from_packets`: one `ec` over the packet → SILK
+  decodes the low band (WB 16 kHz) from the front → CELT decodes the high band
+  (`start=17`, end 19 SWB / 21 FB) from the same `ec` and **accumulates** onto the
+  SILK output (÷32768 normalized). Redundancy flag is read to keep the `ec` in sync.
+- **CELT-only 20 ms configs 19/23/27** wired via the new `end_band` parameter
+  (NB→13, WB→17, SWB→19). Config-23 (WB) verified bit-exact vs libopus
+  (`test_opus_celtwb_rfc`).
+- In-suite guards: `test_opus_hybrid_rfc` (config-15 frame 0, corr 0.9999 vs golden),
+  `test_opus_celtwb_rfc` (config-23 frame 0, corr 0.9999).
+
+### Fixed
+
+- **`quant_all_bands` fold for `start>0`** — the PVQ lowband/fold logic omitted
+  `norm_offset = M·eBands[start]` (harmless for config-31 where it is 0). In hybrid the
+  *uncoded* high bands folded from the un-decoded low region (zeroed), producing wrong
+  collapse masks (`0` instead of `254`) → anti-collapse filled them with noise → wrong
+  high band. Threaded `norm_offset` through the `lowband_offset` update and the
+  `effective_lowband` clamp, matching libopus `bands.c`. Found via bit-exact stage dumps.
+
+### Not yet (honest status)
+
+- Hybrid **10 ms** (config 12/14, needs CELT LM=2) and **stereo** hybrid (needs SILK MS
+  stereo) are not decoded. CELT-only non-20 ms frame sizes (2.5/5/10 ms) and SILK MB /
+  10/40/60 ms / stereo remain. **Encoder** is 2.6.3. Claim: "real CELT + SILK + hybrid
+  20 ms mono `.opus` decode, verified vs libopus"; not "Opus complete".
+
 ## [2.6.1] - 2026-07-02
 
 **SILK is real.** shravan now decodes actual libopus-encoded SILK-mode `.opus` files

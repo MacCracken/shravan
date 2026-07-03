@@ -5548,9 +5548,16 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             var code = 0;
             if (plen >= 1) { code = load8(pdata) & 3; }
             var handled = 0;
-            if ((config == 31) & (plen >= 2)) {
-                celt_decode_frame(st, pdata + 1, plen - 1, Cf, pcm);
-                handled = 1;
+            # CELT-only 20ms: config 19 (NB, end=13), 23 (WB, 17), 27 (SWB, 19), 31 (FB, 21).
+            if ((config == 19) | (config == 23) | (config == 27) | (config == 31)) {
+                if (plen >= 2) {
+                    var ceb = 21;
+                    if (config == 19) { ceb = 13; }
+                    if (config == 23) { ceb = 17; }
+                    if (config == 27) { ceb = 19; }
+                    celt_decode_frame_ec(st, ec_dec_new(pdata + 1, plen - 1), plen - 1, Cf, 0, ceb, 0, pcm);
+                    handled = 1;
+                }
             }
             # SILK-only 20ms mono: config 1 (NB, 8kHz internal) or 9 (WB, 16kHz).
             # code 0 (one frame/packet), mono only. Real .opus voice decode → 48kHz.

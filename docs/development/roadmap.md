@@ -1,6 +1,10 @@
 # Development Roadmap
 
-> **v2.6.1** — 11343 tests, Cyrius 6.3.x. **SILK is real**: shravan decodes actual
+> **v2.6.2** — 11345 tests, Cyrius 6.3.x. **Opus hybrid is real**: shravan decodes actual
+> libopus **hybrid** `.opus` (SILK low band + CELT high band over one shared range coder,
+> SWB/FB 20 ms mono) at **correlation 0.9999 vs libopus**; the CELT refactor also lit up the
+> CELT-only 20 ms configs (NB/WB/SWB). Prior:
+> **v2.6.1** — **SILK is real**: shravan decodes actual
 > libopus SILK-mode `.opus` files (voice, NB/WB 20 ms mono) to 48 kHz at correlation
 > **0.999994 vs ffmpeg**, every internal stage bit-exact vs libopus. Prior:
 > **v2.6.0** — **Opus is real**: shravan decodes actual
@@ -47,7 +51,12 @@ path. The lists below are the *current* verified state, not the original audit.
   phase). Every stage bit-exact vs a from-source libopus reference decoder: `decode_indices`,
   `NLSF_decode`, `NLSF2A`, pitch/LTP, `decode_pulses` (shell coder), `decode_core` (LTP+LPC
   synthesis), and the internal→48 kHz resampler. Not yet: SILK **MB** (12 kHz), **10/40/60 ms**
-  frames, **stereo** (MS) SILK; **hybrid** (2.6.2), **encoder** (2.6.3).
+  frames, **stereo** (MS) SILK.
+- **Opus hybrid + CELT-only configs → PCM, RFC-6716** *(2.6.2)* — hybrid `.opus` (SILK low
+  band + CELT high band, one shared range coder; config 13 SWB / 15 FB, 20 ms mono) decodes at
+  **correlation 0.9999 vs a libopus golden**, per-frame ≥ 0.99993. The CELT decoder is now
+  band-range/accumulate parameterized, so **CELT-only 20 ms configs 19/23/27** (NB/WB/SWB)
+  decode too (config-23 bit-exact vs libopus). Not yet: hybrid **10 ms**/stereo, **encoder** (2.6.3).
 - **MP3 decode → PCM** *(2.5.11 + 2.5.12)* — `mp3_decode` produces real samples for
   **all three layers and all MPEG versions**, verified sample-exact vs minimp3:
   MPEG-1/2/2.5 **Layer III** (mono/stereo/M-S/intensity; bit reservoir; block switching),
@@ -91,16 +100,23 @@ benchmarks** on a perf claim.
 SILK NB/WB 20 ms mono decode landed: `decode_indices` → `NLSF_decode` → `NLSF2A` →
 pitch/LTP → `decode_pulses` (shell coder) → `decode_core` (LTP+LPC synthesis) →
 internal→48 kHz resampler, every stage **bit-exact vs a from-source libopus reference**
-(11343 assertions), and a real libopus SILK `.opus` decodes at **correlation 0.999994
+(11343 assertions at 2.6.1), and a real libopus SILK `.opus` decodes at **correlation 0.999994
 vs ffmpeg**. Wired into `opus_decode_from_packets` (config 1 NB / 9 WB, code 0, mono).
 - **Remaining SILK surface** (folded forward, not silently dropped): **MB** (12 kHz
   internal, config 4–7), **10/40/60 ms** frame sizes (multi-SILK-frame packets), and
   **stereo** (MS prediction). These currently emit timeline-aligned silence.
 
-### v2.6.2 — Opus hybrid mode · large (SILK low-band + CELT high-band)
-- `feat(opus): hybrid decode — SILK codes the low band and CELT the high band over one
-  shared range coder (TOC 12–15, SWB/FB)`. Reuses the 2.6.0 CELT decoder + the 2.6.1 SILK
-  decoder; wires the band split and the single ec_dec across both. Verify vs ffmpeg.
+### v2.6.2 — Opus hybrid mode · ✅ SHIPPED (SILK low-band + CELT high-band)
+Hybrid decode landed for **config 13 (SWB) / 15 (FB), 20 ms mono**: one shared `ec` →
+SILK low band (WB 16 kHz) from the front → CELT high band (`start=17`, end 19/21) from the
+same `ec`, accumulated onto the SILK output. Verified at **corr 0.9999 vs a libopus golden**
+(`test_opus_hybrid_rfc`), per-frame ≥ 0.99993 on a real file. The refactor generalized the
+CELT decoder to `(start, end, accum)` + shared `ec` (config-31 stays bit-exact), which also
+lit up **CELT-only 20 ms configs 19 (NB) / 23 (WB) / 27 (SWB)** — config-23 verified bit-exact
+(`test_opus_celtwb_rfc`). Fixed a real `quant_all_bands` fold bug (`norm_offset` for `start>0`).
+- **Remaining hybrid surface** (folded forward): **10 ms** (config 12/14, needs CELT LM=2),
+  **stereo** hybrid (needs SILK MS stereo), and redundant-frame audio. CELT-only non-20 ms
+  frame sizes remain too.
 
 ### v2.6.3 — Opus encoder conformance (libopus decodes OURS) · large
 The decode side is real (2.6.0–2.6.2); make the encode side real too.
