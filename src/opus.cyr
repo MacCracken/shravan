@@ -3767,6 +3767,61 @@ fn celt_spreading_decision(X, end, C, LM, avg_ptr, last_decision) {
     return decision;
 }
 
+# celt_preemphasis (celt_encoder.c): the exact inverse of the decoder's deemphasis IIR —
+# pre[n] = 32768·pcm[n] − coef·(32768·pcm[n−1]), coef = CELT_DEEMPH. mem_ptr[c] holds the
+# scaled previous sample (0 = fresh). Feeds the forward MDCT.
+fn celt_preemphasis(pcm_in, pre, nsamp, C, mem_ptr) {
+    var c = 0;
+    while (c < C) {
+        var mem = load64(mem_ptr + c * 8);
+        var i = 0;
+        while (i < nsamp) {
+            var x = f64_mul(load64(pcm_in + (i * C + c) * 8), f64_from(32768));
+            store64(pre + (i + c * nsamp) * 8, f64_sub(x, f64_mul(CELT_DEEMPH, mem)));
+            mem = x;
+            i = i + 1;
+        }
+        store64(mem_ptr + c * 8, mem);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# celt_compute_mdcts (celt_encoder.c): forward-MDCT the preemphasized frame — one long block
+# (shift = maxLM−LM) or, if transient, M short blocks (shift = maxLM = 3), interleaved into freq.
+# `nsamp` = per-channel input stride (N + overlap). Uses the verified clt_mdct_forward.
+fn celt_compute_mdcts(pre, freq, C, LM, isTransient, nsamp) {
+    var M = 1 << LM;
+    var N = 120 << LM;
+    var B = 1;
+    var shift = 3 - LM;
+    if (isTransient != 0) { B = M; shift = 3; }
+    var nb = N / B;
+    var c = 0;
+    while (c < C) {
+        var b = 0;
+        while (b < B) {
+            clt_mdct_forward(pre + (c * nsamp + b * nb) * 8, freq + (b + c * N) * 8, B, shift);
+            b = b + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# celt_encode — the PCM-in front-end: preemphasize (mem_ptr persists across frames; 0 = fresh)
+# → forward MDCT (long/short per isTransient) → celt_encode_frame_ec. pcm holds N+overlap
+# interleaved samples per channel (the frame plus 120-sample lookahead). Returns the chosen intra.
+fn celt_encode(st, ec, pcm, C, LM, force_intra, isTransient, mem_ptr) {
+    var N = 120 << LM;
+    var nsamp = N + 120;
+    var pre = alloc(C * nsamp * 8);
+    celt_preemphasis(pcm, pre, nsamp, C, mem_ptr);
+    var freq = alloc(C * N * 8);
+    celt_compute_mdcts(pre, freq, C, LM, isTransient, nsamp);
+    return celt_encode_frame_ec(st, ec, freq, C, LM, 0, 21, force_intra, isTransient);
+}
+
 # celt_encode_frame_ec — encode CELT bands [start,end) into a caller-owned range ENCODER.
 # `freq` holds the C*N MDCT coefficients. Non-transient mono/stereo, no dynalloc boosts,
 # default spread/trim — a first correct-and-decodable frame (the encoder-quality knobs
