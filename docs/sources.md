@@ -6,7 +6,7 @@ checkable or measured against a reference — never transcribed on trust.
 
 ## AAC spectral Huffman codebooks (`src/aac.cyr`)
 
-**HCB1, HCB2, HCB3, HCB4 and HCB6 were measured, not transcribed.**
+**HCB1, HCB2, HCB3, HCB4, HCB6 and HCB11 were measured, not transcribed.**
 
 ### Why
 
@@ -20,6 +20,7 @@ straight out of the source:
 | HCB3 | 4257/4096 = 1.0393 | **> 1: impossible for any prefix code** — 32 symbols unreachable |
 | HCB4 | 3971/4096 = 0.9695 | incomplete — 28 symbols unreachable |
 | HCB6 | — | no table at all; cb 6 was decoded with HCB5's codes |
+| HCB11 | — | no table at all; cb 11 used a bespoke raw 9-bit index with a fixed 8-bit escape (v2.7.0) |
 | HCB5, 7, 8, 9, 10, scalefactor | 1 | valid, prefix-free, complete |
 
 A codebook that is not a complete prefix code corrupts decoding two ways: some
@@ -62,12 +63,16 @@ before being trusted for the broken ones:
 | HCB7 (64 symbols) | **64/64 exact** |
 | HCB5 (81 symbols) | **81/81 exact** |
 
-and every derived table is independently checked for the three properties that
+Every derived table is then independently checked for the three properties that
 define a usable Huffman codebook — Kraft-McMillan sum exactly 1, no duplicate
 `(length, code)` pair, and no codeword a prefix of another. Corroborating
 detail: derived HCB1's codeword-length histogram (`{1:1, 5:8, 7:24, 9:24, 10:8,
 11:16}`) is identical to the one already in the source, which is consistent with
 its *lengths* having been right all along and only its *codes* corrupted.
+
+The decisive check is end-to-end: with all eleven codebooks in place, shravan
+decodes ffmpeg-encoded AAC at correlation **1.00000** with matching sample
+counts, and ffmpeg decodes shravan's AAC (v2.7.0).
 
 `test_aac_codebook_integrity` in `src/main.cyr` asserts all three properties for
 every codebook at test time, so a mistyped table cannot ship again.

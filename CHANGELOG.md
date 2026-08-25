@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-08-25
+
+**AAC is interoperable.** shravan decodes ffmpeg-encoded AAC at correlation **1.00000** with
+matching sample counts, and ffmpeg decodes shravan's AAC. Before this release it managed 7 of 23
+and 8 of 45 frames of the same files before bailing, and what it did produce was 65536x too loud.
+11,601 assertions (was 11,572; +29).
+
+Minor bump, not patch: the AAC bitstream shravan writes has changed. Streams produced by 2.6.x
+are **not** readable by 2.7.0, and vice versa — 2.6.x was not writing AAC, it was writing a
+private format that happened to use ADTS framing.
+
+### Fixed — the two deviations that made AAC unreadable
+
+- **`individual_channel_stream()` field order.** ISO/IEC 14496-3 Table 4.44 puts `global_gain`
+  **first**, then `ics_info()`. shravan's encoder and decoder both put `ics_info()` first, so a
+  spec-conforming frame was mis-parsed from its very first field. Corrected on both sides.
+- **Codebook 11 was a bespoke code.** The encoder wrote, and the decoder read, a raw 9-bit
+  `x*17+y` index with a fixed 8-bit escape. ISO Table 4.A.11 is a 289-entry Huffman code followed
+  by a **variable-length** escape (leading 1s terminated by a 0 give N; the value is
+  `2^(N+4) + next N+4 bits`). The fixed escape also capped magnitudes at 271 where AAC reaches
+  8191. HCB11 was derived by the same measurement procedure as the 2.6.10 codebooks and verified
+  complete (289/289 symbols, Kraft = 1).
+
+### Fixed — everything else that stood between those and a correct decode
+
+Each was found by decoding real files and measuring, not by reading the spec top to bottom:
+
+- **Absolute output level was 2^16 too high.** ISO defines the synthesis IMDCT with a `2/N`
+  normalisation that `fft_imdct` does not apply. shravan's own encoder omitted the reciprocal, so
+  its round-trip cancelled the error out and nothing caught it — but a real stream decoded ~65536x
+  hot and clipped hard (measured rms ratio 65535.55 against ffmpeg). Applied on synthesis and
+  inverted on analysis, so the round-trip is unchanged.
+- **`window_shape` was read and discarded** — shravan always synthesised with a sine window.
+  ffmpeg emits **KBD** (Kaiser-Bessel Derived) for essentially every frame: 23 of 23 in a sample
+  tone file. Both shapes are now built (alpha 4 long, alpha 6 short, via a series expansion of the
+  modified Bessel function I0) and selected per frame. The IMDCT's first half overlaps the
+  *previous* frame, so it uses that frame's shape while the second half uses the current one.
+- **`max_sfb` is 4 bits in an EIGHT_SHORT_SEQUENCE**, not 6, and there is no
+  `predictor_data_present` bit there. Reading 6 + 1 unconditionally desynchronised every short
+  frame by two bits before the section data even began.
+- **Window groups.** `section_data()` and `scale_factor_data()` both run *per window group*, and
+  the spectral data is ordered group → band → window-within-group. Only the single-group case
+  worked; real short frames use 3 and 4 groups. `sect_cb` and `scale_factors` are now group-major
+  throughout.
+- **LONG_START / LONG_STOP window forms.** Sequences 1 and 3 use asymmetric windows (a flat run,
+  a 128-sample short segment, and a zero run) and were being synthesised as ONLY_LONG, so the
+  overlap-add did not reconstruct across transitions.
+- **Short-block synthesis was placing its sub-windows 448 samples early**, ignoring the window
+  shape, and discarding the second half of the frame (`memset(overlap, 0, ...)`) — which corrupted
+  the *following* frame as well. Rewritten over a full 2048-sample frame with correct placement,
+  per-group scalefactors and a real overlap tail.
+- **`scale_factor_data()` has three predictors**, not one: ordinary scalefactors, intensity
+  positions, and PNS noise energies — and the first noise band carries a **raw 9-bit** value
+  rather than a Huffman code. Treating every band alike desynchronised any stream using PNS or
+  intensity stereo.
+- **Fill and data-stream elements were fatal.** A `raw_data_block` may carry several elements, and
+  ffmpeg's very first frame is `ID_FIL`-only. shravan read exactly one element and failed on
+  anything that was not SCE/CPE/END. `ID_FIL` and `ID_DSE` are now skipped.
+- **The cb 11 decode path dereferenced a null LUT.** The sorted/LUT tables were built lazily
+  inside `_aac_decode_spectral_pair`, which that path never calls, so a frame using only cb 0 and
+  cb 11 segfaulted. The builder is now shared (`_aac_ensure_huff_tables`).
+
+### Measured
+
+| | before (2.6.10) | after |
+|---|---|---|
+| frames decoded, tone.aac | 7 of 23 | **23 of 23** |
+| frames decoded, transient.aac | 8 of 45 | **45 of 45** |
+| correlation vs ffmpeg, tone | — | **1.00000** (rms 1402 vs 1402) |
+| correlation vs ffmpeg, transient | — | **1.00000** |
+| ffmpeg decoding shravan's AAC | fails | **0.9903** vs the original signal |
+
+The one block below 0.999 in either file is block 0 of transient.aac, whose rms is ~1 — encoder
+priming silence, where correlation is meaningless.
+
+### Added
+
+- `_aac_init_hcb11` (289 entries), `_aac_read_escape` / `_aac_write_escape`, KBD and sine window
+  tables, `_aac_bessel_i0`, `_br_byte_align`, `_aac_skip_fil` / `_aac_skip_dse`.
+- Tests: ISO escape round-trip across the full magnitude range including the unterminated-escape
+  rejection; both window shapes checked against the Princen-Bradley condition
+  (`w[n]² + w[N-1-n]² = 1`) and against each other; HCB11 added to the codebook integrity check,
+  which now covers all eleven codebooks; short-window `max_sfb` width and multi-group parsing.
+
+### Not fixed
+
+Short-window **CPE** (stereo transients) is still refused with `ERR_UNSUPPORTED_FMT` rather than
+mis-decoded — its per-channel grouped synthesis is not implemented. **PNS** and **intensity
+stereo** are parsed correctly so the bitstream stays in sync, but a PNS band decodes as silence
+and an intensity band is not folded. Both are tracked in the roadmap.
+
+### Performance
+
+Median **-0.9%**, range -1.6% … -0.3% across the nine benchmarks — none of which exercise AAC, so
+this is run-to-run noise rather than a real improvement.
+
 ## [2.6.10] - 2026-08-25
 
 **The four AAC/ID3 defects the 2.6.9 audit confirmed but did not fix.** The AAC spectral Huffman
