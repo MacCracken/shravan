@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.2] - 2026-08-25
+
+**The encoder now uses the stereo and noise tools it could already decode.** 2.7.1 taught the
+decoder to read per-band M/S, PNS and intensity stereo; the encoder still emitted none of them —
+M/S was a time-domain downmix applied to every band, and codebooks 13/14/15 were never written.
+All three are now real encoder decisions made per scalefactor band on the spectrum. **ffmpeg
+decodes the result**: on a stereo signal exercising intensity but not PNS, ffmpeg's and shravan's
+decodes of shravan's own stream correlate at **1.00000**. 11,622 assertions (was 11,615; +7).
+
+### Added — per-band mid/side
+
+M/S was applied to the *time-domain* input, which is equivalent to M/S on every band and is why
+the encoder could only ever signal `ms_mask_present = 2` ("all bands"). Both channels are now
+transformed to the spectrum first and each band chooses independently, on the classic criterion —
+use M/S when the quieter of (mid, side) is quieter than the quieter of (L, R), i.e. exactly when
+it makes one of the two coded channels cheaper. The header emits `ms_mask_present = 1` and a
+49-bit mask.
+
+This exposed a second bug: the side channel had been quantized with the **left channel's**
+scalefactors. That was survivable while every band was M/S (mid and side have similar shape), but
+with a per-band choice ch1 alternates between "side" and "right", whose levels differ. The right
+channel's correlation had dropped 0.9930 → 0.8149 before it was given its own scalefactors.
+
+### Added — perceptual noise substitution in the encoder
+
+A band whose spectrum is noise-like — peak-to-RMS ratio below 2.5, above ~6 kHz — is now coded
+with `NOISE_HCB` (13): its energy is sent and **no spectrum at all**. `scale_factor_data()` grew
+the two extra predictors ISO requires, the first noise band's raw 9-bit value and the noise
+delta chain, alongside the ordinary scalefactor chain.
+
+Waveform correlation is the wrong way to judge this — each decoder generates its own noise, so
+the samples *cannot* match by construction. Measured on the property PNS actually defines, band
+energy, ffmpeg and shravan agree with median correlation **1.0000** and RMS within 1.5%.
+
+### Added — intensity stereo in the encoder
+
+Where a high band of the right channel is the left scaled by a gain, the band is coded with
+`INTENSITY_HCB` (15) or `INTENSITY_HCB2` (14) — the right channel sends an `is_position` on its
+own predictor and no spectrum. Bands qualify above ~6 kHz with |correlation| > 0.85; the position
+is `-4·log2(sqrt(eR/eL))`, inverting the decoder's `0.5^(is_pos/4)`.
+
+A band is intensity-coded *or* M/S-coded, never both — for an intensity band the mask bit means
+"invert the sign", not "mid/side" — and intensity is suppressed where the left band is zero or
+itself PNS, which would otherwise have the decoder copy the left channel's *noise* into the right.
+
+### Changed — bit cost and quality
+
+Measured by encoding with shravan and decoding with **both** ffmpeg and shravan:
+
+| signal | 2.7.1 | 2.7.2 | change | ch0 / ch1 correlation |
+|---|---|---|---|---|
+| stereo tones | 68,770 B | 63,974 B | **−7.0%** | 1.0000 / 0.9926 |
+| music-like stereo | 160,119 B | 157,127 B | **−1.9%** | 0.9923 / 0.9828 |
+| stereo clicks | 50,352 B | 42,543 B | **−15.5%** | 0.9873 / 0.9696 |
+
+PNS and intensity compete for the same high bands and PNS wins where both apply, since it drops
+the spectrum for *both* channels rather than one — which is why intensity's share of the saving
+is the smaller one.
+
+### Added — AAC benchmarks
+
+AAC encode is the heaviest path in the library and had no benchmark at all. `aac_encode_1sec_stereo`
+and `aac_decode_1sec_stereo` now cover it. An interleaved A/B against 2.7.1 puts the three new
+per-band decision passes at **+0.6% encode time** (558 ms → 561 ms per second of stereo audio;
+decode −0.6%, within noise) — the decisions are essentially free.
+
+Both figures are slower than realtime (≈0.56 s to encode and ≈0.88 s to decode one second of
+stereo). That is pre-existing and unchanged by this release, but it is now on the record.
+
+### Fixed — the benchmark history was recording truncated numbers
+
+`scripts/bench-history.sh` stripped the fractional digits before scaling to nanoseconds, so
+`1.390 ms/iter` was written to `bench-history.csv` as `1000000` — a 28% error in the file the
+project treats as its proof, and enough to manufacture or hide a regression on its own. It now
+scales the full decimal.
+
 ## [2.7.1] - 2026-08-25
 
 **Stereo AAC now interoperates too.** 2.7.0 made the single-channel path work; this closes the

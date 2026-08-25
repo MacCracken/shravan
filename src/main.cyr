@@ -1802,6 +1802,81 @@ fn test_aac_window_shapes() {
 # and window group. Before 2.7.1 M/S was applied to the time-domain output (only
 # equivalent when EVERY band is M/S coded), intensity was not implemented at all,
 # and a PNS band decoded as silence.
+# 2.7.2: the ENCODER's stereo/noise decisions. Round-tripping proves the bits are
+# self-consistent but not that the tools ever fire, so this compares two signals
+# that differ ONLY in how amenable they are to intensity stereo: in `friendly`
+# the right channel's high tone is the left's scaled by 1/2 (exactly what
+# intensity codes as a gain), in `hostile` it is a different frequency, which no
+# gain can express. If the decision logic works, friendly must cost fewer bits.
+fn test_aac_encoder_stereo_tools() {
+    syscall(1, 1, "test: aac encoder stereo tools (intensity/PNS/per-band M/S)\n", 60);
+    var n = 8192;
+    var friendly = vec_new();
+    var hostile = vec_new();
+    var fl = alloc(n * 8);
+    var fr = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        var ph = f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(88));
+        var low = f64_mul(f64_sin(ph), f64_div(f64_from(2), f64_from(5)));
+        # ~9 kHz at 44.1 kHz: above the 6 kHz floor where both tools are allowed
+        var hp = f64_div(f64_mul(F64_TWO, f64_mul(F64_PI, f64_from(i))), f64_from(5));
+        var hi = f64_mul(f64_sin(hp), f64_div(F64_ONE, f64_from(4)));
+        # Same tone, same amplitude, quarter-cycle out of phase: identical band
+        # occupancy and identical energy, so the ONLY thing that differs between
+        # the two streams is whether the band correlates. Anything else (a
+        # different frequency, a different level) would change the bit cost for
+        # reasons unrelated to the decision under test.
+        var hq = f64_mul(f64_cos(hp), f64_div(F64_ONE, f64_from(8)));
+
+        var l = f64_add(low, hi);
+        var r_ok = f64_add(low, f64_mul(hi, F64_HALF));    # scaled copy -> intensity
+        var r_no = f64_add(low, hq);                       # decorrelated -> cannot
+        vec_push(friendly, l); vec_push(friendly, r_ok);
+        vec_push(hostile, l);  vec_push(hostile, r_no);
+        store64(fl + i * 8, l);
+        store64(fr + i * 8, r_ok);
+        i = i + 1;
+    }
+
+    var buf_f = alloc(524288);
+    var buf_h = alloc(524288);
+    var sf = aac_encode(friendly, 44100, 2, 160000, buf_f);
+    var sh = aac_encode(hostile, 44100, 2, 160000, buf_h);
+    assert(res_ok(sf) == 1, "encoder stereo tools: friendly encode ok");
+    assert(res_ok(sh) == 1, "encoder stereo tools: hostile encode ok");
+    syscall(1, 1, "  friendly=", 11); fmt_int(sf);
+    syscall(1, 1, " hostile=", 9); fmt_int(sh);
+    syscall(1, 1, " bytes\n", 7);
+    assert(sf < sh, "intensity-friendly stereo costs fewer bits than hostile");
+
+    # ...and the cheaper stream must still decode to the right audio.
+    var result = aac_decode(buf_f, sf);
+    assert(res_ok(result) == 1, "encoder stereo tools: friendly decodes");
+    var sout = decode_result_samples(result);
+    var pairs = vec_len(sout) / 2;
+    assert(pairs > 2048, "encoder stereo tools: enough output to skip priming");
+    var dl_len = pairs - 2048;
+    var dl = alloc(dl_len * 8);
+    var dr = alloc(dl_len * 8);
+    i = 0;
+    while (i < dl_len) {
+        store64(dl + i * 8, vec_get(sout, (2048 + i) * 2));
+        store64(dr + i * 8, vec_get(sout, (2048 + i) * 2 + 1));
+        i = i + 1;
+    }
+    var cl = _best_lag_corr(dl, dl_len, fl, n, 2048);
+    var cr = _best_lag_corr(dr, dl_len, fr, n, 2048);
+    syscall(1, 1, "  corr*1000 L=", 14); fmt_int(cl);
+    syscall(1, 1, " R=", 3); fmt_int(cr);
+    syscall(1, 1, "\n", 1);
+    # Intensity discards the right channel's high-band phase by design, so the
+    # bar for ch1 is "still the same audio", not bit-exactness.
+    assert(cl > 900, "encoder stereo tools: left channel intact (>0.9)");
+    assert(cr > 850, "encoder stereo tools: right channel intact (>0.85)");
+    return 0;
+}
+
 fn test_aac_stereo_tools() {
     syscall(1, 1, "test: aac stereo tools + PNS\n", 29);
     _aac_init_windows();
@@ -1874,7 +1949,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.1 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.7.2 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1992,6 +2067,7 @@ test_aac_hcb1_distinct_quads();
 test_aac_iso_escape_roundtrip();
 test_aac_window_shapes();
 test_aac_stereo_tools();
+test_aac_encoder_stereo_tools();
 test_serde_format_info();
 test_serde_enums();
 test_wav_f32_roundtrip();

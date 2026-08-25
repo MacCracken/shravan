@@ -819,12 +819,13 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
     var i = 0;
     if (is_stereo == 1) {
-        # M/S stereo over the full 2048-sample overlap window: mid=(L+R)/2, side=(L-R)/2
+        # Keep LEFT and RIGHT separate here. M/S used to be applied in the TIME
+        # domain, which is equivalent to M/S on every band and is why the encoder
+        # could only ever signal ms_mask_present = 2. The decision is now made
+        # per scalefactor band on the spectra, below.
         while (i < windowed_size) {
-            var left = load64(samples + (i * ch) * 8);
-            var right = load64(samples + (i * ch + 1) * 8);
-            store64(mono + i * 8, f64_mul(f64_add(left, right), F64_HALF));
-            store64(side + i * 8, f64_mul(f64_sub(left, right), F64_HALF));
+            store64(mono + i * 8, load64(samples + (i * ch) * 8));
+            store64(side + i * 8, load64(samples + (i * ch + 1) * 8));
             i = i + 1;
         }
     } else {
@@ -869,6 +870,124 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         store64(mdct_out + _mi * 8,
                 f64_mul(load64(mdct_out + _mi * 8), _AAC_MDCT_DENORM));
         _mi = _mi + 1;
+    }
+
+    # Right channel: same window + MDCT, so both spectra are available before any
+    # per-band decision is made.
+    var side_mdct = alloc(AAC_FRAME_SIZE * 8);
+    memset(side_mdct, 0, AAC_FRAME_SIZE * 8);
+    var ms_used = alloc(_AAC_NUM_SWB * 8);
+    memset(ms_used, 0, _AAC_NUM_SWB * 8);
+    var is_used = alloc(_AAC_NUM_SWB * 8);
+    memset(is_used, 0, _AAC_NUM_SWB * 8);
+    var is_pos_arr = alloc(_AAC_NUM_SWB * 8);
+    memset(is_pos_arr, 0, _AAC_NUM_SWB * 8);
+    var is_cb_arr = alloc(_AAC_NUM_SWB * 8);
+    memset(is_cb_arr, 0, _AAC_NUM_SWB * 8);
+    if (is_stereo == 1) {
+        var swin = alloc(windowed_size * 8);
+        memset(swin, 0, windowed_size * 8);
+        var si2 = 0;
+        while (si2 < windowed_size) {
+            var ang2 = f64_div(f64_mul(F64_PI, f64_add(f64_from(si2), F64_HALF)),
+                               f64_from(windowed_size));
+            store64(swin + si2 * 8, f64_mul(load64(side + si2 * 8), f64_sin(ang2)));
+            si2 = si2 + 1;
+        }
+        fft_mdct(swin, windowed_size, side_mdct);
+        var sj = 0;
+        while (sj < AAC_FRAME_SIZE) {
+            store64(side_mdct + sj * 8,
+                    f64_mul(load64(side_mdct + sj * 8), _AAC_MDCT_DENORM));
+            sj = sj + 1;
+        }
+
+        # Intensity stereo decision, on the ORIGINAL L/R (before any M/S
+        # transform): where the two channels differ only by a gain, the right
+        # band need not be sent at all — the decoder reconstructs it from the
+        # left. Confined to high bands, where discarding the true right-channel
+        # phase is inaudible.
+        var ib = 0;
+        while (ib < _AAC_NUM_SWB) {
+            var ibs = load64(_aac_swb_offset + ib * 8);
+            var ibe = load64(_aac_swb_offset + (ib + 1) * 8);
+            if (ibs >= _AAC_IS_MIN_BIN) {
+                var dot = F64_ZERO; var eL = F64_ZERO; var eR = F64_ZERO;
+                var ik = ibs;
+                while (ik < ibe) {
+                    var Lv = load64(mdct_out + ik * 8);
+                    var Rv = load64(side_mdct + ik * 8);
+                    dot = f64_add(dot, f64_mul(Lv, Rv));
+                    eL = f64_add(eL, f64_mul(Lv, Lv));
+                    eR = f64_add(eR, f64_mul(Rv, Rv));
+                    ik = ik + 1;
+                }
+                if (f64_gt(eL, F64_ZERO) == 1) {
+                    if (f64_gt(eR, F64_ZERO) == 1) {
+                        var corr = f64_div(dot, f64_sqrt(f64_mul(eL, eR)));
+                        var acorr = f64_abs(corr);
+                        if (f64_gt(acorr, _AAC_IS_MIN_CORR) == 1) {
+                            # scale = sqrt(eR/eL); decoder uses 0.5^(is_pos/4),
+                            # so is_pos = -4 * log2(scale).
+                            var sc = f64_sqrt(f64_div(eR, eL));
+                            var ipos = f64_to(f64_neg(f64_mul(f64_from(4), f64_log2(sc))));
+                            if (ipos > 60) { ipos = 60; }
+                            if (ipos < 0 - 60) { ipos = 0 - 60; }
+                            store64(is_used + ib * 8, 1);
+                            store64(is_pos_arr + ib * 8, ipos);
+                            if (f64_lt(corr, F64_ZERO) == 1) {
+                                store64(is_cb_arr + ib * 8, 14);   # out of phase
+                            } else {
+                                store64(is_cb_arr + ib * 8, 15);   # in phase
+                            }
+                        }
+                    }
+                }
+            }
+            ib = ib + 1;
+        }
+
+        # Per-band M/S decision: use mid/side when it CONCENTRATES the energy,
+        # i.e. when the quieter of (mid, side) is quieter than the quieter of
+        # (L, R). That is the classic criterion — it is exactly when M/S makes
+        # one of the two coded channels cheaper.
+        var mb2 = 0;
+        while (mb2 < _AAC_NUM_SWB) {
+            var bs2 = load64(_aac_swb_offset + mb2 * 8);
+            var be2 = load64(_aac_swb_offset + (mb2 + 1) * 8);
+            var el = F64_ZERO; var er = F64_ZERO;
+            var em = F64_ZERO; var es = F64_ZERO;
+            var k2 = bs2;
+            while (k2 < be2) {
+                var L2 = load64(mdct_out + k2 * 8);
+                var R2 = load64(side_mdct + k2 * 8);
+                var M2 = f64_mul(f64_add(L2, R2), F64_HALF);
+                var S2 = f64_mul(f64_sub(L2, R2), F64_HALF);
+                el = f64_add(el, f64_mul(L2, L2));
+                er = f64_add(er, f64_mul(R2, R2));
+                em = f64_add(em, f64_mul(M2, M2));
+                es = f64_add(es, f64_mul(S2, S2));
+                k2 = k2 + 1;
+            }
+            var minlr = el; if (f64_lt(er, minlr) == 1) { minlr = er; }
+            var minms = em; if (f64_lt(es, minms) == 1) { minms = es; }
+            # An intensity band carries no right-channel spectrum, so M/S has
+            # nothing to act on there (and the mask bit means "invert the
+            # intensity sign" for such a band, not "mid/side").
+            if (load64(is_used + mb2 * 8) == 1) { minms = minlr; }
+            if (f64_lt(minms, minlr) == 1) {
+                store64(ms_used + mb2 * 8, 1);
+                k2 = bs2;
+                while (k2 < be2) {
+                    var L3 = load64(mdct_out + k2 * 8);
+                    var R3 = load64(side_mdct + k2 * 8);
+                    store64(mdct_out + k2 * 8, f64_mul(f64_add(L3, R3), F64_HALF));
+                    store64(side_mdct + k2 * 8, f64_mul(f64_sub(L3, R3), F64_HALF));
+                    k2 = k2 + 1;
+                }
+            }
+            mb2 = mb2 + 1;
+        }
     }
 
     # TNS analysis (mono/SCE only): flatten the temporal envelope before
@@ -979,8 +1098,15 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         _bw_write(bw, _AAC_NUM_SWB, 6);  # max_sfb
         _bw_write(bw, 0, 1);  # predictor_data_present = 0
 
-        # M/S mask: ms_mask_present = 2 (all bands use M/S)
-        _bw_write(bw, 2, 2);
+        # ms_mask_present = 1: a PER-BAND mask follows. The encoder used to
+        # hardcode 2 ("every band is M/S") because it applied M/S in the time
+        # domain and had no per-band choice to signal.
+        _bw_write(bw, 1, 2);
+        var mk = 0;
+        while (mk < _AAC_NUM_SWB) {
+            _bw_write(bw, load64(ms_used + mk * 8), 1);
+            mk = mk + 1;
+        }
     } else {
         # ID_SCE tag (3 bits) + instance tag (4 bits)
         _bw_write(bw, 0, 3);  # ID_SCE = 0
@@ -1031,6 +1157,19 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         } else {
             var bstart = load64(_aac_swb_offset + band * 8);
             var bend = load64(_aac_swb_offset + (band + 1) * 8);
+
+            # Perceptual noise substitution: a high, noise-like band is sent as
+            # an energy instead of coefficients, which is far cheaper and
+            # perceptually equivalent. The energy replaces the band's
+            # scalefactor, so store it there.
+            var pns_nrg = _aac_pns_should_use(mdct_out, bstart, bend);
+            if (pns_nrg >= 0) {
+                store64(band_cb + band * 8, 13);
+                store64(scale_factors + band * 8, pns_nrg);
+                band = band + 1;
+                continue;
+            }
+
             var max_abs = 0;
             var bi = bstart;
             while (bi < bend) {
@@ -1117,21 +1256,52 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
     # Differential scale factors for bands with data
     # (Simplified: just write zero-diff codes for non-first bands)
+    # Noise energies run on their OWN predictor, and the FIRST noise band is a
+    # raw 9-bit value rather than a Huffman delta (ISO 14496-3 4.6.2.3).
+    band = 0;
+    while (band < _AAC_NUM_SWB) {
+        var icb = load64(band_cb + band * 8);
+        if (icb < 1) { store64(is_used + band * 8, 0); }
+        if (icb > 11) { store64(is_used + band * 8, 0); }
+        band = band + 1;
+    }
+
     var prev_scf = global_gain;
+    var noise_prev = global_gain - 90;
+    var noise_first = 1;
+    if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
     band = 0;
     while (band < _AAC_NUM_SWB) {
         if (load64(band_has_data + band * 8) != 0) {
             var scf_val = load64(scale_factors + band * 8);
-            var diff = scf_val - prev_scf;
-            if (diff < 0 - 60) { diff = 0 - 60; }
-            if (diff > 60) { diff = 60; }
-            var index = diff + 60;
-            # Scale factor Huffman codebook (ISO 14496-3)
-            if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
-            var scf_nbits = load64(_aac_scf_lens + index * 8);
-            var scf_code = load64(_aac_scf_codes + index * 8);
-            _bw_write(bw, scf_code, scf_nbits);
-            prev_scf = prev_scf + diff;   # track the transmitted (clamped) value, not the raw scf, so the decoder's predictor stays in sync (was prev_scf = scf_val)
+            if (load64(band_cb + band * 8) == 13) {
+                if (noise_first == 1) {
+                    noise_first = 0;
+                    # decoder: noise_nrg = (global_gain - 90) + praw - 256
+                    var praw = scf_val - (global_gain - 90) + 256;
+                    if (praw < 0) { praw = 0; }
+                    if (praw > 511) { praw = 511; }
+                    _bw_write(bw, praw, 9);
+                    noise_prev = (global_gain - 90) + praw - 256;
+                } else {
+                    var ndiff = scf_val - noise_prev;
+                    if (ndiff < 0 - 60) { ndiff = 0 - 60; }
+                    if (ndiff > 60) { ndiff = 60; }
+                    var nidx = ndiff + 60;
+                    _bw_write(bw, load64(_aac_scf_codes + nidx * 8),
+                                  load64(_aac_scf_lens + nidx * 8));
+                    noise_prev = noise_prev + ndiff;
+                }
+            } else {
+                var diff = scf_val - prev_scf;
+                if (diff < 0 - 60) { diff = 0 - 60; }
+                if (diff > 60) { diff = 60; }
+                var index = diff + 60;
+                var scf_nbits = load64(_aac_scf_lens + index * 8);
+                var scf_code = load64(_aac_scf_codes + index * 8);
+                _bw_write(bw, scf_code, scf_nbits);
+                prev_scf = prev_scf + diff;   # track the transmitted (clamped) value so the decoder's predictor stays in sync
+            }
         }
         band = band + 1;
     }
@@ -1153,7 +1323,9 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     band = 0;
     while (band < _AAC_NUM_SWB) {
         var cb = load64(band_cb + band * 8);
+        # cb 0 (zero) and cb >= 12 (noise / intensity) carry NO spectral data.
         if (cb == 0) { band = band + 1; continue; }
+        if (cb >= 12) { band = band + 1; continue; }
 
         var start = load64(_aac_swb_offset + band * 8);
         var end = load64(_aac_swb_offset + (band + 1) * 8);
@@ -1293,44 +1465,42 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         band = band + 1;
     }
 
-    # Side channel (for stereo M/S)
+    # Side channel (ch1). Its spectrum was produced above, together with the
+    # per-band M/S decision.
     if (is_stereo == 1) {
-        # Window + MDCT the side channel
-        var side_windowed = alloc(windowed_size * 8);
-        memset(side_windowed, 0, windowed_size * 8);
-        i = 0;
-        while (i < windowed_size) {
-            var angle = f64_div(
-                f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
-                f64_from(windowed_size)
-            );
-            var w = f64_sin(angle);
-            store64(side_windowed + i * 8, f64_mul(load64(side + i * 8), w));
-            i = i + 1;
-        }
-        var side_mdct = alloc(AAC_FRAME_SIZE * 8);
-        memset(side_mdct, 0, AAC_FRAME_SIZE * 8);
-        fft_mdct(side_windowed, windowed_size, side_mdct);
-        # Match the synthesis normalisation (see _AAC_IMDCT_NORM): the decoder
-        # now divides by 2^16 to hit the ISO absolute level, so the analysis
-        # side scales up by the same factor and the round-trip is unchanged.
-        _aac_init_norm();
-        var _mi = 0;
-        while (_mi < AAC_FRAME_SIZE) {
-            store64(side_mdct + _mi * 8,
-                    f64_mul(load64(side_mdct + _mi * 8), _AAC_MDCT_DENORM));
-            _mi = _mi + 1;
-        }
-
-        # Quantize side channel with same scale factors
+        # Quantize ch1 with ITS OWN scalefactors, derived from its own spectrum
+        # exactly as ch0's are. Reusing ch0's was tolerable while M/S was applied
+        # to every band (mid and side have similar shape); with a per-band choice
+        # ch1 alternates between "side" and "right", whose levels differ, and the
+        # borrowed scalefactors cost ~0.18 of correlation on the right channel.
         var side_quant = alloc(AAC_FRAME_SIZE * 8);
         memset(side_quant, 0, AAC_FRAME_SIZE * 8);
+        var side_sf = alloc(_AAC_NUM_SWB * 8);
+        memset(side_sf, 0, _AAC_NUM_SWB * 8);
         band = 0;
         while (band < _AAC_NUM_SWB) {
             var bstart = load64(_aac_swb_offset + band * 8);
             var bend = load64(_aac_swb_offset + (band + 1) * 8);
-            var scf = load64(scale_factors + band * 8);
-            var step = f64_pow(F64_TWO, f64_mul(f64_from(1), f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4))));
+
+            var speak = F64_ZERO;
+            var spj = bstart;
+            while (spj < bend) {
+                var spv = f64_abs(load64(side_mdct + spj * 8));
+                if (f64_gt(spv, speak) == 1) { speak = spv; }
+                spj = spj + 1;
+            }
+            var sfloor = f64_div(F64_ONE, f64_mul(f64_from(10000000), f64_from(1000)));
+            var scf = 0;
+            if (f64_gt(speak, sfloor) == 1) {
+                var slog = f64_sub(f64_log2(speak), f64_from(8));
+                scf = f64_to(f64_add(f64_from(100), f64_mul(f64_from(4), slog)));
+            }
+            scf = scf + load64(psy_off + band * 8);
+            if (scf < 0) { scf = 0; }
+            if (scf > 200) { scf = 200; }
+            store64(side_sf + band * 8, scf);
+
+            var step = f64_pow(F64_TWO, f64_div(f64_sub(f64_from(scf), f64_from(100)), f64_from(4)));
             var floor_step = f64_div(F64_ONE, f64_mul(f64_from(100000000), f64_from(100000000)));
             j = bstart;
             while (j < bend) {
@@ -1353,7 +1523,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
         # ch1's individual_channel_stream() begins with global_gain, ahead of its
         # section data — the same ISO ordering as ch0.
-        var gg_side = load64(scale_factors);
+        var gg_side = load64(side_sf);
         if (gg_side < 0) { gg_side = 0; }
         if (gg_side > 255) { gg_side = 255; }
         _bw_write(bw, gg_side, 8);
@@ -1365,10 +1535,12 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         while (band < _AAC_NUM_SWB) {
             var scb = 0;
             if (load64(band_has_data + band * 8) != 0) { scb = 11; }
+            if (load64(is_used + band * 8) == 1) { scb = load64(is_cb_arr + band * 8); }
             var run = 1;
             while (band + run < _AAC_NUM_SWB) {
                 var nscb = 0;
                 if (load64(band_has_data + (band + run) * 8) != 0) { nscb = 11; }
+                if (load64(is_used + (band + run) * 8) == 1) { nscb = load64(is_cb_arr + (band + run) * 8); }
                 if (nscb != scb) { break; }
                 run = run + 1;
             }
@@ -1381,17 +1553,30 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
         # Side channel scale factors (same as mid for simplicity). global_gain was
         # already written above, before the section data.
-        prev_scf = load64(scale_factors);
+        prev_scf = load64(side_sf);
+        var is_prev = 0;   # is_position runs from 0 on its own predictor
         band = 0;
         while (band < _AAC_NUM_SWB) {
-            if (load64(band_has_data + band * 8) != 0) {
-                var scf_val = load64(scale_factors + band * 8);
-                var diff = scf_val - prev_scf;
-                if (diff < 0 - 60) { diff = 0 - 60; }
-                if (diff > 60) { diff = 60; }
-                var index = diff + 60;
-                _bw_write(bw, load64(_aac_scf_codes + index * 8), load64(_aac_scf_lens + index * 8));
-                prev_scf = prev_scf + diff;   # track the transmitted (clamped) value (was prev_scf = scf_val)
+            if (load64(is_used + band * 8) == 1) {
+                # INTENSITY_HCB/HCB2 bands send an is_position delta, not a
+                # scalefactor, and the decoder tracks it on a separate predictor.
+                var ival = load64(is_pos_arr + band * 8);
+                var idiff = ival - is_prev;
+                if (idiff < 0 - 60) { idiff = 0 - 60; }
+                if (idiff > 60) { idiff = 60; }
+                var iindex = idiff + 60;
+                _bw_write(bw, load64(_aac_scf_codes + iindex * 8), load64(_aac_scf_lens + iindex * 8));
+                is_prev = is_prev + idiff;
+            } else {
+                if (load64(band_has_data + band * 8) != 0) {
+                    var scf_val = load64(side_sf + band * 8);
+                    var diff = scf_val - prev_scf;
+                    if (diff < 0 - 60) { diff = 0 - 60; }
+                    if (diff > 60) { diff = 60; }
+                    var index = diff + 60;
+                    _bw_write(bw, load64(_aac_scf_codes + index * 8), load64(_aac_scf_lens + index * 8));
+                    prev_scf = prev_scf + diff;   # track the transmitted (clamped) value (was prev_scf = scf_val)
+                }
             }
             band = band + 1;
         }
@@ -1404,6 +1589,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         # Side channel spectral data — encode with escape pairs (simplified)
         band = 0;
         while (band < _AAC_NUM_SWB) {
+            if (load64(is_used + band * 8) == 1) { band = band + 1; continue; }
             if (load64(band_has_data + band * 8) == 0) { band = band + 1; continue; }
             var bstart = load64(_aac_swb_offset + band * 8);
             var bend = load64(_aac_swb_offset + (band + 1) * 8);
@@ -3215,6 +3401,10 @@ fn _aac_init_norm() {
     if (_AAC_IMDCT_NORM != 0) { return 0; }
     _AAC_MDCT_DENORM = f64_from(65536);
     _AAC_IMDCT_NORM = f64_div(F64_ONE, _AAC_MDCT_DENORM);
+    # peak/rms above this means the band is tonal, not noise: 2.5 sits well
+    # above white noise (~sqrt(2)) and well below a single-bin tone (~sqrt(n)).
+    _AAC_PNS_MAX_PEAK_RATIO = f64_div(f64_from(5), F64_TWO);
+    _AAC_IS_MIN_CORR = f64_div(f64_from(17), f64_from(20));
     return 0;
 }
 
@@ -3380,6 +3570,49 @@ fn _aac_pns_fill(spec, base, bstart, bend, scf) {
         i = i + 1;
     }
     return 0;
+}
+
+# Should this band be coded as noise (PNS) rather than transmitted?
+#
+# Two conditions, both conservative:
+#   * the band starts above _AAC_PNS_MIN_BIN — noise substitution below a few
+#     kHz is audible, and encoders confine it to the high end;
+#   * the band is NOISE-LIKE, measured as peak/rms. A tone concentrates its
+#     energy in one bin and has a high ratio; noise spreads it and sits near
+#     sqrt(2). Substituting a tonal band would be plainly audible.
+#
+# Returns the noise energy to code (>= 0), or -1 to leave the band alone.
+var _AAC_PNS_MIN_BIN = 279;
+# Intensity stereo, like PNS, belongs at the high end: discarding the right
+# channel's phase is inaudible there and plainly audible lower down.
+var _AAC_IS_MIN_BIN = 279;          # ~6 kHz at 44.1 kHz
+var _AAC_IS_MIN_CORR = 0;           # set in _aac_init_norm (0.85)          # ~2 kHz at 44.1 kHz with 1024 bins
+var _AAC_PNS_MAX_PEAK_RATIO = 0;    # set in _aac_init_norm (2.5)
+
+fn _aac_pns_should_use(spec, bstart, bend) {
+    if (bstart < _AAC_PNS_MIN_BIN) { return 0 - 1; }
+    var n = bend - bstart;
+    if (n < 4) { return 0 - 1; }
+    var peak = F64_ZERO;
+    var ss = F64_ZERO;
+    var i = bstart;
+    while (i < bend) {
+        var v = f64_abs(load64(spec + i * 8));
+        if (f64_gt(v, peak) == 1) { peak = v; }
+        ss = f64_add(ss, f64_mul(v, v));
+        i = i + 1;
+    }
+    if (f64_gt(ss, F64_ZERO) == 0) { return 0 - 1; }
+    var rms = f64_sqrt(f64_div(ss, f64_from(n)));
+    if (f64_gt(rms, F64_ZERO) == 0) { return 0 - 1; }
+    if (f64_gt(f64_div(peak, rms), _AAC_PNS_MAX_PEAK_RATIO) == 1) { return 0 - 1; }
+
+    # Invert the decoder's rule (rms per coefficient = 2^(nrg/4)/2):
+    #   nrg = 4 * (log2(rms) + 1)
+    var nrg = f64_to(f64_mul(f64_from(4), f64_add(f64_log2(rms), F64_ONE)));
+    if (nrg < 0) { nrg = 0; }
+    if (nrg > 255) { nrg = 255; }
+    return nrg;
 }
 
 # M/S: left = mid + side, right = mid - side, for the bands the mask selects.

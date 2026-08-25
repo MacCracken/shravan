@@ -441,6 +441,7 @@ fn bitreader_read_bit(br) { return bitreader_read(br, 1); }
 include "src/flac.cyr"
 include "src/fft.cyr"
 include "src/resample.cyr"
+include "src/aac.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -684,6 +685,58 @@ fn bench_flac_decode_1sec() {
 }
 
 # ================================================================
+# Benchmark: aac_encode_1sec_stereo / aac_decode_1sec_stereo
+# ================================================================
+# AAC encode is the heaviest path in the library and had no coverage. It matters
+# from 2.7.2 on, when per-band M/S, intensity and PNS each added a pass over the
+# spectrum before quantization — this is what says whether those decisions cost
+# anything measurable.
+
+fn _bench_aac_signal() {
+    var samples = vec_new();
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    var F64_44100 = f64_from(44100);
+    for (var i = 0; i < 44100; i = i + 1) {
+        var ph = f64_div(f64_mul(two_pi, f64_from(i)), F64_44100);
+        # Low tone shared by both channels, high tone scaled in the right: gives
+        # the M/S, intensity and PNS decisions something real to chew on.
+        var lo = f64_mul(f64_sin(f64_mul(ph, f64_from(440))), f64_div(F64_ONE, F64_TWO));
+        var hi = f64_mul(f64_sin(f64_mul(ph, f64_from(9000))), f64_div(F64_ONE, f64_from(5)));
+        vec_push(samples, f64_add(lo, hi));
+        vec_push(samples, f64_add(lo, f64_mul(hi, F64_HALF)));
+    }
+    return samples;
+}
+
+fn bench_aac_encode_1sec() {
+    var samples = _bench_aac_signal();
+    var buf = alloc(1048576);
+    aac_encode(samples, 44100, 2, 128000, buf);   # warm the tables
+
+    var iters = 3;
+    bench("aac_encode_1sec_stereo", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        aac_encode(samples, 44100, 2, 128000, buf);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+fn bench_aac_decode_1sec() {
+    var samples = _bench_aac_signal();
+    var buf = alloc(1048576);
+    var asize = aac_encode(samples, 44100, 2, 128000, buf);
+
+    var iters = 3;
+    bench("aac_decode_1sec_stereo", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { aac_decode(buf, asize); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Benchmark: fft_1024
 # ================================================================
 
@@ -736,7 +789,7 @@ flac_init();
 fft_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.1 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.7.2 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -748,6 +801,8 @@ var fft_ns     = bench_fft_1024();
 var mdct_ns    = bench_mdct_2048();
 var flac_enc_ns = bench_flac_encode_1sec();
 var flac_dec_ns = bench_flac_decode_1sec();
+var aac_enc_ns  = bench_aac_encode_1sec();
+var aac_dec_ns  = bench_aac_decode_1sec();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);

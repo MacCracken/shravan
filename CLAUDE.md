@@ -22,7 +22,7 @@ is split into three entry points** — each `include`s the same library + codecs
 runs a different test subset, so no single build overflows the Cyrius code buffer
 (~3.15 MB): `src/main.cyr` (core codecs + Opus decode + API), `src/main_encoder.cyr`
 (Opus CELT RFC-6716 encoder), `src/main_silk.cyr` (SILK decode golden vectors). The
-11,615-assertion suite is 1159 / 138 / 10318 across the three. `cyrius distlib`
+11,622-assertion suite is 1166 / 138 / 10318 across the three. `cyrius distlib`
 concatenates the `[lib]` modules into `dist/shravan.cyr`, the **self-contained bundle
 consumers include** (they supply stdlib + bayan + sankoch from their own manifest);
 none of the test files are in `[lib]`.
@@ -58,9 +58,9 @@ bump only on explicit instruction. Bumping the pin requires re-vendoring stdlib:
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run ALL three test binaries (11,615 assertions)
+./scripts/test-all.sh                       # build + run ALL three test binaries (11,622 assertions)
 cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.5.35)
-./build/shravan                             # run core codecs + Opus decode + API (1039 assertions)
+./build/shravan                             # run core codecs + Opus decode + API (1166 assertions)
 cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
 ./build/shravan-encoder                     # run encoder tests (138 assertions)
 cyrius build src/main_silk.cyr build/shravan-silk        # SILK decode golden-vector suite
@@ -90,7 +90,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
 | silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
 | opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by the test harnesses but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
-| aac | src/aac.cyr | AAC-LC encoder/decoder (ADTS) |
+| aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE, long/short windows, sine+KBD, PNS, intensity, per-band M/S, ISO codebooks 1--11 (ffmpeg streams decode frame-for-frame). Encode: ISO-ordered `individual_channel_stream()`, per-band M/S + PNS + intensity (ffmpeg decodes shravan's output) |
 | mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
 | dither | src/dither.cyr | Dithering for sample depth reduction |
@@ -114,7 +114,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,615 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,622 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

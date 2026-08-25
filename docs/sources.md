@@ -98,6 +98,33 @@ output energy matches ffmpeg's within **0.4%** at every gain and band count
 tested. Sample-for-sample agreement is impossible by construction: each decoder
 generates its own noise. `test_aac_stereo_tools` pins the band energy.
 
+## AAC intensity stereo — encoder position (v2.7.2)
+
+The decoder side was verified in 2.7.1 against ffmpeg with hand-built CPE frames
+sweeping `is_position` (`istest2.py`): the right band is reconstructed as the
+left scaled by `0.5^(is_pos/4)`, signed in phase for `INTENSITY_HCB` (15) and
+out of phase for `INTENSITY_HCB2` (14), with an M/S mask bit on the same band
+inverting the sense again.
+
+The encoder inverts exactly that relation. For a band with left/right energies
+`eL`, `eR`, the gain the decoder must apply is `sqrt(eR/eL)`, so
+
+    is_position = round(-4 * log2(sqrt(eR / eL)))
+
+sent as a delta on its own predictor, which starts at 0 and is separate from
+both the scalefactor and the noise-energy chains.
+
+No constant was taken on faith here: `stereoT`, a stereo signal that triggers
+intensity but not PNS, is encoded by shravan and decoded by ffmpeg and shravan
+independently. The two decodes correlate at **1.00000** with an RMS ratio of
+0.9997 — bit-level agreement, which is achievable for intensity (unlike PNS,
+where the noise realisation differs by construction).
+
+The band qualifies at |correlation| > 0.85 above ~6 kHz. That threshold is a
+tuning choice, not a spec value; it was swept over 0.80/0.85/0.90 on three
+signals, trading about 0.3% of bitrate against 0.0008 of ch1 correlation across
+that range.
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified

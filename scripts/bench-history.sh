@@ -23,22 +23,20 @@ $CYRB build src/bench.cyr build/bench 2>&1
 BENCH_OUTPUT=$(./build/bench 2>&1)
 echo "$BENCH_OUTPUT"
 
+# Each unit branch used to sed off the fractional digits before scaling, so
+# "1.390 ms/iter" was recorded as 1000000 ns -- a 28% error in the very file the
+# project treats as its proof. Scale the full decimal instead, and round.
 while IFS= read -r line; do
-    if [[ "$line" == *"ns/iter"* ]]; then
-        BENCH_NAME=$(echo "$line" | sed -E 's/\(.*//;s/^ +//;s/ +$//')
-        NS=$(echo "$line" | sed -E 's/.*: ([0-9]+) ns.*/\1/')
-        echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
-    elif [[ "$line" == *"us/iter"* ]]; then
-        BENCH_NAME=$(echo "$line" | sed -E 's/\(.*//;s/^ +//;s/ +$//')
-        US=$(echo "$line" | sed -E 's/.*: ([0-9]+)\..*/\1/')
-        NS=$((US * 1000))
-        echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
-    elif [[ "$line" == *"ms/iter"* ]]; then
-        BENCH_NAME=$(echo "$line" | sed -E 's/\(.*//;s/^ +//;s/ +$//')
-        MS=$(echo "$line" | sed -E 's/.*: ([0-9]+)\..*/\1/')
-        NS=$((MS * 1000000))
-        echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
-    fi
+    case "$line" in
+        *ns/iter*) UNIT=1 ;;
+        *us/iter*) UNIT=1000 ;;
+        *ms/iter*) UNIT=1000000 ;;
+        *) continue ;;
+    esac
+    BENCH_NAME=$(echo "$line" | sed -E 's/\(.*//;s/^ +//;s/ +$//')
+    VALUE=$(echo "$line" | sed -E 's/.*: ([0-9]+(\.[0-9]+)?) [nu m]*s\/iter.*/\1/')
+    NS=$(awk -v v="$VALUE" -v u="$UNIT" 'BEGIN { printf "%.0f", v * u }')
+    echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
 done <<< "$BENCH_OUTPUT"
 
 echo "════════════════════════════════════════════"
