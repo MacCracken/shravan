@@ -37,7 +37,7 @@ jobs:
 
       - name: Resolve dependencies
         # Resolve/verify any [deps.NAME] git deps and refresh cyrius.lock.
-        # (shravan currently has none — this also writes the lib/ hash lock.)
+        # (shravan has one: sankoch — this also writes the lib/ hash lock.)
         run: cyrius deps
 
       - name: Build

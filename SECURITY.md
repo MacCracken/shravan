@@ -21,9 +21,22 @@ shravan is an audio codec library that decodes untrusted audio data. It processe
 | Bump allocator | Memory exhaustion | Grows by 1MB chunks via brk; no individual free |
 | Integer overflow | Large sample counts | All arithmetic uses 64-bit integers |
 
-## Zero External Dependencies
+## Dependency Surface
 
-shravan has zero external dependencies. No C libraries, no crate ecosystem, no supply chain attack surface. The entire codebase is auditable in `src/main.cyr` and `lib/*.cyr`.
+shravan links no C libraries and pulls from no third-party package ecosystem. Its entire
+dependency surface is two first-party AGNOS sources, both vendored into `lib/` and pinned:
+
+| Source | Pinned by | Verified by |
+|--------|-----------|-------------|
+| Cyrius stdlib (declared `[deps].stdlib` subset) | `cyrius.cyml [package].cyrius` toolchain pin | per-file SHA-256 in `cyrius.lock` |
+| sankoch (compression) | `[deps.sankoch].tag` + resolved commit SHA in `cyrius.lock` | per-file SHA-256 in `cyrius.lock` |
+
+That is a small surface, but it is not zero: a compromised upstream tag would reach a build that
+re-resolves. `cyrius.lock` is the control — it records the resolved commit SHA and a SHA-256 for
+every vendored file, and `cyrius deps --verify` fails the build on any mismatch. Run it after any
+toolchain or dependency bump, and review the `lib/` diff as you would any other code.
+
+All shravan-authored code is auditable in `src/*.cyr`; `lib/*.cyr` is vendored upstream.
 
 ## Reporting Vulnerabilities
 

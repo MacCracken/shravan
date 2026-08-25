@@ -1,7 +1,7 @@
 # shravan — test harness entry point.
 # The library lives in src/shravan.cyr (bundled into dist/shravan.cyr via
 # `cyrius distlib`); this file includes it plus the codec modules and runs the
-# 843-assertion suite. Consumers use dist/shravan.cyr, not this file.
+# 1039-assertion suite. Consumers use dist/shravan.cyr, not this file.
 include "src/shravan.cyr"
 include "src/flac.cyr"
 include "src/ogg.cyr"
@@ -700,7 +700,7 @@ fn test_stream_chunking() {
 }
 
 fn test_pcm_roundtrips() {
-    syscall(1, 1, "test: pcm roundtrips (i32, u8, i24_packed)\n", 44);
+    syscall(1, 1, "test: pcm roundtrips (i32, u8, i24_packed)\n", 43);
 
     # i32 roundtrip
     var s32 = vec_new();
@@ -1216,7 +1216,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.6.7 — audio codecs for AGNOS (Cyrius)\n", 50);
+syscall(1, 1, "shravan v2.6.8 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

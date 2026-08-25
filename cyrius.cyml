@@ -5,7 +5,7 @@ description = "shravan — audio codecs for AGNOS"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/shravan"
 language = "cyrius"
-cyrius = "6.3.27"
+cyrius = "6.5.35"
 
 # [build] entry/output are metadata/convention only — `cyrius build`
 # takes explicit <source> <output> positionals (see CI). src/main.cyr is the
@@ -52,5 +52,5 @@ stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "ass
 
 [deps.sankoch]
 git = "https://github.com/MacCracken/sankoch.git"
-tag = "1.0.0"
+tag = "2.7.10"
 modules = ["dist/sankoch.cyr"]

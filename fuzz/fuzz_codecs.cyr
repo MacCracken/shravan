@@ -207,7 +207,7 @@ fmt_int(iters);
 syscall(1, 1, " iterations per target\n", 23);
 
 # --- FLAC metadata ---
-syscall(1, 1, "  flac_parse_metadata... ", 24);
+syscall(1, 1, "  flac_parse_metadata... ", 25);
 var fi = 0;
 while (fi < iters) {
     var sz = _fz_u(max_size - 42) + 42;

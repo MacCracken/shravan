@@ -2184,7 +2184,7 @@ fn test_flac_encode_decode_24bit() {
 }
 
 fn test_flac_reject_invalid() {
-    syscall(1, 1, "test: flac reject invalid\n", 27);
+    syscall(1, 1, "test: flac reject invalid\n", 26);
 
     # Not FLAC data
     var bad = alloc(12);

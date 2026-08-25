@@ -48,7 +48,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan encoder tests — Opus CELT RFC-6716 (Cyrius)\n", 52);
+syscall(1, 1, "shravan encoder tests — Opus CELT RFC-6716 (Cyrius)\n", 54);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

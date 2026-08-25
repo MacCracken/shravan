@@ -961,7 +961,7 @@ fn test_celt_pcm_rfc() {
     store64(f0_ref + 944 * 8, 0 - 59221); store64(f0_ref + 945 * 8, 0 - 34759); store64(f0_ref + 946 * 8, 0 - 21790); store64(f0_ref + 947 * 8, 0 - 25517); store64(f0_ref + 948 * 8, 0 - 40791); store64(f0_ref + 949 * 8, 0 - 55192); store64(f0_ref + 950 * 8, 0 - 56375); store64(f0_ref + 951 * 8, 0 - 39390);
     store64(f0_ref + 952 * 8, 0 - 9679); store64(f0_ref + 953 * 8, 19995); store64(f0_ref + 954 * 8, 36911); store64(f0_ref + 955 * 8, 35737); store64(f0_ref + 956 * 8, 21553); store64(f0_ref + 957 * 8, 6785); store64(f0_ref + 958 * 8, 3826); store64(f0_ref + 959 * 8, 17675);
     var f0_c = _celt_corr(pcm, f0_ref, 960);
-    syscall(1, 2, "corr0x10000=", 13); fmt_int_fd(2, f64_to(f64_mul(f0_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    syscall(1, 2, "corr0x10000=", 12); fmt_int_fd(2, f64_to(f64_mul(f0_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
     assert(f64_gt(f0_c, thr) == 1, "frame 0 PCM correlation > 0.99");
     # frame 1
     var f1_p = alloc(319);
@@ -1111,7 +1111,7 @@ fn test_celt_pcm_rfc() {
     store64(f1_ref + 944 * 8, 0 - 54516); store64(f1_ref + 945 * 8, 0 - 30631); store64(f1_ref + 946 * 8, 0 - 18261); store64(f1_ref + 947 * 8, 0 - 22673); store64(f1_ref + 948 * 8, 0 - 38726); store64(f1_ref + 949 * 8, 0 - 53951); store64(f1_ref + 950 * 8, 0 - 55939); store64(f1_ref + 951 * 8, 0 - 39726);
     store64(f1_ref + 952 * 8, 0 - 10778); store64(f1_ref + 953 * 8, 18103); store64(f1_ref + 954 * 8, 34167); store64(f1_ref + 955 * 8, 32105); store64(f1_ref + 956 * 8, 17031); store64(f1_ref + 957 * 8, 1393); store64(f1_ref + 958 * 8, 0 - 2412); store64(f1_ref + 959 * 8, 10597);
     var f1_c = _celt_corr(pcm, f1_ref, 960);
-    syscall(1, 2, "corr1x10000=", 13); fmt_int_fd(2, f64_to(f64_mul(f1_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    syscall(1, 2, "corr1x10000=", 12); fmt_int_fd(2, f64_to(f64_mul(f1_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
     assert(f64_gt(f1_c, thr) == 1, "frame 1 PCM correlation > 0.99");
     # frame 2
     var f2_p = alloc(319);
@@ -1261,7 +1261,7 @@ fn test_celt_pcm_rfc() {
     store64(f2_ref + 944 * 8, 0 - 39927); store64(f2_ref + 945 * 8, 0 - 16277); store64(f2_ref + 946 * 8, 0 - 4013); store64(f2_ref + 947 * 8, 0 - 8325); store64(f2_ref + 948 * 8, 0 - 24154); store64(f2_ref + 949 * 8, 0 - 39211); store64(f2_ref + 950 * 8, 0 - 41272); store64(f2_ref + 951 * 8, 0 - 25433);
     store64(f2_ref + 952 * 8, 2932); store64(f2_ref + 953 * 8, 31204); store64(f2_ref + 954 * 8, 46815); store64(f2_ref + 955 * 8, 44501); store64(f2_ref + 956 * 8, 29273); store64(f2_ref + 957 * 8, 13400); store64(f2_ref + 958 * 8, 9103); store64(f2_ref + 959 * 8, 21326);
     var f2_c = _celt_corr(pcm, f2_ref, 960);
-    syscall(1, 2, "corr2x10000=", 13); fmt_int_fd(2, f64_to(f64_mul(f2_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    syscall(1, 2, "corr2x10000=", 12); fmt_int_fd(2, f64_to(f64_mul(f2_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
     assert(f64_gt(f2_c, thr) == 1, "frame 2 PCM correlation > 0.99");
     # frame 3
     var f3_p = alloc(319);
@@ -1411,7 +1411,7 @@ fn test_celt_pcm_rfc() {
     store64(f3_ref + 944 * 8, 0 - 35461); store64(f3_ref + 945 * 8, 0 - 11139); store64(f3_ref + 946 * 8, 1815); store64(f3_ref + 947 * 8, 0 - 1773); store64(f3_ref + 948 * 8, 0 - 16852); store64(f3_ref + 949 * 8, 0 - 31178); store64(f3_ref + 950 * 8, 0 - 32569); store64(f3_ref + 951 * 8, 0 - 16141);
     store64(f3_ref + 952 * 8, 12725); store64(f3_ref + 953 * 8, 41445); store64(f3_ref + 954 * 8, 57500); store64(f3_ref + 955 * 8, 55660); store64(f3_ref + 956 * 8, 40951); store64(f3_ref + 957 * 8, 25603); store64(f3_ref + 958 * 8, 21784); store64(f3_ref + 959 * 8, 34388);
     var f3_c = _celt_corr(pcm, f3_ref, 960);
-    syscall(1, 2, "corr3x10000=", 13); fmt_int_fd(2, f64_to(f64_mul(f3_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
+    syscall(1, 2, "corr3x10000=", 12); fmt_int_fd(2, f64_to(f64_mul(f3_c, f64_from(10000)))); syscall(1, 2, "\n", 1);
     assert(f64_gt(f3_c, thr) == 1, "frame 3 PCM correlation > 0.99");
     return 0;
 }

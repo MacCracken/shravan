@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.8] - 2026-08-25
+
+Maintenance release: toolchain pin **6.3.27 → 6.5.35**, sankoch **1.0.0 → 2.7.10**, stdlib
+re-vendored. **The bump itself required no codec-source changes** — every module compiled
+untouched and all 11,495 assertions pass unchanged (1039 / 138 / 10318). The source edits here
+are unrelated to the bump: **12 `write(2)` calls across `src/` and `fuzz/` passed a byte count
+that did not match their string literal** — 4 truncating output, 8 reading past the end of the
+literal and emitting NUL bytes into the test transcript.
+
+### Changed
+
+- **Toolchain pin bumped 6.3.27 → 6.5.35** (`cyrius.cyml [package].cyrius`) — clears the pin
+  drift the wrapper had been warning about (installed cycc was already 6.5.35). Re-vendored the
+  declared `[deps].stdlib` subset with `cyrius lib sync` (31 modules, up from 30). Every codec
+  module compiled unchanged: no stdlib symbol moved out from under shravan the way
+  `math` → `ganita` (6.0) and `json` → `bayan` (6.1.25) did.
+- **`lib/` grew from 31 vendored files to 38.** One (`thread_macos.cyr`) is new to the declared
+  `[deps].stdlib` subset itself — the 6.5 line splits a macOS `thread` backend out. The other six
+  are transitive leaves the 6.5 stdlib pulls in and 6.3.27 did not: `atomic`, `mmap`, `result`,
+  `sync`, `sync_macos`, `sync_windows` (`thread` → `sync`/`atomic`, `alloc` → `mmap`,
+  `io`/`bayan` → `result`). `cyrius.lock` therefore hashes 38 entries where it hashed 31, and
+  **all 38 must be committed** for `cyrius deps --verify` to pass on a clean checkout — it
+  reports `31 verified, 7 failed` otherwise. (Ordinary builds are unaffected: CI runs
+  `cyrius lib sync` + `cyrius deps`, which re-vendor the missing seven before compiling.)
+- **sankoch 1.0.0 → 2.7.10** (`[deps.sankoch]`, commit `89771bb`) — a major-version jump on a dep
+  shravan declares but does not currently call; `cyrius.lock` refreshed to 38 deps locked, 1
+  commit-pinned. Because `lib/` and `src/` are concatenated into one compilation unit, the jump
+  was checked for symbol collisions rather than assumed safe: sankoch grew **88 → 486** top-level
+  functions (+398), and a programmatic diff of its symbol set against all 912 `src/` functions
+  found **zero newly introduced collisions**. The compiler agrees — still exactly one `duplicate
+  fn` warning, the pre-existing `detect_format`.
+- `dist/shravan.cyr` regenerated at v2.6.8. Its entire diff is four lines: the version stamp
+  plus the three byte-count corrections that happen to live in `[lib]` modules (`src/flac.cyr`,
+  `src/serde.cyr` ×2) — so consumers had been shipping those out-of-bounds writes too. That the
+  bundle changed in *no other way* is the cleanest evidence that the toolchain and dependency
+  bumps altered no generated code. `cyrius distlib` now also emits `dist/shravan.deps`, the
+  15-leaf stdlib sidecar consumers feed to `cyrius deps`. `cyrius.cyml`'s `[lib]` comment has
+  pointed consumers at that file all along, but it has not been in the tree since 957cec1
+  ("cleaning up lib for source", 2026-07-01) deleted the copy added hours earlier by a1b82e3 —
+  so for the whole 2.6.x line the manifest referenced a sidecar the repo did not ship. Note the
+  file's meaning also changed while it was absent: the 2026-07-01 copy listed shravan's own codec
+  modules (`flac`, `ogg`, `mp3`, …), whereas `cyrius distlib` now emits the *stdlib leaf*
+  requirements (`string`, `fmt`, `alloc`, … `bayan`) — which is what `cyrius deps` actually
+  consumes.
+
+### Fixed
+
+- **Mismatched `write(2)` byte counts — 12 sites across `src/` and `fuzz/`.** Every literal-plus-
+  length write in the tree was audited programmatically (230 call sites); 12 disagreed with the
+  true UTF-8 length of their literal. Two distinct defects, same root cause:
+  - **Short counts (4) — output truncated.** The three test-harness banners
+    (`src/main.cyr` 50 → 51, `src/main_encoder.cyr` 52 → 54, `src/main_silk.cyr` 57 → 59) had been
+    sized as if the em-dash (U+2014) were one byte rather than three, so each lost its tail — most
+    visibly the SILK suite, which printed `…golden vectors (Cyriusrunning tests...`, having dropped
+    the closing `)\n`. Also `fuzz/fuzz_codecs.cyr` 24 → 25.
+  - **Over-long counts (8) — out-of-bounds read.** `write(2)` was handed a length one byte beyond
+    the literal, so it read the literal's NUL terminator out of `.rodata` and wrote it to stdout.
+    This was not merely cosmetic: the eight stray NULs made the test transcript a *binary* file to
+    `grep`, `diff`, and CI log scrapers, which silently skip or mis-handle it.
+    `src/flac.cyr` 27 → 26, `src/main.cyr` 44 → 43, `src/opus_rfc_tests.cyr` 13 → 12 (×4, the
+    `corrNx10000=` labels), `src/serde.cyr` 18 → 17 and 19 → 18.
+
+  The suite output is now NUL-free, well-formed UTF-8 end to end: 8 NUL bytes before, 0 after,
+  with all 11,495 assertions still passing. (It is not pure ASCII, and is not meant to be — the
+  banners and section headers legitimately carry em-dashes, 30 high-bit bytes across the three
+  binaries. The defect was the stray NULs, not the multi-byte characters.) `src/bench.cyr` (26)
+  was already correct.
+- Stale figures in `CLAUDE.md` and `README.md`: the suite was documented as 11,469 assertions
+  with a 112-assertion encoder harness; the measured totals are 11,495 and 138. `src/main.cyr`'s
+  own header still called itself the "843-assertion suite"; that harness runs 1039.
+- **`SECURITY.md` claimed "zero external dependencies … no supply chain attack surface."** The
+  first half is defensible (no C libraries, no third-party package ecosystem); the second is not,
+  and this release makes that concrete by pulling 398 additional functions of vendored sankoch
+  from an upstream git tag. Replaced with an accurate *Dependency Surface* section: the two
+  first-party sources (Cyrius stdlib, sankoch), what pins each, and `cyrius deps --verify` /
+  `cyrius.lock` as the control that actually enforces it. The section also no longer points
+  auditors at "`src/main.cyr` and `lib/*.cyr`" — shravan-authored code is all of `src/*.cyr`,
+  and `lib/` is vendored upstream.
+
+### Performance
+
+Toolchain bump is **performance-neutral** — median **−0.5%**, range −3.3% … +1.6% across the
+nine benchmarks (same machine, same session, 3 runs each, 6.3.27 tree rebuilt from `HEAD` for
+the A/B). Nothing regressed beyond run-to-run noise and nothing meaningfully improved.
+
+Note for anyone reading `bench-history.csv`: comparing the new row against the previous
+(2026-07-02) row suggests a 10–25% improvement. That is an artifact, not a codegen win — it is
+cross-session machine drift, amplified by `bench-history.sh` truncating `ms`/`us` readings to
+their integer part before recording (a 3.76 ms result and a 3.99 ms result both land as
+`3000000`). The controlled same-session A/B above is the number to trust.
+
+### Notes
+
+- The two `lib/bayan.cyr` "assigning non-pointer to typed pointer" compile warnings are gone on
+  6.5.35.
+- Two warnings remain, both benign. The `detect_format` duplicate between `src/shravan.cyr` and
+  `lib/sankoch.cyr` is pre-existing — shravan's definition is included last and wins, and it is
+  already tracked in the roadmap for 2.9.0.
+- **New: a `lib/` shadow notice, and a trap in the remedy it suggests.** Because the vendored
+  sankoch (2.7.10, latest release) is newer than the copy the 6.5.35 toolchain bundles (2.7.8),
+  every `cyrius build` / `cyrius distlib` prints a shadow warning ending in *"run `cyrius lib
+  sync --full` to re-sync"*. **Do not follow that advice.** It was verified to do two harmful
+  things: it overwrites `lib/sankoch.cyr` with the older 2.7.8 (silently downgrading the pinned
+  dep, after which `cyrius deps --verify` reports `FAIL: lib/sankoch.cyr (hash mismatch)`), and
+  it dumps the *entire* 108-file stdlib snapshot into `lib/`, discarding the declared-subset
+  convention. The notice is cosmetic; leave it. To silence it legitimately, either set
+  `CYRIUS_NO_WARN_SHADOW_LIB=1` or pin `[deps.sankoch].tag = "2.7.8"` to match the bundle — at
+  the cost of not tracking latest.
+
 ## [2.6.7] - 2026-07-03
 
 **CELT encode now covers stereo — mono AND stereo, closing the 2.6.x line.** `celt_encode(C=2)`

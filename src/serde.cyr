@@ -144,7 +144,7 @@ fn test_wav_f32_roundtrip() {
 }
 
 fn test_aiff_8bit() {
-    syscall(1, 1, "test: aiff 8-bit\n", 18);
+    syscall(1, 1, "test: aiff 8-bit\n", 17);
     var samples = vec_new();
     vec_push(samples, F64_ZERO); vec_push(samples, F64_HALF); vec_push(samples, F64_NEG_HALF);
     var abuf = alloc(65536);
@@ -157,7 +157,7 @@ fn test_aiff_8bit() {
 }
 
 fn test_aiff_stereo() {
-    syscall(1, 1, "test: aiff stereo\n", 19);
+    syscall(1, 1, "test: aiff stereo\n", 18);
     var samples = vec_new();
     vec_push(samples, F64_HALF); vec_push(samples, F64_NEG_HALF);
     vec_push(samples, F64_ZERO); vec_push(samples, F64_ONE);

@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.6.7.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.6.8.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -14,7 +14,7 @@
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,495 assertions, 0 failing. Cyrius toolchain pinned at 6.3.27.
+- 11,495 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.

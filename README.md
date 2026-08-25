@@ -11,7 +11,7 @@ dependencies. Pure Cyrius.
 ## Quick start
 
 ```sh
-# Build + run the full test suite (three harness binaries, 11,469 assertions)
+# Build + run the full test suite (three harness binaries, 11,495 assertions)
 ./scripts/test-all.sh
 
 # Or build/run one suite at a time:
@@ -93,7 +93,7 @@ Benchmarked against the previous Rust+LLVM implementation (v1.1.0):
 
 ## Requirements
 
-- Cyrius 6.3.27 (pinned in `cyrius.cyml [package].cyrius`)
+- Cyrius 6.5.35 (pinned in `cyrius.cyml [package].cyrius`)
 - Linux x86_64
 
 ## License
