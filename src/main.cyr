@@ -976,7 +976,7 @@ fn test_aac_reserved_cb_no_hang() {
     var br = _br_new(data, 16);
     var quant = alloc(AAC_FRAME_SIZE * 8);
     memset(quant, 0, AAC_FRAME_SIZE * 8);
-    var r = _aac_decode_spectral(br, sect_cb, 2, quant);
+    var r = _aac_decode_spectral(br, sect_cb, 2, quant, 0);
     assert(r == 0, "reserved codebook (13) returns instead of hanging");
     return 0;
 }
@@ -1479,6 +1479,239 @@ fn test_sec_ogg_chained_serials() {
     return 0;
 }
 
+
+# ID3v2.2 uses a 6-byte frame header (3-char ID + 3-byte BE size, no flags) and
+# 3-character frame IDs. Parsing it with the v2.3 geometry read the size from
+# bytes straddling two frames and never matched a 4-char ID, so v2.2 tags
+# decoded to nothing.
+fn test_sec_id3v22_frames() {
+    syscall(1, 1, "test: id3v2.2 frame layout\n", 27);
+    var buf = alloc(128);
+    for (var i = 0; i < 128; i = i + 1) { store8(buf + i, 0); }
+    store8(buf, 0x49); store8(buf+1, 0x44); store8(buf+2, 0x33);   # "ID3"
+    store8(buf + 3, 2);            # v2.2
+    store8(buf + 5, 0);            # no flags
+    # Two frames: TT2 "Song" (6+5) and TP1 "Al" (6+3) -> tag_size = 20
+    store8(buf + 9, 20);           # syncsafe tag size
+    # TT2, 3-byte BE size = 5, body: encoding 0 + "Song"
+    store8(buf+10, 0x54); store8(buf+11, 0x54); store8(buf+12, 0x32);
+    store8(buf+13, 0); store8(buf+14, 0); store8(buf+15, 5);
+    store8(buf+16, 0);
+    store8(buf+17, 0x53); store8(buf+18, 0x6F); store8(buf+19, 0x6E); store8(buf+20, 0x67);
+    # TP1, 3-byte BE size = 3, body: encoding 0 + "Al"
+    store8(buf+21, 0x54); store8(buf+22, 0x50); store8(buf+23, 0x31);
+    store8(buf+24, 0); store8(buf+25, 0); store8(buf+26, 3);
+    store8(buf+27, 0);
+    store8(buf+28, 0x41); store8(buf+29, 0x6C);
+
+    var m = tag_read_id3v2(buf, 30);
+    assert(is_err(m) == 0, "id3v2.2 tag parses");
+    var t = tag_meta_title(m);
+    var a = tag_meta_artist(m);
+    assert(t != 0, "v2.2 TT2 title is extracted");
+    assert(a != 0, "v2.2 TP1 artist is extracted");
+    assert_eq(str_len(t), 4, "v2.2 title is \"Song\"");
+    assert_eq(str_len(a), 2, "v2.2 artist is \"Al\"");
+
+    # An unknown major version must be refused, not parsed as v2.3.
+    store8(buf + 3, 9);
+    var bad = tag_read_id3v2(buf, 30);
+    assert(is_err(bad) == 1, "unknown ID3v2 major version is rejected");
+    return 0;
+}
+
+
+# EIGHT_SHORT_SEQUENCE: _aac_parse_ics must REPORT the window sequence, which it
+# previously read and discarded — so every short frame was synthesised with the
+# long-window path and _aac_synth_short had no callers at all.
+fn test_aac_window_sequence_reported() {
+    syscall(1, 1, "test: aac window sequence is reported\n", 38);
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+
+    # ics_info for a LONG frame: reserved(1) win_seq(2)=0 shape(1) max_sfb(6)=1
+    # predictor(1), then section_data: cb=0 run=1, then global_gain(8).
+    var bw = _bw_new();
+    _bw_write(bw, 0, 1); _bw_write(bw, 0, 2); _bw_write(bw, 0, 1);
+    _bw_write(bw, 1, 6); _bw_write(bw, 0, 1);
+    _bw_write(bw, 0, 4); _bw_write(bw, 1, 5);      # section: cb 0, length 1
+    _bw_write(bw, 100, 8);                          # global_gain
+    _bw_flush(bw);
+    var br = _br_new(load64(bw), _bw_byte_len(bw));
+    var cbs = alloc(_AAC_NUM_SWB * 8); memset(cbs, 0, _AAC_NUM_SWB * 8);
+    var sfs = alloc(_AAC_NUM_SWB * 8); memset(sfs, 0, _AAC_NUM_SWB * 8);
+    var info = alloc(16); memset(info, 0, 16);
+    var r = _aac_parse_ics(br, cbs, sfs, info);
+    assert(is_err(r) == 0, "long ics parses");
+    assert_eq(load64(info), 0, "long frame reports window_sequence 0");
+
+    # Same, but EIGHT_SHORT_SEQUENCE (2) with scale_factor_grouping = all 1s,
+    # which means a single window group (each 0 bit would open a new one).
+    var bw2 = _bw_new();
+    _bw_write(bw2, 0, 1); _bw_write(bw2, 2, 2); _bw_write(bw2, 0, 1);
+    _bw_write(bw2, 1, 6); _bw_write(bw2, 0, 1);
+    _bw_write(bw2, 127, 7);                         # grouping: one group
+    _bw_write(bw2, 0, 4); _bw_write(bw2, 1, 3);     # short sections use 3 bits
+    _bw_write(bw2, 100, 8);
+    _bw_flush(bw2);
+    var br2 = _br_new(load64(bw2), _bw_byte_len(bw2));
+    var cbs2 = alloc(_AAC_NUM_SWB * 8); memset(cbs2, 0, _AAC_NUM_SWB * 8);
+    var sfs2 = alloc(_AAC_NUM_SWB * 8); memset(sfs2, 0, _AAC_NUM_SWB * 8);
+    var info2 = alloc(16); memset(info2, 0, 16);
+    var r2 = _aac_parse_ics(br2, cbs2, sfs2, info2);
+    assert(is_err(r2) == 0, "short ics parses");
+    assert_eq(load64(info2), 2, "short frame reports window_sequence 2");
+    assert_eq(load64(info2 + 8), 1, "single window group is detected");
+
+    # Multiple window groups are refused rather than mis-decoded: the spectral
+    # layout interleaves band data per group, which is not implemented.
+    var bw3 = _bw_new();
+    _bw_write(bw3, 0, 1); _bw_write(bw3, 2, 2); _bw_write(bw3, 0, 1);
+    _bw_write(bw3, 1, 6); _bw_write(bw3, 0, 1);
+    _bw_write(bw3, 0, 7);                           # grouping: 8 groups
+    _bw_write(bw3, 0, 4); _bw_write(bw3, 1, 3);
+    _bw_write(bw3, 100, 8);
+    _bw_flush(bw3);
+    var br3 = _br_new(load64(bw3), _bw_byte_len(bw3));
+    var cbs3 = alloc(_AAC_NUM_SWB * 8); memset(cbs3, 0, _AAC_NUM_SWB * 8);
+    var sfs3 = alloc(_AAC_NUM_SWB * 8); memset(sfs3, 0, _AAC_NUM_SWB * 8);
+    var info3 = alloc(16); memset(info3, 0, 16);
+    var r3 = _aac_parse_ics(br3, cbs3, sfs3, info3);
+    assert(is_err(r3) == 1, "multi-group short frame is refused, not mis-decoded");
+    return 0;
+}
+
+
+# ================================================================
+# AAC spectral Huffman codebook integrity (v2.6.10)
+# ================================================================
+# A Huffman codebook that is not a complete prefix code silently corrupts
+# decoding: unreachable symbols can never be emitted, and a codeword that is a
+# prefix of another makes the decoder consume the wrong number of bits and
+# desynchronise the rest of the frame. v2.6.9's audit found HCB1-HCB4 broken
+# exactly this way (HCB3's lengths summed to 4257/4096, which no prefix code
+# can), so the property is asserted here rather than assumed.
+#
+# Checks, for every codebook:
+#   1. Kraft-McMillan sum == 1  (complete: no wasted code space, none over-
+#      subscribed). Computed in integers as sum(2^(SHIFT-len)) == 2^SHIFT.
+#   2. no two symbols share a (length, code) pair
+#   3. no codeword is a prefix of another
+
+var _HCB_SHIFT = 20;
+
+fn _hcb_kraft_ok(lens, n) {
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var L = load64(lens + i * 8);
+        if (L <= 0)          { return 0; }
+        if (L > _HCB_SHIFT)  { return 0; }
+        total = total + (1 << (_HCB_SHIFT - L));
+        i = i + 1;
+    }
+    if (total == (1 << _HCB_SHIFT)) { return 1; }
+    return 0;
+}
+
+# Returns 1 when the codebook is prefix-free (which also rules out duplicates).
+fn _hcb_prefix_free(lens, codes, n) {
+    var a = 0;
+    while (a < n) {
+        var la = load64(lens + a * 8);
+        var ca = load64(codes + a * 8);
+        var b = a + 1;
+        while (b < n) {
+            var lb = load64(lens + b * 8);
+            var cb2 = load64(codes + b * 8);
+            if (la == lb) {
+                if (ca == cb2) { return 0; }       # duplicate codeword
+            } else {
+                if (la < lb) {
+                    if ((cb2 >> (lb - la)) == ca) { return 0; }
+                } else {
+                    if ((ca >> (la - lb)) == cb2) { return 0; }
+                }
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    return 1;
+}
+
+fn _hcb_check(name_ptr, name_len, lens, codes, n) {
+    syscall(1, 1, "    ", 4);
+    syscall(1, 1, name_ptr, name_len);
+    syscall(1, 1, "\n", 1);
+    assert(_hcb_kraft_ok(lens, n) == 1, "codebook is a COMPLETE prefix code (Kraft == 1)");
+    assert(_hcb_prefix_free(lens, codes, n) == 1, "codebook is prefix-free (no dup, no prefix)");
+    return 0;
+}
+
+fn test_aac_codebook_integrity() {
+    syscall(1, 1, "test: aac huffman codebook integrity\n", 37);
+    _aac_init_spectral_codebooks();
+    if (_aac_scf_lens == 0) { _aac_init_scf_codebook(); }
+
+    _hcb_check("hcb1", 4, _aac_hcb1_lens, _aac_hcb1_codes, 81);
+    _hcb_check("hcb2", 4, _aac_hcb2_lens, _aac_hcb2_codes, 81);
+    _hcb_check("hcb3", 4, _aac_hcb3_lens, _aac_hcb3_codes, 81);
+    _hcb_check("hcb4", 4, _aac_hcb4_lens, _aac_hcb4_codes, 81);
+    _hcb_check("hcb5", 4, _aac_hcb5_lens, _aac_hcb5_codes, 81);
+    _hcb_check("hcb6", 4, _aac_hcb6_lens, _aac_hcb6_codes, 81);
+    _hcb_check("hcb7", 4, _aac_hcb7_lens, _aac_hcb7_codes, 64);
+    _hcb_check("hcb8", 4, _aac_hcb8_lens, _aac_hcb8_codes, 64);
+    _hcb_check("hcb9", 4, _aac_hcb9_lens, _aac_hcb9_codes, 169);
+    _hcb_check("hcb10", 5, _aac_hcb10_lens, _aac_hcb10_codes, 169);
+    _hcb_check("scf", 3, _aac_scf_lens, _aac_scf_codes, 121);
+    return 0;
+}
+
+
+# HCB1 had two symbols sharing one codeword (len 7 / 0x06e), so one of the two
+# quads could never be decoded — the decoder returned the other. These two are
+# distinct in the corrected table; decoding each codeword must return its own
+# quad. Pins the concrete failure the duplicate caused.
+fn test_aac_hcb1_distinct_quads() {
+    syscall(1, 1, "test: aac hcb1 quads are distinguishable\n", 41);
+    _aac_init_spectral_codebooks();
+
+    # Symbol 52 = quad (0, 1, 1, 0); symbol 76 = quad (1, 1, 0, 0).
+    var out = alloc(32);
+    var s = 0;
+    while (s < 2) {
+        var sym = 52;
+        var e0 = 0; var e1 = 1; var e2 = 1; var e3 = 0;
+        if (s == 1) { sym = 76; e0 = 1; e1 = 1; e2 = 0; e3 = 0; }
+
+        var nbits = load64(_aac_hcb1_lens + sym * 8);
+        var code  = load64(_aac_hcb1_codes + sym * 8);
+        var bw = _bw_new();
+        _bw_write(bw, code, nbits);
+        _bw_write(bw, 0, 16);           # trailing bits, unused by this quad
+        _bw_flush(bw);
+        var br = _br_new(load64(bw), _bw_byte_len(bw));
+        memset(out, 0, 32);
+        var rc = _aac_decode_spectral_quad(br, 1, out);
+        assert(is_err(rc) == 0, "hcb1 quad decodes");
+        assert_eq(load64(out),      e0, "hcb1 quad value 0 round-trips");
+        assert_eq(load64(out + 8),  e1, "hcb1 quad value 1 round-trips");
+        assert_eq(load64(out + 16), e2, "hcb1 quad value 2 round-trips");
+        assert_eq(load64(out + 24), e3, "hcb1 quad value 3 round-trips");
+        s = s + 1;
+    }
+
+    # The two codewords must differ — that was the actual defect.
+    var c52 = load64(_aac_hcb1_codes + 52 * 8);
+    var c76 = load64(_aac_hcb1_codes + 76 * 8);
+    var l52 = load64(_aac_hcb1_lens + 52 * 8);
+    var l76 = load64(_aac_hcb1_lens + 76 * 8);
+    var same = 0;
+    if (l52 == l76) { if (c52 == c76) { same = 1; } }
+    assert_eq(same, 0, "hcb1 symbols 52 and 76 have distinct codewords");
+    return 0;
+}
+
 # ================================================================
 # Entry point — top-level statements
 # ================================================================
@@ -1492,7 +1725,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.6.9 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.6.10 — audio codecs for AGNOS (Cyrius)\n", 52);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1603,6 +1836,10 @@ test_sec_extended_float_shifts();
 test_sec_ogg_zero_lacing();
 test_sec_id3v2_comm_frame();
 test_sec_ogg_chained_serials();
+test_sec_id3v22_frames();
+test_aac_window_sequence_reported();
+test_aac_codebook_integrity();
+test_aac_hcb1_distinct_quads();
 test_serde_format_info();
 test_serde_enums();
 test_wav_f32_roundtrip();

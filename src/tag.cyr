@@ -125,6 +125,29 @@ fn _tag_extract_comm(frame_data, frame_len) {
     return str_new(buf, text_len);
 }
 
+# Check if 3 bytes at ptr match a 3-char tag (ID3v2.2 frame IDs are 3 chars)
+fn _tag_id_eq3(ptr, c0, c1, c2) {
+    if (load8(ptr) != c0) { return 0; }
+    if (load8(ptr + 1) != c1) { return 0; }
+    if (load8(ptr + 2) != c2) { return 0; }
+    return 1;
+}
+
+# ID3v2.2 uses 3-character frame IDs that never match the 4-character v2.3/v2.4
+# comparisons, so before this every v2.2 field was dropped even when the frame
+# walk happened to stay aligned.
+#   TT2 title, TP1 artist, TAL album, TRK track, TYE year, TCO genre
+fn _tag_assign_text_v22(meta, id_ptr, text) {
+    if (text == 0) { return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x54, 0x32) == 1) { tag_meta_set_title(meta, text); return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x50, 0x31) == 1) { tag_meta_set_artist(meta, text); return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x41, 0x4C) == 1) { tag_meta_set_album(meta, text); return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x52, 0x4B) == 1) { tag_meta_set_track_number(meta, text); return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x59, 0x45) == 1) { tag_meta_set_year(meta, text); return 0; }
+    if (_tag_id_eq3(id_ptr, 0x54, 0x43, 0x4F) == 1) { tag_meta_set_genre(meta, text); return 0; }
+    return 0;
+}
+
 # Check if 4 bytes at ptr match a 4-char tag
 fn _tag_id_eq(ptr, c0, c1, c2, c3) {
     if (load8(ptr) != c0) { return 0; }
@@ -192,6 +215,11 @@ fn tag_read_id3v2(data, len) {
     # var revision = load8(data + 4);
     var flags = load8(data + 5);
 
+    # major_version is attacker-controlled. Only 2, 3 and 4 exist; anything else
+    # was previously funnelled into the v2.3 branch and parsed as garbage.
+    if (major_version < 2) { return err(ERR_UNSUPPORTED_FMT); }
+    if (major_version > 4) { return err(ERR_UNSUPPORTED_FMT); }
+
     var tag_size = tag_syncsafe(data, 6);
     if (len < 10 + tag_size) { return err(ERR_END_OF_STREAM); }
 
@@ -229,41 +257,64 @@ fn tag_read_id3v2(data, len) {
     # mis-slice every frame. shravan does not de-unsynchronise yet; report the
     # tag as unsupported rather than returning confidently wrong metadata.
     if ((flags & 0x80) != 0) { return err(ERR_UNSUPPORTED_FMT); }
-    while (pos + 10 <= tag_size) {
+    # Frame header geometry differs by version:
+    #   v2.2 — 3-char ID + 3-byte big-endian size, NO flag bytes  -> 6 bytes
+    #   v2.3 — 4-char ID + 4-byte big-endian size + 2 flag bytes  -> 10 bytes
+    #   v2.4 — 4-char ID + syncsafe size          + 2 flag bytes  -> 10 bytes
+    # v2.2 tags were previously walked with the v2.3 geometry, so the size was
+    # read from bytes straddling the tail of the real size field and the head of
+    # the next frame's ID. The resulting frame_size was arbitrary and the walk
+    # either stopped immediately or wandered off alignment.
+    var hdr_len = 10;
+    var id_len = 4;
+    if (major_version == 2) { hdr_len = 6; id_len = 3; }
+
+    while (pos + hdr_len <= tag_size) {
         var id_ptr = tag_data + pos;
 
-        # Check for padding (all zeros)
-        if (load8(id_ptr) == 0) {
-            if (load8(id_ptr + 1) == 0) {
-                if (load8(id_ptr + 2) == 0) {
-                    if (load8(id_ptr + 3) == 0) {
-                        break;
-                    }
-                }
-            }
+        # Check for padding (all zeros across the ID)
+        var pad = 1;
+        var pi = 0;
+        while (pi < id_len) {
+            if (load8(id_ptr + pi) != 0) { pad = 0; }
+            pi = pi + 1;
         }
+        if (pad == 1) { break; }
 
         var frame_size = 0;
         if (major_version == 4) {
             # v2.4: syncsafe frame size
             frame_size = tag_syncsafe(tag_data, pos + 4);
         } else {
-            # v2.3: big-endian u32
-            frame_size = read_u32_be(tag_data, pos + 4);
+            if (major_version == 2) {
+                # v2.2: 3-byte big-endian size
+                frame_size = (load8(id_ptr + 3) << 16)
+                           | (load8(id_ptr + 4) << 8)
+                           |  load8(id_ptr + 5);
+            } else {
+                # v2.3: big-endian u32
+                frame_size = read_u32_be(tag_data, pos + 4);
+            }
         }
 
-        # Skip flags (2 bytes)
-        pos = pos + 10;
+        pos = pos + hdr_len;
 
-        if (frame_size == 0) { break; }
+        if (frame_size <= 0) { break; }
         if (pos + frame_size > tag_size) { break; }
 
         var frame_data = tag_data + pos;
 
-        # Handle COMM (comment) frames specially
-        # COMM = 0x43 0x4F 0x4D 0x4D
-        if (_tag_id_eq(id_ptr, 0x43, 0x4F, 0x4D, 0x4D) == 1) {
-            # Comment: encoding(1) + language(3) + description(NUL) + text
+        # Comment frames carry a language code and description, so they need the
+        # COMM-aware extractor rather than the plain-text one. v2.2 spells the
+        # frame "COM"; v2.3/v2.4 spell it "COMM". The BODY layout is identical.
+        var is_comment = 0;
+        if (major_version == 2) {
+            if (_tag_id_eq3(id_ptr, 0x43, 0x4F, 0x4D) == 1) { is_comment = 1; }
+        } else {
+            if (_tag_id_eq(id_ptr, 0x43, 0x4F, 0x4D, 0x4D) == 1) { is_comment = 1; }
+        }
+
+        if (is_comment == 1) {
             # SEC-018's frame_size > 4 bound is preserved inside the extractor.
             var comm_text = _tag_extract_comm(frame_data, frame_size);
             if (comm_text != 0) {
@@ -272,7 +323,11 @@ fn tag_read_id3v2(data, len) {
         } else {
             # Standard text frame
             var text = _tag_extract_text(frame_data, frame_size);
-            _tag_assign_text(meta, id_ptr, text);
+            if (major_version == 2) {
+                _tag_assign_text_v22(meta, id_ptr, text);
+            } else {
+                _tag_assign_text(meta, id_ptr, text);
+            }
         }
 
         pos = pos + frame_size;

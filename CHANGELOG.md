@@ -5,6 +5,123 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.10] - 2026-08-25
+
+**The four AAC/ID3 defects the 2.6.9 audit confirmed but did not fix.** The AAC spectral Huffman
+codebooks were not transcribed from anywhere — they were **measured** against a reference decoder
+and then independently verified, because four of the five needed were structurally impossible and
+there was no way to tell a plausible table from a correct one by inspection. 11,572 assertions
+(was 11,527; +45).
+
+### Fixed — AAC spectral Huffman codebooks
+
+Four codebooks were not valid prefix codes at all, and a fifth had no table. Checked straight out
+of the source:
+
+| Codebook | Kraft-McMillan sum | State before |
+|----------|--------------------|--------------|
+| HCB1 | 1 | lengths valid, but symbols 52 and 76 shared codeword `len 7 / 0x06e`, plus 8 prefix collisions |
+| HCB2 | 15/16 | incomplete — 9 symbols unreachable |
+| HCB3 | 4257/4096 | **greater than 1: impossible for any prefix code** — 32 symbols unreachable |
+| HCB4 | 3971/4096 | incomplete — 28 symbols unreachable |
+| HCB6 | — | no table at all; cb 6 decoded with **HCB5's** codes |
+
+A codebook that is not a complete prefix code fails two ways: unreachable symbols can never be
+emitted, and a codeword that is a prefix of another makes the decoder consume the wrong number of
+bits and desynchronise the rest of the frame. The concrete case, now a regression test: HCB1's
+duplicate meant quad `(0,1,1,0)` and quad `(1,1,0,0)` shared one codeword, so decoding either
+returned `(1,1,0,0)` and the other could never be produced. All five codebooks are replaced, and
+cb 6 is decoded — and encoded — with its own table rather than HCB5's.
+
+**How the tables were obtained.** By measuring, not copying. A minimal ISO/IEC 14496-3 AAC-LC
+frame is built in which one scalefactor band uses the codebook under test and the spectral data is
+a chosen bit pattern; ffmpeg decodes it; the integer quantized coefficients are recovered from the
+PCM by least squares against the windowed cosine basis and inverting the AAC dequantizer. Sweeping
+every bit pattern gives the table for free: a Huffman code is a prefix code, so every pattern
+beginning with symbol S's codeword decodes to S, and **the common prefix of all patterns yielding
+S is S's codeword**. Two details carry the method — the basis is orthonormal only over the *whole*
+2048-sample window (over one IMDCT half it is time-domain aliased and degenerate past ~4
+coefficients, condition number 2.4e5 at 8), so both output halves are fitted jointly; and a frame
+the decoder *dropped* still emits a block of silence, indistinguishable from the genuine all-zero
+symbol, so dropped frames are detected by output block count instead. Full write-up in
+`docs/sources.md`.
+
+**How they were verified.** The method was validated against the codebooks shravan already had
+right, before being trusted for the broken ones — **HCB7 64/64 exact, HCB5 81/81 exact** — and
+each derived table is independently checked for Kraft-McMillan == 1, no duplicate `(len, code)`,
+and no codeword a prefix of another. Corroboration: derived HCB1's length histogram
+(`{1:1, 5:8, 7:24, 9:24, 10:8, 11:16}`) is *identical* to the one already in the source,
+consistent with its lengths having been right and only its codes corrupted.
+
+`test_aac_codebook_integrity` now asserts all three properties for all eleven codebooks at test
+time, so a mistyped table cannot ship again.
+
+### Fixed — AAC EIGHT_SHORT_SEQUENCE
+
+`_aac_parse_ics` read `window_sequence` and threw it away, so every frame — including short-block
+frames — was synthesised with the long-window path, and `_aac_synth_short` had **no callers at
+all**. Any stream containing a transient decoded to garbage from its first short frame onward,
+with the overlap buffer carrying the damage forward. Now wired end to end for the single-group SCE
+case:
+
+- `_aac_parse_ics` reports the window sequence and the window-group count through an out-parameter,
+  decoding `scale_factor_grouping` rather than ignoring it.
+- `_aac_decode_spectral` takes the band table from the window type — the 14-entry
+  `_aac_swb_short` over a 128-coefficient window, not the 49-entry long table over 1024 — and
+  decodes each band once per window. The per-band decode was factored into
+  `_aac_decode_band_range` so long and short share one implementation.
+- `_aac_parse_ics_ext` receives the real `is_short` instead of a hardcoded `0`; `tns_data()` field
+  widths differ between long and short windows, so a short frame's TNS was previously read with
+  long-window widths and desynchronised everything after it.
+- Short frames dispatch to `_aac_synth_short`.
+
+Multi-group short frames and short-window CPE need the grouped spectral layout, which is not
+implemented; both now return `ERR_UNSUPPORTED_FMT` rather than silently decoding as long windows.
+
+### Fixed — ID3v2.2 tags
+
+v2.2 frame headers are **6 bytes** (3-character ID + 3-byte big-endian size, no flag bytes), not
+the 10 of v2.3/v2.4. Parsed with the v2.3 geometry, the size was read from bytes straddling the
+tail of the real size field and the head of the next frame's ID, so the walk either stopped
+immediately or wandered off alignment — and the 3-character IDs never matched the 4-character
+comparisons anyway, so nothing was ever populated. Now: version-aware header geometry, a v2.2
+field assigner (`TT2`/`TP1`/`TAL`/`TRK`/`TYE`/`TCO`), and `COM` routed to the comment extractor
+alongside v2.3/v2.4's `COMM`. `major_version` outside 2..4 is rejected instead of being funnelled
+into the v2.3 branch.
+
+### Added
+
+- `docs/sources.md` — where shravan's non-obvious tables come from and how each was verified.
+- Regression tests, each checked to fail without its fix: codebook integrity (all 11), the HCB1
+  distinct-quad mis-decode, window-sequence reporting including multi-group refusal, and ID3v2.2
+  frame parsing including the version-range rejection.
+
+### Not fixed — AAC is still not interoperable, and this is why
+
+Fixing the codebooks was necessary but is **not** sufficient, and the reason surfaced while
+building spec-conformant frames to derive them. shravan's AAC bitstream is self-consistent — its
+own encoder and decoder agree — but it does not follow ISO/IEC 14496-3:
+
+- **`individual_channel_stream()` field order.** ISO Table 4.44 puts `global_gain` **first**, then
+  `ics_info()`. shravan writes and reads `ics_info()` first. A spec-conforming frame is therefore
+  mis-parsed from its very first field.
+- **Codebook 11 is a bespoke code.** The encoder writes, and the decoder reads, a raw 9-bit
+  `x*17+y` index with a fixed 8-bit escape — not the ISO HCB11 Huffman code with its
+  variable-length escape. Real encoders use cb 11 heavily (352 of 3243 coded bands in a sample
+  file).
+
+Measured consequence: shravan decodes 7 of 23 and 8 of 45 frames of ffmpeg-encoded files before
+bailing. Both deviations are now tracked in the roadmap as the actual prerequisites for AAC
+interop. Because encoder and decoder share the tables, shravan's own round-trip fidelity is
+unchanged by this release (correlation 0.9697 before and after on a signal that exercises cb 1-4;
+the encoded stream does change, 9738 → 9744 bytes) — the codebook fixes are what a *conformant*
+decoder will need, not a fix for the round-trip.
+
+### Performance
+
+Unchanged: median **+0.6%**, range +0.2% … +0.8% across the nine benchmarks — within run-to-run
+noise, and none of them exercise AAC or tag parsing.
+
 ## [2.6.9] - 2026-08-25
 
 **P(-1) scaffold-hardening sweep: 14 security fixes (SEC-019…SEC-032), a second fuzz harness

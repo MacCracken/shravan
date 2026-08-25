@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.6.9.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.6.10.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -14,7 +14,7 @@
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,527 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
+- 11,572 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
@@ -55,10 +55,26 @@ Bring the non-Opus codecs to real/complete and clear the open correctness bugs.
   2.6.9 — SEC-031 and the container/valid-bits split. The **Rice unary bound** was reviewed and
   deliberately left at 32768: it is the SEC-008 security bound, and no failing real-world file
   was produced to justify loosening it.)
-- `feat(aac): EIGHT_SHORT_SEQUENCE is parsed then discarded, spectral codebook 6 has no table of
-  its own, and codebooks 1-4 are malformed prefix codes` — confirmed by the 2.6.9 audit.
-- `feat(tag): ID3v2.2 tags are parsed with the v2.3 frame layout; de-unsynchronisation is
-  unimplemented (0x80 tags are reported unsupported since 2.6.9 rather than mis-sliced)`.
+- `feat(tag): de-unsynchronisation is unimplemented (0x80 tags are reported unsupported since
+  2.6.9 rather than mis-sliced)`. (**ID3v2.2** frame layout and 3-char frame IDs landed in
+  2.6.10.)
+- **AAC interoperability — the real blocker, found while fixing the codebooks in 2.6.10.**
+  shravan's AAC bitstream is self-consistent but does **not** follow ISO/IEC 14496-3, so it can
+  neither read nor be read by other decoders. Two deviations, both confirmed by building
+  spec-conformant frames and decoding them with ffmpeg:
+  - `fix(aac): individual_channel_stream() field order` — ISO Table 4.44 puts `global_gain`
+    FIRST, then `ics_info()`. shravan's encoder and decoder both put `ics_info()` first. A frame
+    written to spec is therefore mis-parsed from its very first field.
+  - `fix(aac): codebook 11 uses a bespoke fixed-length code` — the encoder writes, and the
+    decoder reads, a raw 9-bit `x*17+y` index with a fixed 8-bit escape, not the ISO HCB11
+    Huffman code with its variable-length escape. cb 11 is heavily used by real encoders.
+  Until both are fixed, decoding a real `.aac` fails within a few frames regardless of how
+  correct the spectral codebooks are. The 2.6.10 codebook work is a prerequisite, not a fix for
+  this.
+- `feat(aac): short-window support beyond the single-group SCE case` — 2.6.10 wired
+  EIGHT_SHORT_SEQUENCE through the SCE path (window sequence reported, short band table, short
+  synthesis, short TNS widths). Multi-group short frames and short-window CPE are refused with
+  `ERR_UNSUPPORTED_FMT` rather than mis-decoded; both need the grouped spectral layout.
 - `fix(alac): alac_unmix_stereo uses a logical shift on a signed product` — confirmed by the
   2.6.9 audit.
 
