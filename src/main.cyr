@@ -1797,6 +1797,70 @@ fn test_aac_window_shapes() {
     return 0;
 }
 
+
+# Stereo tools and noise substitution operate on SPECTRAL coefficients, per band
+# and window group. Before 2.7.1 M/S was applied to the time-domain output (only
+# equivalent when EVERY band is M/S coded), intensity was not implemented at all,
+# and a PNS band decoded as silence.
+fn test_aac_stereo_tools() {
+    syscall(1, 1, "test: aac stereo tools + PNS\n", 29);
+    _aac_init_windows();
+
+    # --- M/S: left = mid + side, right = mid - side, over the band only ---
+    var l = alloc(16 * 8); var r = alloc(16 * 8);
+    memset(l, 0, 16 * 8); memset(r, 0, 16 * 8);
+    var i = 0;
+    while (i < 8) {
+        store64(l + i * 8, f64_from(10));
+        store64(r + i * 8, f64_from(3));
+        i = i + 1;
+    }
+    _aac_apply_ms(l, r, 0, 2, 5);          # bands [2,5) only
+    assert_eq(f64_to(load64(l + 1 * 8)), 10, "M/S leaves bins below the band alone");
+    assert_eq(f64_to(load64(l + 2 * 8)), 13, "M/S left = mid + side");
+    assert_eq(f64_to(load64(r + 2 * 8)), 7,  "M/S right = mid - side");
+    assert_eq(f64_to(load64(l + 5 * 8)), 10, "M/S leaves bins above the band alone");
+
+    # --- intensity: right derived from left, 0.5^(is_pos/4), signed by cb ---
+    memset(l, 0, 16 * 8); memset(r, 0, 16 * 8);
+    i = 0;
+    while (i < 8) { store64(l + i * 8, f64_from(64)); i = i + 1; }
+    _aac_apply_intensity(l, r, 0, 0, 4, 0, 15, 0);       # is_pos 0, cb15, no M/S
+    assert_eq(f64_to(load64(r)), 64, "intensity is_pos 0 copies the left band");
+    _aac_apply_intensity(l, r, 0, 0, 4, 4, 15, 0);       # is_pos 4 -> x0.5
+    assert_eq(f64_to(load64(r)), 32, "intensity is_pos 4 halves it");
+    _aac_apply_intensity(l, r, 0, 0, 4, 8, 15, 0);       # is_pos 8 -> x0.25
+    assert_eq(f64_to(load64(r)), 16, "intensity is_pos 8 quarters it");
+    _aac_apply_intensity(l, r, 0, 0, 4, 0, 14, 0);       # cb14 is out of phase
+    assert_eq(f64_to(load64(r)), 0 - 64, "intensity cb14 inverts the phase");
+    _aac_apply_intensity(l, r, 0, 0, 4, 0, 15, 1);       # M/S flag inverts again
+    assert_eq(f64_to(load64(r)), 0 - 64, "intensity ms_used inverts cb15");
+    _aac_apply_intensity(l, r, 0, 0, 4, 0, 14, 1);       # both -> back in phase
+    assert_eq(f64_to(load64(r)), 64, "intensity cb14 + ms_used is back in phase");
+    assert_eq(f64_to(load64(r + 4 * 8)), 0, "intensity touches only its band");
+
+    # --- PNS: a noise band is filled to the coded energy, 2^(nrg/4)/2 per coef ---
+    var sp = alloc(64 * 8);
+    memset(sp, 0, 64 * 8);
+    _aac_pns_fill(sp, 0, 0, 32, 60);
+    var ss = F64_ZERO;
+    i = 0;
+    while (i < 32) {
+        var v = load64(sp + i * 8);
+        ss = f64_add(ss, f64_mul(v, v));
+        i = i + 1;
+    }
+    var rms = f64_sqrt(f64_div(ss, f64_from(32)));
+    var want = f64_pow(F64_TWO, f64_sub(f64_div(f64_from(60), f64_from(4)), F64_ONE));
+    # within 1% — the fill normalises exactly, so this is a tight bound
+    var relerr = f64_abs(f64_div(f64_sub(rms, want), want));
+    assert(f64_lt(relerr, f64_div(F64_ONE, f64_from(100))) == 1,
+           "PNS band energy is 2^(nrg/4)/2 per coefficient");
+    assert(f64_gt(f64_abs(load64(sp)), F64_ZERO) == 1, "PNS band is not silent");
+    assert_eq(f64_to(load64(sp + 40 * 8)), 0, "PNS touches only its band");
+    return 0;
+}
+
 # ================================================================
 # Entry point — top-level statements
 # ================================================================
@@ -1810,7 +1874,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.0 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.7.1 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1927,6 +1991,7 @@ test_aac_codebook_integrity();
 test_aac_hcb1_distinct_quads();
 test_aac_iso_escape_roundtrip();
 test_aac_window_shapes();
+test_aac_stereo_tools();
 test_serde_format_info();
 test_serde_enums();
 test_wav_f32_roundtrip();

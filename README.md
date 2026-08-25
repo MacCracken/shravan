@@ -11,7 +11,7 @@ dependencies. Pure Cyrius.
 ## Quick start
 
 ```sh
-# Build + run the full test suite (three harness binaries, 11,601 assertions)
+# Build + run the full test suite (three harness binaries, 11,615 assertions)
 ./scripts/test-all.sh
 
 # Or build/run one suite at a time:

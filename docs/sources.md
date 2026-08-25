@@ -77,6 +77,27 @@ counts, and ffmpeg decodes shravan's AAC (v2.7.0).
 `test_aac_codebook_integrity` in `src/main.cyr` asserts all three properties for
 every codebook at test time, so a mistyped table cannot ship again.
 
+## AAC perceptual noise substitution scaling (`src/aac.cyr`)
+
+A PNS band carries only an energy, and the decoder synthesises noise to match
+it. The scale relating the coded noise energy to the spectral coefficients was
+**measured**, not taken on trust: PNS-only frames were built to spec, decoded
+with ffmpeg, and their spectral coefficients recovered by least squares against
+the windowed MDCT basis. The ratio to `2^((nrg-100)/4)` came out **exactly 0.5**
+and constant across global_gain 150/160/170 and band counts 4/8/16, so the
+target RMS per coefficient is
+
+    2^(nrg/4) / 2
+
+where `nrg` accumulates as `global_gain - 90`, then the first noise band's raw
+9-bit value less 256, then Huffman deltas.
+
+Averaged over 60 frames — enough to remove the noise realisation, which
+otherwise scatters a single-block measurement by tens of percent — shravan's
+output energy matches ffmpeg's within **0.4%** at every gain and band count
+tested. Sample-for-sample agreement is impossible by construction: each decoder
+generates its own noise. `test_aac_stereo_tools` pins the band energy.
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified

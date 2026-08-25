@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] - 2026-08-25
+
+**Stereo AAC now interoperates too.** 2.7.0 made the single-channel path work; this closes the
+channel-pair element, perceptual noise substitution and intensity stereo. On ffmpeg-encoded stereo
+files shravan now decodes **every frame** (was 30 of 36 and 18 of 23) with per-channel correlation
+**1.00000 / 0.99843** and **0.98269 / 1.00000** — the sub-unity figures are PNS bands, which
+*cannot* match a reference decoder by construction. 11,615 assertions (was 11,601; +14).
+
+### Fixed — the channel-pair element was broken in four separate ways
+
+`channel_pair_element()` re-implemented `ics_info()` inline rather than sharing the SCE path, and
+had drifted from it:
+
+- **Each channel's `global_gain` was read AFTER its section data.** ISO Table 4.44 puts it first,
+  at the head of `individual_channel_stream()` — the same defect 2.7.0 fixed for SCE, still
+  present here.
+- **The per-channel `pulse_data_present` / `tns_data_present` / `gain_control_data_present` flags
+  were never read at all**, so `spectral_data()` began three bits early for both channels. This is
+  what produced `ERR_END_OF_STREAM` on real stereo files.
+- **Short windows were refused outright** (`ERR_UNSUPPORTED_FMT`).
+- **M/S was applied to the TIME-DOMAIN output.** M/S is a spectral operation; applying it after
+  the IMDCT only happens to be equivalent when *every* band is M/S coded, and is simply wrong for
+  the per-band mask that real encoders use (`ms_mask_present == 1` in all 30 and 22 CPE frames of
+  the sample files).
+
+The element is now parsed with the same `_aac_parse_ics_info` / `_aac_parse_sections_sf` helpers
+as the SCE path, so the two cannot drift again, and the encoder emits the matching ISO order.
+
+### Added — perceptual noise substitution (PNS)
+
+A band coded with `NOISE_HCB` (13) carries **no spectrum at all**, only an energy — it decoded as
+silence. The decoder now fills such bands with noise at the coded energy.
+
+The scaling was measured, not assumed: recovering the spectral coefficients of PNS-only frames
+built to spec gave a ratio to `2^((nrg-100)/4)` of **exactly 0.5**, constant across global_gain
+150/160/170 and band counts 4/8/16 — so the target RMS per coefficient is `2^(nrg/4) / 2`, where
+`nrg` accumulates as `global_gain - 90`, then the first noise band's raw 9-bit value less 256,
+then Huffman deltas. Averaged over 60 frames to remove the noise realisation, shravan's output
+energy matches ffmpeg's within **0.4%** across every gain and band count tested.
+
+PNS output can never match a reference decoder *sample-for-sample* — each decoder generates its
+own noise — so the property checked is spectral energy: on the sample files the per-block
+band-energy correlation is median **1.00000** (min 0.978) and the overall rms ratio **0.999**.
+
+### Added — intensity stereo
+
+A right-channel band coded with `INTENSITY_HCB` (15) or `INTENSITY_HCB2` (14) is not transmitted:
+it is derived from the left, scaled by `0.5^(is_position/4)`, with 14 out of phase and an M/S flag
+on the same band inverting the sense again. ffmpeg's encoder does not emit intensity stereo, so it
+was validated against ffmpeg with hand-built CPE frames instead: **all 16 combinations** — both
+codebooks x both M/S flags x four positions including a negative one — agree.
+
+### Fixed — scale_factor_data() has three predictors
+
+Ordinary scalefactors, intensity positions and PNS noise energies each carry their own running
+predictor, and **the first noise band is a raw 9-bit value**, not a Huffman code. Treating every
+band as an ordinary delta desynchronised any stream using either tool — which is every stereo file
+ffmpeg produces, since it uses PNS heavily (351 and 319 bands in the two samples).
+
+### Fixed — other
+
+- **`_aac_parse_ics_info` wrote `max_sfb` past the end of the SCE's `ics_info` buffer** (96 bytes
+  allocated, field at offset +96). Now 128.
+- **Short-block synthesis discarded its overlap tail and ignored window groups** in the
+  dequantiser, so windows outside group 0 were scaled with group 0's scalefactors.
+- Dequantisation is split out of synthesis (`_aac_dequant_long` / `_aac_dequant_short`,
+  `_aac_synth_spec` / `_aac_synth_short_spec`) so the stereo tools and PNS can run where the
+  format defines them — between dequantisation and the IMDCT.
+
+### Measured
+
+| | 2.7.0 | 2.7.1 |
+|---|---|---|
+| stereoT.aac frames | 30 of 36 | **36 of 36** |
+| clickST.aac frames | 18 of 23 | **23 of 23** |
+| stereoT L / R correlation | — | **1.00000 / 0.99843** |
+| clickST L / R correlation | — | **0.98269 / 1.00000** |
+| PNS band energy vs ffmpeg | silence | within **0.4%** |
+| intensity stereo cases agreeing | 0 of 16 | **16 of 16** |
+| mono tone.aac / transient.aac | 1.00000 | 1.00000 (unchanged) |
+
+### Added — tests
+
+M/S applied to the right band only and leaving its neighbours alone; intensity across both
+codebooks, both M/S senses and three positions; PNS band energy against `2^(nrg/4)/2` with the
+band boundaries respected.
+
+### Not fixed
+
+shravan's own **encoder** still emits neither intensity stereo nor PNS, and only all-bands M/S —
+the decoder handles all three, the encoder does not produce them. Tracked in the roadmap.
+
+### Performance
+
+Median **-0.5%**, range -1.0% … -0.1% across the nine benchmarks — noise; none exercise AAC.
+
 ## [2.7.0] - 2026-08-25
 
 **AAC is interoperable.** shravan decodes ffmpeg-encoded AAC at correlation **1.00000** with

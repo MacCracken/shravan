@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.7.0.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.7.1.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -14,7 +14,7 @@
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,601 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
+- 11,615 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
@@ -58,12 +58,13 @@ Bring the non-Opus codecs to real/complete and clear the open correctness bugs.
 - `feat(tag): de-unsynchronisation is unimplemented (0x80 tags are reported unsupported since
   2.6.9 rather than mis-sliced)`. (**ID3v2.2** frame layout and 3-char frame IDs landed in
   2.6.10.)
-- `feat(aac): short-window CPE (stereo transients)` — 2.7.0 made AAC interoperable for the
-  single-channel path; a short-window CPE is still refused with `ERR_UNSUPPORTED_FMT` rather than
-  mis-decoded, since its per-channel grouped synthesis is not implemented.
-- `feat(aac): PNS and intensity stereo are parsed but not synthesised` — 2.7.0 reads their
-  scalefactor syntax correctly so the bitstream stays in sync, but a PNS band decodes as silence
-  and an intensity band is not folded.
+- `feat(aac): PNS noise generator is not the reference one` — 2.7.1 fills noise bands to the
+  correct coded energy (verified within 0.4% against ffmpeg) but with its own deterministic PRNG,
+  so PNS bands never match a reference decoder sample-for-sample. That is inherent to noise
+  substitution, not a defect, and only the band energy is defined by the format.
+- `feat(aac): encoder does not use the stereo tools` — the decoder handles M/S (per band and
+  all-bands), intensity stereo and PNS, but shravan's own encoder still emits neither intensity
+  nor PNS, and only all-bands M/S.
 - `fix(alac): alac_unmix_stereo uses a logical shift on a signed product` — confirmed by the
   2.6.9 audit.
 
