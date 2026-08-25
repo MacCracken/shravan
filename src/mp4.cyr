@@ -264,7 +264,16 @@ fn mp4_decode(data, len) {
     var total = 0;
     var i = 0;
     while (i < count) {
-        total = total + load64(sizes + i * 8) + 7;
+        var asz = load64(sizes + i * 8);
+        # SEC-030: bound the running total per iteration. Sample sizes come from
+        # stsz as unsigned 32-bit values (up to ~4.29e9) and `count` is bounded
+        # only by the file length, so the sum could in principle wrap past 2^63
+        # and land on a SMALL positive value — alloc() would then succeed at the
+        # wrapped size and the memcpy loop below would run off the end of it.
+        # Capping at 256 MB (the _ALLOC_MAX policy) makes the wrap unreachable.
+        if (asz < 0) { return err(ERR_DECODE); }
+        total = total + asz + 7;
+        if (total > 268435456) { return err(ERR_DECODE); }
         i = i + 1;
     }
     if (total <= 0) { return err(ERR_DECODE); }

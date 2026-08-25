@@ -38,6 +38,31 @@ toolchain or dependency bump, and review the `lib/` diff as you would any other 
 
 All shravan-authored code is auditable in `src/*.cyr`; `lib/*.cyr` is vendored upstream.
 
+## Fuzzing
+
+Two harnesses, both gated in CI and run in full before each release:
+
+| Harness | Reaches | Strategy |
+|---------|---------|----------|
+| `fuzz/fuzz_codecs.cyr` | FLAC metadata, Ogg pages, MP3 frame scan, ID3v2 | random bytes behind the format magic |
+| `fuzz/fuzz_decode.cyr` | `codec_open`, WAV, AIFF, ALAC, FLAC (+range), MP3, Ogg, MP4, AAC, Vorbis comments | random-behind-magic **and** valid files built by shravan's own encoders with N bytes corrupted |
+
+The corrupted-valid-file strategy is what reaches deep decode paths; random bytes rarely survive
+header validation long enough to get there.
+
+```sh
+./fuzz/run.sh 90000     # current gate: 903,500 calls, 0 crashes
+```
+
+`alloc()` is a bump allocator that never frees, so `fuzz_decode` is swept across several seeded
+processes rather than run as one — a fixed seed keeps any failure reproducible, and a failing
+batch prints the seed that reproduces it.
+
+Untrusted input is bounded rather than trusted: decoders cap total decoded samples, allocation
+sizes are checked against a 256 MB policy ceiling, and every chunk body is required to be inside
+the buffer before it is read. See the `SEC-0NN` markers in `src/` for the individual fixes and
+the CHANGELOG entry that introduced each.
+
 ## Reporting Vulnerabilities
 
 Report security issues to the repository maintainer via GitHub Security Advisories. Do not file public issues for security vulnerabilities.

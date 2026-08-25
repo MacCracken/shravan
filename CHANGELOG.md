@@ -5,6 +5,144 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.9] - 2026-08-25
+
+**P(-1) scaffold-hardening sweep: 14 security fixes (SEC-019…SEC-032), a second fuzz harness
+covering the formats that had none, and CI widened from 1039 to all 11,527 assertions.**
+
+Every finding below was reproduced with a proof-of-concept before it was fixed and re-measured
+after, so the numbers are observed rather than estimated. Cost of the whole sweep: **+0.7 %
+median** across the nine benchmarks — the new bounds are per-chunk and per-frame, not per-sample.
+11,527 assertions (was 11,495; +32 in 10 new hostile-input regression tests, each verified to
+fail without its fix).
+
+### Security — memory corruption and crashes
+
+- **SEC-025 — NULL write, verified SIGSEGV.** `alloc()` signals failure by returning **0**, not a
+  negative error. `_vec_new_cap()` published that 0 as a vec's data pointer *alongside a non-zero
+  capacity*, so the first `vec_push` wrote through NULL. A 300 MiB WAV drove `count` to
+  157,286,400, `alloc(1,258,291,200)` returned 0, and the decode died with **exit 139**. It now
+  range-checks `n`, checks both allocations, and returns a packed error — which the six converters
+  and both `wav_decode`/`aiff_decode` now propagate (`vec_len()` on a packed error was itself the
+  fatal dereference). Same file now returns `ERR_DECODE`, exit 0.
+- **SEC-024 — 248-byte heap overflow in FLAC.** `flac_decode_lpc`/`flac_decode_fixed` allocated
+  `block_size * 8` bytes and then wrote `order` warm-up samples into it with no relation checked
+  between the two. Block-size code 6 yields sizes down to **1** and LPC `sf_type` 63 yields order
+  **32**, so a crafted subframe wrote 256 bytes into an 8-byte allocation, with attacker-chosen
+  contents. `num_res = block_size - order` also went negative into `alloc()`. Now requires
+  `0 <= order < block_size`, as the format does.
+- **SEC-026 — 112-byte heap overflow in AAC.** In the CPE path `shared_max_sfb` is a 6-bit field
+  (0…63) driving the per-band M/S mask loop, but `ms_mask` holds only `_AAC_NUM_SWB` (49) entries:
+  63 stores of 8 bytes into a 392-byte allocation. Reachable from an **18-byte** ADTS file. The SCE
+  path already had this clamp; the CPE path now matches it.
+
+### Security — out-of-bounds reads
+
+- **SEC-022 — WAV and AIFF read chunk bodies past the buffer.** Both chunk walks guard only
+  `pos + 8 <= len`, proving the 8-byte chunk *header* is present — then read the body. WAV's `fmt `
+  reads to `pos + 23` (16 bytes past); AIFF's `COMM` reads to `pos + 25` (18 bytes past, and with
+  no declared-size check at all); AIFF's `SSND` offset field reads 4 past. Demonstrated on WAV: a
+  44-byte file whose `fmt ` header ends exactly at byte 44 **decoded successfully**, reporting
+  `rate=12345, channels=2, depth=24` read entirely from beyond the buffer. All three now require
+  the body to be present.
+- **SEC-028 — undefined shift counts from AIFF's 80-bit sample rate.** `exponent` is a 15-bit
+  field, so `unbiased` spans −16383…+16384 and both branches of `extended_to_f64` computed shift
+  counts far outside the legal 0…63 — exponent `0x403F` produced `32 - 33` = **−1**, a negative
+  shift. Now bounded, returning 0 (which callers already reject) outside 0…62. AIFF `COMM` also
+  validates channels, sample size and rate as ranges rather than only against zero.
+
+### Security — allocation amplification
+
+`alloc()` is a bump allocator that never frees, so amplification is unbounded growth, not
+transient. Each fix converts an input-proportional multiplier into a fixed ceiling.
+
+| Fix | Vector | Before | After |
+|-----|--------|--------|-------|
+| **SEC-023** | FLAC: 13-byte frame declaring `block_size` 65535 with a CONSTANT subframe | 26 KB → **3.0 GB** (~122,000x, unbounded) | hard ceiling **774 MB** at any input size |
+| **SEC-020** | resample: kernel half-width scales with the inverse rate ratio, and `source_rate` comes from the file header | 64 samples, 48000→1 → **1.5 GB** | **9.6 MB** |
+| **SEC-027** | AAC: 8-byte ADTS frame yields 1024 samples (~1024x); the cap was on the counting pass, not the allocating one | 560 KB → **2.15 GB** | ceiling **523 MB** |
+| **SEC-029** | ALAC: `num_samples` was capped per element, the *number* of elements was not (~1 byte → 16384 samples) | ~63,000x | 2^25-sample ceiling |
+| **SEC-019** | Ogg: 255 zero lacing values in 282 bytes minted 255 empty packets, each an alloc + `str_new` + vec slot | ~43 bytes heap per input byte | **2.9x** (page overhead only) |
+| **SEC-030** | MP4: `stsz` sizes are u32 and `count` is bounded only by file length, so the byte total could wrap past 2^63 onto a *small* positive and undersize the `alloc()` the memcpy loop then overruns | wrap reachable in principle | capped at 256 MB |
+
+FLAC additionally honours STREAMINFO `total_samples` when non-zero — the stream's own statement of
+its length, so stopping there is correct decoding rather than only defence.
+
+### Fixed — decode correctness
+
+- **WAVE_FORMAT_EXTENSIBLE 24-in-32** (a roadmap item). `wValidBitsPerSample` was assigned over
+  `wBitsPerSample`, but the former is the *meaningful* depth and the latter is the **container**
+  that strides the sample data. Every "24-bit in a 32-bit container" file — the common
+  professional layout — was read on a 3-byte grid out of 4-byte data and desynchronised after the
+  first sample. Now strides by the container and reports the valid depth: a 24-in-32 file decodes
+  to exactly 0.5 / −0.5 / 0.25 / 0.0.
+- **SEC-031 — FLAC seek anchor** (a roadmap item). The SEEKTABLE byte offset is a 64-bit value
+  taken straight from the file and never validated, so `flac_br_set_pos()` could anchor the
+  bitreader before the audio or past the end of the buffer. Seek points that do not land inside
+  the audio region are now ignored.
+- **ID3v2 COMM frames were silently dropped — all of them.** A COMM body is
+  `encoding(1) | language(3) | description(NUL) | text`, but it was passed to the plain-text
+  extractor at `frame_data + 3`; that helper reads its first byte as the encoding, which is the
+  *third language byte* (the `g` of `"eng"`), so the encoding check rejected every spec-conforming
+  comment. Replaced with a COMM-aware extractor that skips the language code and the
+  NUL-terminated description.
+- **ID3v2 header flags were never read.** An extended header (flag `0x40`) was parsed as if it
+  were the first frame, so the frame walk started at the wrong offset and lost the entire tag.
+  Now skipped, honouring the v2.3/v2.4 difference (v2.3 excludes the size field, v2.4 includes it).
+  Unsynchronised tags (`0x80`) shift every frame boundary; shravan does not de-unsynchronise yet,
+  so they are reported `ERR_UNSUPPORTED_FMT` rather than returning confidently wrong metadata.
+- **SEC-032 — chained Ogg streams were spliced together.** Page serial numbers were never
+  consulted, so a physical stream carrying several logical ones — exactly what
+  `cat a.opus b.opus` produces, legal per RFC 7845 §3 — had its pages reassembled into a single
+  packet sequence. Reassembly now latches the serial from the first page (not from a BOS flag,
+  which a truncated capture may lack and an attacker controls) and stops at a foreign one.
+- **SEC-021 — `resample_mono` returned an empty vec as success** for a zero or negative rate,
+  having none of the guards its sibling `resample()` carries: 64 samples in, 0 out, no error.
+  Both now reject rates and channel counts `<= 0` (the old `== 0` check let negatives through)
+  and return `ERR_INVALID_RATE`.
+
+### Added — fuzzing and CI
+
+- **`fuzz/fuzz_decode.cyr`** — a second harness that includes the *real* `src/shravan.cyr` rather
+  than stubbing it. The existing `fuzz_codecs` note that "WAV/AIFF/ALAC require main.cyr library
+  (deferred to library factoring)" had been obsolete since the library was factored out, leaving
+  **WAV, AIFF, ALAC, AAC, MP4, Ogg/Opus, `codec_open` and Vorbis comments with no coverage at
+  all**. Two input strategies per target: random bytes behind the format magic, and a *valid*
+  file built by shravan's own encoders with N bytes corrupted — the latter is what reaches decode
+  paths random data never survives to touch. Seeded and reproducible; a failing batch prints the
+  seed that reproduces it.
+- **`fuzz/run.sh` sweeps seeds across batches.** `alloc()` never frees, so one process cannot run
+  unboundedly (~34K calls ≈ 230 MB RSS); the roadmap's ≥90K gate is reached with bounded memory
+  instead. Current gate: **903,500 calls, 0 crashes** (810,000 `fuzz_codecs` + 93,500
+  `fuzz_decode`), run after every fix above.
+- **`scripts/check-write-lengths.py`** — CI guard for the v2.6.8 defect class. Every
+  `syscall(1, fd, "…", N)` must declare its true UTF-8 byte length; short counts truncate output
+  and long counts read past the literal into `.rodata`, emitting stray NULs that turn logs into
+  binary files. 268 literals checked; `--fix` rewrites them. This is not hypothetical — the bug
+  was reintroduced while *writing* the new fuzz harness and the guard caught it.
+- **CI now gates on all three harnesses.** It built and ran only `src/main.cyr`, covering 1039 of
+  11,527 assertions and leaving the Opus CELT encoder and the SILK golden vectors untested.
+  `scripts/test-all.sh` runs under `set -o pipefail` — without it `tee` supplies the exit status
+  and a failing suite would pass the step silently (verified) — plus a check that exactly three
+  harnesses reported, so a suite that silently runs zero tests cannot pass.
+
+### Performance
+
+Neutral: median **+0.7 %**, range −0.3 % … +1.8 % across the nine benchmarks (same machine, same
+session, 3 runs each, medians compared). Run-to-run variance on this machine is under 1 %, so the
+sweep sits at the edge of noise; the bounds checks are per-chunk and per-frame, never per-sample.
+
+### Not fixed — known and tracked
+
+The audit confirmed further defects that are features rather than repairs, and they are **not**
+addressed here: AAC `EIGHT_SHORT_SEQUENCE` is parsed then discarded (short-window frames decode
+with the long-window path), spectral codebook 6 has no table of its own, and codebooks 1–4 are
+malformed prefix codes; ID3v2.2 tags are parsed with the v2.3 frame layout; `alac_unmix_stereo`
+uses a logical shift on a signed product. These belong with the existing 2.9.0 per-codec work.
+`flac_br_read_unary`'s 32768 bound (SEC-008) was reported as rejecting spec-legal streams; it is
+deliberately left in place — loosening a security bound on a theoretical argument, with no failing
+real-world file, is the wrong direction for a hardening release.
+
 ## [2.6.8] - 2026-08-25
 
 Maintenance release: toolchain pin **6.3.27 → 6.5.35**, sankoch **1.0.0 → 2.7.10**, stdlib

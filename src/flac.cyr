@@ -475,6 +475,18 @@ fn flac_decode_verbatim(br, block_size, bps) {
 
 # Decode FIXED subframe (order 0-4)
 fn flac_decode_fixed(br, block_size, bps, order) {
+    # SEC-024: the predictor order must be strictly less than the block size.
+    # FLAC requires blocksize > order (there must be residuals to predict), and
+    # without the check the warm-up loop below writes `order` 8-byte samples
+    # into an alloc(block_size * 8) buffer. Block-size code 6 yields sizes down
+    # to 1 and LPC sf_type 63 yields order 32, so a crafted subframe wrote 256
+    # bytes into an 8-byte allocation — a 248-byte heap overflow whose contents
+    # are raw bits from the file. It also made num_res negative, handing
+    # alloc() a negative size.
+    if (block_size <= 0)     { return err(ERR_DECODE); }
+    if (order < 0)           { return err(ERR_DECODE); }
+    if (order >= block_size) { return err(ERR_DECODE); }
+
     var buf = alloc(block_size * 8);
     # Read warm-up samples
     var i = 0;
@@ -520,6 +532,18 @@ fn flac_decode_fixed(br, block_size, bps, order) {
 
 # Decode LPC subframe (order 1-32)
 fn flac_decode_lpc(br, block_size, bps, order) {
+    # SEC-024: the predictor order must be strictly less than the block size.
+    # FLAC requires blocksize > order (there must be residuals to predict), and
+    # without the check the warm-up loop below writes `order` 8-byte samples
+    # into an alloc(block_size * 8) buffer. Block-size code 6 yields sizes down
+    # to 1 and LPC sf_type 63 yields order 32, so a crafted subframe wrote 256
+    # bytes into an 8-byte allocation — a 248-byte heap overflow whose contents
+    # are raw bits from the file. It also made num_res negative, handing
+    # alloc() a negative size.
+    if (block_size <= 0)     { return err(ERR_DECODE); }
+    if (order < 0)           { return err(ERR_DECODE); }
+    if (order >= block_size) { return err(ERR_DECODE); }
+
     var buf = alloc(block_size * 8);
     # Read warm-up samples
     var i = 0;
@@ -694,9 +718,40 @@ fn flac_decode(data, len) {
     var si_rate = load64(si + 16);
     var si_ch   = load64(si + 24);
     var si_bps  = load64(si + 32);
+    var si_total = load64(si + 40);
     var audio_start = load64(si + 48);
 
     if (si_rate == 0) { return err(ERR_INVALID_RATE); }
+
+    # SEC-023: bound total decoded samples.
+    #
+    # Nothing capped accumulation across frames. A frame header declaring
+    # block_size 65535 plus a CONSTANT subframe fits in 13 bytes and mints
+    # 65535 samples per channel, so a crafted stream expanded ~122,000x:
+    # measured, a 26 KB input drove peak RSS to 3.0 GB (and alloc() never
+    # frees). CRC-8 per frame does not bound it — the attacker just computes
+    # the CRC.
+    #
+    # Two bounds, in order of authority:
+    #  1. STREAMINFO total_samples, when non-zero, is the stream's own
+    #     statement of its length. Frames beyond it contradict the header, so
+    #     stopping there is correct decoding, not just defence.
+    #  2. When total_samples is 0 ("unknown"), an absolute ceiling. 2^25
+    #     interleaved samples is 256 MB of f64 payload, matching the _ALLOC_MAX
+    #     policy in shravan.cyr — ~6.3 minutes of 44.1 kHz stereo, which covers
+    #     a track. Whole-file decode is the wrong API past that; stream.cyr is.
+    #     (Note the vec's growth-doubling means peak RSS runs ~3x the payload,
+    #     since alloc() never frees, so the ceiling is deliberately not larger.)
+    var flac_max_samples = 33554432;
+    var sample_limit = flac_max_samples;
+    if (si_total > 0) {
+        if (si_ch > 0) {
+            var declared = si_total * si_ch;
+            if (declared > 0) {
+                if (declared < sample_limit) { sample_limit = declared; }
+            }
+        }
+    }
 
     var all_samples = vec_new();
     var br = bitreader_new(data, len);
@@ -779,6 +834,12 @@ fn flac_decode(data, len) {
             var scale_div = f64_from(1 << (frame_bps - 1));
             var scale = f64_div(F64_ONE, scale_div);
 
+            # SEC-023: refuse the frame that would breach the limit rather
+            # than truncating, so a caller never receives silently short audio.
+            if (vec_len(all_samples) + block_size * ch_count > sample_limit) {
+                return err(ERR_DECODE);
+            }
+
             # Interleave and convert to f64
             var si2 = 0;
             while (si2 < block_size) {
@@ -847,7 +908,21 @@ fn flac_decode_range(data, len, start_sample, num_samples) {
                 var sp = vec_get(seek_table, i);
                 var sp_sample = load64(sp);
                 if (sp_sample <= start_sample) {
-                    start_byte = audio_start + load64(sp + 8);
+                    # SEC-031: the seek point's byte offset is a 64-bit value
+                    # straight out of the SEEKTABLE and was never validated.
+                    # flac_br_set_pos() would then anchor the bitreader at an
+                    # arbitrary — possibly negative or past-the-end — position
+                    # and every subsequent read would be out of bounds. (This is
+                    # the roadmap's "flac seek anchor" item.) Ignore a seek
+                    # point that does not land inside the audio region; the scan
+                    # simply starts from an earlier valid anchor.
+                    var sp_off = load64(sp + 8);
+                    if (sp_off >= 0) {
+                        var cand = audio_start + sp_off;
+                        if (cand >= audio_start) {
+                            if (cand < len) { start_byte = cand; }
+                        }
+                    }
                 } else {
                     i = st_len;
                 }

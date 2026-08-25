@@ -222,9 +222,37 @@ fn ogg_extract_packets(data, len) {
     var pi = 0;
     var num_pages = vec_len(pages);
 
+    # SEC-032: confine reassembly to ONE logical bitstream.
+    #
+    # An Ogg physical stream may carry several logical streams, distinguished
+    # by the 32-bit serial number in each page header — either multiplexed, or
+    # chained end-to-end, which is exactly what `cat a.opus b.opus` produces and
+    # is legal per RFC 7845 Sec. 3. The serial was never consulted, so pages from
+    # different streams were spliced into one packet sequence and handed to the
+    # decoder as though they belonged together.
+    #
+    # Latch the serial from the FIRST page rather than from a BOS flag: a
+    # truncated or headerless capture may have no BOS at all, and an attacker
+    # controls the flag byte either way.
+    var stream_serial = 0;
+    var have_serial = 0;
+
     while (pi < num_pages) {
         var page = vec_get(pages, pi);
         var ht = ogg_page_header_type(page);
+
+        var pserial = ogg_page_serial(page);
+        if (have_serial == 0) {
+            stream_serial = pserial;
+            have_serial = 1;
+        }
+        if (pserial != stream_serial) {
+            # A different logical stream: stop here. Any partially accumulated
+            # packet belongs to the stream we were following, so flush it below
+            # rather than letting it absorb foreign bytes.
+            pi = num_pages;
+            continue;
+        }
 
         # If NOT a continuation page and we have accumulated data, flush it
         if ((ht & 0x01) == 0) {
@@ -268,11 +296,21 @@ fn ogg_extract_packets(data, len) {
             body_offset = body_offset + lacing_value;
 
             if (lacing_value < 255) {
-                # Packet boundary
-                var pkt = alloc(cur_len + 1);
-                memcpy(pkt, cur_buf, cur_len);
-                vec_push(packets, str_new(pkt, cur_len));
-                cur_len = 0;
+                # Packet boundary. SEC-019: only emit a packet with content.
+                # A lacing value of 0 legitimately terminates a packet whose
+                # length is a multiple of 255 (cur_len > 0 there), but a 0 with
+                # nothing accumulated denotes a zero-length packet, which no
+                # audio codec can use. Emitting them let a page carrying 255
+                # zero lacing values in 282 bytes mint 255 packets, each costing
+                # an alloc + str_new + vec slot: ~43 bytes of heap per input
+                # byte, measured, and alloc() never frees. Skipping them costs
+                # nothing real and bounds the amplification.
+                if (cur_len > 0) {
+                    var pkt = alloc(cur_len + 1);
+                    memcpy(pkt, cur_buf, cur_len);
+                    vec_push(packets, str_new(pkt, cur_len));
+                    cur_len = 0;
+                }
             }
 
             sj = sj + 1;

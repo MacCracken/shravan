@@ -123,11 +123,28 @@ var _RS_PHASE_HALF = 0;      # scaled_half used to build table
 var _RS_PHASE_KSCALE = 0;    # kernel_scale used
 var _RS_PHASE_WSUM = 0;      # pointer to per-phase weight sums
 
+# SEC-020: hard cap on the kernel half-width.
+#
+# scaled_half = ceil(quality / ratio), and ratio = target/source when
+# downsampling — so it grows without bound as the rate ratio does, and
+# source_rate comes straight out of an attacker-controlled file header.
+# Measured before this cap: resample(64 samples, 48000 -> 1) built a
+# 256 x 768001 x 8 table and peaked at 1.5 GB of RSS, from 64 samples of input.
+#
+# 1024 keeps the worst-case table at 256 * 2049 * 8 = 4.2 MB. A sinc kernel
+# wider than ~2000 taps buys no audible stopband improvement, so clamping
+# degrades extreme ratios gracefully instead of exploding.
+var _RS_MAX_HALF = 1024;
+
 fn _rs_build_phase_table(scaled_half, kernel_scale) {
+    # Clamp before the cache check, so a clamped request hits the cache too.
+    if (scaled_half < 1) { scaled_half = 1; }
+    if (scaled_half > _RS_MAX_HALF) { scaled_half = _RS_MAX_HALF; }
+
     if (_RS_PHASE_TBL != 0) {
         if (_RS_PHASE_HALF == scaled_half) {
             if (f64_eq(_RS_PHASE_KSCALE, kernel_scale) == 1) {
-                return 0;  # already built for this config
+                return scaled_half;  # already built for this config
             }
         }
     }
@@ -162,10 +179,22 @@ fn _rs_build_phase_table(scaled_half, kernel_scale) {
         store64(_RS_PHASE_WSUM + p * 8, wsum);
         p = p + 1;
     }
-    return 0;
+    # Returns the (possibly clamped) half-width — callers MUST adopt it, since
+    # their tap loop runs over [-scaled_half, +scaled_half] while reading rows
+    # only _RS_PHASE_WIDTH wide.
+    return scaled_half;
 }
 
 fn resample_mono(samples_vec, source_rate, target_rate, quality) {
+    # SEC-021: resample_mono is public API but had none of the rate guards its
+    # sibling resample() carries. A zero or negative rate produced ratio = inf
+    # or a negative, so new_frames came out <= 0 and the function returned an
+    # EMPTY vec as a SUCCESS value — 64 samples in, 0 out, no error. Silent
+    # data loss in a consumer that trusts the packed Result.
+    if (source_rate <= 0) { return err(ERR_INVALID_RATE); }
+    if (target_rate <= 0) { return err(ERR_INVALID_RATE); }
+    if (quality <= 0)     { return err(ERR_DECODE); }
+
     var frames = vec_len(samples_vec);
     if (frames == 0) {
         return vec_new();
@@ -204,7 +233,7 @@ fn resample_mono(samples_vec, source_rate, target_rate, quality) {
     var scaled_half = f64_to(f64_ceil(f64_div(f_half, filter_scale)));
 
     # Build polyphase table for this configuration
-    _rs_build_phase_table(scaled_half, kernel_scale);
+    scaled_half = _rs_build_phase_table(scaled_half, kernel_scale);
     var width = _RS_PHASE_WIDTH;
     var f_np = f64_from(_RS_NUM_PHASES);
 
@@ -262,9 +291,12 @@ fn resample_mono(samples_vec, source_rate, target_rate, quality) {
 # Returns: new vec of resampled interleaved samples, or negative error
 
 fn resample(samples_vec, channels, source_rate, target_rate, quality) {
-    if (source_rate == 0)  { return err(ERR_INVALID_RATE); }
-    if (target_rate == 0)  { return err(ERR_INVALID_RATE); }
-    if (channels == 0)     { return err(ERR_INVALID_CHANNELS); }
+    # SEC-021: `<= 0`, not `== 0` — a negative rate slipped past the old
+    # equality check and yielded an empty vec reported as success.
+    if (source_rate <= 0)  { return err(ERR_INVALID_RATE); }
+    if (target_rate <= 0)  { return err(ERR_INVALID_RATE); }
+    if (channels <= 0)     { return err(ERR_INVALID_CHANNELS); }
+    if (quality <= 0)      { return err(ERR_DECODE); }
 
     var total = vec_len(samples_vec);
     var frames = total / channels;

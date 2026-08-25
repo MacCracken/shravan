@@ -40,19 +40,30 @@ jobs:
         # (shravan has one: sankoch — this also writes the lib/ hash lock.)
         run: cyrius deps
 
-      - name: Build
+      - name: Build & test all three harnesses
+        # The suite is split across three entry points so no single build
+        # overflows the ~3.15 MB Cyrius code buffer. Gating on src/main.cyr
+        # alone covered 1039 of 11,495 assertions and left the Opus CELT
+        # encoder and the SILK golden vectors untested in CI; test-all.sh
+        # builds and runs all three and fails on any build or assertion error.
+        # pipefail matters: without it `tee` supplies the exit status and a
+        # failing suite would pass the step silently.
         run: |
-          mkdir -p build
-          cyrius build src/main.cyr build/shravan
-          echo "shravan: $(wc -c < build/shravan) bytes"
+          set -o pipefail
+          ./scripts/test-all.sh 2>&1 | tee /tmp/test-output.txt
 
       - name: Verify ELF
         run: file build/shravan | grep -q "ELF 64-bit" || { echo "Not a valid ELF binary"; exit 1; }
 
-      - name: Test suite
+      - name: Verify assertion totals
+        # Guard against a harness silently running zero tests: each must report
+        # "0 failed", and all three result lines must be present.
         run: |
-          ./build/shravan 2>&1 | tee /tmp/test-output.txt
-          grep -q "0 failed" /tmp/test-output.txt || { echo "Tests failed"; exit 1; }
+          grep -c "0 failed" /tmp/test-output.txt | grep -q '^3$' \
+            || { echo "Expected 3 passing harnesses"; cat /tmp/test-output.txt; exit 1; }
+          for b in build/shravan build/shravan-encoder build/shravan-silk; do
+            echo "$b: $(wc -c < "$b") bytes"
+          done
 
       - name: Build & run benchmarks
         run: |
@@ -64,13 +75,25 @@ jobs:
         # Audit the include-dependency graph (0 untrusted / 0 missing).
         run: cyrius vet src/main.cyr
 
+      - name: Write-length check
+        # Every syscall write literal must declare its true UTF-8 byte length.
+        # A short count truncates output; a long count reads past the literal
+        # into .rodata and emits stray NULs that turn logs into binary files.
+        # v2.6.8 fixed 12 such sites — this keeps them fixed.
+        run: scripts/check-write-lengths.py
+
       - name: Fuzz smoke
-        # The fuzz harness self-contains its codec helpers; run a short pass to
-        # catch crashes on malformed input (full 90K pass: ./fuzz/run.sh).
+        # Two harnesses: fuzz_codecs stubs a minimal library (FLAC metadata,
+        # Ogg, MP3 scan, ID3v2); fuzz_decode includes the real src/shravan.cyr
+        # and covers codec_open, WAV, AIFF, ALAC, FLAC, MP3, Ogg, MP4, AAC and
+        # Vorbis tags. Short pass here; full >=90K gate: ./fuzz/run.sh 90000
         run: |
           cyrius build fuzz/fuzz_codecs.cyr build/fuzz_codecs
           ./build/fuzz_codecs 1000 2>&1 | tee /tmp/fuzz-out.txt
           grep -q "0 crashes" /tmp/fuzz-out.txt || { echo "Fuzz crash detected"; exit 1; }
+          cyrius build fuzz/fuzz_decode.cyr build/fuzz_decode
+          ./build/fuzz_decode 200 1 2>&1 | tee /tmp/fuzz-dec.txt
+          grep -q "0 crashes" /tmp/fuzz-dec.txt || { echo "Fuzz crash detected (decode)"; exit 1; }
 
       - name: Security scan
         # All shravan-authored code now lives in src/ + fuzz/ (lib/ is vendored

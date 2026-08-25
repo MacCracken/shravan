@@ -357,9 +357,25 @@ fn _safe_alloc_mul(a, b) {
 }
 
 # Allocate a vec with pre-set capacity (avoids growth in hot loops)
+#
+# SEC-025: alloc() returns 0 — not a negative error — when a request is
+# oversized or mmap fails. This published that 0 as the vec's data pointer
+# alongside a non-zero capacity, so the first vec_push wrote through NULL.
+# Verified: a 300 MiB WAV drove count to 157,286,400, alloc(1,258,291,200)
+# returned 0, and the decode SIGSEGV'd (exit 139). n * 8 could overflow too.
+# Now every failure path returns a packed error for the caller to propagate.
 fn _vec_new_cap(n) {
+    if (n < 0) { return err(ERR_DECODE); }
+    # A zero-length conversion is legitimate (empty audio) — hand back a normal
+    # growable vec rather than a zero-capacity one with a NULL buffer.
+    if (n == 0) { return vec_new(); }
+    if (n > _ALLOC_MAX / 8) { return err(ERR_DECODE); }
+
     var v = alloc(24);
+    if (v == 0) { return err(ERR_DECODE); }
     var data = alloc(n * 8);
+    if (data == 0) { return err(ERR_DECODE); }
+
     store64(v, data);
     store64(v + 8, 0);
     store64(v + 16, n);
@@ -371,6 +387,7 @@ fn _vec_new_cap(n) {
 # Returns: vec of f64 bit patterns
 fn i16_to_f64(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     var scale = F64_RCP_32768;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u16_le(src, i * 2);
@@ -396,6 +413,7 @@ fn f64_to_i16(samples, out) {
 # Convert signed 32-bit samples to f64 vec.
 fn i32_to_f64(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     var scale = F64_RCP_2147483648;
     for (var i = 0; i < count; i = i + 1) {
         var raw = read_u32_le(src, i * 4);
@@ -419,6 +437,7 @@ fn f64_to_i32(samples, out) {
 # Convert 24-bit packed LE samples (3 bytes each) to f64 vec.
 fn i24_packed_to_f64(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     var scale = F64_RCP_8388608;
     for (var i = 0; i < count; i = i + 1) {
         var off = i * 3;
@@ -448,6 +467,7 @@ fn f64_to_i24_packed(samples, out) {
 # Returns: vec of f64 bit patterns
 fn i24_to_f64(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     var scale = F64_RCP_8388608;
     for (var i = 0; i < count; i = i + 1) {
         var raw = load64(src + i * 8) & 0xFFFFFF;
@@ -473,6 +493,7 @@ fn f64_to_i24(samples, out) {
 # Convert unsigned 8-bit PCM (center=128) to f64 vec.
 fn u8_to_f64(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     var scale = F64_RCP_128;
     for (var i = 0; i < count; i = i + 1) {
         var raw = load8(src + i);
@@ -497,6 +518,7 @@ fn f64_to_u8(samples, out) {
 # Convert IEEE 754 float32 (4 bytes LE) to f64 vec.
 fn f32_to_f64_vec(src, count) {
     var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
     for (var i = 0; i < count; i = i + 1) {
         var bits = read_u32_le(src, i * 4);
         # Decompose f32: sign(1) | exp(8) | mantissa(23)
@@ -609,6 +631,7 @@ fn wav_decode(data, len) {
     var fmt_ch = 0;
     var fmt_rate = 0;
     var fmt_bps = 0;
+    var fmt_valid_bits = 0;   # EXTENSIBLE wValidBitsPerSample (0 = not present)
     var fmt_found = 0;
     var dat_start = 0;
     var dat_size = 0;
@@ -621,6 +644,14 @@ fn wav_decode(data, len) {
         # "fmt " = 0x20746D66 LE
         if (chunk_id == 0x20746D66) {
             if (ck_size < 16) { return err(ERR_INVALID_HEADER); }
+            # SEC-022: the loop guard only proves the 8-byte chunk HEADER is in
+            # the buffer (pos + 8 <= len). The reads below reach pos + 23, so a
+            # `fmt ` header sitting at the very end of the buffer read up to 16
+            # bytes past it. ck_size is the DECLARED size and proves nothing
+            # about what is actually present. Demonstrated: a 44-byte WAV whose
+            # `fmt ` header ends at byte 44 decoded successfully, reporting
+            # rate/channels/depth taken entirely from beyond the buffer.
+            if (pos + 24 > len) { return err(ERR_INVALID_HEADER); }
             fmt_code = read_u16_le(data, pos + 8);
             fmt_ch   = read_u16_le(data, pos + 10);
             fmt_rate = read_u32_le(data, pos + 12);
@@ -631,8 +662,20 @@ fn wav_decode(data, len) {
             if (fmt_code == WAV_FMT_EXTENSIBLE) {
                 if (ck_size >= 40) {
                     if (pos + 34 <= len) {
+                        # wValidBitsPerSample says how many bits carry signal;
+                        # wBitsPerSample (read above into fmt_bps) is the
+                        # CONTAINER size and is what strides the sample data.
+                        # Overwriting fmt_bps with valid_bits mis-strode every
+                        # 24-in-32 file — the common "24-bit in a 32-bit
+                        # container" layout — reading 3-byte samples out of a
+                        # 4-byte grid and desynchronising after the first one.
+                        # (This is the roadmap's "wav WAVE_FORMAT_EXTENSIBLE
+                        # 24-in-32" item.) Keep them separate: stride by the
+                        # container, report the valid bits.
                         var valid_bits = read_u16_le(data, pos + 26);
-                        if (valid_bits > 0) { fmt_bps = valid_bits; }
+                        if (valid_bits > 0) {
+                            if (valid_bits <= fmt_bps) { fmt_valid_bits = valid_bits; }
+                        }
                         fmt_code = read_u16_le(data, pos + 32);
                     }
                 }
@@ -700,6 +743,12 @@ fn wav_decode(data, len) {
         }
     }
 
+    # SEC-025: the converters can now return a packed error (oversized or
+    # failed allocation). vec_len() on a negative pointer segfaults, so the
+    # error has to be caught before it is treated as a vec — this is exactly
+    # how a 300 MiB WAV reached exit 139.
+    if (is_err(samples) == 1) { return samples; }
+
     var sample_count = vec_len(samples);
     if (sample_count == 0) {
         if (dat_size > 0) {
@@ -710,7 +759,13 @@ fn wav_decode(data, len) {
     var total_frames = sample_count / fmt_ch;
     var dur = f64_div(f64_from(total_frames), f64_from(fmt_rate));
 
-    var fi = fmtinfo_new(FMT_WAV, fmt_rate, fmt_ch, fmt_bps, dur, total_frames);
+    # Report the meaningful bit depth (valid bits when EXTENSIBLE declared them,
+    # otherwise the container size) — decoding above already strode by the
+    # container.
+    var report_bps = fmt_bps;
+    if (fmt_valid_bits > 0) { report_bps = fmt_valid_bits; }
+
+    var fi = fmtinfo_new(FMT_WAV, fmt_rate, fmt_ch, report_bps, dur, total_frames);
     return decode_result_new(fi, samples);
 }
 
@@ -882,13 +937,26 @@ fn extended_to_f64(ext) {
     # mantissa_hi represents bits 63..32 of the mantissa
     # value = mant_hi >> (31 - unbiased) when unbiased <= 31
     # value = mant_hi << (unbiased - 31) when unbiased > 31
+    # SEC-028: bound every shift count to 0..31 before shifting.
+    #
+    # `exponent` is a 15-bit field, so `unbiased` spans -16383..+16384 and both
+    # branches below computed shift counts far outside the 0..63 a shift may
+    # legally take. Two reachable cases, both from AIFF COMM bytes:
+    #   * exponent 0x403F -> unbiased 64 -> shift 33 -> `32 - shift` = -1,
+    #     a NEGATIVE shift count;
+    #   * a small exponent -> `31 - unbiased` in the thousands.
+    # A sample rate is a positive integer, so anything outside that is a
+    # malformed rate: return 0, which every caller already rejects.
+    if (unbiased < 0)  { return F64_ZERO; }   # value < 1 Hz
+    if (unbiased > 62) { return F64_ZERO; }   # far past any real sample rate
+
     var result = 0;
     if (unbiased <= 31) {
-        result = mant_hi >> (31 - unbiased);
+        result = mant_hi >> (31 - unbiased);       # shift 0..31
     } else {
         # Need lower mantissa bits too
         var mant_lo = (load8(ext+6) << 24) | (load8(ext+7) << 16) | (load8(ext+8) << 8) | load8(ext+9);
-        var shift = unbiased - 31;
+        var shift = unbiased - 31;                 # 1..31
         result = (mant_hi << shift) | (mant_lo >> (32 - shift));
     }
 
@@ -1036,6 +1104,15 @@ fn aiff_decode(data, len) {
         # "COMM" = 0x43 0x4F 0x4D 0x4D
         if (ck0==0x43) { if (ck1==0x4F) { if (ck2==0x4D) { if (ck3==0x4D) {
             var base = pos + 8;
+            # SEC-022: the loop only proves the 8-byte chunk header is present
+            # (pos + 8 <= len). The COMM body is 18 bytes — 2 channels,
+            # 4 numSampleFrames, 2 sampleSize, 10 extended sampleRate — so the
+            # reads below reach pos + 25. Unlike WAV this path did not even
+            # check the declared ck_size, so a COMM header at the end of the
+            # buffer read 18 bytes past it, including the 10-byte extended
+            # float handed to extended_to_f64.
+            if (ck_size < 18)     { return err(ERR_INVALID_HEADER); }
+            if (pos + 26 > len)   { return err(ERR_INVALID_HEADER); }
             channels = read_u16_be(data, base);
             # num_sample_frames at base+2 (4 bytes), skip
             sample_size = read_u16_be(data, base + 6);
@@ -1066,6 +1143,9 @@ fn aiff_decode(data, len) {
         # "SSND" = 0x53 0x53 0x4E 0x44
         if (ck0==0x53) { if (ck1==0x53) { if (ck2==0x4E) { if (ck3==0x44) {
             if (ck_size >= 8) {
+                # SEC-022: ck_size is the DECLARED size; the 4-byte offset
+                # field at pos+8..pos+11 still has to be inside the buffer.
+                if (pos + 12 > len) { return err(ERR_INVALID_HEADER); }
                 var ssnd_offset = read_u32_be(data, pos + 8);
                 # Guard against underflow: ssnd_offset must fit within chunk
                 if (ssnd_offset <= ck_size - 8) {
@@ -1089,13 +1169,25 @@ fn aiff_decode(data, len) {
     if (ssnd_found == 0) { return err(ERR_INVALID_HEADER); }
     if (channels == 0)   { return err(ERR_INVALID_CHANNELS); }
 
+    # SEC-028: validate the COMM fields as ranges, not just against zero.
+    # channels and sampleSize are 16-bit fields, and only `== 0` was rejected,
+    # so 65535 channels or a 65535-bit sample depth reached the PCM converters
+    # and the frame-count division below.
+    if (channels > 256)     { return err(ERR_INVALID_CHANNELS); }
+    if (sample_size <= 0)   { return err(ERR_INVALID_HEADER); }
+    if (sample_size > 32)   { return err(ERR_INVALID_HEADER); }
+
     var sample_rate = f64_to(sample_rate_f);
-    if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
+    if (sample_rate <= 0)       { return err(ERR_INVALID_RATE); }
+    if (sample_rate > 4000000)  { return err(ERR_INVALID_RATE); }
 
     var avail = len - ssnd_start;
     if (ssnd_len > avail) { ssnd_len = avail; }
 
     var samples = aiff_decode_pcm(data + ssnd_start, ssnd_len, sample_size, endian);
+    # SEC-025: same as wav_decode — the little-endian ("sowt") converter can
+    # return a packed error, and vec_len() on it would segfault.
+    if (is_err(samples) == 1) { return samples; }
     var sc = vec_len(samples);
     var tf = sc / channels;
     var dur = f64_div(f64_from(tf), f64_from(sample_rate));
@@ -1608,6 +1700,14 @@ fn alac_decode(data, len) {
     var all_channels = vec_new();
     var done = 0;
 
+    # SEC-029: bound cumulative decoded samples across elements.
+    # alac_decode_element caps num_samples at 16384 per element, but nothing
+    # capped the NUMBER of elements: an element tag is 3 bits + 4 bits, so
+    # roughly one byte of input can mint 16384 samples (131 KB of f64), a
+    # ~63,000x amplification that alloc() never reclaims. Same 2^25-sample
+    # ceiling as FLAC (SEC-023) and AAC (SEC-027).
+    var alac_total = 0;
+
     while (done == 0) {
         var tag = bitreader_read(br, 3);
         if (is_err(tag) == 1) { done = 1; }
@@ -1618,16 +1718,22 @@ fn alac_decode(data, len) {
                 if (tag == ID_SCE) {
                     var samples = alac_decode_element(br, cfg, 1, max_bits);
                     if (is_err(samples) == 1) { return samples; }
+                    alac_total = alac_total + vec_len(samples);
+                    if (alac_total > 33554432) { return err(ERR_DECODE); }
                     vec_push(all_channels, samples);
                 }
                 if (tag == ID_LFE) {
                     var samples = alac_decode_element(br, cfg, 1, max_bits);
                     if (is_err(samples) == 1) { return samples; }
+                    alac_total = alac_total + vec_len(samples);
+                    if (alac_total > 33554432) { return err(ERR_DECODE); }
                     vec_push(all_channels, samples);
                 }
                 if (tag == ID_CPE) {
                     var samples = alac_decode_element(br, cfg, 2, max_bits);
                     if (is_err(samples) == 1) { return samples; }
+                    alac_total = alac_total + vec_len(samples);
+                    if (alac_total > 33554432) { return err(ERR_DECODE); }
                     # Deinterleave into two channels
                     var nf = vec_len(samples) / 2;
                     var left = vec_new();

@@ -22,7 +22,7 @@ is split into three entry points** — each `include`s the same library + codecs
 runs a different test subset, so no single build overflows the Cyrius code buffer
 (~3.15 MB): `src/main.cyr` (core codecs + Opus decode + API), `src/main_encoder.cyr`
 (Opus CELT RFC-6716 encoder), `src/main_silk.cyr` (SILK decode golden vectors). The
-11,495-assertion suite is 1039 / 138 / 10318 across the three. `cyrius distlib`
+11,527-assertion suite is 1071 / 138 / 10318 across the three. `cyrius distlib`
 concatenates the `[lib]` modules into `dist/shravan.cyr`, the **self-contained bundle
 consumers include** (they supply stdlib + bayan + sankoch from their own manifest);
 none of the test files are in `[lib]`.
@@ -41,7 +41,10 @@ dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyr
 dist/shravan.deps -- stdlib leaf sidecar `cyrius deps` consumes (emitted alongside the bundle)
 lib/             -- vendored Cyrius stdlib snapshot ONLY (cyrius lib sync)
 build/           -- compiled binaries (gitignored)
-scripts/         -- test-all.sh, bench-history.sh, version-bump.sh
+scripts/         -- test-all.sh, bench-history.sh, version-bump.sh,
+                    check-write-lengths.py (CI guard: syscall write byte counts)
+fuzz/            -- fuzz_codecs.cyr (stubbed lib), fuzz_decode.cyr (real lib:
+                    codec_open/WAV/AIFF/ALAC/FLAC/MP3/Ogg/MP4/AAC/tags), run.sh
 docs/            -- architecture, roadmap
 ```
 
@@ -55,7 +58,7 @@ bump only on explicit instruction. Bumping the pin requires re-vendoring stdlib:
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run ALL three test binaries (11,495 assertions)
+./scripts/test-all.sh                       # build + run ALL three test binaries (11,527 assertions)
 cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.5.35)
 ./build/shravan                             # run core codecs + Opus decode + API (1039 assertions)
 cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
@@ -64,6 +67,8 @@ cyrius build src/main_silk.cyr build/shravan-silk        # SILK decode golden-ve
 ./build/shravan-silk                        # run SILK tests (10318 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
+./fuzz/run.sh 90000                         # hostile-input gate (903,500 calls, 0 crashes)
+./scripts/check-write-lengths.py            # verify syscall write byte counts (--fix to repair)
 ```
 
 ## Modules
@@ -109,7 +114,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,495 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,527 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

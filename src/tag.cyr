@@ -87,6 +87,44 @@ fn _tag_extract_text(frame_data, frame_len) {
     return str_new(buf, text_len);
 }
 
+# Extract the text of an ID3v2 COMM (comment) frame.
+#
+# The COMM body is  encoding(1) | language(3) | description(NUL-terminated) | text
+# — NOT a plain text frame. The old code called _tag_extract_text(frame_data+3,
+# ...), which treats its first byte as the encoding; that byte is the THIRD
+# LANGUAGE byte (the 'g' of "eng"), so the encoding check rejected it and every
+# spec-conforming comment was silently dropped.
+fn _tag_extract_comm(frame_data, frame_len) {
+    if (frame_len < 5) { return 0; }          # encoding + language + 1 byte
+    var encoding = load8(frame_data);
+    # Same support as _tag_extract_text: Latin-1 and UTF-8 only.
+    if (encoding != 0) {
+        if (encoding != 3) { return 0; }
+    }
+
+    # Skip the 3-byte language code, then the NUL-terminated description.
+    var i = 4;
+    while (i < frame_len) {
+        if (load8(frame_data + i) == 0) { break; }
+        i = i + 1;
+    }
+    if (i >= frame_len) { return 0; }         # unterminated description
+    i = i + 1;                                # step over the NUL
+
+    var text_start = frame_data + i;
+    var text_len = frame_len - i;
+    while (text_len > 0) {
+        if (load8(text_start + text_len - 1) != 0) { break; }
+        text_len = text_len - 1;
+    }
+    if (text_len <= 0) { return 0; }
+
+    var buf = alloc(text_len + 1);
+    memcpy(buf, text_start, text_len);
+    store8(buf + text_len, 0);
+    return str_new(buf, text_len);
+}
+
 # Check if 4 bytes at ptr match a 4-char tag
 fn _tag_id_eq(ptr, c0, c1, c2, c3) {
     if (load8(ptr) != c0) { return 0; }
@@ -152,7 +190,7 @@ fn tag_read_id3v2(data, len) {
 
     var major_version = load8(data + 3);
     # var revision = load8(data + 4);
-    # var flags = load8(data + 5);
+    var flags = load8(data + 5);
 
     var tag_size = tag_syncsafe(data, 6);
     if (len < 10 + tag_size) { return err(ERR_END_OF_STREAM); }
@@ -162,6 +200,35 @@ fn tag_read_id3v2(data, len) {
 
     # ID3v2.3 / v2.4 frames: 4-byte ID + 4-byte size + 2-byte flags
     var pos = 0;
+
+    # The header flags byte was never read, so an EXTENDED HEADER (0x40) was
+    # parsed as though it were the first frame: the frame walk started at the
+    # wrong offset, hit garbage, and dropped the entire tag silently. Skip it.
+    # The size field differs between versions, and getting this wrong is worse
+    # than not handling it at all:
+    #   v2.3 — plain big-endian u32, size EXCLUDES the 4-byte field itself
+    #   v2.4 — syncsafe integer, size INCLUDES the 4-byte field
+    if ((flags & 0x40) != 0) {
+        if (pos + 4 <= tag_size) {
+            var ext_size = 0;
+            if (major_version == 4) {
+                ext_size = tag_syncsafe(tag_data, pos);
+            } else {
+                ext_size = read_u32_be(tag_data, pos) + 4;
+            }
+            if (ext_size < 4)                { return err(ERR_INVALID_HEADER); }
+            if (pos + ext_size > tag_size)   { return err(ERR_INVALID_HEADER); }
+            pos = pos + ext_size;
+        } else {
+            return err(ERR_INVALID_HEADER);
+        }
+    }
+
+    # Unsynchronisation (0x80) rewrites the frame bytes (an 0x00 is inserted
+    # after every 0xFF), so the frame walk below would read shifted sizes and
+    # mis-slice every frame. shravan does not de-unsynchronise yet; report the
+    # tag as unsupported rather than returning confidently wrong metadata.
+    if ((flags & 0x80) != 0) { return err(ERR_UNSUPPORTED_FMT); }
     while (pos + 10 <= tag_size) {
         var id_ptr = tag_data + pos;
 
@@ -196,13 +263,11 @@ fn tag_read_id3v2(data, len) {
         # Handle COMM (comment) frames specially
         # COMM = 0x43 0x4F 0x4D 0x4D
         if (_tag_id_eq(id_ptr, 0x43, 0x4F, 0x4D, 0x4D) == 1) {
-            # Comment: encoding(1) + 3-byte language + text
-            # SEC-018: frame_size > 4 ensures frame_data+3 read and frame_size-3 >= 2
-            if (frame_size > 4) {
-                var comm_text = _tag_extract_text(frame_data + 3, frame_size - 3);
-                if (comm_text != 0) {
-                    tag_meta_set_comment(meta, comm_text);
-                }
+            # Comment: encoding(1) + language(3) + description(NUL) + text
+            # SEC-018's frame_size > 4 bound is preserved inside the extractor.
+            var comm_text = _tag_extract_comm(frame_data, frame_size);
+            if (comm_text != 0) {
+                tag_meta_set_comment(meta, comm_text);
             }
         } else {
             # Standard text frame

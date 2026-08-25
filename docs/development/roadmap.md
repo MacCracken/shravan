@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.6.8.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.6.9.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -14,7 +14,7 @@
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,495 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
+- 11,527 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
@@ -50,8 +50,17 @@ Bring the non-Opus codecs to real/complete and clear the open correctness bugs.
   psychoacoustics + optional R/D scale-factor loop`.
 - `feat(mp4): esds/AudioSpecificConfig parse, AudioSampleEntry v1/v2, multi-track + edit-list
   (gapless trim), co64/largesize` (drop the hardcoded LC config).
-- `fix: mp3 MPEG-2.5 8 kHz low-bitrate short blocks; flac seek anchor + Rice unary bound; wav
-  WAVE_FORMAT_EXTENSIBLE 24-in-32; core detect_format/sankoch symbol collision (build warning)`.
+- `fix: mp3 MPEG-2.5 8 kHz low-bitrate short blocks; core detect_format/sankoch symbol collision
+  (build warning)`. (**flac seek anchor** and **wav WAVE_FORMAT_EXTENSIBLE 24-in-32** were fixed in
+  2.6.9 — SEC-031 and the container/valid-bits split. The **Rice unary bound** was reviewed and
+  deliberately left at 32768: it is the SEC-008 security bound, and no failing real-world file
+  was produced to justify loosening it.)
+- `feat(aac): EIGHT_SHORT_SEQUENCE is parsed then discarded, spectral codebook 6 has no table of
+  its own, and codebooks 1-4 are malformed prefix codes` — confirmed by the 2.6.9 audit.
+- `feat(tag): ID3v2.2 tags are parsed with the v2.3 frame layout; de-unsynchronisation is
+  unimplemented (0x80 tags are reported unsupported since 2.6.9 rather than mis-sliced)`.
+- `fix(alac): alac_unmix_stereo uses a logical shift on a signed product` — confirmed by the
+  2.6.9 audit.
 
 ### v3.0.0 — production-quality, interoperable, hardened suite · MAJOR
 The major bump: every codec value-verified end-to-end both directions, fully interoperable, and

@@ -2834,6 +2834,13 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
             if (is_err(window_shape) == 1) { return window_shape; }
             shared_max_sfb = _br_read(br, 6);
             if (is_err(shared_max_sfb) == 1) { return shared_max_sfb; }
+            # SEC-026: clamp to the scalefactor-band count, exactly as the SCE
+            # path does at the `if (max_sfb > num_swb)` line below. Without it
+            # this 6-bit field (0..63) drove the per-band M/S mask loop past
+            # ms_mask, which is only _AAC_NUM_SWB (49) entries: 63 stores of 8
+            # bytes into a 392-byte allocation is a 112-byte heap overflow,
+            # reachable from an 18-byte ADTS file.
+            if (shared_max_sfb > _AAC_NUM_SWB) { shared_max_sfb = _AAC_NUM_SWB; }
             var predictor = _br_read(br, 1);
             if (is_err(predictor) == 1) { return predictor; }
 
@@ -3106,6 +3113,15 @@ fn aac_decode(data, len) {
             if (res_ok(rc) == 1) {
                 # rc = number of channels decoded (1 or 2)
                 var frame_samples = AAC_FRAME_SIZE * rc;
+                # SEC-027: SEC-011 caps the FIRST pass (which only counts), but
+                # this second pass is the one that allocates and had no bound.
+                # A minimal 8-byte ADTS frame yields AAC_FRAME_SIZE (1024)
+                # samples, so a file of repeated 8-byte frames amplified ~1024x:
+                # a 560 KB input reached ~2.15 GB. Same 2^25-sample ceiling as
+                # FLAC's SEC-023 (256 MB of f64 payload).
+                if (vec_len(all_samples) + frame_samples > 33554432) {
+                    return err(ERR_DECODE);
+                }
                 var i = 0;
                 while (i < frame_samples) {
                     vec_push(all_samples, load64(frame_buf + i * 8));

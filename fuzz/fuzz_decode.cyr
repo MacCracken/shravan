@@ -1,0 +1,371 @@
+# Fuzz: full-library decode entry points.
+#
+# Complements fuzz/fuzz_codecs.cyr, which stubs a minimal library and can only
+# reach flac_parse_metadata / ogg_parse_page / mp3_scan_frames / tag_read_id3v2.
+# That harness's "WAV/AIFF/ALAC require main.cyr library (deferred to library
+# factoring)" note is obsolete: src/shravan.cyr IS the library now, so this
+# harness includes it for real and fuzzes the entry points consumers actually
+# call on untrusted bytes.
+#
+# Invariants:
+#   - No decode entry point crashes on any input.
+#   - Every one returns a packed error code (negative) rather than aborting.
+#
+# Coverage added here: codec_open (unified dispatch), wav_decode, aiff_decode,
+# alac_decode, flac_decode + flac_decode_range, mp3_decode + mp3_decode_pcm,
+# ogg_decode, mp4_decode, aac_decode, tag_read_vorbis.
+#
+# Two input strategies per target:
+#   (a) random bytes behind the format's magic  — reaches header validation
+#   (b) VALID seed file with N bytes corrupted  — reaches deep decode paths that
+#       random data never survives long enough to touch
+#
+# Usage: ./build/fuzz_decode [iters] [seed]   (default: 2000, seed 1)
+#
+# The seed is explicit because alloc() is a bump allocator that never frees, so
+# a single process cannot run unboundedly (2000 iters ~= 34K calls ~= 230 MB
+# RSS). fuzz/run.sh therefore sweeps seeds across several short processes to
+# reach a high call count in bounded memory; a fixed seed keeps any failure
+# reproducible.
+
+include "src/shravan.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
+include "src/opus.cyr"
+include "src/silk.cyr"
+include "src/aac.cyr"
+include "src/mp4.cyr"
+include "src/resample.cyr"
+include "src/dither.cyr"
+include "src/simd.cyr"
+include "src/stream.cyr"
+
+# ================================================================
+# PRNG (SplitMix-ish LCG; deterministic so failures reproduce)
+# ================================================================
+
+var _fz_state = 88172645463325252;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_u(m) {
+    if (m <= 0) { return 0; }
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    if (r < 0) { r = 0; }          # INT64_MIN negates to itself
+    return r % m;
+}
+
+fn _fz_fill(buf, len) {
+    var i = 0;
+    while (i < len) { store8(buf + i, _fz_u(256)); i = i + 1; }
+    return 0;
+}
+
+# Copy an mlen-byte magic to the head, random bytes after it.
+fn _fz_fill_magic(buf, len, magic, mlen) {
+    var i = 0;
+    while (i < mlen) { if (i < len) { store8(buf + i, load8(magic + i)); } i = i + 1; }
+    while (i < len) { store8(buf + i, _fz_u(256)); i = i + 1; }
+    return 0;
+}
+
+# Copy `seed` (slen bytes) into buf, then corrupt `nmut` random byte positions.
+# This is what reaches the deep decode paths.
+fn _fz_mutate(buf, seed, slen, nmut) {
+    var i = 0;
+    while (i < slen) { store8(buf + i, load8(seed + i)); i = i + 1; }
+    var m = 0;
+    while (m < nmut) {
+        var pos = _fz_u(slen);
+        store8(buf + pos, _fz_u(256));
+        m = m + 1;
+    }
+    return slen;
+}
+
+# ================================================================
+# Seed builders — real, valid files produced by shravan's own encoders
+# ================================================================
+
+fn _fz_make_samples(n) {
+    var v = vec_new();
+    var i = 0;
+    while (i < n) {
+        # alternating +/- 0.5 with a slow ramp; non-trivial but bounded
+        if ((i / 16) % 2 == 0) { vec_push(v, F64_HALF); } else { vec_push(v, F64_NEG_HALF); }
+        i = i + 1;
+    }
+    return v;
+}
+
+# ================================================================
+# Main
+# ================================================================
+
+alloc_init();
+shravan_init_constants();
+flac_init();
+ogg_init();
+mp3_init();
+fft_init();
+aac_init();
+resample_init();
+
+var iters = 2000;
+args_init();
+if (argc() > 1) {
+    iters = atoi(argv(1));
+    if (iters <= 0) { iters = 2000; }
+}
+if (argc() > 2) {
+    var sd = atoi(argv(2));
+    if (sd > 0) {
+        # Mix the seed in rather than assigning it, so a small seed still
+        # starts the LCG in a well-distributed state.
+        _fz_state = _fz_state + sd * 6364136223846793005;
+        _fz_rand();
+    }
+}
+
+var max_size = 4096;
+var buf = alloc(max_size);
+var total = 0;
+
+# --- magics ---
+var m_riff = alloc(4);
+store8(m_riff, 0x52); store8(m_riff+1, 0x49); store8(m_riff+2, 0x46); store8(m_riff+3, 0x46);
+var m_form = alloc(4);
+store8(m_form, 0x46); store8(m_form+1, 0x4F); store8(m_form+2, 0x52); store8(m_form+3, 0x4D);
+var m_flac = alloc(4);
+store8(m_flac, 0x66); store8(m_flac+1, 0x4C); store8(m_flac+2, 0x61); store8(m_flac+3, 0x43);
+var m_ogg = alloc(4);
+store8(m_ogg, 0x4F); store8(m_ogg+1, 0x67); store8(m_ogg+2, 0x67); store8(m_ogg+3, 0x53);
+var m_adts = alloc(2);
+store8(m_adts, 0xFF); store8(m_adts+1, 0xF1);
+var m_mp3 = alloc(2);
+store8(m_mp3, 0xFF); store8(m_mp3+1, 0xFB);
+# ....ftyp  (mp4 box header at offset 4)
+var m_ftyp = alloc(8);
+store8(m_ftyp, 0); store8(m_ftyp+1, 0); store8(m_ftyp+2, 0); store8(m_ftyp+3, 0x18);
+store8(m_ftyp+4, 0x66); store8(m_ftyp+5, 0x74); store8(m_ftyp+6, 0x79); store8(m_ftyp+7, 0x70);
+
+syscall(1, 1, "fuzz_decode: ", 13);
+fmt_int(iters);
+syscall(1, 1, " iterations per target, stream ", 31);
+# Digest of the PRNG state: proves the seed actually re-aims the byte stream,
+# and is the handle for reproducing a failing run.
+fmt_int(_fz_u(1000000));
+syscall(1, 1, "\n", 1);
+
+# ================================================================
+# Build valid seed files with shravan's own encoders
+# ================================================================
+
+var seed_pcm = _fz_make_samples(256);
+
+var wav_seed = alloc(8192);
+var wav_len = wav_encode(seed_pcm, 44100, 1, PCM_I16, wav_seed);
+if (is_err(wav_len) == 1) { wav_len = 0; }
+
+var aiff_seed = alloc(8192);
+var aiff_len = aiff_encode(seed_pcm, 44100, 1, 16, aiff_seed);
+if (is_err(aiff_len) == 1) { aiff_len = 0; }
+
+var flac_seed = alloc(16384);
+var flac_len = flac_encode(seed_pcm, 44100, 1, 16, flac_seed);
+if (is_err(flac_len) == 1) { flac_len = 0; }
+
+var aac_seed = alloc(16384);
+var aac_len = aac_encode(seed_pcm, 44100, 1, 64000, aac_seed);
+if (is_err(aac_len) == 1) { aac_len = 0; }
+
+syscall(1, 1, "  seeds: wav=", 13); fmt_int(wav_len);
+syscall(1, 1, " aiff=", 6); fmt_int(aiff_len);
+syscall(1, 1, " flac=", 6); fmt_int(flac_len);
+syscall(1, 1, " aac=", 5); fmt_int(aac_len);
+syscall(1, 1, " bytes\n", 7);
+
+# ================================================================
+# Target: codec_open — the unified dispatch, the real attack surface
+# ================================================================
+syscall(1, 1, "  codec_open (random+magic)... ", 31);
+var fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 16) + 16;
+    var which = _fz_u(7);
+    if (which == 0) { _fz_fill_magic(buf, sz, m_riff, 4); }
+    if (which == 1) { _fz_fill_magic(buf, sz, m_form, 4); }
+    if (which == 2) { _fz_fill_magic(buf, sz, m_flac, 4); }
+    if (which == 3) { _fz_fill_magic(buf, sz, m_ogg,  4); }
+    if (which == 4) { _fz_fill_magic(buf, sz, m_adts, 2); }
+    if (which == 5) { _fz_fill_magic(buf, sz, m_ftyp, 8); }
+    if (which == 6) { _fz_fill(buf, sz); }
+    codec_open(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: WAV — random-behind-magic, then valid-seed mutation
+# ================================================================
+syscall(1, 1, "  wav_decode... ", 16);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 44) + 44;
+    _fz_fill_magic(buf, sz, m_riff, 4);
+    wav_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+if (wav_len > 0) {
+    fi = 0;
+    while (fi < iters) {
+        var n = _fz_mutate(buf, wav_seed, wav_len, _fz_u(6) + 1);
+        wav_decode(buf, n);
+        fi = fi + 1; total = total + 1;
+    }
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: AIFF
+# ================================================================
+syscall(1, 1, "  aiff_decode... ", 17);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 54) + 54;
+    _fz_fill_magic(buf, sz, m_form, 4);
+    aiff_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+if (aiff_len > 0) {
+    fi = 0;
+    while (fi < iters) {
+        var n = _fz_mutate(buf, aiff_seed, aiff_len, _fz_u(6) + 1);
+        aiff_decode(buf, n);
+        fi = fi + 1; total = total + 1;
+    }
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: FLAC full decode (not just metadata) + range decode
+# ================================================================
+syscall(1, 1, "  flac_decode... ", 17);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 42) + 42;
+    _fz_fill_magic(buf, sz, m_flac, 4);
+    flac_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+if (flac_len > 0) {
+    fi = 0;
+    while (fi < iters) {
+        var n = _fz_mutate(buf, flac_seed, flac_len, _fz_u(6) + 1);
+        flac_decode(buf, n);
+        flac_decode_range(buf, n, _fz_u(512), _fz_u(512) + 1);
+        fi = fi + 1; total = total + 2;
+    }
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: ALAC (roadmap says the decoder is unreachable via dispatch —
+# fuzz it directly so it is hardened before it is wired up)
+# ================================================================
+syscall(1, 1, "  alac_decode... ", 17);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 16) + 16;
+    _fz_fill(buf, sz);
+    alac_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: MP3 full decode
+# ================================================================
+syscall(1, 1, "  mp3_decode... ", 16);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 4) + 4;
+    _fz_fill_magic(buf, sz, m_mp3, 2);
+    mp3_decode(buf, sz);
+    mp3_decode_pcm(buf, sz);
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: Ogg full decode (drives the Opus packet path)
+# ================================================================
+syscall(1, 1, "  ogg_decode... ", 16);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 27) + 27;
+    _fz_fill_magic(buf, sz, m_ogg, 4);
+    ogg_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: MP4 demux + decode (box-tree walk on hostile sizes)
+# ================================================================
+syscall(1, 1, "  mp4_decode... ", 16);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 16) + 16;
+    _fz_fill_magic(buf, sz, m_ftyp, 8);
+    mp4_demux(buf, sz);
+    mp4_decode(buf, sz);
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: AAC (ADTS)
+# ================================================================
+syscall(1, 1, "  aac_decode... ", 16);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 7) + 7;
+    _fz_fill_magic(buf, sz, m_adts, 2);
+    aac_decode(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+if (aac_len > 0) {
+    fi = 0;
+    while (fi < iters) {
+        var n = _fz_mutate(buf, aac_seed, aac_len, _fz_u(6) + 1);
+        aac_decode(buf, n);
+        fi = fi + 1; total = total + 1;
+    }
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: Vorbis comment (attacker-controlled length vector)
+# ================================================================
+syscall(1, 1, "  tag_read_vorbis... ", 21);
+fi = 0;
+while (fi < iters) {
+    var sz = _fz_u(max_size - 8) + 8;
+    _fz_fill(buf, sz);
+    tag_read_vorbis(buf, sz);
+    fi = fi + 1; total = total + 1;
+}
+syscall(1, 1, "ok\n", 3);
+
+syscall(1, 1, "\nfuzz_decode: ", 14);
+fmt_int(total);
+syscall(1, 1, " calls, 0 crashes\n", 18);
+syscall(60, 0);

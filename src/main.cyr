@@ -1203,6 +1203,282 @@ fn print_summary() {
     return 0;
 }
 
+
+# ================================================================
+# Hostile-input regression tests (v2.6.9 P(-1) hardening sweep)
+# Each corresponds to a numbered SEC- fix and pins the behaviour that
+# was wrong before it. Helper below builds little-endian fields.
+# ================================================================
+
+fn _sec_put32(p, off, v) {
+    store8(p + off, v & 0xFF); store8(p + off + 1, (v >> 8) & 0xFF);
+    store8(p + off + 2, (v >> 16) & 0xFF); store8(p + off + 3, (v >> 24) & 0xFF);
+    return 0;
+}
+fn _sec_put16(p, off, v) {
+    store8(p + off, v & 0xFF); store8(p + off + 1, (v >> 8) & 0xFF);
+    return 0;
+}
+
+# SEC-022: a `fmt ` chunk header ending exactly at `len` must not have its
+# 16-byte body read from beyond the buffer.
+fn test_sec_wav_fmt_truncated() {
+    syscall(1, 1, "test: sec wav fmt body past len\n", 32);
+    var buf = alloc(256);
+    for (var i = 0; i < 256; i = i + 1) { store8(buf + i, 0); }
+    _sec_put32(buf, 0, 0x46464952);   # RIFF
+    _sec_put32(buf, 4, 36);
+    _sec_put32(buf, 8, 0x45564157);   # WAVE
+    _sec_put32(buf, 12, 0x61746164);  # "data"
+    _sec_put32(buf, 16, 16);          # -> next chunk header starts at 36
+    _sec_put32(buf, 36, 0x20746D66);  # "fmt " header occupies 36..43
+    _sec_put32(buf, 40, 16);          # declared size 16, body would be 44..59
+    # A *valid* fmt body planted outside the declared length.
+    _sec_put32(buf, 44, 0x00020001);  # PCM, 2 channels
+    _sec_put32(buf, 48, 12345);       # rate 12345 — unmistakable if leaked
+    _sec_put16(buf, 58, 24);
+    var r = wav_decode(buf, 44);
+    assert(is_err(r) == 1, "wav fmt body past len is rejected, not read");
+    return 0;
+}
+
+# SEC-022: AIFF COMM/SSND bodies must be inside the buffer too.
+fn test_sec_aiff_chunk_truncated() {
+    syscall(1, 1, "test: sec aiff comm body past len\n", 34);
+    var buf = alloc(128);
+    for (var i = 0; i < 128; i = i + 1) { store8(buf + i, 0); }
+    store8(buf, 0x46); store8(buf+1, 0x4F); store8(buf+2, 0x52); store8(buf+3, 0x4D);
+    store8(buf+8, 0x41); store8(buf+9, 0x49); store8(buf+10, 0x46); store8(buf+11, 0x46);
+    # COMM header at 12..19, body would run to 37 — declare len 20.
+    store8(buf+12, 0x43); store8(buf+13, 0x4F); store8(buf+14, 0x4D); store8(buf+15, 0x4D);
+    store8(buf+19, 18);               # big-endian size 18
+    var r = aiff_decode(buf, 20);
+    assert(is_err(r) == 1, "aiff COMM body past len is rejected");
+
+    # SSND whose 4-byte offset field would be read past len.
+    for (var i = 0; i < 128; i = i + 1) { store8(buf + i, 0); }
+    store8(buf, 0x46); store8(buf+1, 0x4F); store8(buf+2, 0x52); store8(buf+3, 0x4D);
+    store8(buf+8, 0x41); store8(buf+9, 0x49); store8(buf+10, 0x46); store8(buf+11, 0x46);
+    store8(buf+12, 0x53); store8(buf+13, 0x53); store8(buf+14, 0x4E); store8(buf+15, 0x44);
+    store8(buf+19, 16);
+    var r2 = aiff_decode(buf, 20);
+    assert(is_err(r2) == 1, "aiff SSND offset past len is rejected");
+    return 0;
+}
+
+# WAVE_FORMAT_EXTENSIBLE: wBitsPerSample is the container stride;
+# wValidBitsPerSample is only the meaningful depth. 24-in-32 must decode.
+fn test_sec_wav_extensible_24_in_32() {
+    syscall(1, 1, "test: wav extensible 24-in-32\n", 30);
+    var buf = alloc(256);
+    for (var i = 0; i < 256; i = i + 1) { store8(buf + i, 0); }
+    _sec_put32(buf, 0, 0x46464952);
+    _sec_put32(buf, 8, 0x45564157);
+    _sec_put32(buf, 12, 0x20746D66);
+    _sec_put32(buf, 16, 40);
+    _sec_put16(buf, 20, 0xFFFE);      # WAVE_FORMAT_EXTENSIBLE
+    _sec_put16(buf, 22, 1);           # mono
+    _sec_put32(buf, 24, 44100);
+    _sec_put32(buf, 28, 176400);
+    _sec_put16(buf, 32, 4);           # block align 4 -> 32-bit container
+    _sec_put16(buf, 34, 32);          # wBitsPerSample  = 32 (CONTAINER)
+    _sec_put16(buf, 36, 22);          # cbSize
+    _sec_put16(buf, 38, 24);          # wValidBitsPerSample = 24
+    _sec_put32(buf, 40, 3);
+    _sec_put16(buf, 44, 1);           # SubFormat PCM
+    _sec_put32(buf, 60, 0x61746164);  # "data"
+    _sec_put32(buf, 64, 16);          # 4 samples x 4 bytes
+    _sec_put32(buf, 68, 0x40000000);  # +0.5, MSB-justified
+    _sec_put32(buf, 72, 0xC0000000);  # -0.5
+    _sec_put32(buf, 76, 0x20000000);  # +0.25
+    _sec_put32(buf, 80, 0x00000000);  #  0.0
+    _sec_put32(buf, 4, 76);
+    var r = wav_decode(buf, 84);
+    assert(res_ok(r) == 1, "24-in-32 extensible decodes");
+    var fi = decode_result_info(r);
+    var sm = decode_result_samples(r);
+    # Strided by the 4-byte container -> exactly 4 samples (not 16/3 = 5).
+    assert_eq(vec_len(sm), 4, "24-in-32 strides by the 32-bit container");
+    assert_eq(fmtinfo_bit_depth(fi), 24, "24-in-32 reports the valid bit depth");
+    assert_eq(f64_to(f64_mul(vec_get(sm, 0), f64_from(1000))), 500, "24-in-32 sample 0 = +0.5");
+    assert_eq(f64_to(f64_mul(vec_get(sm, 1), f64_from(1000))), 0 - 500, "24-in-32 sample 1 = -0.5");
+    assert_eq(f64_to(f64_mul(vec_get(sm, 2), f64_from(1000))), 250, "24-in-32 sample 2 = +0.25");
+    return 0;
+}
+
+# SEC-024: predictor order must be < block size, else the warm-up loop
+# writes `order` samples into a `block_size`-sample buffer.
+fn test_sec_flac_order_exceeds_block() {
+    syscall(1, 1, "test: sec flac order >= block size\n", 35);
+    var src = alloc(512);
+    for (var i = 0; i < 512; i = i + 1) { store8(src + i, 0x5A); }
+    var br = bitreader_new(src, 512);
+    var r = flac_decode_lpc(br, 1, 16, 32);
+    assert(is_err(r) == 1, "LPC order 32 with block size 1 is rejected");
+    var br2 = bitreader_new(src, 512);
+    var r2 = flac_decode_fixed(br2, 2, 16, 4);
+    assert(is_err(r2) == 1, "FIXED order 4 with block size 2 is rejected");
+    var br3 = bitreader_new(src, 512);
+    var r3 = flac_decode_lpc(br3, 32, 16, 32);
+    assert(is_err(r3) == 1, "LPC order == block size is rejected");
+    return 0;
+}
+
+# SEC-021: resample_mono had none of resample()'s rate guards and returned an
+# EMPTY vec as a SUCCESS value for a zero or negative rate.
+fn test_sec_resample_rate_guards() {
+    syscall(1, 1, "test: sec resample rate guards\n", 31);
+    var v = vec_new();
+    for (var i = 0; i < 64; i = i + 1) { vec_push(v, F64_HALF); }
+    var a = resample_mono(v, 0, 48000, RESAMPLE_GOOD);
+    assert(is_err(a) == 1, "resample_mono rejects source_rate 0");
+    var b = resample_mono(v, 0 - 1, 48000, RESAMPLE_GOOD);
+    assert(is_err(b) == 1, "resample_mono rejects negative source_rate");
+    var c = resample_mono(v, 48000, 0, RESAMPLE_GOOD);
+    assert(is_err(c) == 1, "resample_mono rejects target_rate 0");
+    var d = resample(v, 1, 0 - 1, 48000, RESAMPLE_GOOD);
+    assert(is_err(d) == 1, "resample rejects negative source_rate");
+    # SEC-020: an extreme ratio must not build an unbounded kernel table.
+    var e = resample(v, 1, 48000, 1, RESAMPLE_GOOD);
+    assert(res_ok(e) == 1, "extreme downsample still succeeds (kernel clamped)");
+    return 0;
+}
+
+# SEC-025: an oversized conversion must return a packed error, not publish a
+# NULL data pointer that the first vec_push writes through.
+fn test_sec_vec_new_cap_oversize() {
+    syscall(1, 1, "test: sec oversized pcm conversion\n", 35);
+    var small = alloc(64);
+    memset(small, 0, 64);
+    # Far beyond the 256 MB policy cap; must be refused, not attempted.
+    var r = i16_to_f64(small, 200000000);
+    assert(is_err(r) == 1, "oversized i16_to_f64 returns an error");
+    var r2 = _vec_new_cap(0);
+    assert(is_err(r2) == 0, "zero-capacity request still yields a usable vec");
+    assert_eq(vec_len(r2), 0, "zero-capacity vec is empty");
+    return 0;
+}
+
+# SEC-028: the AIFF 80-bit extended sample rate must not produce shift counts
+# outside 0..63 (exponent is a 15-bit field).
+fn test_sec_extended_float_shifts() {
+    syscall(1, 1, "test: sec aiff extended float bounds\n", 37);
+    var ext = alloc(10);
+    # exponent 0x403F (unbiased 64) with an all-ones mantissa: used to compute
+    # a shift of 32 - 33 = -1.
+    store8(ext, 0x40); store8(ext + 1, 0x3F);
+    for (var i = 2; i < 10; i = i + 1) { store8(ext + i, 0xFF); }
+    var v = extended_to_f64(ext);
+    assert_eq(f64_to(v), 0, "absurd exponent yields 0 (rejected upstream)");
+    # A tiny exponent used to shift by thousands.
+    store8(ext, 0x00); store8(ext + 1, 0x01);
+    var v2 = extended_to_f64(ext);
+    assert_eq(f64_to(v2), 0, "sub-1 Hz exponent yields 0");
+    # A real rate still round-trips.
+    var ext2 = alloc(10);
+    f64_to_extended(44100, ext2);
+    assert_eq(f64_to(extended_to_f64(ext2)), 44100, "44100 Hz round-trips");
+    return 0;
+}
+
+# SEC-019: a page of all-zero lacing values denotes no packets at all, and must
+# not mint one empty packet per segment.
+fn test_sec_ogg_zero_lacing() {
+    syscall(1, 1, "test: sec ogg zero-length packets\n", 34);
+    var page_sz = 282;                 # 27 header + 255 segment table, no body
+    var data = alloc(page_sz + 16);
+    for (var i = 0; i < page_sz + 16; i = i + 1) { store8(data + i, 0); }
+    store8(data, 0x4F); store8(data+1, 0x67); store8(data+2, 0x67); store8(data+3, 0x53);
+    store8(data + 26, 255);            # 255 segments, all lacing 0
+    var crc = ogg_crc32_page(data, page_sz);
+    store8(data + 22, crc & 0xFF);
+    store8(data + 23, (crc >> 8) & 0xFF);
+    store8(data + 24, (crc >> 16) & 0xFF);
+    store8(data + 25, (crc >> 24) & 0xFF);
+    var pkts = ogg_extract_packets(data, page_sz);
+    assert(is_err(pkts) == 0, "all-zero lacing page parses");
+    assert_eq(vec_len(pkts), 0, "255 zero lacing values yield 0 packets, not 255");
+    return 0;
+}
+
+
+# ID3v2.3 COMM frames: body is encoding(1)|language(3)|description(NUL)|text.
+# Parsing it as a plain text frame read the third language byte as the encoding
+# and silently dropped every comment.
+fn test_sec_id3v2_comm_frame() {
+    syscall(1, 1, "test: id3v2 COMM frame + ext header\n", 36);
+    var buf = alloc(128);
+    for (var i = 0; i < 128; i = i + 1) { store8(buf + i, 0); }
+    store8(buf, 0x49); store8(buf+1, 0x44); store8(buf+2, 0x33);   # "ID3"
+    store8(buf + 3, 3);            # v2.3
+    store8(buf + 5, 0);            # no flags
+    # tag_size (syncsafe) = 10 (frame header) + 11 (frame body) = 21
+    store8(buf + 9, 21);
+    # COMM frame header
+    store8(buf+10, 0x43); store8(buf+11, 0x4F); store8(buf+12, 0x4D); store8(buf+13, 0x4D);
+    store8(buf + 17, 11);          # big-endian frame size = 11
+    # body: encoding 0 | "eng" | "" NUL | "hello"
+    store8(buf + 20, 0);           # encoding: Latin-1
+    store8(buf+21, 0x65); store8(buf+22, 0x6E); store8(buf+23, 0x67);   # "eng"
+    store8(buf + 24, 0);           # empty description, NUL terminated
+    store8(buf+25, 0x68); store8(buf+26, 0x65); store8(buf+27, 0x6C);
+    store8(buf+28, 0x6C); store8(buf+29, 0x6F);                        # "hello"
+
+    var m = tag_read_id3v2(buf, 31);
+    assert(is_err(m) == 0, "id3v2 with COMM parses");
+    var c = tag_meta_comment(m);
+    assert(c != 0, "COMM comment is extracted, not dropped");
+    assert_eq(str_len(c), 5, "COMM text is \"hello\" (5 bytes)");
+
+    # Extended header (flags 0x40) must be skipped, not parsed as a frame.
+    for (var i = 0; i < 128; i = i + 1) { store8(buf + i, 0); }
+    store8(buf, 0x49); store8(buf+1, 0x44); store8(buf+2, 0x33);
+    store8(buf + 3, 3);
+    store8(buf + 5, 0x40);         # extended header present
+    store8(buf + 9, 20);           # tag size = 6 ext + 14 ... (frame walk skips ext)
+    store8(buf + 13, 6);           # v2.3 ext size u32 = 6 (excludes itself) -> skip 10
+    var m2 = tag_read_id3v2(buf, 30);
+    assert(is_err(m2) == 0, "id3v2 with extended header parses without error");
+
+    # Unsynchronised tags are reported unsupported rather than mis-sliced.
+    store8(buf + 5, 0x80);
+    var m3 = tag_read_id3v2(buf, 30);
+    assert(is_err(m3) == 1, "unsynchronised id3v2 is reported unsupported");
+    return 0;
+}
+
+
+# SEC-032: a chained Ogg stream (`cat a.opus b.opus`) carries two logical
+# bitstreams with different serial numbers. Reassembly must not splice them.
+fn test_sec_ogg_chained_serials() {
+    syscall(1, 1, "test: sec ogg chained serials\n", 30);
+    # Two pages, each: 27-byte header + 1 segment of 4 payload bytes.
+    var page_sz = 27 + 1 + 4;
+    var total = page_sz * 2;
+    var data = alloc(total + 16);
+    for (var i = 0; i < total + 16; i = i + 1) { store8(data + i, 0); }
+
+    for (var pg = 0; pg < 2; pg = pg + 1) {
+        var b = data + pg * page_sz;
+        store8(b, 0x4F); store8(b+1, 0x67); store8(b+2, 0x67); store8(b+3, 0x53);
+        store8(b + 5, 0);              # fresh page, not a continuation
+        store8(b + 14, pg + 1);        # serial: 1 for page 0, 2 for page 1
+        store8(b + 26, 1);             # one segment
+        store8(b + 27, 4);             # lacing value 4 -> 4-byte packet
+        for (var k = 0; k < 4; k = k + 1) { store8(b + 28 + k, 0xA0 + pg); }
+        var crc = ogg_crc32_page(b, page_sz);
+        store8(b + 22, crc & 0xFF);
+        store8(b + 23, (crc >> 8) & 0xFF);
+        store8(b + 24, (crc >> 16) & 0xFF);
+        store8(b + 25, (crc >> 24) & 0xFF);
+    }
+
+    var pkts = ogg_extract_packets(data, total);
+    assert(is_err(pkts) == 0, "chained ogg parses");
+    assert_eq(vec_len(pkts), 1, "only the first logical stream is reassembled");
+    return 0;
+}
+
 # ================================================================
 # Entry point — top-level statements
 # ================================================================
@@ -1216,7 +1492,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.6.8 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.6.9 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1315,6 +1591,18 @@ test_tag_write_id3v2_roundtrip();
 test_tag_write_vorbis_roundtrip();
 test_stream_aiff_chunking();
 test_stream_edge_cases();
+
+# Hostile-input regression tests (v2.6.9 P(-1) hardening sweep)
+test_sec_wav_fmt_truncated();
+test_sec_aiff_chunk_truncated();
+test_sec_wav_extensible_24_in_32();
+test_sec_flac_order_exceeds_block();
+test_sec_resample_rate_guards();
+test_sec_vec_new_cap_oversize();
+test_sec_extended_float_shifts();
+test_sec_ogg_zero_lacing();
+test_sec_id3v2_comm_frame();
+test_sec_ogg_chained_serials();
 test_serde_format_info();
 test_serde_enums();
 test_wav_f32_roundtrip();
