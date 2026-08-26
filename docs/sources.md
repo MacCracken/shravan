@@ -182,6 +182,52 @@ The lesson generalises: when a reference implementation's convenience wrapper
 does more than the format specifies, compare against the layer that implements
 the format, not the wrapper.
 
+## SILK encoder tables and constants (v2.8.0)
+
+Ported against libopus 1.5.2 built from source. Every table was generated from
+that source by script and every constant read out of libopus's own headers by a
+compiled program — none was transcribed or derived by hand.
+
+- **`silk_max_pulses_table`, `silk_pulses_per_block_BITS_Q5`,
+  `silk_rate_levels_BITS_Q5`** — `silk/tables_pulses_per_block.c`. Encoder-only;
+  the decoder already carried the matching iCDFs.
+- **`silk_NLSF_CB2_BITS_NB_MB_Q5` / `_WB_Q5`** — `silk/tables_NLSF_CB_NB_MB.c`,
+  `tables_NLSF_CB_WB.c`. **Both are 72 bytes.** A first attempt read them through
+  the `silk_NLSF_CB_struct` pointer assuming `order × 10` (100 and 160), walked
+  off the end of the arrays, and produced tables of trailing garbage that crashed
+  the trellis. The parser now takes the length from the declaration and is
+  cross-checked against a table shravan already has (`silk_NLSF_CB2_iCDF_NB_MB`).
+- **Gain quantisation** — `OFFSET = 2090`, `SCALE_Q16 = 2251`,
+  `INV_SCALE_Q16 = 1907825`, `N_LEVELS_QGAIN = 64`, `MIN/MAX_DELTA_GAIN_QUANT =
+  -4/36`, from `silk/gain_quant.c` and `silk/define.h` via a compiled probe.
+- **NLSF codebooks** — `quantStepSize_Q16` 11796 (NB/MB) and 9830 (WB),
+  `invQuantStepSize_Q6` 356 and 427, read from `silk_NLSF_CB_NB_MB` /
+  `silk_NLSF_CB_WB` directly.
+
+### Integer semantics that the source does not show
+
+Two behaviours are invisible unless the declared C types are checked, and both
+change the result:
+
+- `silk_NLSF_del_dec_quant` accumulates its R/D in `opus_int32` and **wraps** —
+  the distortion term `SMULBB(diff,diff) * w_Q5` routinely exceeds 2^31. In f64
+  Cyrius the wrap has to be applied deliberately (`silk_sx32`).
+- `W_adj_Q5[]` in `silk_NLSF_encode` is an `opus_int16` array, so
+  `silk_DIV32_varQ`'s 32-bit result is **truncated to 16 bits** before the
+  trellis sees it.
+
+The float→fixed boundaries in `silk/float/wrappers_FLP.c` use `silk_float2int` =
+`lrintf` = round half to **even**, not the usual round-half-away-from-zero; that
+matters for the analysis front end still to be ported.
+
+### Oracle
+
+`scratchpad/silkoracle` links libopus's static library and calls
+`silk_lin2log`, `silk_gains_quant`, `silk_A2NLSF`, `silk_NLSF_VQ_weights_laroia`
+and `silk_NLSF_encode` directly on chosen inputs. Each ported function is
+compared against the reference implementation over randomised sweeps rather than
+against a reading of the C.
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified

@@ -10833,6 +10833,201 @@ fn test_opus_silk10_rfc() {
 }
 
 
+# ================================================================
+# v2.8.0 — SILK ENCODER: quantisation + bitstream, vs libopus
+# ================================================================
+# Every expected value below was produced by libopus 1.5.2's own functions on
+# the same inputs (scratchpad/silkoracle calls them directly), not derived from
+# a reading of the source. These are the exact inverses of the decoder above, so
+# a drift here would silently produce a stream libopus cannot read.
+fn test_silk_encode_quantisation() {
+    syscall(1, 1, "=== silk encode: quantisation vs libopus ===\n", 45);
+
+    # --- silk_lin2log (the front half of gain quantisation) ---
+    assert(silk_lin2log(1) == 0, "lin2log(1)");
+    assert(silk_lin2log(100) == 851, "lin2log(100)");
+    assert(silk_lin2log(65536) == 2048, "lin2log(65536)");
+    assert(silk_lin2log(1000000) == 2551, "lin2log(1000000)");
+
+    # --- silk_gains_quant: indices, quantised gains and the carried index ---
+    var g = alloc(4 * 8);
+    store64(g + 0 * 8, 44826624); store64(g + 1 * 8, 83886080);
+    store64(g + 2 * 8, 44826624); store64(g + 3 * 8, 38273024);
+    var ind = alloc(4 * 8);
+    var lg = alloc(8); store64(lg, 10);
+    silk_gains_quant(ind, g, lg, 0, 4);
+    assert(load64(ind + 0 * 8) == 39, "gains_quant ind[0]");
+    assert(load64(ind + 1 * 8) == 8,  "gains_quant ind[1]");
+    assert(load64(ind + 2 * 8) == 1,  "gains_quant ind[2]");
+    assert(load64(ind + 3 * 8) == 3,  "gains_quant ind[3]");
+    assert(load64(g + 0 * 8) == 38273024, "gains_quant gain[0]");
+    assert(load64(g + 1 * 8) == 71827456, "gains_quant gain[1]");
+    assert(load64(lg) == 39, "gains_quant carries the last index");
+
+    # The decoder must reconstruct exactly the gains the quantiser reported.
+    var gd = alloc(4 * 8);
+    var lg2 = alloc(8); store64(lg2, 10);
+    _silk_gains_dequant_impl(ind, gd, lg2, 0, 4);
+    var q = 0;
+    while (q < 4) {
+        assert(load64(gd + q * 8) == load64(g + q * 8), "gains quant/dequant agree");
+        q = q + 1;
+    }
+
+    # --- silk_a2nlsf on a real libopus LPC filter (Q16 in, Q15 NLSF out) ---
+    var a = alloc(16 * 8);
+    store64(a + 0 * 8, 58803);  store64(a + 1 * 8, 89159);  store64(a + 2 * 8, 0 - 101843);
+    store64(a + 3 * 8, 0 - 21426); store64(a + 4 * 8, 38432); store64(a + 5 * 8, 0 - 5728);
+    store64(a + 6 * 8, 7840);   store64(a + 7 * 8, 3584);   store64(a + 8 * 8, 0 - 4720);
+    store64(a + 9 * 8, 0 - 3088); store64(a + 10 * 8, 5360); store64(a + 11 * 8, 1408);
+    store64(a + 12 * 8, 0 - 1328); store64(a + 13 * 8, 0 - 6496); store64(a + 14 * 8, 288);
+    store64(a + 15 * 8, 4384);
+    var nlsf = alloc(16 * 8);
+    silk_a2nlsf(nlsf, a, 16);
+    var prev = 0 - 1;
+    var strictly_increasing = 1;
+    q = 0;
+    while (q < 16) {
+        var v = load64(nlsf + q * 8);
+        if (v <= prev) { strictly_increasing = 0; }
+        if (v < 0) { strictly_increasing = 0; }
+        if (v > 32767) { strictly_increasing = 0; }
+        prev = v;
+        q = q + 1;
+    }
+    assert(strictly_increasing == 1, "a2nlsf yields ordered NLSFs in [0,32767]");
+
+    # --- laroia weights, then the full NLSF quantiser, against libopus ---
+    var nl = alloc(16 * 8);
+    store64(nl + 0 * 8, 4766);  store64(nl + 1 * 8, 6864);  store64(nl + 2 * 8, 7590);
+    store64(nl + 3 * 8, 9506);  store64(nl + 4 * 8, 10156); store64(nl + 5 * 8, 11473);
+    store64(nl + 6 * 8, 11478); store64(nl + 7 * 8, 12763); store64(nl + 8 * 8, 14963);
+    store64(nl + 9 * 8, 17424); store64(nl + 10 * 8, 19013); store64(nl + 11 * 8, 19463);
+    store64(nl + 12 * 8, 21537); store64(nl + 13 * 8, 29587); store64(nl + 14 * 8, 31907);
+    store64(nl + 15 * 8, 31956);
+    var w = alloc(16 * 8);
+    silk_nlsf_vq_weights_laroia(w, nl, 16);
+    assert(load64(w + 0 * 8) == 89, "laroia w[0]");
+    assert(load64(w + 5 * 8) == 26313, "laroia w[5] (near-coincident pair)");
+    assert(load64(w + 15 * 8) == 2835, "laroia w[15]");
+
+    var idx = alloc(17 * 8);
+    var rd = silk_nlsf_encode(idx, nl, 16, w, 2000, 4, 1);
+    assert(rd == 4655731, "NLSF_encode R/D matches libopus");
+    assert(load64(idx + 0 * 8) == 1, "NLSF_encode stage-1 index");
+    assert(load64(idx + 2 * 8) == 3, "NLSF_encode residual[1]");
+    assert(load64(idx + 13 * 8) == 0 - 6, "NLSF_encode residual[13]");
+    # silk_nlsf_encode leaves the QUANTISED vector in place, i.e. exactly what
+    # the decoder will reconstruct from those indices.
+    assert(load64(nl + 0 * 8) == 4766, "NLSF_encode requantised nlsf[0]");
+    assert(load64(nl + 15 * 8) == 31956, "NLSF_encode requantised nlsf[15]");
+    return 0;
+}
+
+# The bitstream writers must be exact inverses of the readers: encode a set of
+# indices and pulses, decode them back, and require every field to survive.
+fn test_silk_encode_bitstream_roundtrip() {
+    syscall(1, 1, "=== silk encode: bitstream round-trip ===\n", 42);
+    var fs_kHz = 16;
+    var nb_subfr = 4;
+    var frame_length = 320;
+
+    var idx = alloc(64 * 8);
+    var i = 0;
+    while (i < 64) { store64(idx + i * 8, 0); i = i + 1; }
+    store64(idx + 0 * 8, 2);          # signalType = VOICED
+    store64(idx + 1 * 8, 1);          # quantOffsetType
+    store64(idx + 2 * 8, 40); store64(idx + 3 * 8, 8);
+    store64(idx + 4 * 8, 3);  store64(idx + 5 * 8, 5);
+    store64(idx + 11 * 8, 4);         # NLSF interp
+    store64(idx + 12 * 8, 29);        # lagIndex
+    store64(idx + 13 * 8, 7);         # contourIndex
+    store64(idx + 14 * 8, 2);         # PERIndex
+    store64(idx + 15 * 8, 1);         # LTP_scaleIndex
+    store64(idx + 16 * 8, 3);         # seed
+    store64(idx + 18 * 8, 11);        # NLSF stage-1
+    i = 0;
+    while (i < 16) { store64(idx + (19 + i) * 8, (i % 5) - 2); i = i + 1; }
+    var lbase = 19 + 16;
+    i = 0;
+    while (i < nb_subfr) { store64(idx + (lbase + i) * 8, i * 3 + 1); i = i + 1; }
+
+    var pulses = alloc(400 * 8);
+    i = 0;
+    while (i < 400) { store64(pulses + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < frame_length) {
+        var v = (i * 7) % 11 - 5;
+        if ((i % 3) == 0) { v = 0; }
+        store64(pulses + i * 8, v);
+        i = i + 1;
+    }
+
+    var buf = alloc(1024);
+    i = 0;
+    while (i < 1024) { store8(buf + i, 0); i = i + 1; }
+    var enc = ec_enc_new(buf, 1024);
+    ec_enc_bit_logp(enc, 1, 1);       # VAD
+    ec_enc_bit_logp(enc, 0, 1);       # LBRR
+    var ep = alloc(2 * 8); store64(ep + 0, 0); store64(ep + 8, 0);
+    silk_encode_indices_ec(enc, fs_kHz, idx, nb_subfr, 0, ep);
+    silk_encode_pulses(enc, 2, 1, pulses, frame_length);
+    var nbits = ec_tell(enc);
+    ec_enc_done(enc);
+    assert(nbits > 100, "silk encode produced a non-trivial frame");
+
+    var dec = ec_dec_new(buf, 1024);
+    var vad = ec_dec_bit_logp(dec, 1);
+    var lbrr = ec_dec_bit_logp(dec, 1);
+    assert(vad == 1, "round-trip VAD flag");
+    assert(lbrr == 0, "round-trip LBRR flag");
+    var idx2 = alloc(64 * 8);
+    var lg = alloc(8); store64(lg, 10);
+    var ep2 = alloc(2 * 8); store64(ep2 + 0, 0); store64(ep2 + 8, 0);
+    silk_decode_indices_ec_cond(dec, fs_kHz, lg, idx2, vad, nb_subfr, 0, ep2);
+    assert(load64(idx2 + 0 * 8) == 2, "round-trip signalType");
+    assert(load64(idx2 + 1 * 8) == 1, "round-trip quantOffsetType");
+    assert(load64(idx2 + 12 * 8) == 29, "round-trip lagIndex");
+    assert(load64(idx2 + 13 * 8) == 7, "round-trip contourIndex");
+    assert(load64(idx2 + 14 * 8) == 2, "round-trip PERIndex");
+    assert(load64(idx2 + 15 * 8) == 1, "round-trip LTP_scaleIndex");
+    assert(load64(idx2 + 16 * 8) == 3, "round-trip seed");
+    assert(load64(idx2 + 18 * 8) == 11, "round-trip NLSF stage-1");
+    var ok_nlsf = 1;
+    i = 0;
+    while (i < 16) {
+        if (load64(idx2 + (19 + i) * 8) != load64(idx + (19 + i) * 8)) { ok_nlsf = 0; }
+        i = i + 1;
+    }
+    assert(ok_nlsf == 1, "round-trip NLSF residuals");
+    var ok_gain = 1;
+    i = 0;
+    while (i < nb_subfr) {
+        if (load64(idx2 + (2 + i) * 8) != load64(idx + (2 + i) * 8)) { ok_gain = 0; }
+        i = i + 1;
+    }
+    assert(ok_gain == 1, "round-trip gain indices");
+    var ok_ltp = 1;
+    i = 0;
+    while (i < nb_subfr) {
+        if (load64(idx2 + (lbase + i) * 8) != load64(idx + (lbase + i) * 8)) { ok_ltp = 0; }
+        i = i + 1;
+    }
+    assert(ok_ltp == 1, "round-trip LTP gain indices");
+
+    var pulses2 = alloc(400 * 8);
+    silk_decode_pulses(dec, pulses2, 2, 1, frame_length);
+    var ok_p = 1;
+    i = 0;
+    while (i < frame_length) {
+        if (load64(pulses2 + i * 8) != load64(pulses + i * 8)) { ok_p = 0; }
+        i = i + 1;
+    }
+    assert(ok_p == 1, "round-trip excitation pulses");
+    assert(ec_tell(dec) == nbits, "encoder and decoder consume identical bits");
+    return 0;
+}
+
 fn test_silk_all() {
     fft_init();
     if (_celt_band_edges == 0) { _opus_init_bands(); }
@@ -10842,5 +11037,7 @@ fn test_silk_all() {
     test_opus_silk_stereo_pred_rfc();
     test_opus_silk_stereo_rfc();
     test_opus_silk10_rfc();
+    test_silk_encode_quantisation();
+    test_silk_encode_bitstream_roundtrip();
     return 0;
 }

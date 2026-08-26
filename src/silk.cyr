@@ -1551,6 +1551,1022 @@ fn silk_decode_core(st, ctrl, xq, pulses) {
     return 0;
 }
 
+# ============================================================================
+# SILK ENCODE — bitstream layer (v2.8.0)
+# ============================================================================
+# silk_encode_indices (encode_indices.c) — the exact inverse of
+# silk_decode_indices_ec_cond above, field for field and table for table. The
+# `idx` buffer uses the SAME layout the decoder fills, so a decode->encode round
+# trip reproduces the original bytes:
+#     0 signalType   1 quantOffset   2..5 gain indices   6..9 gains (Q16, unused
+#     here)   10 NLSF stage-1   11 NLSF interp   12 lagIndex   13 contourIndex
+#     14 PERIndex   15 LTP_scaleIndex   16 seed   17 (ec_tell, unused)
+#     18..18+order NLSF indices (stage-1 then `order` residuals)
+#     19+order..    LTP gain indices
+# `cond` is condCoding (0 independent, 1 conditional); `ecprev` is the 2-slot
+# [ec_prevSignalType, ec_prevLagIndex] predictor state, matching the decoder.
+fn silk_encode_indices_ec(ec, fs_kHz, idx, nb_subfr, cond, ecprev) {
+    if (_silk_type_VAD == 0) { _silk_tables_init(); }
+    if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
+    if (_silk_contour_10_wb == 0) { _silk_tables6_init(); }
+    var order = 16;
+    if (fs_kHz < 16) { order = 10; }
+    var signalType = load64(idx + 0 * 8);
+    var quantOffset = load64(idx + 1 * 8);
+
+    # A: signal type + quantizer offset
+    var typeOffset = 2 * signalType + quantOffset;
+    if (typeOffset >= 2) { ec_enc_icdf(ec, typeOffset - 2, _silk_type_VAD, 8); }
+    else { ec_enc_icdf(ec, typeOffset, _silk_type_noVAD, 8); }
+
+    # B: gains — first subframe conditional or two-stage absolute, rest delta
+    var g0 = load64(idx + 2 * 8);
+    if (cond == 1) {
+        ec_enc_icdf(ec, g0, _silk_delta_gain, 8);
+    } else {
+        ec_enc_icdf(ec, g0 >> 3, _silk_gain_iCDF + signalType * 8, 8);
+        ec_enc_icdf(ec, g0 & 7, _silk_uniform8, 8);
+    }
+    var i = 1;
+    while (i < nb_subfr) { ec_enc_icdf(ec, load64(idx + (2 + i) * 8), _silk_delta_gain, 8); i = i + 1; }
+
+    # C: NLSF stage-1 index
+    var cb1 = _silk_cb1_wb;
+    if (fs_kHz < 16) { cb1 = _silk_cb1_nb; }
+    var nlsf0 = load64(idx + 18 * 8);
+    ec_enc_icdf(ec, nlsf0, cb1 + (signalType >> 1) * 32, 8);
+
+    # D: NLSF stage-2 residuals, with the extension codebook at the extremes
+    var ec_ix = alloc(order * 8);
+    var pred = alloc(order);
+    silk_nlsf_unpack(nlsf0, fs_kHz, ec_ix, pred);
+    var ec_icdf = _silk_ec_icdf_wb;
+    if (fs_kHz < 16) { ec_icdf = _silk_ec_icdf_nb; }
+    i = 0;
+    while (i < order) {
+        var v = load64(idx + (19 + i) * 8);
+        if (v >= 4) {
+            ec_enc_icdf(ec, 8, ec_icdf + load64(ec_ix + i * 8), 8);
+            ec_enc_icdf(ec, v - 4, _silk_nlsf_ext, 8);
+        } else {
+            if (v <= 0 - 4) {
+                ec_enc_icdf(ec, 0, ec_icdf + load64(ec_ix + i * 8), 8);
+                ec_enc_icdf(ec, (0 - v) - 4, _silk_nlsf_ext, 8);
+            } else {
+                ec_enc_icdf(ec, v + 4, ec_icdf + load64(ec_ix + i * 8), 8);
+            }
+        }
+        i = i + 1;
+    }
+
+    # E: NLSF interpolation factor — only for 20 ms (nb_subfr == 4)
+    if (nb_subfr == 4) { ec_enc_icdf(ec, load64(idx + 11 * 8), _silk_nlsf_interp, 8); }
+
+    if (signalType == 2) {
+        # F: pitch lag — delta from the previous frame when conditional coding
+        # allows it, otherwise absolute as high/low parts.
+        var lagIndex = load64(idx + 12 * 8);
+        var absolute = 1;
+        if (cond == 1) {
+            if (load64(ecprev + 0) == 2) {
+                var dl = lagIndex - load64(ecprev + 8);
+                if (dl < 0 - 8) { dl = 0; } else { if (dl > 11) { dl = 0; } else { dl = dl + 9; absolute = 0; } }
+                ec_enc_icdf(ec, dl, _silk_pitch_delta, 8);
+            }
+        }
+        if (absolute == 1) {
+            var half = fs_kHz >> 1;
+            var hi = lagIndex / half;
+            var lo = lagIndex - hi * half;
+            ec_enc_icdf(ec, hi, _silk_pitch_lag, 8);
+            var lowbits = _silk_uniform8;
+            if (fs_kHz == 12) { lowbits = _silk_uniform6; }
+            if (fs_kHz == 8) { lowbits = _silk_uniform4; }
+            ec_enc_icdf(ec, lo, lowbits, 8);
+        }
+        store64(ecprev + 8, lagIndex);
+
+        # G: pitch contour — codebook per bandwidth and frame size
+        var contour = _silk_pitch_contour;
+        if (fs_kHz == 8) { contour = _silk_pitch_contour_nb; }
+        if (nb_subfr == 2) {
+            contour = _silk_contour_10_wb;
+            if (fs_kHz == 8) { contour = _silk_contour_10_nb; }
+        }
+        ec_enc_icdf(ec, load64(idx + 13 * 8), contour, 8);
+
+        # H: LTP periodicity index + per-subframe gain indices
+        var PER = load64(idx + 14 * 8);
+        ec_enc_icdf(ec, PER, _silk_ltp_per, 8);
+        var ltpgain = _silk_ltp_gain0;
+        if (PER == 1) { ltpgain = _silk_ltp_gain1; }
+        if (PER == 2) { ltpgain = _silk_ltp_gain2; }
+        var lbase = 19 + order;
+        var k = 0;
+        while (k < nb_subfr) { ec_enc_icdf(ec, load64(idx + (lbase + k) * 8), ltpgain, 8); k = k + 1; }
+
+        # I: LTP scaling — only sent on an independently coded frame
+        if (cond == 0) { ec_enc_icdf(ec, load64(idx + 15 * 8), _silk_ltpscale, 8); }
+    }
+    store64(ecprev + 0, signalType);
+
+    # J: seed
+    ec_enc_icdf(ec, load64(idx + 16 * 8), _silk_uniform4, 8);
+    return 0;
+}
+
+# silk_ROR32 — 32-bit rotate right; a negative count rotates left.
+fn silk_ror32(a32, rot) {
+    var x = a32 & 0xFFFFFFFF;
+    if (rot == 0) { return silk_sx32(x); }
+    if (rot < 0) {
+        var m = 0 - rot;
+        return silk_sx32(((x << m) | (x >> (32 - m))) & 0xFFFFFFFF);
+    }
+    return silk_sx32(((x << (32 - rot)) | (x >> rot)) & 0xFFFFFFFF);
+}
+
+# silk_lin2log (lin2log.c): piece-wise parabolic log2, output in Q7.
+# The inverse of silk_log2lin above, and the front half of gain quantisation.
+fn silk_lin2log(inLin) {
+    var lz = silk_clz32(inLin);
+    var frac_Q7 = silk_ror32(inLin, 24 - lz) & 0x7F;
+    return silk_smlawb(frac_Q7, silk_mul(frac_Q7, 128 - frac_Q7), 179) + ((31 - lz) << 7);
+}
+
+# silk_gains_quant (gain_quant.c) — the exact inverse of _silk_gains_dequant_impl.
+# Writes the gain indices to `ind`, replaces `gains_q16` with the QUANTISED gains
+# (what the decoder will reconstruct), and advances `lastgain_ptr`.
+#   OFFSET 2090, SCALE_Q16 2251, INV_SCALE_Q16 1907825, N_LEVELS_QGAIN 64,
+#   MIN/MAX_DELTA_GAIN_QUANT -4/36 — taken from libopus's own headers, not derived.
+fn silk_gains_quant(ind, gains_q16, lastgain_ptr, conditional, nb_subfr) {
+    var prev_ind = load64(lastgain_ptr);
+    var k = 0;
+    while (k < nb_subfr) {
+        # log scale, scale, floor
+        var v = silk_smulwb(2251, silk_lin2log(load64(gains_q16 + k * 8)) - 2090);
+        # round towards the previous quantised gain (hysteresis)
+        if (v < prev_ind) { v = v + 1; }
+        if (v < 0) { v = 0; }
+        if (v > 63) { v = 63; }
+
+        if ((k == 0) & (conditional == 0)) {
+            var lo = prev_ind - 4;               # + MIN_DELTA_GAIN_QUANT
+            if (v < lo) { v = lo; }
+            if (v > 63) { v = 63; }
+            if (v < 0) { v = 0; }
+            prev_ind = v;
+            store64(ind + k * 8, v);
+        } else {
+            var d = v - prev_ind;
+            # Double the step for large increases so the top level stays reachable.
+            var thr = 2 * 36 - 64 + prev_ind;
+            if (d > thr) { d = thr + ((d - thr + 1) >> 1); }
+            if (d < 0 - 4) { d = 0 - 4; }
+            if (d > 36) { d = 36; }
+            if (d > thr) {
+                prev_ind = prev_ind + ((d << 1) - thr);
+                if (prev_ind > 63) { prev_ind = 63; }
+            } else {
+                prev_ind = prev_ind + d;
+            }
+            store64(ind + k * 8, d - (0 - 4));   # shift to non-negative
+        }
+
+        var il = silk_smulwb(1907825, prev_ind) + 2090;
+        if (il > 3967) { il = 3967; }
+        store64(gains_q16 + k * 8, silk_log2lin(il));
+        k = k + 1;
+    }
+    store64(lastgain_ptr, prev_ind);
+    return 0;
+}
+
+# ---- SILK ENCODE: LPC -> NLSF (A2NLSF.c) ------------------------------------
+# Fixed point even in libopus's float build, so this must reproduce the integer
+# arithmetic exactly -- the decoder's silk_NLSF2A is its inverse and any drift
+# shows up as a different NLSF index.
+
+# silk_bwexpander_32: chirp the coefficients toward the origin (Q16 in place).
+fn silk_bwexpander_32(ar, d, chirp_Q16) {
+    var chirp = chirp_Q16;
+    var chirp_minus_one = chirp - 65536;
+    var i = 0;
+    while (i < d - 1) {
+        store64(ar + i * 8, silk_smulww(chirp, load64(ar + i * 8)));
+        chirp = chirp + silk_rshift_round(silk_mul(chirp, chirp_minus_one), 16);
+        i = i + 1;
+    }
+    store64(ar + (d - 1) * 8, silk_smulww(chirp, load64(ar + (d - 1) * 8)));
+    return 0;
+}
+
+# Transform a polynomial from the cos(n*f) basis to cos(f)^n.
+fn _silk_a2nlsf_trans_poly(pp, dd) {
+    var k = 2;
+    while (k <= dd) {
+        var n = dd;
+        while (n > k) {
+            store64(pp + (n - 2) * 8, load64(pp + (n - 2) * 8) - load64(pp + n * 8));
+            n = n - 1;
+        }
+        store64(pp + (k - 2) * 8, load64(pp + (k - 2) * 8) - (load64(pp + k * 8) << 1));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Horner evaluation of a Q16 polynomial at a Q12 point; result Q16.
+fn _silk_a2nlsf_eval_poly(pp, x, dd) {
+    var y32 = load64(pp + dd * 8);
+    var x_Q16 = x << 4;
+    var n = dd - 1;
+    while (n >= 0) {
+        y32 = silk_smlaww(load64(pp + n * 8), y32, x_Q16);
+        n = n - 1;
+    }
+    return y32;
+}
+
+# Split the whitening filter into its symmetric (P) and antisymmetric (Q) parts,
+# divide out the known roots at z = +/-1, and move to the cos(f)^n basis.
+fn _silk_a2nlsf_init(a_Q16, P, Q, dd) {
+    store64(P + dd * 8, 1 << 16);
+    store64(Q + dd * 8, 1 << 16);
+    var k = 0;
+    while (k < dd) {
+        var lo = load64(a_Q16 + (dd - k - 1) * 8);
+        var hi = load64(a_Q16 + (dd + k) * 8);
+        store64(P + k * 8, (0 - lo) - hi);
+        store64(Q + k * 8, (0 - lo) + hi);
+        k = k + 1;
+    }
+    k = dd;
+    while (k > 0) {
+        store64(P + (k - 1) * 8, load64(P + (k - 1) * 8) - load64(P + k * 8));
+        store64(Q + (k - 1) * 8, load64(Q + (k - 1) * 8) + load64(Q + k * 8));
+        k = k - 1;
+    }
+    _silk_a2nlsf_trans_poly(P, dd);
+    _silk_a2nlsf_trans_poly(Q, dd);
+    return 0;
+}
+
+# silk_A2NLSF: find the d roots of P and Q by scanning the cosine table for sign
+# changes, refining each with 3 binary divisions plus one linear interpolation.
+# If the roots cannot all be found the coefficients are bandwidth-expanded and
+# the search restarts; after 16 such attempts it falls back to a white spectrum.
+# `a_Q16` is modified in place (that is libopus's contract, not an accident).
+fn silk_a2nlsf(NLSF, a_Q16, d) {
+    if (_silk_lsfcos_q12 == 0) { _silk_lsfcos_init(); }
+    var dd = d >> 1;
+    var P = alloc((dd + 1) * 8);
+    var Q = alloc((dd + 1) * 8);
+    _silk_a2nlsf_init(a_Q16, P, Q, dd);
+
+    var pp = P;
+    var xlo = load64(_silk_lsfcos_q12 + 0 * 8);
+    var ylo = _silk_a2nlsf_eval_poly(pp, xlo, dd);
+    var root_ix = 0;
+    if (ylo < 0) {
+        store64(NLSF + 0 * 8, 0);
+        pp = Q;
+        ylo = _silk_a2nlsf_eval_poly(pp, xlo, dd);
+        root_ix = 1;
+    }
+    var k = 1;
+    var i = 0;
+    var thr = 0;
+    var done = 0;
+    while (done == 0) {
+        var xhi = load64(_silk_lsfcos_q12 + k * 8);
+        var yhi = _silk_a2nlsf_eval_poly(pp, xhi, dd);
+
+        var cross = 0;
+        if ((ylo <= 0) & (yhi >= thr)) { cross = 1; }
+        if ((ylo >= 0) & (yhi <= 0 - thr)) { cross = 1; }
+
+        if (cross == 1) {
+            if (yhi == 0) { thr = 1; } else { thr = 0; }
+            var ffrac = 0 - 256;
+            var m = 0;
+            while (m < 3) {                              # BIN_DIV_STEPS_A2NLSF_FIX
+                var xmid = silk_rshift_round(xlo + xhi, 1);
+                var ymid = _silk_a2nlsf_eval_poly(pp, xmid, dd);
+                var c2 = 0;
+                if ((ylo <= 0) & (ymid >= 0)) { c2 = 1; }
+                if ((ylo >= 0) & (ymid <= 0)) { c2 = 1; }
+                if (c2 == 1) { xhi = xmid; yhi = ymid; }
+                else { xlo = xmid; ylo = ymid; ffrac = ffrac + sar(128, m); }
+                m = m + 1;
+            }
+            var aylo = ylo; if (aylo < 0) { aylo = 0 - aylo; }
+            if (aylo < 65536) {
+                var den = ylo - yhi;
+                var nom = (ylo << 5) + sar(den, 1);      # 8 - BIN_DIV_STEPS = 5
+                if (den != 0) { ffrac = ffrac + silk_div_trunc(nom, den); }
+            } else {
+                ffrac = ffrac + silk_div_trunc(ylo, sar(ylo - yhi, 5));
+            }
+            var val = (k << 8) + ffrac;
+            if (val > 32767) { val = 32767; }
+            store64(NLSF + root_ix * 8, val);
+            root_ix = root_ix + 1;
+            if (root_ix >= d) { done = 1; }
+            else {
+                pp = P;
+                if ((root_ix & 1) != 0) { pp = Q; }
+                xlo = load64(_silk_lsfcos_q12 + (k - 1) * 8);
+                ylo = (1 - (root_ix & 2)) << 12;
+            }
+        } else {
+            k = k + 1;
+            xlo = xhi;
+            ylo = yhi;
+            thr = 0;
+            if (k > 128) {                               # LSF_COS_TAB_SZ_FIX
+                i = i + 1;
+                if (i > 16) {                            # MAX_ITERATIONS_A2NLSF_FIX
+                    var w = silk_div_trunc(1 << 15, d + 1);
+                    store64(NLSF + 0 * 8, w);
+                    var k2 = 1;
+                    while (k2 < d) {
+                        store64(NLSF + k2 * 8, _i16(load64(NLSF + (k2 - 1) * 8) + w));
+                        k2 = k2 + 1;
+                    }
+                    return 0;
+                }
+                silk_bwexpander_32(a_Q16, d, 65536 - (1 << i));
+                _silk_a2nlsf_init(a_Q16, P, Q, dd);
+                pp = P;
+                xlo = load64(_silk_lsfcos_q12 + 0 * 8);
+                ylo = _silk_a2nlsf_eval_poly(pp, xlo, dd);
+                root_ix = 0;
+                if (ylo < 0) {
+                    store64(NLSF + 0 * 8, 0);
+                    pp = Q;
+                    ylo = _silk_a2nlsf_eval_poly(pp, xlo, dd);
+                    root_ix = 1;
+                }
+                k = 1;
+            }
+        }
+    }
+    return 0;
+}
+
+# ---- SILK ENCODE: NLSF quantisation (NLSF_VQ*.c, NLSF_del_dec_quant.c) -------
+# Also fixed point in libopus's float build.
+
+# silk_NLSF_VQ_weights_laroia: inverse-spacing weights, NLSF_W_Q = 2.
+fn silk_nlsf_vq_weights_laroia(w_out, nlsf_Q15, D) {
+    var t1 = load64(nlsf_Q15 + 0 * 8);
+    if (t1 < 1) { t1 = 1; }
+    t1 = silk_div_trunc(1 << 17, t1);                       # 1 << (15 + NLSF_W_Q)
+    var t2 = load64(nlsf_Q15 + 1 * 8) - load64(nlsf_Q15 + 0 * 8);
+    if (t2 < 1) { t2 = 1; }
+    t2 = silk_div_trunc(1 << 17, t2);
+    var v0 = t1 + t2;
+    if (v0 > 32767) { v0 = 32767; }
+    store64(w_out + 0 * 8, v0);
+
+    var k = 1;
+    while (k < D - 1) {
+        var a = load64(nlsf_Q15 + (k + 1) * 8) - load64(nlsf_Q15 + k * 8);
+        if (a < 1) { a = 1; }
+        t1 = silk_div_trunc(1 << 17, a);
+        var v1 = t1 + t2;
+        if (v1 > 32767) { v1 = 32767; }
+        store64(w_out + k * 8, v1);
+
+        var b = load64(nlsf_Q15 + (k + 2) * 8) - load64(nlsf_Q15 + (k + 1) * 8);
+        if (b < 1) { b = 1; }
+        t2 = silk_div_trunc(1 << 17, b);
+        var v2 = t1 + t2;
+        if (v2 > 32767) { v2 = 32767; }
+        store64(w_out + (k + 1) * 8, v2);
+        k = k + 2;
+    }
+    var c = (1 << 15) - load64(nlsf_Q15 + (D - 1) * 8);
+    if (c < 1) { c = 1; }
+    t1 = silk_div_trunc(1 << 17, c);
+    var vl = t1 + t2;
+    if (vl > 32767) { vl = 32767; }
+    store64(w_out + (D - 1) * 8, vl);
+    return 0;
+}
+
+# silk_NLSF_VQ: weighted predictive absolute error of the input against every
+# stage-1 codebook vector, used to pick survivors.
+fn silk_nlsf_vq(err_Q24, in_Q15, cb_Q8, wght_Q9, K, order) {
+    var i = 0;
+    while (i < K) {
+        var sum_error = 0;
+        var pred = 0;
+        var m = order - 2;
+        while (m >= 0) {
+            var diff = load64(in_Q15 + (m + 1) * 8) - (load8(cb_Q8 + i * order + m + 1) << 7);
+            var diffw = silk_smulbb(diff, load64(wght_Q9 + (i * order + m + 1) * 8));
+            var e1 = diffw - sar(pred, 1);
+            if (e1 < 0) { e1 = 0 - e1; }
+            sum_error = sum_error + e1;
+            pred = diffw;
+
+            diff = load64(in_Q15 + m * 8) - (load8(cb_Q8 + i * order + m) << 7);
+            diffw = silk_smulbb(diff, load64(wght_Q9 + (i * order + m) * 8));
+            var e2 = diffw - sar(pred, 1);
+            if (e2 < 0) { e2 = 0 - e2; }
+            sum_error = sum_error + e2;
+            pred = diffw;
+            m = m - 2;
+        }
+        store64(err_Q24 + i * 8, sum_error);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# silk_NLSF_del_dec_quant: delayed-decision (4-state) quantisation of the
+# stage-2 residual, trading squared error against the entropy-coder rate through
+# mu_Q20. Returns the winning R/D value in Q25 and fills `indices`.
+fn silk_nlsf_del_dec_quant(indices, x_Q10, w_Q5, pred_coef_Q8, ec_ix, ec_rates_Q5,
+                           quant_step_size_Q16, inv_quant_step_size_Q6, mu_Q20, order) {
+    var NST = 4;                                    # NLSF_QUANT_DEL_DEC_STATES
+    var EXT = 10;                                   # NLSF_QUANT_MAX_AMPLITUDE_EXT
+    var AMP = 4;                                    # NLSF_QUANT_MAX_AMPLITUDE
+    var ADJ = 102;                                  # SILK_FIX_CONST(0.1, 10)
+
+    # Precompute the two reconstruction levels for every index.
+    var out0_tab = alloc(2 * EXT * 8);
+    var out1_tab = alloc(2 * EXT * 8);
+    var i = 0 - EXT;
+    while (i <= EXT - 1) {
+        var o0 = i << 10;
+        var o1 = o0 + 1024;
+        if (i > 0) { o0 = o0 - ADJ; o1 = o1 - ADJ; }
+        else { if (i == 0) { o1 = o1 - ADJ; }
+        else { if (i == 0 - 1) { o0 = o0 + ADJ; }
+        else { o0 = o0 + ADJ; o1 = o1 + ADJ; } } }
+        store64(out0_tab + (i + EXT) * 8, sar(silk_smulbb(o0, quant_step_size_Q16), 16));
+        store64(out1_tab + (i + EXT) * 8, sar(silk_smulbb(o1, quant_step_size_Q16), 16));
+        i = i + 1;
+    }
+
+    var ind = alloc(NST * 16 * 8);
+    var prev_out = alloc(2 * NST * 8);
+    var RD = alloc(2 * NST * 8);
+    var RD_min = alloc(NST * 8);
+    var RD_max = alloc(NST * 8);
+    var ind_sort = alloc(NST * 8);
+    var nStates = 1;
+    store64(RD + 0, 0);
+    store64(prev_out + 0, 0);
+
+    i = order - 1;
+    while (i >= 0) {
+        var rates = ec_rates_Q5 + load64(ec_ix + i * 8);
+        var in_Q10 = load64(x_Q10 + i * 8);
+        var j = 0;
+        while (j < nStates) {
+            var pred_Q10 = sar(silk_smulbb(load8(pred_coef_Q8 + i), load64(prev_out + j * 8)), 8);
+            var res_Q10 = _i16(in_Q10 - pred_Q10);
+            var ind_tmp = sar(silk_smulbb(inv_quant_step_size_Q6, res_Q10), 16);
+            if (ind_tmp < 0 - EXT) { ind_tmp = 0 - EXT; }
+            if (ind_tmp > EXT - 1) { ind_tmp = EXT - 1; }
+            store64(ind + (j * 16 + i) * 8, ind_tmp);
+
+            var o0q = _i16(load64(out0_tab + (ind_tmp + EXT) * 8) + pred_Q10);
+            var o1q = _i16(load64(out1_tab + (ind_tmp + EXT) * 8) + pred_Q10);
+            store64(prev_out + j * 8, o0q);
+            store64(prev_out + (j + nStates) * 8, o1q);
+
+            var rate0 = 0;
+            var rate1 = 0;
+            if (ind_tmp + 1 >= AMP) {
+                if (ind_tmp + 1 == AMP) {
+                    rate0 = load8(rates + ind_tmp + AMP);
+                    rate1 = 280;
+                } else {
+                    rate0 = (280 - 43 * AMP) + silk_smulbb(43, ind_tmp);
+                    rate1 = rate0 + 43;
+                }
+            } else {
+                if (ind_tmp <= 0 - AMP) {
+                    if (ind_tmp == 0 - AMP) {
+                        rate0 = 280;
+                        rate1 = load8(rates + ind_tmp + 1 + AMP);
+                    } else {
+                        rate0 = (280 - 43 * AMP) + silk_smulbb(0 - 43, ind_tmp);
+                        rate1 = rate0 - 43;
+                    }
+                } else {
+                    rate0 = load8(rates + ind_tmp + AMP);
+                    rate1 = load8(rates + ind_tmp + 1 + AMP);
+                }
+            }
+            # libopus accumulates RD in opus_int32 and lets it wrap; the
+            # distortion term SMULBB(d,d)*w_Q5 routinely exceeds 2^31, so the
+            # wrap is part of the defined result, not an accident.
+            var RD_tmp = load64(RD + j * 8);
+            var d0 = _i16(in_Q10 - o0q);
+            var acc0 = silk_sx32(RD_tmp + silk_sx32(silk_smulbb(d0, d0) * load64(w_Q5 + i * 8)));
+            store64(RD + j * 8, silk_sx32(acc0 + silk_smulbb(mu_Q20, rate0)));
+            var d1 = _i16(in_Q10 - o1q);
+            var acc1 = silk_sx32(RD_tmp + silk_sx32(silk_smulbb(d1, d1) * load64(w_Q5 + i * 8)));
+            store64(RD + (j + nStates) * 8, silk_sx32(acc1 + silk_smulbb(mu_Q20, rate1)));
+            j = j + 1;
+        }
+
+        if (nStates <= NST / 2) {
+            j = 0;
+            while (j < nStates) {
+                store64(ind + ((j + nStates) * 16 + i) * 8, load64(ind + (j * 16 + i) * 8) + 1);
+                j = j + 1;
+            }
+            nStates = nStates << 1;
+            j = nStates;
+            while (j < NST) {
+                store64(ind + (j * 16 + i) * 8, load64(ind + ((j - nStates) * 16 + i) * 8));
+                j = j + 1;
+            }
+        } else {
+            j = 0;
+            while (j < NST) {
+                if (load64(RD + j * 8) > load64(RD + (j + NST) * 8)) {
+                    store64(RD_max + j * 8, load64(RD + j * 8));
+                    store64(RD_min + j * 8, load64(RD + (j + NST) * 8));
+                    store64(RD + j * 8, load64(RD_min + j * 8));
+                    store64(RD + (j + NST) * 8, load64(RD_max + j * 8));
+                    var sw = load64(prev_out + j * 8);
+                    store64(prev_out + j * 8, load64(prev_out + (j + NST) * 8));
+                    store64(prev_out + (j + NST) * 8, sw);
+                    store64(ind_sort + j * 8, j + NST);
+                } else {
+                    store64(RD_min + j * 8, load64(RD + j * 8));
+                    store64(RD_max + j * 8, load64(RD + (j + NST) * 8));
+                    store64(ind_sort + j * 8, j);
+                }
+                j = j + 1;
+            }
+            var settled = 0;
+            while (settled == 0) {
+                var min_max = 2147483647;
+                var max_min = 0;
+                var ind_min_max = 0;
+                var ind_max_min = 0;
+                j = 0;
+                while (j < NST) {
+                    if (min_max > load64(RD_max + j * 8)) { min_max = load64(RD_max + j * 8); ind_min_max = j; }
+                    if (max_min < load64(RD_min + j * 8)) { max_min = load64(RD_min + j * 8); ind_max_min = j; }
+                    j = j + 1;
+                }
+                if (min_max >= max_min) { settled = 1; }
+                else {
+                    store64(ind_sort + ind_max_min * 8, load64(ind_sort + ind_min_max * 8) ^ NST);
+                    store64(RD + ind_max_min * 8, load64(RD + (ind_min_max + NST) * 8));
+                    store64(prev_out + ind_max_min * 8, load64(prev_out + (ind_min_max + NST) * 8));
+                    store64(RD_min + ind_max_min * 8, 0);
+                    store64(RD_max + ind_min_max * 8, 2147483647);
+                    var c = 0;
+                    while (c < 16) {
+                        store64(ind + (ind_max_min * 16 + c) * 8, load64(ind + (ind_min_max * 16 + c) * 8));
+                        c = c + 1;
+                    }
+                }
+            }
+            j = 0;
+            while (j < NST) {
+                store64(ind + (j * 16 + i) * 8,
+                        load64(ind + (j * 16 + i) * 8) + sar(load64(ind_sort + j * 8), 2));
+                j = j + 1;
+            }
+        }
+        i = i - 1;
+    }
+
+    var ind_tmp2 = 0;
+    var min_Q25 = 2147483647;
+    var j2 = 0;
+    while (j2 < 2 * NST) {
+        if (min_Q25 > load64(RD + j2 * 8)) { min_Q25 = load64(RD + j2 * 8); ind_tmp2 = j2; }
+        j2 = j2 + 1;
+    }
+    j2 = 0;
+    while (j2 < order) {
+        store64(indices + j2 * 8, load64(ind + ((ind_tmp2 & (NST - 1)) * 16 + j2) * 8));
+        j2 = j2 + 1;
+    }
+    store64(indices + 0, load64(indices + 0) + sar(ind_tmp2, 2));
+    return min_Q25;
+}
+
+# Encoder-only NLSF ROM: the per-index bit costs the trellis scores against.
+var _silk_ec_rates_nb = 0;     # silk_NLSF_CB2_BITS_NB_MB_Q5[100]
+var _silk_ec_rates_wb = 0;     # silk_NLSF_CB2_BITS_WB_Q5[160]
+
+fn _silk_nlsf_enc_tables_init() {
+    _silk_ec_rates_nb = alloc(72);
+    store8(_silk_ec_rates_nb + 0, 255); store8(_silk_ec_rates_nb + 1, 255); store8(_silk_ec_rates_nb + 2, 255); store8(_silk_ec_rates_nb + 3, 131); store8(_silk_ec_rates_nb + 4, 6); store8(_silk_ec_rates_nb + 5, 145); store8(_silk_ec_rates_nb + 6, 255); store8(_silk_ec_rates_nb + 7, 255); store8(_silk_ec_rates_nb + 8, 255); store8(_silk_ec_rates_nb + 9, 255); store8(_silk_ec_rates_nb + 10, 255); store8(_silk_ec_rates_nb + 11, 236); store8(_silk_ec_rates_nb + 12, 93); store8(_silk_ec_rates_nb + 13, 15); store8(_silk_ec_rates_nb + 14, 96); store8(_silk_ec_rates_nb + 15, 255); store8(_silk_ec_rates_nb + 16, 255); store8(_silk_ec_rates_nb + 17, 255);
+    store8(_silk_ec_rates_nb + 18, 255); store8(_silk_ec_rates_nb + 19, 255); store8(_silk_ec_rates_nb + 20, 194); store8(_silk_ec_rates_nb + 21, 83); store8(_silk_ec_rates_nb + 22, 25); store8(_silk_ec_rates_nb + 23, 71); store8(_silk_ec_rates_nb + 24, 221); store8(_silk_ec_rates_nb + 25, 255); store8(_silk_ec_rates_nb + 26, 255); store8(_silk_ec_rates_nb + 27, 255); store8(_silk_ec_rates_nb + 28, 255); store8(_silk_ec_rates_nb + 29, 162); store8(_silk_ec_rates_nb + 30, 73); store8(_silk_ec_rates_nb + 31, 34); store8(_silk_ec_rates_nb + 32, 66); store8(_silk_ec_rates_nb + 33, 162); store8(_silk_ec_rates_nb + 34, 255); store8(_silk_ec_rates_nb + 35, 255);
+    store8(_silk_ec_rates_nb + 36, 255); store8(_silk_ec_rates_nb + 37, 210); store8(_silk_ec_rates_nb + 38, 126); store8(_silk_ec_rates_nb + 39, 73); store8(_silk_ec_rates_nb + 40, 43); store8(_silk_ec_rates_nb + 41, 57); store8(_silk_ec_rates_nb + 42, 173); store8(_silk_ec_rates_nb + 43, 255); store8(_silk_ec_rates_nb + 44, 255); store8(_silk_ec_rates_nb + 45, 255); store8(_silk_ec_rates_nb + 46, 201); store8(_silk_ec_rates_nb + 47, 125); store8(_silk_ec_rates_nb + 48, 71); store8(_silk_ec_rates_nb + 49, 48); store8(_silk_ec_rates_nb + 50, 58); store8(_silk_ec_rates_nb + 51, 130); store8(_silk_ec_rates_nb + 52, 255); store8(_silk_ec_rates_nb + 53, 255);
+    store8(_silk_ec_rates_nb + 54, 255); store8(_silk_ec_rates_nb + 55, 166); store8(_silk_ec_rates_nb + 56, 110); store8(_silk_ec_rates_nb + 57, 73); store8(_silk_ec_rates_nb + 58, 57); store8(_silk_ec_rates_nb + 59, 62); store8(_silk_ec_rates_nb + 60, 104); store8(_silk_ec_rates_nb + 61, 210); store8(_silk_ec_rates_nb + 62, 255); store8(_silk_ec_rates_nb + 63, 255); store8(_silk_ec_rates_nb + 64, 251); store8(_silk_ec_rates_nb + 65, 123); store8(_silk_ec_rates_nb + 66, 65); store8(_silk_ec_rates_nb + 67, 55); store8(_silk_ec_rates_nb + 68, 68); store8(_silk_ec_rates_nb + 69, 100); store8(_silk_ec_rates_nb + 70, 171); store8(_silk_ec_rates_nb + 71, 255);
+    _silk_ec_rates_wb = alloc(72);
+    store8(_silk_ec_rates_wb + 0, 255); store8(_silk_ec_rates_wb + 1, 255); store8(_silk_ec_rates_wb + 2, 255); store8(_silk_ec_rates_wb + 3, 156); store8(_silk_ec_rates_wb + 4, 4); store8(_silk_ec_rates_wb + 5, 154); store8(_silk_ec_rates_wb + 6, 255); store8(_silk_ec_rates_wb + 7, 255); store8(_silk_ec_rates_wb + 8, 255); store8(_silk_ec_rates_wb + 9, 255); store8(_silk_ec_rates_wb + 10, 255); store8(_silk_ec_rates_wb + 11, 227); store8(_silk_ec_rates_wb + 12, 102); store8(_silk_ec_rates_wb + 13, 15); store8(_silk_ec_rates_wb + 14, 92); store8(_silk_ec_rates_wb + 15, 255); store8(_silk_ec_rates_wb + 16, 255); store8(_silk_ec_rates_wb + 17, 255);
+    store8(_silk_ec_rates_wb + 18, 255); store8(_silk_ec_rates_wb + 19, 255); store8(_silk_ec_rates_wb + 20, 213); store8(_silk_ec_rates_wb + 21, 83); store8(_silk_ec_rates_wb + 22, 24); store8(_silk_ec_rates_wb + 23, 72); store8(_silk_ec_rates_wb + 24, 236); store8(_silk_ec_rates_wb + 25, 255); store8(_silk_ec_rates_wb + 26, 255); store8(_silk_ec_rates_wb + 27, 255); store8(_silk_ec_rates_wb + 28, 255); store8(_silk_ec_rates_wb + 29, 150); store8(_silk_ec_rates_wb + 30, 76); store8(_silk_ec_rates_wb + 31, 33); store8(_silk_ec_rates_wb + 32, 63); store8(_silk_ec_rates_wb + 33, 214); store8(_silk_ec_rates_wb + 34, 255); store8(_silk_ec_rates_wb + 35, 255);
+    store8(_silk_ec_rates_wb + 36, 255); store8(_silk_ec_rates_wb + 37, 190); store8(_silk_ec_rates_wb + 38, 121); store8(_silk_ec_rates_wb + 39, 77); store8(_silk_ec_rates_wb + 40, 43); store8(_silk_ec_rates_wb + 41, 55); store8(_silk_ec_rates_wb + 42, 185); store8(_silk_ec_rates_wb + 43, 255); store8(_silk_ec_rates_wb + 44, 255); store8(_silk_ec_rates_wb + 45, 255); store8(_silk_ec_rates_wb + 46, 245); store8(_silk_ec_rates_wb + 47, 137); store8(_silk_ec_rates_wb + 48, 71); store8(_silk_ec_rates_wb + 49, 43); store8(_silk_ec_rates_wb + 50, 59); store8(_silk_ec_rates_wb + 51, 139); store8(_silk_ec_rates_wb + 52, 255); store8(_silk_ec_rates_wb + 53, 255);
+    store8(_silk_ec_rates_wb + 54, 255); store8(_silk_ec_rates_wb + 55, 255); store8(_silk_ec_rates_wb + 56, 131); store8(_silk_ec_rates_wb + 57, 66); store8(_silk_ec_rates_wb + 58, 50); store8(_silk_ec_rates_wb + 59, 66); store8(_silk_ec_rates_wb + 60, 107); store8(_silk_ec_rates_wb + 61, 194); store8(_silk_ec_rates_wb + 62, 255); store8(_silk_ec_rates_wb + 63, 255); store8(_silk_ec_rates_wb + 64, 166); store8(_silk_ec_rates_wb + 65, 116); store8(_silk_ec_rates_wb + 66, 76); store8(_silk_ec_rates_wb + 67, 55); store8(_silk_ec_rates_wb + 68, 53); store8(_silk_ec_rates_wb + 69, 125); store8(_silk_ec_rates_wb + 70, 255); store8(_silk_ec_rates_wb + 71, 255);
+    return 0;
+}
+
+# silk_DIV32_varQ: (a << Qres) / b, computed by normalise + reciprocal + one
+# Newton refinement, exactly as libopus does it.
+fn silk_div32_varq(a32, b32, Qres) {
+    var aa = a32; if (aa < 0) { aa = 0 - aa; }
+    var bb = b32; if (bb < 0) { bb = 0 - bb; }
+    var a_headrm = silk_clz32(aa) - 1;
+    var a32_nrm = silk_sx32(a32 << a_headrm);
+    var b_headrm = silk_clz32(bb) - 1;
+    var b32_nrm = silk_sx32(b32 << b_headrm);
+    var b32_inv = silk_div_trunc(sar(2147483647, 2), sar(b32_nrm, 16));
+    var result = silk_smulwb(a32_nrm, b32_inv);
+    a32_nrm = silk_sx32(a32_nrm - silk_sx32(silk_smmul(b32_nrm, result) << 3));
+    result = silk_smlawb(result, a32_nrm, b32_inv);
+    var lshift = 29 + a_headrm - b_headrm - Qres;
+    if (lshift < 0) { return silk_lshift_sat32(result, 0 - lshift); }
+    if (lshift < 32) { return sar(result, lshift); }
+    return 0;
+}
+
+# silk_insertion_sort_increasing: sorts `a` ascending and records where each
+# sorted element came from, but only guarantees the first K positions.
+fn silk_insertion_sort_increasing(a, idx, L, K) {
+    var i = 0;
+    while (i < K) { store64(idx + i * 8, i); i = i + 1; }
+    i = 1;
+    while (i < K) {
+        var value = load64(a + i * 8);
+        var j = i - 1;
+        var placed = 0;
+        while ((placed == 0) & (j >= 0)) {
+            if (value < load64(a + j * 8)) {
+                store64(a + (j + 1) * 8, load64(a + j * 8));
+                store64(idx + (j + 1) * 8, load64(idx + j * 8));
+                j = j - 1;
+            } else { placed = 1; }
+        }
+        store64(a + (j + 1) * 8, value);
+        store64(idx + (j + 1) * 8, i);
+        i = i + 1;
+    }
+    # Beyond K, only the first K positions have to stay correct.
+    i = K;
+    while (i < L) {
+        var v2 = load64(a + i * 8);
+        if (v2 < load64(a + (K - 1) * 8)) {
+            var j2 = K - 2;
+            var placed2 = 0;
+            while ((placed2 == 0) & (j2 >= 0)) {
+                if (v2 < load64(a + j2 * 8)) {
+                    store64(a + (j2 + 1) * 8, load64(a + j2 * 8));
+                    store64(idx + (j2 + 1) * 8, load64(idx + j2 * 8));
+                    j2 = j2 - 1;
+                } else { placed2 = 1; }
+            }
+            store64(a + (j2 + 1) * 8, v2);
+            store64(idx + (j2 + 1) * 8, i);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# silk_NLSF_encode: stabilise, score every stage-1 codebook vector, keep the
+# nSurvivors best, run the trellis on each, and take the lowest R/D path. Writes
+# NLSFIndices[0..order] and replaces pNLSF_Q15 with the QUANTISED vector (the
+# same one the decoder will reconstruct). Returns the R/D value in Q25.
+fn silk_nlsf_encode(NLSFIndices, pNLSF_Q15, fs_kHz, pW_Q2, NLSF_mu_Q20, nSurvivors, signalType) {
+    if (_silk_type_VAD == 0) { _silk_tables_init(); }       # _silk_cb1_nb/_wb (stage-1 iCDF)
+    if (_silk_cb1nlsf_nb == 0) { _silk_tables3_init(); }
+    if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }     # silk_nlsf_unpack needs these
+    if (_silk_ec_rates_nb == 0) { _silk_nlsf_enc_tables_init(); }
+    var order = 16;
+    var cb1tab = _silk_cb1nlsf_wb;
+    var wghttab = _silk_cb1wght_wb;
+    var dmin = _silk_dmin_wb;
+    var icdf = _silk_cb1_wb;
+    var rates = _silk_ec_rates_wb;
+    var qstep = 9830;
+    var invqstep = 427;
+    if (fs_kHz < 16) {
+        order = 10; cb1tab = _silk_cb1nlsf_nb; wghttab = _silk_cb1wght_nb;
+        dmin = _silk_dmin_nb; icdf = _silk_cb1_nb; rates = _silk_ec_rates_nb;
+        qstep = 11796; invqstep = 356;
+    }
+    var nVectors = 32;
+
+    silk_nlsf_stabilize(pNLSF_Q15, dmin, order);
+
+    var err_Q24 = alloc(nVectors * 8);
+    silk_nlsf_vq(err_Q24, pNLSF_Q15, cb1tab, wghttab, nVectors, order);
+    var tempIndices1 = alloc(nVectors * 8);
+    silk_insertion_sort_increasing(err_Q24, tempIndices1, nVectors, nSurvivors);
+
+    var RD_Q25 = alloc(nSurvivors * 8);
+    var tempIndices2 = alloc(nSurvivors * 16 * 8);
+    var res_Q10 = alloc(16 * 8);
+    var W_adj_Q5 = alloc(16 * 8);
+    var ec_ix = alloc(16 * 8);
+    var pred_Q8 = alloc(16);
+
+    var sidx = 0;
+    while (sidx < nSurvivors) {
+        var ind1 = load64(tempIndices1 + sidx * 8);
+        var i = 0;
+        while (i < order) {
+            var cbv = load8(cb1tab + ind1 * order + i) << 7;
+            var W_tmp_Q9 = load64(wghttab + (ind1 * order + i) * 8);
+            store64(res_Q10 + i * 8, _i16(sar(silk_smulbb(load64(pNLSF_Q15 + i * 8) - cbv, W_tmp_Q9), 14)));
+            # W_adj_Q5[] is an opus_int16 array in libopus (NLSF_encode.c), so the
+            # division result is truncated to 16 bits before it reaches the trellis.
+            store64(W_adj_Q5 + i * 8, _i16(silk_div32_varq(load64(pW_Q2 + i * 8), silk_smulbb(W_tmp_Q9, W_tmp_Q9), 21)));
+            i = i + 1;
+        }
+        silk_nlsf_unpack(ind1, fs_kHz, ec_ix, pred_Q8);
+        var rd = silk_nlsf_del_dec_quant(tempIndices2 + sidx * 16 * 8, res_Q10, W_adj_Q5,
+                                         pred_Q8, ec_ix, rates, qstep, invqstep, NLSF_mu_Q20, order);
+        # add the stage-1 index's own rate
+        var base = (signalType >> 1) * nVectors;
+        var prob_Q8 = 0;
+        if (ind1 == 0) { prob_Q8 = 256 - load8(icdf + base + ind1); }
+        else { prob_Q8 = load8(icdf + base + ind1 - 1) - load8(icdf + base + ind1); }
+        var bits_q7 = (8 << 7) - silk_lin2log(prob_Q8);
+        store64(RD_Q25 + sidx * 8, silk_sx32(rd + silk_smulbb(bits_q7, sar(NLSF_mu_Q20, 2))));
+        sidx = sidx + 1;
+    }
+
+    var bestIndex = alloc(8);
+    silk_insertion_sort_increasing(RD_Q25, bestIndex, nSurvivors, 1);
+    var bi = load64(bestIndex);
+    store64(NLSFIndices + 0, load64(tempIndices1 + bi * 8));
+    var j = 0;
+    while (j < order) {
+        store64(NLSFIndices + (j + 1) * 8, load64(tempIndices2 + (bi * 16 + j) * 8));
+        j = j + 1;
+    }
+    silk_nlsf_decode(NLSFIndices, fs_kHz, pNLSF_Q15);
+    return load64(RD_Q25 + 0);
+}
+
+# ---- SILK ENCODE: excitation (encode_pulses.c / shell_coder.c / code_signs.c) ----
+# Encoder-only ROM: the bit-cost tables used to pick a rate level, and the
+# per-stage caps that decide when a shell block must be downscaled. Everything
+# else (shell code tables, offsets, iCDFs, sign table) is already here for decode.
+var _silk_max_pulses = 0;      # silk_max_pulses_table[4]
+var _silk_ppb_bits = 0;        # silk_pulses_per_block_BITS_Q5[9][18]
+var _silk_ratelvl_bits = 0;    # silk_rate_levels_BITS_Q5[2][9]
+
+fn _silk_enc_tables_init() {
+    _silk_max_pulses = alloc(4);
+    store8(_silk_max_pulses + 0, 8); store8(_silk_max_pulses + 1, 10); store8(_silk_max_pulses + 2, 12); store8(_silk_max_pulses + 3, 16);
+    _silk_ppb_bits = alloc(162);
+    store8(_silk_ppb_bits + 0, 31); store8(_silk_ppb_bits + 1, 57); store8(_silk_ppb_bits + 2, 107); store8(_silk_ppb_bits + 3, 160); store8(_silk_ppb_bits + 4, 205); store8(_silk_ppb_bits + 5, 205); store8(_silk_ppb_bits + 6, 255); store8(_silk_ppb_bits + 7, 255); store8(_silk_ppb_bits + 8, 255); store8(_silk_ppb_bits + 9, 255); store8(_silk_ppb_bits + 10, 255); store8(_silk_ppb_bits + 11, 255); store8(_silk_ppb_bits + 12, 255); store8(_silk_ppb_bits + 13, 255); store8(_silk_ppb_bits + 14, 255); store8(_silk_ppb_bits + 15, 255); store8(_silk_ppb_bits + 16, 255); store8(_silk_ppb_bits + 17, 255);
+    store8(_silk_ppb_bits + 18, 69); store8(_silk_ppb_bits + 19, 47); store8(_silk_ppb_bits + 20, 67); store8(_silk_ppb_bits + 21, 111); store8(_silk_ppb_bits + 22, 166); store8(_silk_ppb_bits + 23, 205); store8(_silk_ppb_bits + 24, 255); store8(_silk_ppb_bits + 25, 255); store8(_silk_ppb_bits + 26, 255); store8(_silk_ppb_bits + 27, 255); store8(_silk_ppb_bits + 28, 255); store8(_silk_ppb_bits + 29, 255); store8(_silk_ppb_bits + 30, 255); store8(_silk_ppb_bits + 31, 255); store8(_silk_ppb_bits + 32, 255); store8(_silk_ppb_bits + 33, 255); store8(_silk_ppb_bits + 34, 255); store8(_silk_ppb_bits + 35, 255);
+    store8(_silk_ppb_bits + 36, 82); store8(_silk_ppb_bits + 37, 74); store8(_silk_ppb_bits + 38, 79); store8(_silk_ppb_bits + 39, 95); store8(_silk_ppb_bits + 40, 109); store8(_silk_ppb_bits + 41, 128); store8(_silk_ppb_bits + 42, 145); store8(_silk_ppb_bits + 43, 160); store8(_silk_ppb_bits + 44, 173); store8(_silk_ppb_bits + 45, 205); store8(_silk_ppb_bits + 46, 205); store8(_silk_ppb_bits + 47, 205); store8(_silk_ppb_bits + 48, 224); store8(_silk_ppb_bits + 49, 255); store8(_silk_ppb_bits + 50, 255); store8(_silk_ppb_bits + 51, 224); store8(_silk_ppb_bits + 52, 255); store8(_silk_ppb_bits + 53, 224);
+    store8(_silk_ppb_bits + 54, 125); store8(_silk_ppb_bits + 55, 74); store8(_silk_ppb_bits + 56, 59); store8(_silk_ppb_bits + 57, 69); store8(_silk_ppb_bits + 58, 97); store8(_silk_ppb_bits + 59, 141); store8(_silk_ppb_bits + 60, 182); store8(_silk_ppb_bits + 61, 255); store8(_silk_ppb_bits + 62, 255); store8(_silk_ppb_bits + 63, 255); store8(_silk_ppb_bits + 64, 255); store8(_silk_ppb_bits + 65, 255); store8(_silk_ppb_bits + 66, 255); store8(_silk_ppb_bits + 67, 255); store8(_silk_ppb_bits + 68, 255); store8(_silk_ppb_bits + 69, 255); store8(_silk_ppb_bits + 70, 255); store8(_silk_ppb_bits + 71, 255);
+    store8(_silk_ppb_bits + 72, 173); store8(_silk_ppb_bits + 73, 115); store8(_silk_ppb_bits + 74, 85); store8(_silk_ppb_bits + 75, 73); store8(_silk_ppb_bits + 76, 76); store8(_silk_ppb_bits + 77, 92); store8(_silk_ppb_bits + 78, 115); store8(_silk_ppb_bits + 79, 145); store8(_silk_ppb_bits + 80, 173); store8(_silk_ppb_bits + 81, 205); store8(_silk_ppb_bits + 82, 224); store8(_silk_ppb_bits + 83, 224); store8(_silk_ppb_bits + 84, 255); store8(_silk_ppb_bits + 85, 255); store8(_silk_ppb_bits + 86, 255); store8(_silk_ppb_bits + 87, 255); store8(_silk_ppb_bits + 88, 255); store8(_silk_ppb_bits + 89, 255);
+    store8(_silk_ppb_bits + 90, 166); store8(_silk_ppb_bits + 91, 134); store8(_silk_ppb_bits + 92, 113); store8(_silk_ppb_bits + 93, 102); store8(_silk_ppb_bits + 94, 101); store8(_silk_ppb_bits + 95, 102); store8(_silk_ppb_bits + 96, 107); store8(_silk_ppb_bits + 97, 118); store8(_silk_ppb_bits + 98, 125); store8(_silk_ppb_bits + 99, 138); store8(_silk_ppb_bits + 100, 145); store8(_silk_ppb_bits + 101, 155); store8(_silk_ppb_bits + 102, 166); store8(_silk_ppb_bits + 103, 182); store8(_silk_ppb_bits + 104, 192); store8(_silk_ppb_bits + 105, 192); store8(_silk_ppb_bits + 106, 205); store8(_silk_ppb_bits + 107, 150);
+    store8(_silk_ppb_bits + 108, 224); store8(_silk_ppb_bits + 109, 182); store8(_silk_ppb_bits + 110, 134); store8(_silk_ppb_bits + 111, 101); store8(_silk_ppb_bits + 112, 83); store8(_silk_ppb_bits + 113, 79); store8(_silk_ppb_bits + 114, 85); store8(_silk_ppb_bits + 115, 97); store8(_silk_ppb_bits + 116, 120); store8(_silk_ppb_bits + 117, 145); store8(_silk_ppb_bits + 118, 173); store8(_silk_ppb_bits + 119, 205); store8(_silk_ppb_bits + 120, 224); store8(_silk_ppb_bits + 121, 255); store8(_silk_ppb_bits + 122, 255); store8(_silk_ppb_bits + 123, 255); store8(_silk_ppb_bits + 124, 255); store8(_silk_ppb_bits + 125, 255);
+    store8(_silk_ppb_bits + 126, 255); store8(_silk_ppb_bits + 127, 224); store8(_silk_ppb_bits + 128, 192); store8(_silk_ppb_bits + 129, 150); store8(_silk_ppb_bits + 130, 120); store8(_silk_ppb_bits + 131, 101); store8(_silk_ppb_bits + 132, 92); store8(_silk_ppb_bits + 133, 89); store8(_silk_ppb_bits + 134, 93); store8(_silk_ppb_bits + 135, 102); store8(_silk_ppb_bits + 136, 118); store8(_silk_ppb_bits + 137, 134); store8(_silk_ppb_bits + 138, 160); store8(_silk_ppb_bits + 139, 182); store8(_silk_ppb_bits + 140, 192); store8(_silk_ppb_bits + 141, 224); store8(_silk_ppb_bits + 142, 224); store8(_silk_ppb_bits + 143, 224);
+    store8(_silk_ppb_bits + 144, 255); store8(_silk_ppb_bits + 145, 224); store8(_silk_ppb_bits + 146, 224); store8(_silk_ppb_bits + 147, 182); store8(_silk_ppb_bits + 148, 155); store8(_silk_ppb_bits + 149, 134); store8(_silk_ppb_bits + 150, 118); store8(_silk_ppb_bits + 151, 109); store8(_silk_ppb_bits + 152, 104); store8(_silk_ppb_bits + 153, 102); store8(_silk_ppb_bits + 154, 106); store8(_silk_ppb_bits + 155, 111); store8(_silk_ppb_bits + 156, 118); store8(_silk_ppb_bits + 157, 131); store8(_silk_ppb_bits + 158, 145); store8(_silk_ppb_bits + 159, 160); store8(_silk_ppb_bits + 160, 173); store8(_silk_ppb_bits + 161, 131);
+    _silk_ratelvl_bits = alloc(18);
+    store8(_silk_ratelvl_bits + 0, 131); store8(_silk_ratelvl_bits + 1, 74); store8(_silk_ratelvl_bits + 2, 141); store8(_silk_ratelvl_bits + 3, 79); store8(_silk_ratelvl_bits + 4, 80); store8(_silk_ratelvl_bits + 5, 138); store8(_silk_ratelvl_bits + 6, 95); store8(_silk_ratelvl_bits + 7, 104); store8(_silk_ratelvl_bits + 8, 134);
+    store8(_silk_ratelvl_bits + 9, 95); store8(_silk_ratelvl_bits + 10, 99); store8(_silk_ratelvl_bits + 11, 91); store8(_silk_ratelvl_bits + 12, 125); store8(_silk_ratelvl_bits + 13, 93); store8(_silk_ratelvl_bits + 14, 76); store8(_silk_ratelvl_bits + 15, 123); store8(_silk_ratelvl_bits + 16, 115); store8(_silk_ratelvl_bits + 17, 123);
+    return 0;
+}
+
+# encode_split (shell_coder.c): a child count is only coded when its parent is
+# non-zero -- the parent already told the decoder there is nothing to split.
+fn _silk_encode_split(ec, p_child1, p, table) {
+    if (p > 0) { ec_enc_icdf(ec, p_child1, table + load8(_silk_shell_off + p), 8); }   # byte table, as the decoder reads it
+    return 0;
+}
+
+fn _silk_combine_pulses(out, inp, len) {
+    var k = 0;
+    while (k < len) {
+        store64(out + k * 8, load64(inp + 2 * k * 8) + load64(inp + (2 * k + 1) * 8));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# silk_shell_encoder: code one 16-pulse block as a binary split tree, coarsest
+# level first, exactly mirroring the decoder's recursion order.
+fn silk_shell_encoder(ec, pulses0) {
+    var p1 = alloc(8 * 8);
+    var p2 = alloc(4 * 8);
+    var p3 = alloc(2 * 8);
+    var p4 = alloc(1 * 8);
+    _silk_combine_pulses(p1, pulses0, 8);
+    _silk_combine_pulses(p2, p1, 4);
+    _silk_combine_pulses(p3, p2, 2);
+    _silk_combine_pulses(p4, p3, 1);
+    _silk_encode_split(ec, load64(p3 + 0 * 8), load64(p4 + 0 * 8), _silk_shell3);
+    _silk_encode_split(ec, load64(p2 + 0 * 8), load64(p3 + 0 * 8), _silk_shell2);
+    _silk_encode_split(ec, load64(p1 + 0 * 8), load64(p2 + 0 * 8), _silk_shell1);
+    _silk_encode_split(ec, load64(pulses0 + 0 * 8), load64(p1 + 0 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(pulses0 + 2 * 8), load64(p1 + 1 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(p1 + 2 * 8), load64(p2 + 1 * 8), _silk_shell1);
+    _silk_encode_split(ec, load64(pulses0 + 4 * 8), load64(p1 + 2 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(pulses0 + 6 * 8), load64(p1 + 3 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(p2 + 2 * 8), load64(p3 + 1 * 8), _silk_shell2);
+    _silk_encode_split(ec, load64(p1 + 4 * 8), load64(p2 + 2 * 8), _silk_shell1);
+    _silk_encode_split(ec, load64(pulses0 + 8 * 8), load64(p1 + 4 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(pulses0 + 10 * 8), load64(p1 + 5 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(p1 + 6 * 8), load64(p2 + 3 * 8), _silk_shell1);
+    _silk_encode_split(ec, load64(pulses0 + 12 * 8), load64(p1 + 6 * 8), _silk_shell0);
+    _silk_encode_split(ec, load64(pulses0 + 14 * 8), load64(p1 + 7 * 8), _silk_shell0);
+    return 0;
+}
+
+# silk_encode_signs (code_signs.c). A sign is sent only for a non-zero pulse, and
+# the probability depends on the block's pulse sum, so the decoder can rebuild
+# the same context from what it has already decoded.
+fn silk_encode_signs(ec, pulses, length, signalType, quantOffsetType, sum_pulses) {
+    var icdf = alloc(2);
+    store8(icdf + 1, 0);
+    var base = 7 * (quantOffsetType + (signalType << 1));
+    var nblk = (length + 8) >> 4;
+    var i = 0;
+    while (i < nblk) {
+        var p = load64(sum_pulses + i * 8);
+        if (p > 0) {
+            var m = p & 0x1F;
+            if (m > 6) { m = 6; }
+            store8(icdf + 0, load8(_silk_sign_icdf + base + m));
+            var j = 0;
+            while (j < 16) {
+                var q = load64(pulses + (i * 16 + j) * 8);
+                if (q != 0) {
+                    var sym = 0;                     # silk_enc_map: negative -> 0, positive -> 1
+                    if (q > 0) { sym = 1; }
+                    ec_enc_icdf(ec, sym, icdf, 8);
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# combine_and_check: pairwise-sum `inp` into `out`, reporting whether any sum
+# exceeded the cap for this tree level (which forces the block to be downscaled).
+fn _silk_combine_and_check(out, inp, max_pulses, len) {
+    var over = 0;
+    var k = 0;
+    while (k < len) {
+        var sum = load64(inp + 2 * k * 8) + load64(inp + (2 * k + 1) * 8);
+        if (sum > max_pulses) { over = 1; }
+        store64(out + k * 8, sum);
+        k = k + 1;
+    }
+    return over;
+}
+
+# silk_encode_pulses: the inverse of silk_decode_pulses. `pulses` holds signed
+# quantisation indices, one per sample. Blocks whose pulse sums exceed the shell
+# coder's caps are right-shifted until they fit, and the shifted-out bits are
+# sent afterwards as raw LSBs.
+fn silk_encode_pulses(ec, signalType, quantOffsetType, pulses, frame_length) {
+    if (_silk_ratelvl_icdf == 0) { _silk_tables5_init(); }
+    if (_silk_max_pulses == 0) { _silk_enc_tables_init(); }
+
+    var iter = frame_length >> 4;
+    if ((iter << 4) < frame_length) { iter = iter + 1; }   # 10 ms @ 12 kHz only
+
+    var total = iter * 16;
+    var abs_pulses = alloc(total * 8);
+    var i = 0;
+    while (i < total) {
+        var v = 0;
+        if (i < frame_length) { v = load64(pulses + i * 8); }
+        if (v < 0) { v = 0 - v; }
+        store64(abs_pulses + i * 8, v);
+        i = i + 1;
+    }
+
+    var sum_pulses = alloc(iter * 8);
+    var nRshifts = alloc(iter * 8);
+    var comb = alloc(8 * 8);
+    i = 0;
+    while (i < iter) {
+        store64(nRshifts + i * 8, 0);
+        var ap = abs_pulses + i * 16 * 8;
+        var settled = 0;
+        while (settled == 0) {
+            var sd = _silk_combine_and_check(comb, ap, load8(_silk_max_pulses + 0), 8);
+            sd = sd + _silk_combine_and_check(comb, comb, load8(_silk_max_pulses + 1), 4);
+            sd = sd + _silk_combine_and_check(comb, comb, load8(_silk_max_pulses + 2), 2);
+            sd = sd + _silk_combine_and_check(sum_pulses + i * 8, comb, load8(_silk_max_pulses + 3), 1);
+            if (sd != 0) {
+                store64(nRshifts + i * 8, load64(nRshifts + i * 8) + 1);
+                var k = 0;
+                while (k < 16) { store64(ap + k * 8, load64(ap + k * 8) >> 1); k = k + 1; }
+            } else { settled = 1; }
+        }
+        i = i + 1;
+    }
+
+    # Rate level: pick the pulse-count model that costs the fewest bits overall.
+    var minbits = 0;
+    var haveMin = 0;
+    var RateLevelIndex = 0;
+    var k2 = 0;
+    while (k2 < 10 - 1) {                        # N_RATE_LEVELS - 1 = 9 candidates
+        var nb = _silk_ppb_bits + k2 * 18;
+        var sumBits = load8(_silk_ratelvl_bits + (signalType >> 1) * 9 + k2);
+        i = 0;
+        while (i < iter) {
+            if (load64(nRshifts + i * 8) > 0) { sumBits = sumBits + load8(nb + 17); }
+            else { sumBits = sumBits + load8(nb + load64(sum_pulses + i * 8)); }
+            i = i + 1;
+        }
+        if (haveMin == 0) { minbits = sumBits; RateLevelIndex = k2; haveMin = 1; }
+        else { if (sumBits < minbits) { minbits = sumBits; RateLevelIndex = k2; } }
+        k2 = k2 + 1;
+    }
+    ec_enc_icdf(ec, RateLevelIndex, _silk_ratelvl_icdf + (signalType >> 1) * 9, 8);
+
+    # Pulse counts per block; a downscaled block sends the escape symbol once per
+    # shift, then its (scaled) sum on the last rate level's model.
+    var cdf = _silk_ppb_icdf + RateLevelIndex * 18;
+    var esc = _silk_ppb_icdf + (10 - 1) * 18;    # the escape row, as the decoder reads it
+    i = 0;
+    while (i < iter) {
+        var nr = load64(nRshifts + i * 8);
+        if (nr == 0) {
+            ec_enc_icdf(ec, load64(sum_pulses + i * 8), cdf, 8);
+        } else {
+            ec_enc_icdf(ec, 17, cdf, 8);
+            var k3 = 1;
+            while (k3 < nr) {
+                # After 10 shifts the escape symbol is no longer representable,
+                # so the table shifts by one -- mirror the decoder exactly.
+                var ex = 0;
+                if (k3 == 10) { ex = 1; }
+                ec_enc_icdf(ec, 17, esc + ex, 8);
+                k3 = k3 + 1;
+            }
+            var exl = 0;
+            if (nr == 10) { exl = 1; }
+            ec_enc_icdf(ec, load64(sum_pulses + i * 8), esc + exl, 8);
+        }
+        i = i + 1;
+    }
+
+    # Shell code each non-empty block.
+    i = 0;
+    while (i < iter) {
+        if (load64(sum_pulses + i * 8) > 0) {
+            silk_shell_encoder(ec, abs_pulses + i * 16 * 8);
+        }
+        i = i + 1;
+    }
+
+    # LSBs for the blocks that had to be downscaled.
+    i = 0;
+    while (i < iter) {
+        var nr2 = load64(nRshifts + i * 8);
+        if (nr2 > 0) {
+            var nLS = nr2 - 1;
+            var k4 = 0;
+            while (k4 < 16) {
+                var aq = 0;
+                if (i * 16 + k4 < frame_length) { aq = load64(pulses + (i * 16 + k4) * 8); }
+                if (aq < 0) { aq = 0 - aq; }
+                var j2 = nLS;
+                while (j2 > 0) {
+                    ec_enc_icdf(ec, (aq >> j2) & 1, _silk_lsb_icdf, 8);
+                    j2 = j2 - 1;
+                }
+                ec_enc_icdf(ec, aq & 1, _silk_lsb_icdf, 8);
+                k4 = k4 + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    # silk_encode_signs walks whole 16-sample blocks, so the tail past
+    # frame_length must be zero. libopus memsets it (encode_pulses.c:91); the only
+    # config where the tail exists is 10 ms @ 12 kHz (120 samples -> 8 blocks).
+    var pad = iter * 16;
+    var pz = frame_length;
+    while (pz < pad) { store64(pulses + pz * 8, 0); pz = pz + 1; }
+    silk_encode_signs(ec, pulses, frame_length, signalType, quantOffsetType, sum_pulses);
+    return 0;
+}
+
 # ---- stateful frame orchestration (decode_frame.c / dec_API.c) ----
 # Extended st layout adds: 13 LastGainIndex, 14 prevNLSF(ptr,order), 15 first_frame_after_reset.
 # silk_decoder_init: allocate persistent buffers and reset state for sampling rate fs_kHz.

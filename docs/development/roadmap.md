@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.7.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.8.0.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -16,7 +16,7 @@
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,665 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
+- 11,706 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
@@ -51,11 +51,33 @@ Every one of the 32 TOC configs now decodes. Measured against a from-source libo
 - Still open: `test: fold the 64-vector libopus comparison into CI` rather than leaving it in
   `scratchpad/opusref` (it needs a libopus build, so it wants a separate CI job).
 
-### v2.8.0 — Opus SILK + hybrid ENCODE · large (full Opus encode)
-The big lift: the encoder counterpart of 2.6.1–2.6.3. Expect several patches (2.8.1…) —
-pitch/LTP analysis and NLSF VQ are each substantial.
-- `feat(silk): encode — LPC/LTP analysis, pitch estimation, NLSF quantization (VQ + stabilize),
-  gain/excitation quant, the SILK bitstream`. Verify a shravan SILK frame decodes in libopus.
+### v2.8.0 — SILK encode: bitstream + quantisation · **DONE** (shipped 2.8.0)
+The writer half, all bit-exact against libopus 1.5.2.
+- ~~`silk_encode_indices` / `silk_encode_pulses` / shell coder / sign coder~~ — done; **174/174**
+  real libopus frames transcode byte-identical (NB/MB/WB × 10/20/40/60 ms, voiced + unvoiced,
+  independent + conditional coding).
+- ~~NLSF quantisation (`silk_A2NLSF`, laroia weights, stage-1 VQ, delayed-decision trellis)~~ —
+  done; 250/250 vs libopus.
+- ~~gain quantisation (`silk_lin2log`, `silk_gains_quant`)~~ — done; 300/300 vs libopus.
+- Also fixed a real out-of-bounds read in `silk_encode_signs` (10 ms @ 12 kHz).
+
+### v2.8.1 — SILK encode: the analysis front end · large (makes the encoder actually encode)
+Nothing below exists yet; shravan cannot encode SILK audio until it does. Verification for each is
+a numeric comparison against libopus on the same input, via `scratchpad/silkoracle`.
+- `feat(silk): silk_burg_modified_FLP + silk_find_LPC_FLP` (LPC analysis; the only heavy float
+  function on the unvoiced path).
+- `feat(silk): silk_noise_shape_analysis_FLP + silk_process_gains_FLP`.
+- `feat(silk): silk_NSQ` — the noise-shaping quantiser that produces the excitation. Fixed point
+  throughout, 32-bit wrapping; the riskiest single step.
+- `feat(silk): silk_encode_frame_FLP orchestration + the gainMult rate loop`, then the roadmap
+  gate: a shravan SILK frame that libopus decodes to audio **correlating with the input** — not
+  merely a legal frame, which an all-zero excitation would satisfy while proving nothing.
+- Note: the float→fixed boundaries use `lrintf` (round half to **even**), which f64 code must
+  reproduce deliberately.
+
+### v2.8.2 — the voiced path and hybrid encode · large
+- `feat(silk): pitch analysis (silk_pitch_analysis_core_FLP), silk_find_LTP_FLP,
+  silk_quant_LTP_gains, LTP scaling`. The bitstream writer already handles voiced frames.
 - `feat(opus): hybrid encode (SILK low band + CELT high band over one range coder) + the encoder
   mode/bandwidth decision and TOC assembly` → shravan encodes **every** Opus config libopus decodes.
 

@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-08-26
+
+**SILK encoder, part 1: the bitstream writer and the quantisation chain — every piece verified
+bit-exact against libopus 1.5.2.** This is the first half of the v2.8.0 roadmap item; the analysis
+front end (LPC, noise shaping, excitation) is not here and shravan cannot yet encode SILK audio.
+See "What this does not do" below. 11,706 assertions (was 11,665; +41).
+
+### Added — the SILK bitstream writer, the exact inverse of the decoder
+
+`silk_encode_indices_ec`, `silk_encode_pulses`, `silk_shell_encoder` and `silk_encode_signs`, plus
+the three encoder-only ROM tables (`silk_max_pulses_table`, `silk_pulses_per_block_BITS_Q5`,
+`silk_rate_levels_BITS_Q5`) generated from the libopus source, not transcribed.
+
+Verified by transcoding, which is the only test that can isolate a writer bug: take a **real
+libopus SILK payload**, decode its indices and pulses with shravan's decoder, feed those straight
+back into the new writers, and require the bytes to come back identical. **174 of 174 frames are
+byte-identical** across all twelve SILK-only mono configs — NB/MB/WB at 10/20/40/60 ms, voiced and
+unvoiced, independent and conditional coding. (The comparison stops two bytes short of the range
+coder's flush tail, where the original stream legitimately continues with more symbols.)
+
+### Added — the quantisation chain
+
+| function | verified against libopus |
+|---|---|
+| `silk_lin2log`, `silk_ror32` | 209/209 values across the full int32 range |
+| `silk_gains_quant` | 300/300 random gain sets × previous index × coding mode |
+| `silk_a2nlsf`, `silk_bwexpander_32` | 122/122 LPC filters (2 from libopus's own encoder, 120 random stable) |
+| `silk_nlsf_vq_weights_laroia` | 150/150 |
+| `silk_nlsf_encode` (stage-1 VQ + 4-state delayed-decision trellis + requantise) | 250/250 across NB/MB/WB, four R/D weights, 1–8 survivors, all signal types |
+
+All of these are **fixed point even in libopus's float build**, so they are bit-exactness
+requirements rather than approximations — the decoder's inverses are already in the tree and any
+drift would produce a stream libopus cannot read.
+
+Two traps this surfaced, both found by comparing rather than reading: libopus accumulates the
+trellis R/D in `opus_int32` and lets it **wrap** (the distortion term routinely exceeds 2^31), and
+`W_adj_Q5[]` is an `opus_int16` array, so the division result is **truncated to 16 bits** before it
+reaches the trellis. Neither is visible in the source without checking the declared types.
+
+### Fixed — `silk_encode_signs` read past the end of the pulse buffer
+
+The sign coder walks whole 16-sample blocks, so for 10 ms at 12 kHz (120 samples = 7.5 blocks) it
+read `pulses[120..127]`. libopus is safe only because `silk_encode_pulses` zero-fills that tail;
+shravan now does the same. With the bump allocator this was a silent read of stale heap, not a
+crash — it would have produced wrong signs and desynchronised the decoder on exactly one config.
+
+### Tooling
+
+`scratchpad/silkoracle` calls libopus's own `silk_gains_quant` / `silk_A2NLSF` / `silk_NLSF_encode`
+/ `silk_lin2log` / `silk_NLSF_VQ_weights_laroia` directly, so each ported function is checked
+against the reference implementation rather than against a reading of it. libopus 1.5.2 is built
+from source in the scratchpad with tracing hooks in its SILK encoder.
+
+### What this does not do
+
+shravan **cannot encode SILK audio yet**. The analysis front end is absent: `silk_burg_modified_FLP`
+(LPC), `silk_noise_shape_analysis_FLP`, `silk_NSQ` (which produces the excitation),
+`silk_process_gains_FLP`, and the `silk_encode_frame_FLP` orchestration. The voiced path
+(`silk_pitch_analysis_core_FLP`, `silk_find_LTP_FLP`, `silk_quant_LTP_gains`) is also absent,
+though the bitstream writer already handles voiced frames — that is what the 40/60 ms conditional
+-coding round trips exercise.
+
+The roadmap's gate for this item — "a shravan SILK frame decodes in libopus" — is **not met**, and
+deliberately so: it can be reached trivially by emitting a legal all-zero frame, which would decode
+to silence and prove nothing. The remaining work is itemised as v2.8.1 in the roadmap.
+
+Benchmarks: interleaved A/B against 2.7.4 shows FFT +0.3%, FLAC decode −0.5%, Opus CELT decode
++0.5% — all noise; nothing on the decode path changed.
+
 ## [2.7.4] - 2026-08-26
 
 **All 32 Opus configs now decode within 0.02 LSB of libopus, mono and stereo — 64 of 64 vectors.**
