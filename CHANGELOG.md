@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.4] - 2026-08-26
+
+**All 32 Opus configs now decode within 0.02 LSB of libopus, mono and stereo — 64 of 64 vectors.**
+2.7.3 measured 52 of 64 and listed twelve gaps. Eight of those turned out to be a flaw in the
+*measurement*, not the decoder; the rest were two real bugs, both now fixed. 11,665 assertions
+(was 11,660; +5).
+
+### Fixed — CELT stereo side-inversion was skipped on N == 2 bands
+
+`inv` tells the decoder the side channel was negated before coding. libopus applies that negation
+to **every** stereo band, gating only `stereo_merge` on `N != 2` (end of `quant_band_stereo` in
+`bands.c`). shravan had the negation nested inside the `N > 2` branch, so any band of width 1 —
+the eight lowest, where `N == 2` — kept the wrong sign on its side channel whenever `inv` was
+signalled.
+
+Found by diffing an instrumented libopus against an instrumented shravan, stage by stage: the
+range decoding, bit allocation, band energies and `ec_tell` all matched exactly, and the decoded
+spectrum matched for channel 0 while channel 1 came back sign-flipped on bands 2 and 3 — with
+both decoders agreeing that `inv = 1` for precisely those bands.
+
+`test_celt_stereo_inv_n2` pins it with a real libopus 5 ms stereo frame whose bands 2 and 3 signal
+`inv`; the expected per-channel energies come from libopus 1.5.2 decoding the same bytes. With the
+negation back in the wrong scope the test reports channel 1 at 4.626 instead of 5.219, so it fails
+loudly.
+
+### Added — the redundant frame is now decoded in the HYBRID path too
+
+2.7.3 decoded redundant frames only for SILK-only packets; the hybrid path read the header (keeping
+the range coder aligned) but discarded the frame. Both hybrid paths now decode and mix it, honouring
+libopus's asymmetric ordering: a CELT→SILK redundant frame is decoded **before** the main CELT
+frame, a SILK→CELT one **after**, with a decoder reset in between. That ordering is not cosmetic —
+the redundant decode shares the CELT state the following frames depend on.
+
+### Fixed — the reference rig was comparing against libopus's limiter, not its decoder
+
+Eight of 2.7.3's twelve "gaps" were not shravan bugs. `opus_decode()` runs `opus_pcm_soft_clip()`
+over its output — a limiter that lives outside the codec and has memory across calls. Wherever the
+signal approached full scale it pulled libopus's output down by up to 20%, and a correct decoder
+looked wrong. `opus_decode_float()` skips it, and that is what the reference must use.
+
+This is what the supposed "CELT LM=1 stereo bug" actually was: libopus's own internal deemphasis
+output at the diverging samples turned out to equal **shravan's** values exactly, with the
+difference introduced only afterwards. Configs 25, 29, 30 and 31 needed no change at all. The rig
+now compares raw f64 samples from `opus_decode_float` against shravan's f64 output, with error
+reported in LSB of a 16-bit sample.
+
+### Result
+
+| | 2.7.3 | 2.7.4 |
+|---|---|---|
+| vectors within ±2 LSB | 52 / 64 | **64 / 64** |
+| worst error across all vectors | — | **0.016 LSB** |
+| median per-vector worst error | — | 0.007 LSB |
+| bit-identical vectors | — | 9 / 64 |
+
+The nine bit-identical vectors are the SILK-only configs, where the arithmetic is integer
+throughout. The rest differ only by float rounding, three orders of magnitude below one LSB.
+
+Benchmarks: interleaved A/B against 2.7.3 shows FFT +0.2%, FLAC decode −0.3%, Opus CELT decode
++0.6% — all noise.
+
 ## [2.7.3] - 2026-08-26
 
 **Opus decode completeness — and a packet-framing bug that was silently breaking shipped configs.**

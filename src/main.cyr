@@ -602,6 +602,62 @@ fn test_opus_parse_tags() {
 # TOC's frame-count code and then ignored it, so every code-1/2/3 packet decoded
 # wrongly -- and libopus pads CBR SILK streams with code 3 routinely, which made
 # ordinary .opus files decode to silence for most of their frames.
+# 2.7.4: CELT stereo side-inversion on an N == 2 band.
+#
+# `inv` tells the decoder the side channel was negated before coding. libopus
+# applies that negation to EVERY stereo band and gates only stereo_merge on
+# N != 2 (bands.c, end of quant_band_stereo). shravan had the negation nested
+# inside the N > 2 branch, so the eight lowest bands -- every band of width 1,
+# which is exactly where N == 2 -- kept the wrong sign on their side channel.
+#
+# The vector is a real libopus 5 ms stereo CELT frame (the redundant frame from
+# a hybrid transition, which decodes from a freshly reset CELT state and so is
+# self-contained). Bands 2 and 3 signal inv = 1. The expected per-channel
+# energies come from libopus 1.5.2 decoding these same bytes; with the negation
+# in the wrong scope, channel 1 comes out at 4.627 instead of 5.219.
+fn test_celt_stereo_inv_n2() {
+    syscall(1, 1, "test: celt stereo side-inversion (N==2 band)\n", 45);
+    var n = 23;
+    var buf = alloc(n);
+    store8(buf + 0, 127); store8(buf + 1, 140); store8(buf + 2, 1); store8(buf + 3, 27);
+    store8(buf + 4, 9); store8(buf + 5, 191); store8(buf + 6, 126); store8(buf + 7, 222);
+    store8(buf + 8, 16); store8(buf + 9, 136); store8(buf + 10, 133); store8(buf + 11, 159);
+    store8(buf + 12, 137); store8(buf + 13, 96); store8(buf + 14, 241); store8(buf + 15, 216);
+    store8(buf + 16, 39); store8(buf + 17, 222); store8(buf + 18, 196); store8(buf + 19, 246);
+    store8(buf + 20, 6); store8(buf + 21, 172); store8(buf + 22, 217);
+
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var st = celt_dec_state_new();
+    var out = alloc(2 * 240 * 8);
+    var z = 0;
+    while (z < 2 * 240) { store64(out + z * 8, F64_ZERO); z = z + 1; }
+    # 5 ms => LM = 1; start band 0, end band 17 (wideband), stereo, no accumulate.
+    var r = celt_decode_frame_ec(st, ec_dec_new(buf, n), n, 2, 0, 17, 0, 1, out);
+    assert(is_err(r) == 0, "celt stereo inv: frame decodes");
+
+    var e0 = F64_ZERO;
+    var e1 = F64_ZERO;
+    var i = 0;
+    while (i < 240) {
+        var a = load64(out + (i * 2 + 0) * 8);
+        var b = load64(out + (i * 2 + 1) * 8);
+        e0 = f64_add(e0, f64_mul(a, a));
+        e1 = f64_add(e1, f64_mul(b, b));
+        i = i + 1;
+    }
+    var q0 = f64_to(f64_mul(e0, f64_from(1000)));
+    var q1 = f64_to(f64_mul(e1, f64_from(1000)));
+    syscall(1, 1, "  energy*1000 ch0=", 18); fmt_int(q0);
+    syscall(1, 1, " ch1=", 5); fmt_int(q1);
+    syscall(1, 1, " (libopus: 8534 / 5219)\n", 24);
+    assert(q0 > 8531, "celt stereo inv: ch0 energy matches libopus (low)");
+    assert(q0 < 8537, "celt stereo inv: ch0 energy matches libopus (high)");
+    # The regression this pins: ch1 came out at 4627 with inv applied only for N > 2.
+    assert(q1 > 5216, "celt stereo inv: ch1 energy matches libopus (low)");
+    assert(q1 < 5222, "celt stereo inv: ch1 energy matches libopus (high)");
+    return 0;
+}
+
 fn test_opus_packet_framing() {
     syscall(1, 1, "test: opus packet framing (RFC 6716 3.2)\n", 41);
     var offs = alloc(48 * 8);
@@ -2054,7 +2110,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.3 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.7.4 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2075,6 +2131,7 @@ test_alac_bitreader();
 test_alac_verbatim_frame();
 test_i24_unpacked();
 test_opus_parse_tags();
+test_celt_stereo_inv_n2();
 test_opus_packet_framing();
 test_opus_decode_from_packets();
 test_stream_chunking();

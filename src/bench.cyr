@@ -836,7 +836,7 @@ flac_init();
 fft_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.3 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.7.4 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();

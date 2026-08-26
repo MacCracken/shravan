@@ -163,6 +163,25 @@ each of the 32 TOC configs in mono and stereo, a packet container plus
 absolute sample error against that PCM, not by correlation: correlation above
 0.999 was found to pass a stream containing a frame off by 271 LSB.
 
+### Comparing against libopus: use the float API (v2.7.4)
+
+`opus_decode()` runs **`opus_pcm_soft_clip()`** over its output — a limiter that
+sits outside the codec and carries state across calls. Anywhere the signal
+approaches full scale it pulls the output down (by up to 20% on the vectors
+here), so a *correct* decoder measured against it looks wrong. Eight of the
+twelve gaps reported in 2.7.3 were this and nothing else.
+
+`opus_decode_float()` skips the limiter (`opus_decoder.c`: the two calls differ
+only in their `soft_clip` argument). The reference rig therefore decodes with
+`opus_decode_float` and writes raw f64; shravan writes raw f64; error is reported
+in LSB of a 16-bit sample. Under that comparison all 64 config x channel vectors
+agree within **0.016 LSB**, and the nine SILK-only vectors — integer arithmetic
+end to end — are bit-identical.
+
+The lesson generalises: when a reference implementation's convenience wrapper
+does more than the format specifies, compare against the layer that implements
+the format, not the wrapper.
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified

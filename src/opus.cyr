@@ -3474,10 +3474,15 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
             cm = cm | quant_band(ctx, X, N, mbits, B, lowband, LM, lowband_out, F64_ONE, lowband_scratch, fill);
         }
         stereo_merge(X, Y, mid, N);
-        if (inv != 0) {
-            var j = 0;
-            while (j < N) { store64(Y + j * 8, f64_neg(load64(Y + j * 8))); j = j + 1; }
-        }
+    }
+    # The side inversion applies to EVERY stereo band, not just the split ones.
+    # libopus gates only stereo_merge on N != 2 (bands.c, end of quant_band_stereo);
+    # this negation used to sit inside the N > 2 branch, so an N == 2 band that
+    # signalled inv kept the wrong sign on its side channel. N == 2 is every band
+    # of width 1 -- the eight lowest -- so this hit ordinary stereo streams.
+    if (inv != 0) {
+        var j = 0;
+        while (j < N) { store64(Y + j * 8, f64_neg(load64(Y + j * 8))); j = j + 1; }
     }
     return cm;
 }
@@ -4783,6 +4788,46 @@ fn _opus_smooth_fade(in1, in2, out, overlap, C) {
     return 0;
 }
 
+# Decode the redundant frame: always 5 ms (F5 = 240 samples => LM=1) and start
+# band 0, from its OWN range decoder over the trailing `rb` bytes of the frame.
+# For a SILK->CELT transition (celt_to_silk == 0) the CELT decoder is stale, so
+# libopus resets it first and the decode doubles as priming for the CELT run that
+# follows (opus_decoder.c:637). Returns the 240-frame, C-channel buffer.
+fn _opus_redundancy_decode(cst, fdata, newlen, rb, celt_to_silk, endband, C) {
+    var red = alloc(2 * 240 * 8);
+    var zz = 0;
+    while (zz < 2 * 240) { store64(red + zz * 8, F64_ZERO); zz = zz + 1; }
+    if (celt_to_silk == 0) { celt_dec_state_reset(cst); }
+    celt_decode_frame_ec(cst, ec_dec_new(fdata + newlen, rb), rb, C, 0, endband, 0, 1, red);
+    return red;
+}
+
+# Mix a decoded redundant frame into `pcm`, which holds `fsamp` frames of C channels.
+fn _opus_redundancy_mix(red, celt_to_silk, C, pcm, fsamp) {
+    if (celt_to_silk == 0) {
+        # SILK -> CELT: the redundant frame covers the END of this frame.
+        if (fsamp >= 120) {
+            _opus_smooth_fade(pcm + (fsamp - 120) * C * 8, red + 120 * C * 8,
+                              pcm + (fsamp - 120) * C * 8, 120, C);
+        }
+    } else {
+        # CELT -> SILK: it covers the START -- copied outright over the first
+        # 2.5 ms, then cross-faded over the next 2.5 ms.
+        var i = 0;
+        while (i < 120) {
+            var c2 = 0;
+            while (c2 < C) {
+                store64(pcm + (i * C + c2) * 8, load64(red + (i * C + c2) * 8));
+                c2 = c2 + 1;
+            }
+            i = i + 1;
+        }
+        _opus_smooth_fade(red + 120 * C * 8, pcm + 120 * C * 8,
+                          pcm + 120 * C * 8, 120, C);
+    }
+    return 0;
+}
+
 # Read the redundancy header off the tail of a SILK-mode frame, decode the 5 ms
 # CELT frame it points at, and mix it into `pcm`. `pcm` holds `fsamp` interleaved
 # frames of `C` channels. Returns 1 if a redundant frame was decoded.
@@ -4810,36 +4855,8 @@ fn _opus_decode_redundancy(cst, ec, fdata, flen, is_hybrid, endband, C, pcm, fsa
     if (rb < 2) { return 0; }
     store64(ec + 8, load64(ec + 8) - rb);       # shrink storage past the raw bytes
 
-    # The redundant frame is 5 ms (F5 = 240 samples => LM=1), start band 0, and it
-    # is decoded from its OWN range decoder over the trailing `rb` bytes.
-    var red = alloc(2 * 240 * 8);
-    var zz = 0;
-    while (zz < 2 * 240) { store64(red + zz * 8, F64_ZERO); zz = zz + 1; }
-    if (celt_to_silk == 0) {
-        # SILK -> CELT: the CELT decoder is stale, so libopus resets it, decodes
-        # the redundant frame to prime it, and cross-fades the tail of this frame.
-        celt_dec_state_reset(cst);
-    }
-    celt_decode_frame_ec(cst, ec_dec_new(fdata + newlen, rb), rb, C, 0, endband, 0, 1, red);
-    if (celt_to_silk == 0) {
-        if (fsamp >= 120) {
-            _opus_smooth_fade(pcm + (fsamp - 120) * C * 8, red + 120 * C * 8,
-                              pcm + (fsamp - 120) * C * 8, 120, C);
-        }
-    } else {
-        # CELT -> SILK: the redundant frame covers the START of this frame.
-        var i = 0;
-        while (i < 120) {
-            var c2 = 0;
-            while (c2 < C) {
-                store64(pcm + (i * C + c2) * 8, load64(red + (i * C + c2) * 8));
-                c2 = c2 + 1;
-            }
-            i = i + 1;
-        }
-        _opus_smooth_fade(red + 120 * C * 8, pcm + 120 * C * 8,
-                          pcm + 120 * C * 8, 120, C);
-    }
+    var red = _opus_redundancy_decode(cst, fdata, newlen, rb, celt_to_silk, endband, C);
+    _opus_redundancy_mix(red, celt_to_silk, C, pcm, fsamp);
     return 1;
 }
 
@@ -5238,19 +5255,34 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                         store64(pcm + hq * 8, f64_div(f64_from(load64(silk_out + hq * 8)), F64_32768));
                         hq = hq + 1;
                     }
-                    # Redundancy flag: must be read to keep the shared ec in sync even
-                    # when 0. Redundant-audio handling is a follow-on (assume/skip here).
+                    # Redundancy: hybrid signals it explicitly, with an explicit size.
                     var hlen = plen;
+                    var hcts = 0;
+                    var hrb = 0;
+                    var hred = 0;
                     if (ec_tell(hec) + 17 + 20 <= 8 * hlen) {
                         if (ec_dec_bit_logp(hec, 12) != 0) {
-                            var hcts = ec_dec_bit_logp(hec, 1);
-                            var hrb = ec_dec_uint(hec, 256) + 2;
+                            hcts = ec_dec_bit_logp(hec, 1);
+                            hrb = ec_dec_uint(hec, 256) + 2;
                             hlen = hlen - hrb;
-                            store64(hec + 8, load64(hec + 8) - hrb);
+                            if (hlen * 8 < ec_tell(hec)) { hlen = plen; hrb = 0; }
+                            else { hred = 1; store64(hec + 8, load64(hec + 8) - hrb); }
                         }
+                    }
+                    var hredbuf = 0;
+                    # A CELT->SILK redundant frame is decoded BEFORE the main CELT
+                    # frame; a SILK->CELT one after, with a state reset in between
+                    # (opus_decoder.c:578 vs 637). Getting the order wrong silently
+                    # corrupts the CELT state the following frames depend on.
+                    if ((hred == 1) & (hcts != 0)) {
+                        hredbuf = _opus_redundancy_decode(st, pdata, hlen, hrb, hcts, hb_end, 1);
                     }
                     # CELT high band from the same ec, accumulated onto the SILK low band.
                     celt_decode_frame_ec(st, hec, hlen, 1, 17, hb_end, 1, hlm, pcm);
+                    if ((hred == 1) & (hcts == 0)) {
+                        hredbuf = _opus_redundancy_decode(st, pdata, hlen, hrb, hcts, hb_end, 1);
+                    }
+                    if (hred == 1) { _opus_redundancy_mix(hredbuf, hcts, 1, pcm, fsamp); }
                     handled = 1;
                 }
             }
@@ -5284,16 +5316,28 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                         hsq = hsq + 1;
                     }
                     var hslen = plen;
+                    var hscts = 0;
+                    var hsrb = 0;
+                    var hsred = 0;
                     if (ec_tell(hsec) + 17 + 20 <= 8 * hslen) {
                         if (ec_dec_bit_logp(hsec, 12) != 0) {
-                            var hscts = ec_dec_bit_logp(hsec, 1);
-                            var hsrb = ec_dec_uint(hsec, 256) + 2;
+                            hscts = ec_dec_bit_logp(hsec, 1);
+                            hsrb = ec_dec_uint(hsec, 256) + 2;
                             hslen = hslen - hsrb;
-                            store64(hsec + 8, load64(hsec + 8) - hsrb);
+                            if (hslen * 8 < ec_tell(hsec)) { hslen = plen; hsrb = 0; }
+                            else { hsred = 1; store64(hsec + 8, load64(hsec + 8) - hsrb); }
                         }
+                    }
+                    var hsredbuf = 0;
+                    if ((hsred == 1) & (hscts != 0)) {
+                        hsredbuf = _opus_redundancy_decode(st, pdata, hslen, hsrb, hscts, hsbe, 2);
                     }
                     # CELT stereo high band from the same ec, accumulated onto L/R.
                     celt_decode_frame_ec(st, hsec, hslen, 2, 17, hsbe, 1, hslm, pcm);
+                    if ((hsred == 1) & (hscts == 0)) {
+                        hsredbuf = _opus_redundancy_decode(st, pdata, hslen, hsrb, hscts, hsbe, 2);
+                    }
+                    if (hsred == 1) { _opus_redundancy_mix(hsredbuf, hscts, 2, pcm, fsamp); }
                     handled = 1;
                 }
             }
