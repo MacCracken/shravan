@@ -598,6 +598,111 @@ fn test_opus_parse_tags() {
     return 0;
 }
 
+# 2.7.3: RFC 6716 section 3.2 packet framing. Until this release shravan read the
+# TOC's frame-count code and then ignored it, so every code-1/2/3 packet decoded
+# wrongly -- and libopus pads CBR SILK streams with code 3 routinely, which made
+# ordinary .opus files decode to silence for most of their frames.
+fn test_opus_packet_framing() {
+    syscall(1, 1, "test: opus packet framing (RFC 6716 3.2)\n", 41);
+    var offs = alloc(48 * 8);
+    var lens = alloc(48 * 8);
+    var buf = alloc(4096);
+    memset(buf, 0, 4096);
+
+    # --- frame duration for every one of the 32 configs ---
+    assert(_opus_frame_samples(0) == 480,  "config 0: SILK NB 10ms");
+    assert(_opus_frame_samples(1) == 960,  "config 1: SILK NB 20ms");
+    assert(_opus_frame_samples(2) == 1920, "config 2: SILK NB 40ms");
+    assert(_opus_frame_samples(3) == 2880, "config 3: SILK NB 60ms");
+    assert(_opus_frame_samples(7) == 2880, "config 7: SILK MB 60ms");
+    assert(_opus_frame_samples(12) == 480, "config 12: hybrid 10ms");
+    assert(_opus_frame_samples(13) == 960, "config 13: hybrid 20ms");
+    assert(_opus_frame_samples(16) == 120, "config 16: CELT 2.5ms");
+    assert(_opus_frame_samples(17) == 240, "config 17: CELT 5ms");
+    assert(_opus_frame_samples(18) == 480, "config 18: CELT 10ms");
+    assert(_opus_frame_samples(31) == 960, "config 31: CELT 20ms");
+
+    # --- code 0: one frame, the whole remainder ---
+    store8(buf, (31 << 3) | 0);
+    var n = _opus_split_frames(buf, 21, offs, lens, 48);
+    assert(n == 1, "code 0 -> 1 frame");
+    assert(load64(offs) == 1, "code 0 frame starts past the TOC");
+    assert(load64(lens) == 20, "code 0 frame is the rest of the packet");
+
+    # --- code 1: two equal frames; an odd remainder is invalid ---
+    store8(buf, (31 << 3) | 1);
+    n = _opus_split_frames(buf, 21, offs, lens, 48);
+    assert(n == 2, "code 1 -> 2 frames");
+    assert(load64(lens) == 10, "code 1 first half");
+    assert(load64(lens + 8) == 10, "code 1 second half");
+    assert(is_err(_opus_split_frames(buf, 22, offs, lens, 48)) == 1,
+           "code 1 rejects an odd remainder");
+
+    # --- code 2: explicit first length ---
+    store8(buf, (31 << 3) | 2);
+    store8(buf + 1, 6);
+    n = _opus_split_frames(buf, 21, offs, lens, 48);
+    assert(n == 2, "code 2 -> 2 frames");
+    assert(load64(lens) == 6, "code 2 honours the explicit first length");
+    assert(load64(lens + 8) == 13, "code 2 second frame takes the rest");
+    store8(buf + 1, 200);
+    assert(is_err(_opus_split_frames(buf, 21, offs, lens, 48)) == 1,
+           "code 2 rejects a first length past the packet end");
+
+    # --- code 2: two-byte length field (>= 252) ---
+    store8(buf, (31 << 3) | 2);
+    store8(buf + 1, 253); store8(buf + 2, 1);       # 253 + 4*1 = 257
+    n = _opus_split_frames(buf, 300, offs, lens, 48);
+    assert(n == 2, "code 2 two-byte length -> 2 frames");
+    assert(load64(lens) == 257, "code 2 two-byte length decodes as b1 + 4*b2");
+
+    # --- code 3 CBR: frame count byte, equal division ---
+    store8(buf, (18 << 3) | 3);       # config 18 = CELT 10ms, 4 frames = 40ms
+    store8(buf + 1, 4);               # VBR=0, padding=0, count=4
+    n = _opus_split_frames(buf, 42, offs, lens, 48);
+    assert(n == 4, "code 3 CBR -> the signalled frame count");
+    assert(load64(lens) == 10, "code 3 CBR divides the remainder evenly");
+    assert(load64(offs) == 2, "code 3 CBR first frame starts past TOC + count byte");
+    assert(is_err(_opus_split_frames(buf, 41, offs, lens, 48)) == 1,
+           "code 3 CBR rejects a remainder that does not divide");
+
+    # --- code 3 with padding: 255 means 254 bytes and another length byte ---
+    store8(buf, (18 << 3) | 3);
+    store8(buf + 1, 0x40 | 2);        # padding flag, count 2
+    store8(buf + 2, 5);               # 5 bytes of padding, no continuation
+    # 28 - 1 TOC - 1 count - 1 padding-length - 5 padding = 20, split two ways.
+    n = _opus_split_frames(buf, 28, offs, lens, 48);
+    assert(n == 2, "code 3 padded -> 2 frames");
+    assert(load64(lens) == 10, "code 3 padding is removed before dividing");
+
+    # --- code 3 VBR: explicit lengths for all but the last frame ---
+    store8(buf, (18 << 3) | 3);
+    store8(buf + 1, 0x80 | 3);        # VBR, count 3
+    store8(buf + 2, 4); store8(buf + 3, 6);
+    n = _opus_split_frames(buf, 24, offs, lens, 48);
+    assert(n == 3, "code 3 VBR -> 3 frames");
+    assert(load64(lens) == 4, "code 3 VBR first explicit length");
+    assert(load64(lens + 8) == 6, "code 3 VBR second explicit length");
+    assert(load64(lens + 16) == 10, "code 3 VBR last frame takes the remainder");
+
+    # --- hostile input: the duration and count caps must hold ---
+    store8(buf, (3 << 3) | 3);        # config 3 = 60ms per frame
+    store8(buf + 1, 3);               # 3 x 60ms = 180ms > the 120ms packet cap
+    assert(is_err(_opus_split_frames(buf, 40, offs, lens, 48)) == 1,
+           "a packet longer than 120 ms is rejected");
+    store8(buf, (18 << 3) | 3);
+    store8(buf + 1, 0);               # zero frames
+    assert(is_err(_opus_split_frames(buf, 40, offs, lens, 48)) == 1,
+           "a zero frame count is rejected");
+    store8(buf + 1, 0x40 | 2);
+    store8(buf + 2, 255); store8(buf + 3, 255);   # padding far beyond the packet
+    assert(is_err(_opus_split_frames(buf, 20, offs, lens, 48)) == 1,
+           "padding past the end of the packet is rejected");
+    assert(is_err(_opus_split_frames(buf, 0, offs, lens, 48)) == 1,
+           "an empty packet is rejected");
+    return 0;
+}
+
 fn test_opus_decode_from_packets() {
     syscall(1, 1, "test: opus decode from packets\n", 31);
 
@@ -1949,7 +2054,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.2 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.7.3 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -1970,6 +2075,7 @@ test_alac_bitreader();
 test_alac_verbatim_frame();
 test_i24_unpacked();
 test_opus_parse_tags();
+test_opus_packet_framing();
 test_opus_decode_from_packets();
 test_stream_chunking();
 test_flac_crc();

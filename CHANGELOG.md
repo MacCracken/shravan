@@ -5,6 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.3] - 2026-08-26
+
+**Opus decode completeness — and a packet-framing bug that was silently breaking shipped configs.**
+Verified against a from-source libopus rig covering all 32 TOC configs in mono and stereo: shravan
+now matches libopus within ±2 LSB on **52 of those 64 vectors, up from 22**. 11,660 assertions
+(was 11,622; +38).
+
+### Fixed — shravan had no Opus packet-framing layer at all
+
+The TOC byte's low two bits are the frame-count code (RFC 6716 §3.2). shravan read that code and
+then acted on it only in one place — a `code == 0` guard on the SILK branches. Everything else fell
+through: a code-1/2/3 SILK packet produced **silence**, and a code-3 CELT packet was handed to the
+decoder whole, frame-count byte and padding included.
+
+This is not a corner case. libopus pads CBR SILK streams using code 3, so **30% of packets (384 of
+1280) across the reference streams are code 3**. The effect on configs the project already claimed
+as verified:
+
+| config | before | after |
+|---|---|---|
+| 0 — SILK NB 10 ms | 1 of 20 frames decoded, rest silence | bit-exact |
+| 1 — SILK NB 20 ms | 1 of 20 | bit-exact |
+| 8 — SILK WB 10 ms | 7 of 20 | bit-exact |
+| 9 — SILK WB 20 ms | 6 of 20 | bit-exact |
+
+`_opus_split_frames` now implements codes 0/1/2/3 with the one- and two-byte length encoding, the
+255-continuation padding scheme, and libopus's validity checks (≤48 frames, ≤120 ms, every length
+inside the packet). The decode loop iterates frames within packets, and the output buffer is sized
+by a pre-scan of real frame durations — it was `packets × 960`, which a 60 ms frame (2880 samples)
+or a code-3 packet of 48 frames would have overrun. `test_opus_packet_framing` covers all four
+codes, both length encodings, padding, and four hostile-input rejections.
+
+### Added — SILK medium-band (12 kHz), TOC configs 4–7
+
+Every bandwidth decision in the SILK decoder was a binary `if (fs_kHz == 8) … else … WB`, so 12 kHz
+silently took the wideband branch. libopus puts 8 and 12 kHz *together* on `silk_NLSF_CB_NB_MB` with
+LPC order 10 (`decoder_set_fs.c:74`); five sites now test `fs_kHz < 16`. The one genuinely missing
+table was the pitch-lag low-bits iCDF — 8/12/16 kHz use `silk_uniform4/6/8` and shravan had no
+`uniform6`, so an MB voiced frame spent 3 bits where libopus spends log2(6). Also: 10 ms at 12 kHz
+is 120 samples = 7.5 shell blocks, the one config where libopus rounds the block count up.
+
+### Added — SILK 40 ms and 60 ms frames, TOC configs 2/3/6/7/10/11
+
+A SILK-mode Opus frame longer than 20 ms carries 2 or 3 sequential SILK frames in one range-coder
+stream, and the LP header groups every frame's VAD flag by channel ahead of that channel's LBRR
+flag — so the flags cannot be read per-frame. Frames after the first use **conditional coding**:
+the first gain is delta-coded, the pitch lag is predicted from the previous frame when that frame
+was voiced, and the LTP scaling index is omitted entirely. All three are now implemented, with the
+`ec_prevSignalType` / `ec_prevLagIndex` predictor state carried across frames.
+
+### Added — CELT 2.5 ms and 5 ms frames (LM=0/1), TOC configs 16/17/20/21/24/25/28/29
+
+The CELT core was already largely LM-generic; what was missing were the tables and two gates:
+
+- `e_prob_model` rows for LM=0 and LM=1, and `pred_coef`/`beta_coef` for both. Generated from the
+  libopus source and **validated by re-deriving the two rows shravan already had** before use.
+- `tf_select_table` held only the **LM=3 row**. That was also wrong for the LM=2 configs that ship
+  today — the LM=2 row differs at index 4 — so a transient 10 ms CELT or hybrid frame was decoded
+  with the wrong tf resolution. All four rows are now present and indexed by LM.
+- For LM=0 there is no `tf_select` bit and no transient bit; reading them desynchronised the range
+  decoder for every 2.5 ms frame.
+
+Before this, configs 16–29's odd rows decoded to silence, and **config 25 did not terminate at all**
+— a denial of service on a valid packet.
+
+### Added — redundant CELT frames at mode transitions (RFC 6716 §4.5.1)
+
+At a SILK↔CELT switch the encoder embeds an extra 5 ms CELT frame. shravan read the flag in the
+hybrid path but never decoded it, and in SILK-only mode never read it — there the flag is *implicit*,
+set whenever 17 bits remain. The visible cost was not a click: the CELT decoder entered each CELT run
+with stale state, so the frames after every switch were wrong and converged only over ~5 frames.
+`_opus_decode_redundancy` now reads the header, resets and primes the CELT state, decodes the 5 ms
+frame from its own range decoder over the trailing bytes, and cross-fades with the CELT window. Every
+SILK 40/60 ms mono config went from 9–10 bad frames to **bit-exact**.
+
+### Fixed — SILK stereo hardcoded a 20 ms frame length
+
+`silk_decode_stereo` computed `frame_length = 20 * fs_kHz` while the mono path read it from decoder
+state, so every 10 ms stereo packet built mid/side buffers twice the real length. Configs 0, 8, 12
+and 14 in stereo went from max errors of 14618/12310/14951/16208 LSB to bit-exact.
+
+### Added — Opus decode benchmark
+
+`opus_celt_decode_20ms` covers the CELT decode path this release reworked: **2.25 ms per 20 ms
+frame**, about 8.8× realtime. An interleaved A/B against 2.7.2 puts the framing pre-scan and the
+LM-indexed tf table at −0.6% (noise); FFT and FLAC are unchanged.
+
+### Known remaining gaps (measured, not estimated)
+
+12 of the 64 vectors are still outside ±2 LSB, and all of them are understood:
+
+- **CELT LM=1 stereo at SWB/FB** (configs 25, 29) — 3–4 isolated frames of 20 diverge; the rest are
+  exact. Not transient frames, and `dual_stereo` is decoded and threaded correctly, so the trigger is
+  not yet identified. This also propagates into the redundant frame, which is itself a 5 ms stereo
+  CELT decode — which is why six SILK/hybrid **stereo** vectors still show one bad frame at a
+  transition.
+- **Configs 30 and 31** — 2 and 4 individual samples exceed the tolerance (max 271 LSB) in otherwise
+  exact streams. Pre-existing; exposed by moving from correlation to a max-error metric.
+- **Hybrid redundancy** reads its header and keeps the range coder aligned, but still does not decode
+  the redundant frame; only the SILK-only path does.
+
 ## [2.7.2] - 2026-08-25
 
 **The encoder now uses the stereo and noise tools it could already decode.** 2.7.1 taught the

@@ -1,20 +1,22 @@
 # Development Roadmap
 
-**Current: v2.7.2.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.7.3.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
-- **Decode is real and complete for the mainstream Opus surface.** shravan decodes actual
-  libopus `.opus` — CELT + SILK + hybrid, mono **and** stereo, 10 ms **and** 20 ms, all
-  bandwidths — bit-exact vs libopus (correlation ~1.0 vs ffmpeg). Plus WAV, AIFF, FLAC (enc+dec),
-  Ogg, MP3 (MPEG-1/2/2.5 Layer I/II/III), AAC-LC, MP4/M4A demux, ALAC (decoder present).
+- **Decode covers ALL 32 Opus TOC configs (2.7.3).** CELT + SILK + hybrid, mono and stereo,
+  2.5 / 5 / 10 / 20 / 40 / 60 ms, NB through FB, with RFC 6716 §3.2 packet framing (codes 0–3,
+  padding) and redundant-frame handling at SILK↔CELT transitions. Verified against a from-source
+  libopus rig: **52 of 64 config×channel vectors within ±2 LSB**; the remaining 12 are itemised
+  under v2.7.4. Plus WAV, AIFF, FLAC (enc+dec), Ogg, MP3 (MPEG-1/2/2.5 Layer I/II/III), AAC-LC,
+  MP4/M4A demux, ALAC (decoder present).
 - **CELT encode is real and complete — mono AND stereo, at quality (v2.6.0–2.6.7).** shravan encodes
   a real RFC-6716 **CELT** frame that **libopus decodes sample-identical** to shravan's own decoder
   (correlation 1.000000), with the full decision surface: adaptive spread, 2-pass coarse-energy race,
   transient detection + short-block encode, per-band tf_analysis, masking-driven dynalloc boosts, and
   **stereo** (joint mid/side + intensity, `stereo_analysis` dual decision). Every stage ported from
   libopus's float build and adversarially verified faithful.
-- 11,622 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
+- 11,660 assertions, 0 failing. Cyrius toolchain pinned at 6.5.35.
 
 The remaining distance is (1) the rest of the Opus **encoder** (SILK + hybrid), (2) closing the small
 decode gaps, and (3) bringing the non-Opus codecs and the whole suite to production/interop quality.
@@ -26,11 +28,27 @@ The CELT encoder is done (mono + stereo). Three minors then finish Opus encode (
 mature the rest of the suite, and harden everything; **3.0.0** is the major bump when the suite is
 complete, fully interoperable both directions, and fuzz-clean.
 
-### v2.7.0 — Opus decode completeness · small–medium (close the last decode gaps)
-The mainstream surface decodes; finish the long tail so *every* Opus config decodes.
-- `feat(silk): MB (12 kHz, config 4–7) decode; 40 ms / 60 ms frame sizes (multi-subframe loop)`.
-- `feat(opus): CELT 2.5 ms / 5 ms (LM=0/1) decode — parameterize the remaining LM=2/3 assumptions`.
-- Redundant-frame (CELT↔SILK transition) audio handling in the hybrid path.
+### v2.7.3 — Opus decode completeness · **DONE** (shipped 2.7.3)
+Every one of the 32 TOC configs now decodes. Measured against a from-source libopus rig over all
+32 configs x mono/stereo: **52 of 64 vectors within ±2 LSB, up from 22**.
+- ~~`feat(silk): MB (12 kHz, config 4–7) decode; 40 ms / 60 ms frame sizes`~~ — done.
+- ~~`feat(opus): CELT 2.5 ms / 5 ms (LM=0/1) decode`~~ — done; also fixed the `tf_select_table`
+  row, which was wrong for the LM=2 configs already shipping.
+- ~~Redundant-frame (CELT↔SILK transition) handling~~ — done for SILK-only; hybrid still reads the
+  header without decoding the frame (below).
+- Unplanned but required: shravan had **no packet-framing layer**, so every code-1/2/3 packet
+  decoded wrongly. 30% of libopus's packets are code 3.
+
+### v2.7.4 — close the last 12 vectors · small (finish what 2.7.3 measured)
+All twelve are understood and reproducible with `scratchpad/opusref`.
+- `fix(opus): CELT LM=1 stereo at SWB/FB — 3–4 isolated frames of 20 diverge (configs 25, 29).`
+  Not transient frames; `dual_stereo` is decoded and threaded. This is the root cause of six more
+  stereo vectors, because the redundant frame is itself a 5 ms stereo CELT decode.
+- `fix(opus): configs 30/31 — 2 and 4 individual samples exceed ±2 LSB (max 271) in otherwise
+  exact streams.` Pre-existing; only visible once the metric moved from correlation to max error.
+- `feat(opus): decode the redundant frame in the HYBRID path too` (the header is already read and
+  the range coder stays aligned; only the decode + cross-fade is missing).
+- `test: fold the 64-vector libopus comparison into CI` rather than leaving it in the scratchpad.
 
 ### v2.8.0 — Opus SILK + hybrid ENCODE · large (full Opus encode)
 The big lift: the encoder counterpart of 2.6.1–2.6.3. Expect several patches (2.8.1…) —

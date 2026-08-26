@@ -442,6 +442,9 @@ include "src/flac.cyr"
 include "src/fft.cyr"
 include "src/resample.cyr"
 include "src/aac.cyr"
+include "src/tag.cyr"
+include "src/silk.cyr"
+include "src/opus.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -737,6 +740,50 @@ fn bench_aac_decode_1sec() {
 }
 
 # ================================================================
+# Benchmark: opus_celt_decode_20ms
+# ================================================================
+# The Opus decode path had no benchmark, and 2.7.3 added a per-packet framing
+# pre-scan plus a frame loop around the dispatch. This measures the CELT-only
+# fullband 20 ms decode, the hot path for CELT and hybrid alike.
+
+fn bench_opus_celt_decode() {
+    var N = 960;
+    var pcmin = alloc(N * 8);
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    for (var i = 0; i < N; i = i + 1) {
+        var ph = f64_div(f64_mul(two_pi, f64_from(i)), f64_from(48000));
+        var v = f64_add(f64_mul(f64_sin(f64_mul(ph, f64_from(440))), f64_div(F64_ONE, F64_TWO)),
+                        f64_mul(f64_sin(f64_mul(ph, f64_from(3300))), f64_div(F64_ONE, f64_from(5))));
+        store64(pcmin + i * 8, v);
+    }
+    # celt_encode wants the frame plus 120 samples of lookahead.
+    var pcmw = alloc((N + 120) * 8);
+    for (var k = 0; k < N + 120; k = k + 1) {
+        store64(pcmw + k * 8, load64(pcmin + (k % N) * 8));
+    }
+    var pkt = alloc(4096);
+    var plen = 160;
+    var enc = ec_enc_new(pkt, plen);
+    var est = celt_dec_state_new();   # the encoder shares the CELT state layout
+    var mem = alloc(8); store64(mem, 0);
+    celt_encode(est, enc, pcmw, 1, 3, 0, 0, mem);
+    ec_enc_done(enc);
+
+    var out = alloc(2 * N * 8);
+    var st = celt_dec_state_new();
+    celt_decode_frame(st, pkt, plen, 1, out);      # warm the tables
+
+    var iters = 200;
+    bench("opus_celt_decode_20ms", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        celt_decode_frame(st, pkt, plen, 1, out);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Benchmark: fft_1024
 # ================================================================
 
@@ -789,7 +836,7 @@ flac_init();
 fft_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.7.2 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.7.3 benchmarks\n", 26);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -803,6 +850,7 @@ var flac_enc_ns = bench_flac_encode_1sec();
 var flac_dec_ns = bench_flac_decode_1sec();
 var aac_enc_ns  = bench_aac_encode_1sec();
 var aac_dec_ns  = bench_aac_decode_1sec();
+var opus_dec_ns = bench_opus_celt_decode();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);

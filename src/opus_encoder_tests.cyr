@@ -715,23 +715,23 @@ fn test_celt_tf_encode_rfc() {
     store64(tfe + 19 * 8, 0);
     store64(tfe + 20 * 8, 0);
     var buf = alloc(16); var ee = ec_enc_new(buf, 16);
-    celt_tf_encode(tfe, 0, 0, ee, 0, 21);
+    celt_tf_encode(tfe, 0, 0, ee, 0, 21, 3);
     ec_enc_done(ee);
     assert(load64(ee + 88) == 0, "tf_encode: no error");
     var dd = ec_dec_new(buf, 16);
     var tfd = alloc(21 * 8);
-    celt_tf_decode(tfd, 0, dd, 0, 21);
+    celt_tf_decode(tfd, 0, dd, 0, 21, 3);
     var i = 0; var ok = 1;
     while (i < 21) { if (load64(tfe + i * 8) != load64(tfd + i * 8)) { ok = 0; } i = i + 1; }
     assert(ok == 1, "tf_encode->tf_decode round-trip (mapped tf_res)");
     var tfe2 = alloc(21 * 8); var j = 0;
     while (j < 21) { store64(tfe2 + j * 8, (j * 7) & 1); j = j + 1; }
     var buf2 = alloc(16); var ee2 = ec_enc_new(buf2, 16);
-    celt_tf_encode(tfe2, 1, 1, ee2, 0, 21);
+    celt_tf_encode(tfe2, 1, 1, ee2, 0, 21, 3);
     ec_enc_done(ee2);
     var dd2 = ec_dec_new(buf2, 16);
     var tfd2 = alloc(21 * 8);
-    celt_tf_decode(tfd2, 1, dd2, 0, 21);
+    celt_tf_decode(tfd2, 1, dd2, 0, 21, 3);
     i = 0; var ok2 = 1;
     while (i < 21) { if (load64(tfe2 + i * 8) != load64(tfd2 + i * 8)) { ok2 = 0; } i = i + 1; }
     assert(ok2 == 1, "tf_encode->tf_decode round-trip (transient, tf_select=1)");
@@ -1739,13 +1739,13 @@ fn test_celt_tf_analysis_rfc() {
     # Encode the raw tf_res (celt_tf_encode remaps `tf` in place to the tf_change values)
     var buf = alloc(64); var zz = 0; while (zz < 64) { store8(buf + zz, 0); zz = zz + 1; }
     var ee = ec_enc_new(buf, 64);
-    celt_tf_encode(tf, it, tf_select, ee, 0, 21);
+    celt_tf_encode(tf, it, tf_select, ee, 0, 21, 3);
     var enc_tell = ec_tell(ee);
     ec_enc_done(ee);
     # Decode: the decoder must reconstruct the identical remapped tf_res, consuming the same bits
     var dtf = alloc(21 * 8);
     var dd = ec_dec_new(buf, 64);
-    celt_tf_decode(dtf, it, dd, 0, 21);
+    celt_tf_decode(dtf, it, dd, 0, 21, 3);
     var dec_tell = ec_tell(dd);
     syscall(1, 2, "tf_select=", 10); fmt_int_fd(2, tf_select); syscall(1, 2, " tf_bits=", 9); fmt_int_fd(2, enc_tell); syscall(1, 2, "\n", 1);
     _celt_assert_arr(tf, dtf, 21, "tf_res: encoder remap == decoder remap (round-trip)");

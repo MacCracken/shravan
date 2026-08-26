@@ -125,6 +125,44 @@ tuning choice, not a spec value; it was swept over 0.80/0.85/0.90 on three
 signals, trading about 0.3% of bitrate against 0.0008 of ch1 correlation across
 that range.
 
+## Opus decode tables (v2.7.3)
+
+libopus 1.5.2 source (`downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz`) was
+used as the authority, and every table was **generated from that source by
+script, never transcribed**. Each generator was validated on data shravan
+already had before its new output was trusted:
+
+- **`e_prob_model[0]` and `[1]`** (CELT coarse-energy probability model, 2.5 ms
+  and 5 ms) — `celt/quant_bands.c`. The parser was first run against rows `[2][0]`
+  and `[2][1]`, which shravan already carried, and both matched byte-for-byte.
+- **`pred_coef` / `beta_coef`** for LM=0 and LM=1 — `celt/quant_bands.c:63`.
+- **`tf_select_table[4][8]`** — `celt/celt.c:263`. shravan held a single row; the
+  generator confirmed it equalled the LM=3 row exactly, then emitted all four.
+  The LM=2 row differs from LM=3 at index 4 (2 vs 3), so the single-row table was
+  also wrong for the 10 ms configs already shipping.
+- **`silk_uniform6_iCDF`** — `silk/tables_other.c:92`, the 12 kHz pitch-lag
+  low-bits codebook.
+- **`silk_pitch_delta_iCDF`**, **`silk_LBRR_flags_2/3_iCDF`** —
+  `silk/tables_pitch_lag.c:41`, `silk/tables_other.c`.
+
+Behavioural rules were read from the source rather than recalled, and two
+recollections were wrong until checked:
+
+- The redundant frame at a mode transition is **5 ms (LM=1)**, not 2.5 ms;
+  `F2_5 = 120` is the cross-fade length, not the frame length
+  (`src/opus_decoder.c:600`).
+- The SILK LP header orders flags **per channel** — every VAD flag for a channel,
+  then that channel's LBRR flag — not VAD/LBRR interleaved per frame
+  (`silk/dec_API.c:231`).
+
+## Verification rig
+
+`scratchpad/opusref/` builds against the installed libopus and generates, for
+each of the 32 TOC configs in mono and stereo, a packet container plus
+**libopus's own decode of exactly those packets**. shravan is judged by maximum
+absolute sample error against that PCM, not by correlation: correlation above
+0.999 was found to pass a stream containing a frame off by 271 LSB.
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified
