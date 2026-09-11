@@ -27,6 +27,14 @@
 # >>> include "lib/fnptr.cyr"
 include "lib/fnptr.cyr"
 
+# v6.5.44 — THREADS_CONCURRENT: does thread_create actually produce a SECOND thread?
+# 1 = the body runs concurrently with the caller; 0 = it runs INLINE at create (serial peer).
+# ⛔ This exists because the concurrency corpus could not tell the two apart. Every test in it
+# passed on macOS while bodies ran inline — a serial backend satisfies "the worker ran", "join
+# returned 0" and "the count is exact". A test that DISCRIMINATES must be guarded by capability
+# (never by target name, never by errno — the v6.5.36 lesson), and this is that capability.
+var THREADS_CONCURRENT = 0;   # serial fallback (bodies run inline)
+
 # Create a real OS thread: CreateThread(NULL, 0, fp, arg, 0, NULL). fp is the
 # cyrius thread-body fn pointer (&body) — a single-i64-param fn returning i64,
 # which compiled for PE is already a valid MS-x64 ThreadProc (lpParameter arrives

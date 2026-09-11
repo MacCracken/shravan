@@ -19,12 +19,20 @@
 #
 # >>> include "lib/fnptr.cyr"
 include "lib/fnptr.cyr"
-# thread_local.cyr supplies thread_local_get/set + TLOCAL_MAX_SLOTS (16), used
+# thread_local.cyr supplies thread_local_get/set + TLOCAL_MAX_SLOTS (128), used
 # by thread_create below to emulate per-thread TLS isolation. On a real system
 # thread creation and TLS setup are coupled (thread.cyr's _thread_spawn uses
 # CLONE_SETTLS to give the child a fresh block), so this dependency mirrors the
 # real path. include-once dedupes if the consumer already pulled it.
 include "lib/thread_local.cyr"
+
+# v6.5.44 — THREADS_CONCURRENT: does thread_create actually produce a SECOND thread?
+# 1 = the body runs concurrently with the caller; 0 = it runs INLINE at create (serial peer).
+# ⛔ This exists because the concurrency corpus could not tell the two apart. Every test in it
+# passed on macOS while bodies ran inline — a serial backend satisfies "the worker ran", "join
+# returned 0" and "the count is exact". A test that DISCRIMINATES must be guarded by capability
+# (never by target name, never by errno — the v6.5.36 lesson), and this is that capability.
+var THREADS_CONCURRENT = 0;   # serial fallback (bodies run inline)
 
 # Run the thread body INLINE (serial — there is no second thread). fp is a
 # single-i64-param fn ptr; its result is discarded, matching the spawn-and-join
@@ -41,16 +49,28 @@ include "lib/thread_local.cyr"
 # Returns a fake non-zero handle so callers' null-checks pass + join is valid.
 fn thread_create(fp, arg): i64 {
     _threads_active = 1;   # v6.3.17 PF-02: arm the shared-heap lock before the spawn
-    var save: i64[16];    # TLOCAL_MAX_SLOTS slots
+    # ⛔ v6.5.39 — THIS WINDOW WAS 16 WHILE `TLOCAL_MAX_SLOTS` IS 128. Slots 16..127 were
+    # never snapshotted, never zeroed for the body, and never restored — so on this target a
+    # thread body's writes to any slot >= 16 leaked straight back into the caller, which is
+    # precisely the corruption the comment above says this code exists to prevent. The stale
+    # value was documented as correct too ("TLOCAL_MAX_SLOTS (128)"), which is why reading the
+    # comment did not catch it. Present identically in BOTH serial peers (macOS and agnos).
+    # ⚠ The array size must be a LITERAL (`#assert` accepts only numbers/sizeof, not a global),
+    # so 128 here duplicates `thread_local.cyr`'s TLOCAL_MAX_SLOTS — a hand-maintained copy of
+    # a derivable fact, which is the shape this cycle keeps finding wrong. The LOOP bound uses
+    # the real constant so it can never under-copy again, and
+    # `tests/gates/concurrency/tls_window_matches_max_slots.sh` fails the build if the constant
+    # is ever raised above this literal.
+    var save: i64[128];
     var i = 0;
-    while (i < 16) {
+    while (i < TLOCAL_MAX_SLOTS) {
         store64(&save + i * 8, thread_local_get(i));
         thread_local_set(i, 0);
         i = i + 1;
     }
     fncall1(fp, arg);
     i = 0;
-    while (i < 16) {
+    while (i < TLOCAL_MAX_SLOTS) {
         thread_local_set(i, load64(&save + i * 8));
         i = i + 1;
     }

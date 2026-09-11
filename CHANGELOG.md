@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.35` → `6.6.2`**, and sankoch `2.7.10` → `2.7.14`. No source
+  change. Zero compiler rejections, zero fail-open sites.
+
+  ⚠ Nine `src/*.cyr` files are not canonically formatted under the 6.6.2 formatter
+  (cyrfmt began tracking paren depth at 6.5.28; this repo was pinned 6.5.35 but
+  predates the reformat). No CI step runs `cyrius fmt`, so nothing is red; left
+  alone rather than shipping a nine-file whitespace diff.
+
 ## [2.8.0] - 2026-08-26
 
 **SILK encoder, part 1: the bitstream writer and the quantisation chain — every piece verified

@@ -74,6 +74,14 @@ include "lib/mmap.cyr"
 # double-include if callers already pulled it in).
 include "lib/atomic.cyr"
 
+# v6.5.44 — THREADS_CONCURRENT: does thread_create actually produce a SECOND thread?
+# 1 = the body runs concurrently with the caller; 0 = it runs INLINE at create (serial peer).
+# ⛔ This exists because the concurrency corpus could not tell the two apart. Every test in it
+# passed on macOS while bodies ran inline — a serial backend satisfies "the worker ran", "join
+# returned 0" and "the count is exact". A test that DISCRIMINATES must be guarded by capability
+# (never by target name, never by errno — the v6.5.36 lesson), and this is that capability.
+var THREADS_CONCURRENT = 1;   # REAL clone(2) threads
+
 # Stack size per thread. v6.3.13: bumped 64KB → 2MB so that `var arr[N]` LOCALS —
 # now per-thread STACK-allocated (thread-safe; previously a shared global/BSS buffer,
 # the str_builder concurrency root cause) — fit on a spawned thread's stack even for
