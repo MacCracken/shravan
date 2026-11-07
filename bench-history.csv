@@ -181,3 +181,15 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-08-26T07:55:12Z,8869588,main,aac_encode_1sec_stereo,604954000
 2026-08-26T07:55:12Z,8869588,main,aac_decode_1sec_stereo,982628000
 2026-08-26T07:55:12Z,8869588,main,opus_celt_decode_20ms,2592000
+2026-11-07T18:23:42Z,461ceaf,main,wav_decode_1sec_i16,891248
+2026-11-07T18:23:42Z,461ceaf,main,wav_encode_1sec_i16,821254
+2026-11-07T18:23:42Z,461ceaf,main,pcm_i16_to_f64_4096,84047
+2026-11-07T18:23:42Z,461ceaf,main,pcm_i24_packed_4096,78784
+2026-11-07T18:23:42Z,461ceaf,main,pcm_u8_to_f64_4096,67108
+2026-11-07T18:23:42Z,461ceaf,main,fft_forward_1024,1294000
+2026-11-07T18:23:42Z,461ceaf,main,mdct_forward_2048,6068000
+2026-11-07T18:23:42Z,461ceaf,main,flac_encode_1sec_i16,10574000
+2026-11-07T18:23:42Z,461ceaf,main,flac_decode_1sec_i16,3840000
+2026-11-07T18:23:42Z,461ceaf,main,aac_encode_1sec_stereo,580876000
+2026-11-07T18:23:42Z,461ceaf,main,aac_decode_1sec_stereo,909764000
+2026-11-07T18:23:42Z,461ceaf,main,opus_celt_decode_20ms,2138000

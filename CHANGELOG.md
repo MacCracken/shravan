@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2] - 2026-11-07
+
+Maintenance release. No codec source change. 11,706 assertions (unchanged).
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`**, sankoch `2.7.14` → `2.8.1`, bayan `1.5.5` → `1.5.12` — the
+  versions the 6.6.20 snapshot bundles. `lib/` re-vendored: all 41 files are byte-identical to the
+  snapshot, whose 113 files match the `6.6.20` tag; sankoch resolved from its tag is byte-identical
+  to the bundled copy. New vendored leaves `alloc_cx.cyr` and `poison.cyr`.
+- **`dist/` regenerated with the 6.6.20 distlib.** The bundle now opens with a compile-verified
+  `# Requires` include block, and `dist/shravan.deps` narrows from 15 stdlib leaves to the 7 it needs
+  directly (`math`, `ganita`, `io`, `assert`, `str`, `bayan`, `syscalls`); the rest arrive
+  transitively. A consumer declaring only those 7 builds and runs against the bundle.
+- **Version banners** in `src/main.cyr` and `src/bench.cyr` now read v2.8.2; both had stayed at
+  v2.8.0 through 2.8.1. Toolchain references in the README, CONTRIBUTING, roadmap and CLAUDE.md
+  corrected from 6.5.35.
+
+### Verified
+
+- **Numerics did not move.** Upstream rewrote `f64_sin`/`f64_cos` (6.6.9) and `f64_pow` (6.6.10) for
+  accuracy, so a green suite was not enough on its own: the stdout of all three test binaries,
+  built on 6.6.2 and 6.6.20, is identical apart from the version banner.
+- `./fuzz/run.sh 90000`: all fuzzers passed, 0 crashes. `cyrius vet`: 0 untrusted, 0 missing. Write
+  lengths correct. CI's `lib sync` + `deps` sequence replayed from an empty `lib/` reproduces `lib/`
+  and `cyrius.lock` byte for byte.
+- **Benchmarks** (same session, three alternating runs against a 6.6.2 build): median +0.5% across
+  12 benchmarks. Outliers are `fft_forward_1024` −6.9% and `pcm_u8_to_f64_4096` +25.0%.
+
+  The `pcm_u8` jump is code layout, not a regression. The loop and its callees compile to identical
+  instructions on both toolchains, and a reduced program runs at 52 µs on both. Shifting a local copy
+  of the callee by a few bytes swings that loop from 33 µs to 66 µs **on 6.6.2**, and from 33 µs to
+  38 µs on 6.6.20, so this benchmark says little about either toolchain on this CPU (Zen 3). It is not
+  caused by page faults (173 vs 175), allocator position or heap offset; all three were measured.
+
+### Notes
+
+- Harness binaries grow by about 282 KB (`build/shravan` 2,888,016 → 3,169,800 bytes). The growth is
+  the same in all three, so it comes from the toolchain and its libraries, not shravan's source. It
+  is well inside the compiler's code buffer, a 64 MiB growable region since 6.4.49.
+- ⚠ The pin-move sequence is now `cyrius lib sync`, then `cyrius deps --relock`. `lib sync` copies
+  declared modules only, so plain `deps` refuses the transitive leaves still at the old pin
+  (`atomic`, `boxed`, `mmap`, `result`, `sync*`) as a lock/snapshot disagreement. Relock only when
+  the pin really moved; under an unchanged pin that refusal means the snapshot changed.
+- `cyrius.lock` keeps the old `sankoch 2.7.14` commit row alongside `2.8.1`. Retaining old-tag rows
+  is deliberate toolchain behaviour (fail-closed) since 6.6.20.
+- distlib warns that `is_err` is undefined for `x86_64-windows`. `syscalls_windows.cyr` did not
+  define it at 6.6.2 either, and Windows is not a shravan target.
+- The same nine `src/*.cyr` files as 2.8.1 remain non-canonical under the formatter.
+
 ## [2.8.1] - 2026-09-11
 
 ### Changed
