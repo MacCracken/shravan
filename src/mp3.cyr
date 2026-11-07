@@ -750,7 +750,7 @@ fn _mp3_l3_init() {
     _mp3_hd(20,1719,511,6);_mp3_hd(21,1719,511,8);_mp3_hd(22,1719,511,10);_mp3_hd(23,1719,511,13);
     _mp3_hd(24,2230,512,4);_mp3_hd(25,2230,512,5);_mp3_hd(26,2230,512,6);_mp3_hd(27,2230,512,7);
     _mp3_hd(28,2230,512,8);_mp3_hd(29,2230,512,9);_mp3_hd(30,2230,512,11);_mp3_hd(31,2230,512,13);
-    _mp3_hd(32,2742,31,0); _mp3_hd(33,2261,31,0);
+    _mp3_hd(32,2742,31,0); _mp3_hd(33,2773,31,0);
 
     # --- synthesis window (bit patterns are f64 directly) ---
     _mp3_dtbl = alloc(512 * 8);
@@ -870,7 +870,7 @@ fn test_mp3_l3_tables() {
     # descriptor spot checks
     assert_eq(load64(_mp3_huff_tlen + 1 * 8), 7, "tab1 treelen 7");
     assert_eq(load64(_mp3_huff_lin + 16 * 8), 1, "tab16 linbits 1");
-    assert_eq(load64(_mp3_huff_off + 33 * 8), 2261, "tab33 off 2261");
+    assert_eq(load64(_mp3_huff_off + 33 * 8), 2773, "tab33 off 2773");
     # sfb long[0][ ] : 44100 band 6 = 24, band 22 = 576
     # unified 8-row sfb tables (minimp3 sr_idx order): row 5 = MPEG1 44100, row 2 = MPEG2 22050, row 0 = MPEG2.5 11025
     assert_eq(load64(_mp3_sfb_l + (5*23 + 6) * 8), 24, "sfbl[44100][6]=24");
@@ -1180,7 +1180,9 @@ fn _mp3_read_huffman(part_2_start, gr, ch) {
     var region1 = 0;
     var region2 = 0;
     if ((load64(_si_winsw + gc * 8) == 1) && (load64(_si_btype + gc * 8) == 2)) {
-        region1 = 36;
+        # Three windows of the first three short bands. That is 36 lines at every
+        # rate but 8 kHz, whose short bands are twice as wide, making it 72.
+        region1 = load64(_mp3_sfb_s + (_mp3_sfreq * 14 + 3) * 8) * 3;
         region2 = 576;
     } else {
         var r0 = load64(_si_r0 + gc * 8);

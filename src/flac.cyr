@@ -591,14 +591,12 @@ fn flac_decode_lpc(br, block_size, bps, order) {
             acc = acc + load64(coeffs + j * 8) * load64(buf + (n - 1 - j) * 8);
             j = j + 1;
         }
-        # Arithmetic right shift for acc >> qlp_shift
+        # acc >> qlp_shift must round down, as an arithmetic shift does: rounding
+        # toward zero is off by one on every negative prediction, and the error
+        # feeds back through the filter until the audio is unrecognisable.
         var predicted = 0;
         if (qlp_shift >= 0) {
-            if (acc < 0) {
-                predicted = 0 - ((0 - acc) >> qlp_shift);
-            } else {
-                predicted = acc >> qlp_shift;
-            }
+            predicted = sar(acc, qlp_shift);
         } else {
             predicted = acc << (0 - qlp_shift);
         }
@@ -1386,13 +1384,9 @@ fn flac_apply_mid_side(left, right, count, mid_buf, side_buf) {
         var l = load64(left + i * 8);
         var r = load64(right + i * 8);
         store64(side_buf + i * 8, l - r);
-        # Arithmetic right shift for (l + r) >> 1
-        var sum = l + r;
-        if (sum < 0) {
-            store64(mid_buf + i * 8, 0 - ((0 - sum) >> 1));
-        } else {
-            store64(mid_buf + i * 8, sum >> 1);
-        }
+        # (l + r) >> 1 has to round down. The decoder rebuilds the dropped bit from
+        # side, so rounding an odd negative sum toward zero loses a sample value.
+        store64(mid_buf + i * 8, sar(l + r, 1));
         i = i + 1;
     }
     return 0;
@@ -1927,6 +1921,64 @@ fn flac_encode(samples_vec, sample_rate, channels, bits_per_sample, out_buf) {
 # FLAC module init (call before any encode/decode)
 # ================================================================
 
+# Check a FLAC stream against the MD5 of the audio stored in its STREAMINFO.
+#
+# Returns 0 if the decoded audio matches, 1 if the file stores no signature (an
+# all-zero field means the encoder did not compute one), or a negative error if
+# the stream will not decode or the audio does not match (ERR_DECODE).
+#
+# This is separate from flac_decode because hashing costs as much again as the
+# decode, and most callers already trust their files.
+fn flac_verify(data, len) {
+    if (len < 42) { return err(ERR_INVALID_HEADER); }
+    if (read_u32_be(data, 0) != 0x664C6143) { return err(ERR_INVALID_HEADER); }   # "fLaC"
+    if ((load8(data + 4) & 0x7F) != 0) { return err(ERR_INVALID_HEADER); }        # STREAMINFO first
+
+    # The signature is the last 16 bytes of the 34-byte STREAMINFO body.
+    var stored = data + 26;
+    var has_sig = 0;
+    var i = 0;
+    while (i < 16) {
+        if (load8(stored + i) != 0) { has_sig = 1; }
+        i = i + 1;
+    }
+    if (has_sig == 0) { return 1; }
+
+    var dr = flac_decode(data, len);
+    if (is_err(dr) == 1) { return dr; }
+    var samples = decode_result_samples(dr);
+    var bps = fmtinfo_bit_depth(decode_result_info(dr));
+    var bytes_per = (bps + 7) / 8;
+    var count = vec_len(samples);
+    if (count > 268435456 / bytes_per) { return err(ERR_DECODE); }
+
+    # flac_decode scaled by a power of two, so scaling back is exact. The hash
+    # covers signed little-endian samples in whole bytes.
+    var pcm = alloc(count * bytes_per + 1);
+    if (pcm == 0) { return err(ERR_DECODE); }
+    var scale = f64_from(1 << (bps - 1));
+    var pos = 0;
+    i = 0;
+    while (i < count) {
+        var s = f64_to(f64_mul(vec_get(samples, i), scale));
+        var b = 0;
+        while (b < bytes_per) {
+            store8(pcm + pos, (s >> (b * 8)) & 0xFF);
+            pos = pos + 1;
+            b = b + 1;
+        }
+        i = i + 1;
+    }
+
+    var md5 = flac_md5_compute(pcm, pos);
+    i = 0;
+    while (i < 16) {
+        if (load8(md5 + i) != load8(stored + i)) { return err(ERR_DECODE); }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn flac_init() {
     flac_crc8_init();
     flac_crc16_init();
@@ -2167,6 +2219,42 @@ fn test_flac_encode_decode_sine() {
     }
     assert_eq(ok, 1, "flac sine roundtrip within tolerance");
 
+    return 0;
+}
+
+# flac_verify recomputes the audio's MD5, so these are checked against the stored
+# signature. The 8-bit case matters: its samples are one byte, and the sign has to
+# survive packing.
+fn test_flac_verify() {
+    syscall(1, 1, "test: flac md5 verify\n", 22);
+    var samples = vec_new();
+    for (var i = 0; i < 2048; i = i + 1) {
+        vec_push(samples, f64_div(f64_from((i % 200) - 100), f64_from(128)));
+    }
+    var buf = alloc(262144);
+
+    var n = flac_encode(samples, 44100, 2, 16, buf);
+    assert_eq(flac_verify(buf, n), 0, "flac verify 16-bit stereo");
+    n = flac_encode(samples, 48000, 1, 24, buf);
+    assert_eq(flac_verify(buf, n), 0, "flac verify 24-bit mono");
+    n = flac_encode(samples, 22050, 1, 8, buf);
+    assert_eq(flac_verify(buf, n), 0, "flac verify 8-bit mono");
+
+    # A wrong signature is an error, not a pass.
+    var kept = load8(buf + 30);
+    store8(buf + 30, kept ^ 0xFF);
+    var bad = flac_verify(buf, n);
+    assert(is_err(bad) == 1, "flac verify rejects a wrong signature");
+    assert_eq(bad, err(ERR_DECODE), "flac verify mismatch is ERR_DECODE");
+    store8(buf + 30, kept);
+
+    # An all-zero signature means none was stored.
+    for (var z = 0; z < 16; z = z + 1) { store8(buf + 26 + z, 0); }
+    assert_eq(flac_verify(buf, n), 1, "flac verify reports no signature");
+
+    assert(is_err(flac_verify(buf, 10)) == 1, "flac verify rejects a short buffer");
+    store8(buf, 0);
+    assert(is_err(flac_verify(buf, n)) == 1, "flac verify rejects bad magic");
     return 0;
 }
 

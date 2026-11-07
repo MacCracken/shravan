@@ -175,7 +175,7 @@ fn fmtinfo_total_samples(fi){ return load64(fi + 40); }
 # Detect audio format from header bytes.
 # data: pointer to byte buffer, len: buffer length
 # Returns AudioFormat enum value on success, negative error on failure.
-fn detect_format(data, len) {
+fn shravan_detect_format(data, len) {
     if (len < 4) { return err(ERR_INVALID_HEADER); }
 
     # WAV: "RIFF"
@@ -268,6 +268,14 @@ fn detect_format(data, len) {
     }
 
     return err(ERR_UNSUPPORTED_FMT);
+}
+
+# sankoch also defines detect_format(src, src_len), for compression formats, and
+# both bundles land in one namespace where the last definition wins. Everything
+# in shravan calls shravan_detect_format so that order cannot reroute codec_open
+# into sankoch's version. This name stays for compatibility until 3.0.
+fn detect_format(data, len) {
+    return shravan_detect_format(data, len);
 }
 
 # ================================================================
@@ -516,6 +524,16 @@ fn f64_to_u8(samples, out) {
 }
 
 # Convert IEEE 754 float32 (4 bytes LE) to f64 vec.
+# Read little-endian IEEE 754 doubles into a vec: the samples are stored as-is.
+fn f64le_to_f64_vec(src, count) {
+    var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
+    for (var i = 0; i < count; i = i + 1) {
+        vec_push(v, load64(src + i * 8));
+    }
+    return v;
+}
+
 fn f32_to_f64_vec(src, count) {
     var v = _vec_new_cap(count);
     if (is_err(v) == 1) { return v; }
@@ -741,6 +759,10 @@ fn wav_decode(data, len) {
             var count = dat_size / 4;
             samples = f32_to_f64_vec(audio, count);
         }
+        if (fmt_bps == 64) {
+            var count = dat_size / 8;
+            samples = f64le_to_f64_vec(audio, count);
+        }
     }
 
     # SEC-025: the converters can now return a packed error (oversized or
@@ -778,10 +800,10 @@ fn wav_decode(data, len) {
 fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
     if (channels == 0)    { return err(ERR_INVALID_CHANNELS); }
     if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
-    if (pcm_fmt == PCM_F64) { return err(ERR_ENCODE); }
 
     var fmt_code = WAV_FMT_PCM;
     if (pcm_fmt == PCM_F32) { fmt_code = WAV_FMT_IEEE_FLOAT; }
+    if (pcm_fmt == PCM_F64) { fmt_code = WAV_FMT_IEEE_FLOAT; }
 
     var bps = pcm_bit_depth(pcm_fmt);
     var bytes_ps = pcm_bytes_per_sample(pcm_fmt);
@@ -810,6 +832,14 @@ fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
     if (pcm_fmt == PCM_F32) {
         # Convert f64 back to f32 IEEE 754 LE
         raw_size = f64_to_f32_bytes(samples, raw_data);
+    }
+    if (pcm_fmt == PCM_F64) {
+        # f64 samples are already IEEE 754 doubles, so this is a straight copy.
+        var f64_count = vec_len(samples);
+        for (var fi = 0; fi < f64_count; fi = fi + 1) {
+            store64(raw_data + fi * 8, vec_get(samples, fi));
+        }
+        raw_size = f64_count * 8;
     }
 
     var data_size = raw_size;
@@ -1299,10 +1329,8 @@ fn aiff_encode(samples, sample_rate, channels, bits, out) {
 # ================================================================
 
 # ALAC constants
-var ALAC_MB0 = 10;
-var ALAC_MAX_PREFIX = 9;
-var ALAC_QBSHIFT = 9;
 var ALAC_MAX_COEFS = 32;
+var ALAC_MAX_FRAME = 16384;
 
 # ALAC element tags
 enum AlacTag { ID_SCE = 0; ID_CPE = 1; ID_LFE = 3; ID_END = 7; }
@@ -1411,87 +1439,97 @@ fn bitreader_read_bit(br) {
     return bitreader_read(br, 1);
 }
 
-# Floor of log2(x + 3)
-fn alac_lg3(x) {
-    var v = x + 3;
+# floor(log2(x)), and 0 for x <= 1: the format relies on log2(0) being 0.
+fn _alac_log2(x) {
     var r = 0;
-    while (v > 1) { v = v >> 1; r = r + 1; }
+    while (x > 1) { x = x >> 1; r = r + 1; }
     return r;
 }
 
-# Decode a single Rice-coded value
-fn alac_rice_decode(br, m, k, max_bits) {
-    var prefix = 0;
-    while (prefix < ALAC_MAX_PREFIX) {
-        var b = bitreader_read_bit(br);
-        if (is_err(b) == 1) { return b; }
-        if (b == 0) { prefix = ALAC_MAX_PREFIX + 1; }
-        else { prefix = prefix + 1; }
-    }
-    # Adjust: if we broke out with b==0, prefix was not incremented for that bit
-    if (prefix > ALAC_MAX_PREFIX) { prefix = prefix - ALAC_MAX_PREFIX - 1; }
-
-    if (prefix >= ALAC_MAX_PREFIX) {
-        return bitreader_read(br, max_bits);
-    }
-
-    var suffix = 0;
-    if (k > 0) { suffix = bitreader_read(br, k); }
-    if (is_err(suffix) == 1) { return suffix; }
-    return prefix * m + suffix;
+# Wrap to a signed `bits`-wide value. ALAC's arithmetic is 32-bit and wraps.
+fn _alac_wrap(v, bits) {
+    var u = v & ((1 << bits) - 1);
+    if (u >= (1 << (bits - 1))) { return u - (1 << bits); }
+    return u;
 }
 
-# Decode Rice-coded residual block
-# output: pre-allocated buffer (pointer), num_samples: count
-fn alac_rice_decode_block(br, output, num_samples, max_bits, pb, kb) {
-    var history = ALAC_MB0;
+# Sign of a value: -1, 0 or 1.
+fn _alac_sign(v) {
+    if (v > 0) { return 1; }
+    if (v < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Read one adaptive Golomb-Rice value. Leading ones give the prefix; nine of them
+# mean the value follows raw in `bps` bits. The prefix counts in units of 2^k - 1,
+# and the k-bit suffix is one bit shorter when its top k-1 bits are all zero.
+fn alac_rice_scalar(br, k, bps) {
+    var x = 0;
+    var more = 1;
+    while (more == 1) {
+        var b = bitreader_read_bit(br);
+        if (is_err(b) == 1) { return b; }
+        if (b == 0) {
+            more = 0;
+        } else {
+            x = x + 1;
+            if (x == 9) { more = 0; }
+        }
+    }
+    if (x == 9) { return bitreader_read(br, bps); }
+    if (k <= 1) { return x; }
+
+    var hi = bitreader_read(br, k - 1);
+    if (is_err(hi) == 1) { return hi; }
+    var val = (x << k) - x;
+    if (hi == 0) { return val; }
+    var lo = bitreader_read_bit(br);
+    if (is_err(lo) == 1) { return lo; }
+    return val + ((hi << 1) | lo) - 1;
+}
+
+# Decode a block of Rice-coded residuals. The parameter k follows a running
+# history of the signal's magnitude, and when the history falls low enough the
+# stream carries a run of zeros instead. `mult` is the channel's history rate.
+fn alac_rice_decode_block(br, output, num_samples, bps, mult, mb, kb) {
+    var history = mb;
     var sign_mod = 0;
     var i = 0;
 
     while (i < num_samples) {
-        var k = alac_lg3(history);
+        var k = _alac_log2((history >> 9) + 3);
         if (k > kb) { k = kb; }
-        var m = (1 << k) - 1;
-
-        var raw = alac_rice_decode(br, m, k, max_bits);
-        if (is_err(raw) == 1) { return raw; }
-        raw = raw + sign_mod;
-
-        # Unsigned to signed: 0,1,2,3,4 -> 0,-1,1,-2,2
-        var signed = 0;
-        if ((raw & 1) != 0) {
-            signed = 0 - ((raw + 1) >> 1);
-        } else {
-            signed = raw >> 1;
-        }
-
-        store64(output + i * 8, signed);
+        var x = alac_rice_scalar(br, k, bps);
+        if (is_err(x) == 1) { return x; }
+        x = x + sign_mod;
         sign_mod = 0;
 
-        # Update history
-        if (raw > 0xFFFF) { history = 0xFFFF; }
-        else {
-            history = history + (raw * pb) - ((history * pb) >> ALAC_QBSHIFT);
+        # Unsigned to signed: 0,1,2,3,4 -> 0,-1,1,-2,2
+        store64(output + i * 8, (x >> 1) ^ (0 - (x & 1)));
+
+        if (x > 0xFFFF) {
+            history = 0xFFFF;
+        } else {
+            history = history + x * mult - ((history * mult) >> 9);
         }
 
-        # Zero-run detection
         if (history < 128) {
-            if ((i + 1) < num_samples) {
-                var k_run = alac_lg3(history);
-                if (k_run > kb) { k_run = kb; }
-                var m_run = (1 << k_run) - 1;
-                var run_len = alac_rice_decode(br, m_run, k_run, 16);
-                if (is_err(run_len) == 1) { return run_len; }
-                var run = run_len;
-                if (run > (num_samples - i - 1)) { run = num_samples - i - 1; }
-                var j = 0;
-                while (j < run) {
-                    i = i + 1;
-                    if (i < num_samples) { store64(output + i * 8, 0); }
-                    j = j + 1;
+            if (i + 1 < num_samples) {
+                k = 7 - _alac_log2(history) + ((history + 16) >> 6);
+                if (k > kb) { k = kb; }
+                var run = alac_rice_scalar(br, k, 16);
+                if (is_err(run) == 1) { return run; }
+                if (run > 0) {
+                    if (run >= num_samples - i) { run = num_samples - i - 1; }
+                    var z = 1;
+                    while (z <= run) {
+                        store64(output + (i + z) * 8, 0);
+                        z = z + 1;
+                    }
+                    i = i + run;
                 }
+                if (run <= 0xFFFF) { sign_mod = 1; }
                 history = 0;
-                sign_mod = 1;
             }
         }
         i = i + 1;
@@ -1499,53 +1537,63 @@ fn alac_rice_decode_block(br, output, num_samples, max_bits, pb, kb) {
     return 0;
 }
 
-# Apply inverse LPC prediction (unfilter)
-# buf: pointer to i64 array, num_samples: count
-# coefs: pointer to i64 array of coefficients, num_coefs: count
-# den_shift: shift amount
-fn alac_unfilter(buf, num_samples, coefs, num_coefs, den_shift) {
-    if (num_coefs == 0) { return 0; }
-    if (num_samples == 0) { return 0; }
+# Inverse adaptive LPC. Each sample is predicted from the previous `order` samples
+# relative to an older base sample, oldest sample first, and the coefficients are
+# nudged after every sample by the sign of the error, so `coefs` is updated in
+# place. Order 31 is the special first-order case, which can run with
+# err_buf == out.
+fn _alac_lpc(err_buf, out, n, bps, coefs, order, quant) {
+    if (n <= 0) { return 0; }
+    store64(out, load64(err_buf));
+    if (n == 1) { return 0; }
 
-    # Warmup: cumulative sum for first num_coefs samples
-    var limit = num_coefs;
-    if (limit > num_samples - 1) { limit = num_samples - 1; }
-    for (var j = 1; j <= limit; j = j + 1) {
-        var prev = load64(buf + (j-1) * 8);
-        var cur = load64(buf + j * 8);
-        store64(buf + j * 8, cur + prev);
+    var i = 1;
+    if (order == 0) {
+        while (i < n) {
+            store64(out + i * 8, load64(err_buf + i * 8));
+            i = i + 1;
+        }
+        return 0;
+    }
+    if (order == 31) {
+        while (i < n) {
+            store64(out + i * 8, _alac_wrap(load64(out + (i - 1) * 8) + load64(err_buf + i * 8), bps));
+            i = i + 1;
+        }
+        return 0;
     }
 
-    if (num_coefs + 1 >= num_samples) { return 0; }
+    # Warm-up: the first `order` samples are first-order.
+    while (i <= order && i < n) {
+        store64(out + i * 8, _alac_wrap(load64(out + (i - 1) * 8) + load64(err_buf + i * 8), bps));
+        i = i + 1;
+    }
 
-    # Main prediction loop
-    for (var j = num_coefs + 1; j < num_samples; j = j + 1) {
-        var prediction = 0;
-        var base = load64(buf + (j - num_coefs - 1) * 8);
-        for (var c = 0; c < num_coefs; c = c + 1) {
-            var diff = load64(buf + (j - 1 - c) * 8) - base;
-            var coef = load64(coefs + c * 8);
-            prediction = prediction + diff * coef;
+    var half = 1 << (quant - 1);
+    while (i < n) {
+        var d = load64(out + (i - order - 1) * 8);
+        var val = 0;
+        var j = 0;
+        while (j < order) {
+            val = val + (load64(out + (i - order + j) * 8) - d) * load64(coefs + j * 8);
+            j = j + 1;
         }
-        # Arithmetic right shift for signed values
-        # SEC-009: guard INT64_MIN (negation overflows in two's complement)
-        var pred_shifted = prediction;
-        if (den_shift > 0) {
-            # Manual arithmetic right shift since >> is logical
-            if (prediction == (1 << 63)) {
-                # Guard: 0 - INT64_MIN == INT64_MIN (overflow), treat as 0
-                pred_shifted = 0;
-            } else {
-                if (prediction < 0) {
-                    pred_shifted = 0 - ((0 - prediction) >> den_shift);
-                } else {
-                    pred_shifted = prediction >> den_shift;
-                }
+        val = sar(_alac_wrap(val, 32) + half, quant);
+        var error_val = load64(err_buf + i * 8);
+        store64(out + i * 8, _alac_wrap(val + d + error_val, bps));
+
+        var error_sign = _alac_sign(error_val);
+        if (error_sign != 0) {
+            j = 0;
+            while (j < order && _alac_wrap(error_val * error_sign, 32) > 0) {
+                var v = d - load64(out + (i - order + j) * 8);
+                var sn = _alac_sign(v) * error_sign;
+                store64(coefs + j * 8, _alac_wrap(load64(coefs + j * 8) - sn, 16));
+                error_val = error_val - sar(v * sn, quant) * (j + 1);
+                j = j + 1;
             }
         }
-        var prev_sample = load64(buf + (j-1) * 8);
-        var residual = load64(buf + j * 8);
-        store64(buf + j * 8, residual + pred_shifted + prev_sample);
+        i = i + 1;
     }
     return 0;
 }
@@ -1556,7 +1604,7 @@ fn alac_unmix_stereo(u_buf, v_buf, out_l, out_r, num_samples, mix_bits, mix_res)
         var u = load64(u_buf + i * 8);
         var v = load64(v_buf + i * 8);
         if (mix_res != 0) {
-            var left = u + v - ((mix_res * v) >> mix_bits);
+            var left = u + v - sar(mix_res * v, mix_bits);
             var right = left - v;
             store64(out_l + i * 8, left);
             store64(out_r + i * 8, right);
@@ -1568,145 +1616,182 @@ fn alac_unmix_stereo(u_buf, v_buf, out_l, out_r, num_samples, mix_bits, mix_res)
     return 0;
 }
 
-# Decode a single ALAC element (mono or stereo)
-fn alac_decode_element(br, cfg, channels, max_bits) {
-    var _unused = bitreader_read(br, 12);
+# Scratch for one decode. The allocator never frees, so these are made once and
+# reused: a fresh set per frame would cost about 200 KB a frame, or 380 MB for a
+# three-minute stereo track.
+#   +0:  residuals, per channel of an element (2 ptrs)
+#   +16: samples, per channel of an element (2 ptrs)
+#   +32: shifted-out low bits, per channel of an element (2 ptrs)
+#   +48: LPC coefficients, per channel of an element (2 ptrs)
+#   +64: one frame of samples across all channels, interleaved (ptr)
+#   +72: 1 / 2^(bit_depth - 1)
+fn _alac_state_new(cfg) {
+    var n = alac_config_get(cfg, 0);
+    if (n <= 0) { return err(ERR_DECODE); }
+    if (n > ALAC_MAX_FRAME) { return err(ERR_DECODE); }
+    var st = alloc(80);
+    if (st == 0) { return err(ERR_DECODE); }
+    var i = 0;
+    while (i < 6) {
+        var buf = alloc(n * 8);
+        if (buf == 0) { return err(ERR_DECODE); }
+        store64(st + i * 8, buf);
+        i = i + 1;
+    }
+    var c0 = alloc(ALAC_MAX_COEFS * 8);
+    var c1 = alloc(ALAC_MAX_COEFS * 8);
+    var fb = alloc(n * alac_config_get(cfg, 5) * 8);
+    if (c0 == 0 || c1 == 0 || fb == 0) { return err(ERR_DECODE); }
+    store64(st + 48, c0);
+    store64(st + 56, c1);
+    store64(st + 64, fb);
+    store64(st + 72, f64_div(F64_ONE, f64_from(1 << (alac_config_get(cfg, 1) - 1))));
+    return st;
+}
+
+# Decode a single element (mono or stereo) into the state's sample buffers.
+# Returns its sample count.
+fn alac_decode_element(br, cfg, st, channels, max_bits) {
+    var unused = bitreader_read(br, 12);
+    if (is_err(unused) == 1) { return unused; }
     var partial = bitreader_read_bit(br);
     var bytes_shifted = bitreader_read(br, 2);
     var escape_flag = bitreader_read_bit(br);
+    if (is_err(escape_flag) == 1) { return escape_flag; }
 
-    var num_samples = 0;
+    # Low bytes are stored raw, so what remains is narrower. A stereo pair needs
+    # one bit more, because its mid channel holds a sum.
+    var shifted_bits = bytes_shifted * 8;
+    var bps = max_bits - shifted_bits + channels - 1;
+    if (bps < 1) { return err(ERR_DECODE); }
+    if (bps > 32) { return err(ERR_DECODE); }
+
+    var frame_length = alac_config_get(cfg, 0);
+    var num_samples = frame_length;
     if (partial == 1) {
         var hi = bitreader_read(br, 16);
         var lo = bitreader_read(br, 16);
+        if (is_err(lo) == 1) { return lo; }
         num_samples = (hi << 16) | lo;
-    } else {
-        num_samples = alac_config_get(cfg, 0);
     }
-
-    if (num_samples == 0) { return vec_new(); }
-    if (num_samples > 16384) { return err(ERR_DECODE); }
-
-    var shifted_bits = bytes_shifted * 8;
-    if (shifted_bits >= max_bits) { return err(ERR_DECODE); }
-    var effective_bits = max_bits - shifted_bits;
+    if (num_samples == 0) { return 0; }
+    if (num_samples > frame_length) { return err(ERR_DECODE); }
 
     if (escape_flag == 1) {
-        # Uncompressed: read raw samples
-        var total = num_samples * channels;
-        var out = vec_new();
-        for (var i = 0; i < total; i = i + 1) {
-            var raw = bitreader_read(br, max_bits);
-            if (is_err(raw) == 1) { return raw; }
-            vec_push(out, sign_extend(raw, max_bits));
+        # Uncompressed: raw samples, interleaved within the element.
+        for (var i = 0; i < num_samples; i = i + 1) {
+            for (var ch = 0; ch < channels; ch = ch + 1) {
+                var raw = bitreader_read(br, max_bits);
+                if (is_err(raw) == 1) { return raw; }
+                store64(load64(st + 16 + ch * 8) + i * 8, sign_extend(raw, max_bits));
+            }
         }
-        return out;
+        return num_samples;
     }
 
-    # Compressed frame
+    var kb = alac_config_get(cfg, 4);
+    if (kb == 0) { return err(ERR_DECODE); }
     var mix_bits = bitreader_read(br, 8);
     var mix_res = bitreader_read(br, 8);
-    # Sign-extend mix_res from 8 bits
+    if (is_err(mix_res) == 1) { return mix_res; }
     mix_res = sign_extend(mix_res, 8);
+    if (channels == 2 && mix_res != 0 && mix_bits > 31) { return err(ERR_DECODE); }
 
-    # Read prediction params per channel
-    var pred_modes = alloc(channels * 8);
-    var den_shifts = alloc(channels * 8);
-    var pb_factors = alloc(channels * 8);
-    var num_coefs_arr = alloc(channels * 8);
-    var coefs_arr = alloc(channels * 8);  # pointers to coef arrays
-
+    # Predictor header per channel. The coefficients are stored last to first.
+    var mode0 = 0; var mode1 = 0;
+    var quant0 = 0; var quant1 = 0;
+    var pbf0 = 0; var pbf1 = 0;
+    var order0 = 0; var order1 = 0;
     for (var ch = 0; ch < channels; ch = ch + 1) {
-        store64(pred_modes + ch*8, bitreader_read(br, 4));
-        store64(den_shifts + ch*8, bitreader_read(br, 4));
-        store64(pb_factors + ch*8, bitreader_read(br, 3));
-        var nc = bitreader_read(br, 5);
-        if (nc > ALAC_MAX_COEFS) { nc = ALAC_MAX_COEFS; }
-        store64(num_coefs_arr + ch*8, nc);
-
-        var coefs = alloc(nc * 8);
-        for (var c = 0; c < nc; c = c + 1) {
-            var raw = bitreader_read(br, 16);
-            store64(coefs + c * 8, sign_extend(raw, 16));
+        var mode = bitreader_read(br, 4);
+        var quant = bitreader_read(br, 4);
+        var pbf = bitreader_read(br, 3);
+        var order = bitreader_read(br, 5);
+        if (is_err(order) == 1) { return order; }
+        if (order >= frame_length) { return err(ERR_DECODE); }
+        if (quant == 0) { return err(ERR_DECODE); }
+        var coefs = load64(st + 48 + ch * 8);
+        var c = order - 1;
+        while (c >= 0) {
+            var rc = bitreader_read(br, 16);
+            if (is_err(rc) == 1) { return rc; }
+            store64(coefs + c * 8, sign_extend(rc, 16));
+            c = c - 1;
         }
-        store64(coefs_arr + ch*8, coefs);
+        if (ch == 0) { mode0 = mode; quant0 = quant; pbf0 = pbf; order0 = order; }
+        else         { mode1 = mode; quant1 = quant; pbf1 = pbf; order1 = order; }
     }
 
-    # Decode residuals per channel
+    # The shifted-out low bits sit raw between the headers and the residuals.
+    if (shifted_bits > 0) {
+        for (var i = 0; i < num_samples; i = i + 1) {
+            for (var ch = 0; ch < channels; ch = ch + 1) {
+                var low = bitreader_read(br, shifted_bits);
+                if (is_err(low) == 1) { return low; }
+                store64(load64(st + 32 + ch * 8) + i * 8, low);
+            }
+        }
+    }
+
     var pb = alac_config_get(cfg, 2);
-    var kb = alac_config_get(cfg, 4);
-    var channel_bufs = alloc(channels * 8);
-
+    var mb = alac_config_get(cfg, 3);
     for (var ch = 0; ch < channels; ch = ch + 1) {
-        var pbf = load64(pb_factors + ch*8);
-        var adj_pb = (pb * pbf) >> 2;
-        var residuals = alloc(num_samples * 8);
-        for (var z = 0; z < num_samples; z = z + 1) { store64(residuals + z*8, 0); }
-        var rc = alac_rice_decode_block(br, residuals, num_samples, effective_bits, adj_pb, kb);
+        var mode = mode0; var quant = quant0; var pbf = pbf0; var order = order0;
+        if (ch == 1) { mode = mode1; quant = quant1; pbf = pbf1; order = order1; }
+        var res = load64(st + ch * 8);
+        var out = load64(st + 16 + ch * 8);
+        var coefs = load64(st + 48 + ch * 8);
+        var rc = alac_rice_decode_block(br, res, num_samples, bps, (pb * pbf) / 4, mb, kb);
         if (is_err(rc) == 1) { return rc; }
-        store64(channel_bufs + ch*8, residuals);
+        # A non-zero mode runs a first-order pass before the coded predictor.
+        if (mode != 0) { _alac_lpc(res, res, num_samples, bps, coefs, 31, 0); }
+        _alac_lpc(res, out, num_samples, bps, coefs, order, quant);
     }
 
-    # Apply inverse LPC per channel
-    for (var ch = 0; ch < channels; ch = ch + 1) {
-        if (load64(pred_modes + ch*8) == 0) {
-            var buf = load64(channel_bufs + ch*8);
-            var nc = load64(num_coefs_arr + ch*8);
-            var coefs = load64(coefs_arr + ch*8);
-            var ds = load64(den_shifts + ch*8);
-            alac_unfilter(buf, num_samples, coefs, nc, ds);
-        }
-    }
-
-    # Stereo de-matrixing
     if (channels == 2) {
         if (mix_res != 0) {
-            var u_buf = load64(channel_bufs);
-            var v_buf = load64(channel_bufs + 8);
-            var out_l = alloc(num_samples * 8);
-            var out_r = alloc(num_samples * 8);
-            alac_unmix_stereo(u_buf, v_buf, out_l, out_r, num_samples, mix_bits, mix_res);
-            store64(channel_bufs, out_l);
-            store64(channel_bufs + 8, out_r);
+            var u_buf = load64(st + 16);
+            var v_buf = load64(st + 24);
+            alac_unmix_stereo(u_buf, v_buf, u_buf, v_buf, num_samples, mix_bits, mix_res);
         }
     }
 
-    # Interleave into output vec
-    var out = vec_new();
-    for (var i = 0; i < num_samples; i = i + 1) {
+    # The low bits rejoin after the stereo step.
+    if (shifted_bits > 0) {
         for (var ch = 0; ch < channels; ch = ch + 1) {
-            var buf = load64(channel_bufs + ch*8);
-            vec_push(out, load64(buf + i*8));
+            var out = load64(st + 16 + ch * 8);
+            var ext = load64(st + 32 + ch * 8);
+            for (var i = 0; i < num_samples; i = i + 1) {
+                store64(out + i * 8, (load64(out + i * 8) << shifted_bits) | load64(ext + i * 8));
+            }
         }
     }
-    return out;
+    return num_samples;
 }
 
-# Decode raw ALAC data: 24-byte config + frame bytes
-fn alac_decode(data, len) {
-    if (len < 24) { return err(ERR_INVALID_HEADER); }
+# Where the i-th channel of the stream goes in the output. ALAC stores surround
+# with centre first; output follows the usual L R C order. Each nibble is a slot.
+fn _alac_channel_slot(num_ch, i) {
+    var t = 0x76543210;
+    if (num_ch == 3) { t = 0x102; }
+    if (num_ch == 4) { t = 0x3102; }
+    if (num_ch == 5) { t = 0x43102; }
+    if (num_ch == 6) { t = 0x354102; }
+    if (num_ch == 7) { t = 0x3654102; }
+    if (num_ch == 8) { t = 0x35410762; }
+    return (t >> (i * 4)) & 15;
+}
 
-    var cfg = alac_parse_config(data, 24);
-    if (is_err(cfg) == 1) { return cfg; }
-
-    var bit_depth = alac_config_get(cfg, 1);
+# Decode one frame's elements, up to ID_END, and append its samples to `out`
+# interleaved. Returns the frame's sample count per channel.
+fn _alac_decode_frame(br, cfg, st, out) {
     var num_ch = alac_config_get(cfg, 5);
-    var sample_rate = alac_config_get(cfg, 9);
-    var max_bits = bit_depth;
-
-    var br = bitreader_new(data + 24, len - 24);
-
-    # Collect all channel samples
-    var all_channels = vec_new();
+    var max_bits = alac_config_get(cfg, 1);
+    var fb = load64(st + 64);
+    var scale = load64(st + 72);
+    var slot = 0;
+    var nframes = 0 - 1;
     var done = 0;
-
-    # SEC-029: bound cumulative decoded samples across elements.
-    # alac_decode_element caps num_samples at 16384 per element, but nothing
-    # capped the NUMBER of elements: an element tag is 3 bits + 4 bits, so
-    # roughly one byte of input can mint 16384 samples (131 KB of f64), a
-    # ~63,000x amplification that alloc() never reclaims. Same 2^25-sample
-    # ceiling as FLAC (SEC-023) and AAC (SEC-027).
-    var alac_total = 0;
 
     while (done == 0) {
         var tag = bitreader_read(br, 3);
@@ -1714,73 +1799,95 @@ fn alac_decode(data, len) {
         else {
             if (tag == ID_END) { done = 1; }
             else {
-                var _inst = bitreader_read(br, 4);
-                if (tag == ID_SCE) {
-                    var samples = alac_decode_element(br, cfg, 1, max_bits);
-                    if (is_err(samples) == 1) { return samples; }
-                    alac_total = alac_total + vec_len(samples);
-                    if (alac_total > 33554432) { return err(ERR_DECODE); }
-                    vec_push(all_channels, samples);
-                }
-                if (tag == ID_LFE) {
-                    var samples = alac_decode_element(br, cfg, 1, max_bits);
-                    if (is_err(samples) == 1) { return samples; }
-                    alac_total = alac_total + vec_len(samples);
-                    if (alac_total > 33554432) { return err(ERR_DECODE); }
-                    vec_push(all_channels, samples);
-                }
-                if (tag == ID_CPE) {
-                    var samples = alac_decode_element(br, cfg, 2, max_bits);
-                    if (is_err(samples) == 1) { return samples; }
-                    alac_total = alac_total + vec_len(samples);
-                    if (alac_total > 33554432) { return err(ERR_DECODE); }
-                    # Deinterleave into two channels
-                    var nf = vec_len(samples) / 2;
-                    var left = vec_new();
-                    var right = vec_new();
-                    for (var i = 0; i < nf; i = i + 1) {
-                        vec_push(left, vec_get(samples, i * 2));
-                        vec_push(right, vec_get(samples, i * 2 + 1));
+                var channels = 1;
+                if (tag == ID_CPE) { channels = 2; }
+                if (tag != ID_SCE && tag != ID_CPE && tag != ID_LFE) { return err(ERR_DECODE); }
+                var inst = bitreader_read(br, 4);
+                if (is_err(inst) == 1) { return inst; }
+                if (slot + channels > num_ch) { return err(ERR_DECODE); }
+                var n = alac_decode_element(br, cfg, st, channels, max_bits);
+                if (is_err(n) == 1) { return n; }
+                if (nframes < 0) { nframes = n; }
+                if (n != nframes) { return err(ERR_DECODE); }
+                for (var c = 0; c < channels; c = c + 1) {
+                    var dest = _alac_channel_slot(num_ch, slot + c);
+                    var src = load64(st + 16 + c * 8);
+                    for (var i = 0; i < n; i = i + 1) {
+                        store64(fb + (i * num_ch + dest) * 8, load64(src + i * 8));
                     }
-                    vec_push(all_channels, left);
-                    vec_push(all_channels, right);
                 }
+                slot = slot + channels;
             }
         }
     }
 
-    if (vec_len(all_channels) == 0) {
-        return decode_result_new(
-            fmtinfo_new(FMT_ALAC, sample_rate, num_ch, bit_depth, F64_ZERO, 0),
-            vec_new()
-        );
+    if (nframes <= 0) { return 0; }
+    if (slot != num_ch) { return err(ERR_DECODE); }
+
+    # SEC-029: bound cumulative decoded samples. An element mints a full frame
+    # from a few bytes, and alloc() never reclaims. Same 2^25-sample ceiling as
+    # FLAC (SEC-023) and AAC (SEC-027).
+    var total = nframes * num_ch;
+    if (vec_len(out) + total > 33554432) { return err(ERR_DECODE); }
+    for (var i = 0; i < total; i = i + 1) {
+        vec_push(out, f64_mul(f64_from(load64(fb + i * 8)), scale));
     }
+    return nframes;
+}
 
-    # Convert to interleaved f64 samples
-    var nch = vec_len(all_channels);
-    var ch0 = vec_get(all_channels, 0);
-    var nframes = vec_len(ch0);
-    var scale = f64_pow(F64_TWO, f64_from(bit_depth - 1));
-    var output = vec_new();
-
-    for (var fr = 0; fr < nframes; fr = fr + 1) {
-        for (var c = 0; c < nch; c = c + 1) {
-            var ch = vec_get(all_channels, c);
-            if (fr < vec_len(ch)) {
-                vec_push(output, f64_div(f64_from(vec_get(ch, fr)), scale));
-            } else {
-                vec_push(output, F64_ZERO);
-            }
-        }
-    }
-
-    var total_frames = nframes;
+fn _alac_result(cfg, out) {
+    var num_ch = alac_config_get(cfg, 5);
+    var bit_depth = alac_config_get(cfg, 1);
+    var sample_rate = alac_config_get(cfg, 9);
+    var total_frames = vec_len(out) / num_ch;
     var dur = f64_div(f64_from(total_frames), f64_from(sample_rate));
-
     return decode_result_new(
-        fmtinfo_new(FMT_ALAC, sample_rate, nch, bit_depth, dur, total_frames),
-        output
+        fmtinfo_new(FMT_ALAC, sample_rate, num_ch, bit_depth, dur, total_frames),
+        out
     );
+}
+
+# Decode a 24-byte ALACSpecificConfig followed by one frame.
+fn alac_decode(data, len) {
+    if (len < 24) { return err(ERR_INVALID_HEADER); }
+    var cfg = alac_parse_config(data, 24);
+    if (is_err(cfg) == 1) { return cfg; }
+    var st = _alac_state_new(cfg);
+    if (is_err(st) == 1) { return st; }
+    var out = vec_new();
+    var rc = _alac_decode_frame(bitreader_new(data + 24, len - 24), cfg, st, out);
+    if (is_err(rc) == 1) { return rc; }
+    return _alac_result(cfg, out);
+}
+
+# Decode `count` frames, each at its own offset and size within data. This is how
+# a container holds ALAC: every frame is a separate, byte-aligned sample. `cookie`
+# is the 24-byte ALACSpecificConfig.
+fn alac_decode_frames(cookie, data, len, offsets, sizes, count) {
+    var cfg = alac_parse_config(cookie, 24);
+    if (is_err(cfg) == 1) { return cfg; }
+    var st = _alac_state_new(cfg);
+    if (is_err(st) == 1) { return st; }
+    var out = vec_new();
+    var br = bitreader_new(data, 0);
+    var i = 0;
+    while (i < count) {
+        var off = load64(offsets + i * 8);
+        var sz = load64(sizes + i * 8);
+        # Untrusted offset and size: off > len, then sz > len - off, to avoid
+        # overflowing off + sz.
+        if (off < 0 || sz < 0) { return err(ERR_DECODE); }
+        if (off > len) { return err(ERR_DECODE); }
+        if (sz > len - off) { return err(ERR_DECODE); }
+        store64(br, data + off);
+        store64(br + 8, 0);
+        store64(br + 16, 0);
+        store64(br + 24, sz);
+        var rc = _alac_decode_frame(br, cfg, st, out);
+        if (is_err(rc) == 1) { return rc; }
+        i = i + 1;
+    }
+    return _alac_result(cfg, out);
 }
 
 
@@ -1792,7 +1899,7 @@ fn alac_decode(data, len) {
 # data: pointer to audio bytes, len: total length
 # Returns: decode_result pointer, or negative error
 fn codec_open(data, len) {
-    var fmt = detect_format(data, len);
+    var fmt = shravan_detect_format(data, len);
     if (is_err(fmt) == 1) { return fmt; }
 
     if (fmt == FMT_WAV)  { return wav_decode(data, len); }
@@ -1878,7 +1985,7 @@ fn decode_reader_feed(dr, data, len) {
     if (state == 0) {
         # Detecting: need at least 12 bytes for format magic
         if (len < 12) { return vec_new(); }
-        var fmt = detect_format(data, len);
+        var fmt = shravan_detect_format(data, len);
         if (is_err(fmt) == 1) { return vec_new(); }
 
         if (fmt == FMT_WAV) {

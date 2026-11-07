@@ -48,10 +48,11 @@ Two harnesses, both gated in CI and run in full before each release:
 | `fuzz/fuzz_decode.cyr` | `codec_open`, WAV, AIFF, ALAC, FLAC (+range), MP3, Ogg, MP4, AAC, Vorbis comments | random-behind-magic **and** valid files built by shravan's own encoders with N bytes corrupted |
 
 The corrupted-valid-file strategy is what reaches deep decode paths; random bytes rarely survive
-header validation long enough to get there.
+header validation long enough to get there. Seeds include real ffmpeg, flac and lame output, because
+shravan's own encoders never write FLAC LPC, ALAC, TNS, short blocks or an esds.
 
 ```sh
-./fuzz/run.sh 90000     # current gate: 903,500 calls, 0 crashes
+./fuzz/run.sh 90000     # current gate: 914,764 calls, 0 crashes
 ```
 
 `alloc()` is a bump allocator that never frees, so `fuzz_decode` is swept across several seeded

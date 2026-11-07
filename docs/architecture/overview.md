@@ -7,7 +7,7 @@ shravan/
   src/
     shravan.cyr     -- library: error, format, PCM, WAV, AIFF, ALAC, codec dispatch,
                        decode_file/reader (first [lib] bundle module)
-    flac.cyr        -- FLAC encoder/decoder (all subframe types, SEEKTABLE, MD5)
+    flac.cyr        -- FLAC decoder (all subframe types, SEEKTABLE, flac_verify), encoder (Fixed)
     ogg.cyr         -- Ogg container parser/muxer (CRC-32, page extraction)
     mp3.cyr         -- MP3 decode -> PCM: MPEG-1/2/2.5 Layer I/II/III (reservoir, Huffman,
                        requant, IMDCT, polyphase synth) + ID3v2 skipping
@@ -19,7 +19,7 @@ shravan/
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, M/S, short windows)
-    mp4.cyr         -- MP4/M4A container demux (box tree, sample table, AAC -> aac_decode)
+    mp4.cyr         -- MP4/M4A/QuickTime demux (box tree, sample table, esds, AAC -> aac_decode, ALAC -> alac_decode_frames)
     resample.cyr    -- Windowed sinc resampler (Draft/Good/Best)
     dither.cyr      -- TPDF + noise-shaped dithering
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)
@@ -34,8 +34,9 @@ shravan/
   dist/
     shravan.cyr     -- distlib bundle (all src [lib] modules concatenated; consumers include this)
   lib/              -- vendored Cyrius stdlib ONLY (alloc, vec, str, math, ganita, io,
-                       syscalls, fmt, string, args, assert, tagged, thread, fnptr, bayan, …),
-                       version-matched to the cyrius.cyml pin via `cyrius lib sync`
+                       syscalls, fmt, string, args, assert, tagged, thread, fnptr, …)
+                       version-matched to the cyrius.cyml pin, plus the git deps
+                       (sankoch, bayan-json) at their tags
 ```
 
 ## Data Flow
@@ -47,7 +48,7 @@ Raw bytes --> codec_open()    --> decode_result (FormatInfo + samples vec)
                +-- wav_decode()   --> parse RIFF/fmt/data --> PCM to f64
                +-- flac_decode()  --> parse STREAMINFO/frames --> subframes --> f64
                +-- aiff_decode()  --> parse FORM/COMM/SSND --> PCM to f64
-               +-- alac_decode()  --> parse config/frames --> Rice/LPC --> f64
+               +-- mp4_decode()   --> demux --> AAC: aac_decode, ALAC: alac_decode_frames --> f64
                +-- ogg_decode()   --> extract packets --> opus_decode_from_packets()
                +-- mp3_decode()   --> frame scan --> Layer I/II/III decode --> f64 PCM
                +-- aac_decode()   --> ADTS frames --> ICS/spectral/IMDCT --> f64
@@ -79,7 +80,7 @@ tag_write_vorbis()--> Vorbis Comment bytes
 ## Design Decisions
 
 - **f64 internally**: Cyrius native SSE2 double-precision. Higher precision than f32, simpler code (no f32 bit manipulation needed except for WAV IEEE float I/O).
-- **Distlib bundle**: No separate compilation. Consumers `include "dist/shravan.cyr"` (the `cyrius distlib` bundle of `src/shravan.cyr` + codec modules) and get all codecs; they supply stdlib + bayan + sankoch from their own manifest and call `shravan_init_constants()` at startup.
+- **Distlib bundle**: No separate compilation. Consumers `include "dist/shravan.cyr"` (the `cyrius distlib` bundle of `src/shravan.cyr` + codec modules) and get all codecs; they supply stdlib + sankoch from their own manifest, `cyrius deps` pulls `bayan-json` in through shravan's `[deps.bayan]`, and they call `shravan_init_constants()` at startup.
 - **Packed Result**: Negative values are errors (bit 63 set). No heap allocation for error paths. `is_err(r)` is a single comparison.
 - **Caller-provided buffers**: Encode functions take an output buffer pointer. Decode functions return a vec (heap-allocated via bump allocator).
 - **Bump allocator**: No individual free. Working memory grows monotonically. Suitable for batch processing; streaming use cases should be aware of memory growth.

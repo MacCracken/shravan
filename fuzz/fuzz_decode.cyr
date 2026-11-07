@@ -42,6 +42,7 @@ include "src/resample.cyr"
 include "src/dither.cyr"
 include "src/simd.cyr"
 include "src/stream.cyr"
+include "src/interop_fixtures.cyr"
 
 # ================================================================
 # PRNG (SplitMix-ish LCG; deterministic so failures reproduce)
@@ -350,6 +351,48 @@ if (aac_len > 0) {
         fi = fi + 1; total = total + 1;
     }
 }
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: real encoder output
+# ================================================================
+# Every seed above comes from shravan's own encoders, which never write FLAC LPC,
+# ALAC, TNS, short blocks or an esds, so mutating them cannot reach those paths.
+# These seeds are ffmpeg, flac and lame output. A decode here costs far more than the
+# targets above in time and in memory that alloc() never frees, so each runs once
+# per `every` iterations (a power of two). AAC runs least: about 0.1 s a frame.
+var real_buf = alloc(65536);
+fn _fz_real(b64, kind, every, max_len) {
+    var seed = alloc(strlen(b64) + 16);
+    var slen = _mp3_b64_decode(b64, seed);
+    if (max_len > 0) { if (slen > max_len) { slen = max_len; } }
+    if (slen > 65536) { return 0; }
+    var i = 0;
+    var calls = 0;
+    while (i < iters) {
+        if ((i & (every - 1)) == 0) {
+            var n = _fz_mutate(real_buf, seed, slen, _fz_u(6) + 1);
+            if (kind == 0) { codec_open(real_buf, n); }
+            if (kind == 1) { aac_decode(real_buf, n); }
+            if (kind == 2) { mp3_decode_pcm(real_buf, n); }
+            if (kind == 3) { flac_verify(real_buf, n); }
+            calls = calls + 1;
+        }
+        i = i + 1;
+    }
+    return calls;
+}
+syscall(1, 1, "  real encoder seeds... ", 24);
+total = total + _fz_real(_FX_FLAC16_B64, 0, 4, 0);
+total = total + _fz_real(_FX_FLAC16_B64, 3, 4, 0);
+total = total + _fz_real(_FX_FLAC8_B64, 0, 4, 0);
+total = total + _fz_real(_FX_ALAC16_B64, 0, 4, 0);
+total = total + _fz_real(_FX_ALAC24_B64, 0, 4, 0);
+total = total + _fz_real(_FX_ALACMOV_B64, 0, 4, 0);
+total = total + _fz_real(_FX_AAC22_B64, 1, 32, 700);
+total = total + _fz_real(_FX_AAC96_B64, 0, 64, 0);
+total = total + _fz_real(_FX_MP38_B64, 2, 4, 0);
+total = total + _fz_real(_FX_MP344_B64, 2, 4, 0);
 syscall(1, 1, "ok\n", 3);
 
 # ================================================================

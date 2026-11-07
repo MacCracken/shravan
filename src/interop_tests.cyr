@@ -1,0 +1,258 @@
+# interop_tests.cyr -- decode real encoder output and compare with a reference.
+#
+# Round-trip tests decode what shravan encoded, so they cannot see a bug the two
+# sides share, or a path shravan's encoder never takes. These fixtures come from
+# ffmpeg, flac and lame, and the expected values from ffmpeg's decoders. See
+# scripts/gen-interop-fixtures.py.
+
+var _FX_KIND_CODEC = 0;     # codec_open: anything detect_format recognises
+var _FX_KIND_AAC = 1;       # aac_decode: raw ADTS
+var _FX_KIND_MP3 = 2;       # mp3_decode_pcm
+
+# Decode a base64 fixture. Returns a decode result or error.
+fn _fx_decode(b64, kind) {
+    var buf = alloc(strlen(b64) + 16);
+    var n = _mp3_b64_decode(b64, buf);
+    if (kind == _FX_KIND_AAC) { return aac_decode(buf, n); }
+    if (kind == _FX_KIND_MP3) { return mp3_decode_pcm(buf, n); }
+    return codec_open(buf, n);
+}
+
+# FNV-1a over the low 32 bits of each sample. Matches fnv_hash in the generator.
+fn _fx_hash(samples, bps) {
+    var scale = f64_from(1 << (bps - 1));
+    var h = 1469598103934665603;
+    var n = vec_len(samples);
+    var i = 0;
+    while (i < n) {
+        var v = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
+        h = (h ^ (v & 0xFFFFFFFF)) * 0x100000001B3;
+        i = i + 1;
+    }
+    return h;
+}
+
+# A lossless stream must match the reference on every sample.
+fn _fx_exact(name, b64, rate, channels, bps, count, hash) {
+    var r = _fx_decode(b64, _FX_KIND_CODEC);
+    assert(res_ok(r) == 1, name);
+    if (is_err(r) == 1) { return 0; }
+    var fi = decode_result_info(r);
+    assert_eq(fmtinfo_sample_rate(fi), rate, name);
+    assert_eq(fmtinfo_channels(fi), channels, name);
+    assert_eq(fmtinfo_bit_depth(fi), bps, name);
+    var samples = decode_result_samples(r);
+    assert_eq(vec_len(samples), count, name);
+    assert_eq(_fx_hash(samples, bps), hash, name);
+    return 0;
+}
+
+# Read the next integer from a comma-separated cstring at *pos_ptr.
+fn _fx_next_int(s, pos_ptr) {
+    var p = load64(pos_ptr);
+    var neg = 0;
+    if (load8(s + p) == 45) { neg = 1; p = p + 1; }
+    var v = 0;
+    while (load8(s + p) >= 48 && load8(s + p) <= 57) {
+        v = v * 10 + load8(s + p) - 48;
+        p = p + 1;
+    }
+    if (load8(s + p) == 44) { p = p + 1; }
+    store64(pos_ptr, p);
+    if (neg == 1) { return 0 - v; }
+    return v;
+}
+
+# A lossy stream must match on every sampled point, to within rounding as 16-bit
+# values. `ref_csv` holds every step-th reference sample.
+fn _fx_lossy(name, b64, kind, rate, channels, count, step, ref_csv) {
+    var r = _fx_decode(b64, kind);
+    assert(res_ok(r) == 1, name);
+    if (is_err(r) == 1) { return 0; }
+    var fi = decode_result_info(r);
+    assert_eq(fmtinfo_sample_rate(fi), rate, name);
+    assert_eq(fmtinfo_channels(fi), channels, name);
+    var samples = decode_result_samples(r);
+    assert(vec_len(samples) >= count, name);
+    var scale = f64_from(32768);
+    var pos = alloc(8);
+    var i = 0;
+    var off = 0;
+    while (i < count) {
+        var want = _fx_next_int(ref_csv, pos);
+        var got = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
+        var d = got - want;
+        if (d < 0) { d = 0 - d; }
+        if (d > 2) { off = off + 1; }
+        i = i + step;
+    }
+    assert_eq(off, 0, name);
+    return 0;
+}
+
+fn test_interop_flac() {
+    syscall(1, 1, "test: interop flac (flac CLI, LPC subframes)\n", 45);
+    _fx_exact("flac 16-bit stereo LPC", _FX_FLAC16_B64, 44100, 2, 16, _FX_FLAC16_COUNT, _FX_FLAC16_HASH);
+    _fx_exact("flac 8-bit mono LPC", _FX_FLAC8_B64, 8000, 1, 8, _FX_FLAC8_COUNT, _FX_FLAC8_HASH);
+
+    # The signature check on the same real files.
+    var buf = alloc(strlen(_FX_FLAC16_B64) + 16);
+    var n = _mp3_b64_decode(_FX_FLAC16_B64, buf);
+    assert_eq(flac_verify(buf, n), 0, "flac verify on a real file");
+    return 0;
+}
+
+# Stereo FLAC keeps every integer the encoder took in. The mid channel has to round
+# down: an odd negative sum rounded toward zero came back one off, on every such
+# sample. (The encoder scales by 32767 where decoders divide by 32768, so the check
+# is on those integers, not on the f64 samples.)
+fn test_interop_flac_midside_exact() {
+    syscall(1, 1, "test: flac mid-side is lossless\n", 32);
+    var samples = vec_new();
+    var scale = f64_from(32768);
+    for (var i = 0; i < 2048; i = i + 1) {
+        # Both channels negative, with an odd sum on odd i.
+        vec_push(samples, f64_div(f64_from(0 - 1000 - i), scale));
+        vec_push(samples, f64_div(f64_from(0 - 2000 - i * 2), scale));
+    }
+    var buf = alloc(131072);
+    var n = flac_encode(samples, 44100, 2, 16, buf);
+    assert(res_ok(n) == 1, "flac mid-side encode ok");
+    assert_eq(flac_verify(buf, n), 0, "flac mid-side output matches its signature");
+    var r = flac_decode(buf, n);
+    assert(res_ok(r) == 1, "flac mid-side decode ok");
+    var out = decode_result_samples(r);
+    assert_eq(vec_len(out), 4096, "flac mid-side count");
+    var enc_scale = f64_from(32767);
+    var wrong = 0;
+    for (var i = 0; i < 4096; i = i + 1) {
+        var sent = f64_to(f64_mul(vec_get(samples, i), enc_scale));
+        var got = f64_to(f64_mul(vec_get(out, i), scale));
+        if (got != sent) { wrong = wrong + 1; }
+    }
+    assert_eq(wrong, 0, "flac mid-side integers are exact");
+    return 0;
+}
+
+fn test_interop_alac() {
+    syscall(1, 1, "test: interop alac (ffmpeg, MP4 and MOV)\n", 41);
+    _fx_exact("alac 16-bit stereo m4a", _FX_ALAC16_B64, 44100, 2, 16, _FX_ALAC16_COUNT, _FX_ALAC16_HASH);
+    _fx_exact("alac 24-bit shifted bytes", _FX_ALAC24_B64, 48000, 2, 24, _FX_ALAC24_COUNT, _FX_ALAC24_HASH);
+    _fx_exact("alac in QuickTime v2", _FX_ALACMOV_B64, 96000, 2, 16, _FX_ALACMOV_COUNT, _FX_ALACMOV_HASH);
+    return 0;
+}
+
+fn test_interop_aac() {
+    syscall(1, 1, "test: interop aac (ffmpeg, per-rate bands, TNS)\n", 48);
+    _fx_lossy("aac 22 kHz TNS, independent windows", _FX_AAC22_B64, _FX_KIND_AAC, 22050, 2,
+      _FX_AAC22_COUNT, _FX_AAC22_STEP, _FX_AAC22_REF);
+    _fx_lossy("aac 96 kHz in MP4, rate from esds", _FX_AAC96_B64, _FX_KIND_CODEC, 96000, 2,
+      _FX_AAC96_COUNT, _FX_AAC96_STEP, _FX_AAC96_REF);
+    _aac_select_swb(4);    # later tests assume the 44.1 kHz layout
+    return 0;
+}
+
+fn test_interop_mp3() {
+    syscall(1, 1, "test: interop mp3 (lame, count1 B, 8 kHz)\n", 42);
+    _fx_lossy("mp3 8 kHz short blocks", _FX_MP38_B64, _FX_KIND_MP3, 8000, 1,
+      _FX_MP38_COUNT, _FX_MP38_STEP, _FX_MP38_REF);
+    _fx_lossy("mp3 44.1 kHz count1 table B", _FX_MP344_B64, _FX_KIND_MP3, 44100, 1,
+      _FX_MP344_COUNT, _FX_MP344_STEP, _FX_MP344_REF);
+    return 0;
+}
+
+# Band tables: the shape of each one, and the values the reference has at the
+# points that differ between layouts.
+fn test_interop_aac_tables() {
+    syscall(1, 1, "test: aac band tables per sample rate\n", 38);
+    if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    var sr = 0;
+    while (sr < 13) {
+        _aac_select_swb(sr);
+        assert_eq(load64(_aac_swb_offset), 0, "long table starts at 0");
+        assert_eq(load64(_aac_swb_offset + _AAC_NUM_SWB * 8), 1024, "long table ends at 1024");
+        assert_eq(load64(_aac_swb_short), 0, "short table starts at 0");
+        assert_eq(load64(_aac_swb_short + _AAC_NUM_SWB_SHORT * 8), 128, "short table ends at 128");
+        var b = 0;
+        var rising = 1;
+        while (b < _AAC_NUM_SWB) {
+            if (load64(_aac_swb_offset + (b + 1) * 8) <= load64(_aac_swb_offset + b * 8)) { rising = 0; }
+            b = b + 1;
+        }
+        assert_eq(rising, 1, "long table rises");
+        sr = sr + 1;
+    }
+    _aac_select_swb(0);  assert_eq(_AAC_NUM_SWB, 41, "96 kHz has 41 bands");
+    _aac_select_swb(2);  assert_eq(_AAC_NUM_SWB, 47, "64 kHz has 47 bands");
+    _aac_select_swb(5);  assert_eq(_AAC_NUM_SWB, 51, "32 kHz has 51 bands");
+    _aac_select_swb(7);  assert_eq(_AAC_NUM_SWB_SHORT, 15, "22 kHz has 15 short bands");
+    _aac_select_swb(10); assert_eq(_AAC_NUM_SWB, 43, "11 kHz has 43 bands");
+    _aac_select_swb(11); assert_eq(_AAC_NUM_SWB, 40, "8 kHz has 40 bands");
+    _aac_select_swb(4);
+    assert_eq(_AAC_NUM_SWB, 49, "44.1 kHz has 49 bands");
+    assert_eq(_aac_tns_max_long, 42, "44.1 kHz TNS limit");
+    return 0;
+}
+
+# Hand-built boxes for the MP4 paths a small file cannot reach.
+fn test_interop_mp4_boxes() {
+    syscall(1, 1, "test: mp4 64-bit boxes and esds\n", 32);
+    var buf = alloc(256);
+    var e = alloc(8);
+
+    # A 64-bit box size in the low word finds the box after it.
+    write_u32_be(buf, 0, 1);
+    write_u32_be(buf, 4, MP4_FTYP);
+    write_u32_be(buf, 8, 0);
+    write_u32_be(buf, 12, 24);
+    write_u32_be(buf, 24, 16);
+    write_u32_be(buf, 28, MP4_MOOV);
+    assert_eq(mp4_find(buf, 0, 40, MP4_MOOV, e), 32, "largesize box skipped");
+
+    # A size past 4 GiB must not wrap to a small one and land inside the file.
+    write_u32_be(buf, 8, 1);
+    write_u32_be(buf, 12, 24);
+    assert(mp4_find(buf, 0, 40, MP4_MOOV, e) < 0, "high word of largesize is honoured");
+
+    # esds: AAC-LC, 44.1 kHz, stereo.
+    var d = alloc(64);
+    store8(d + 4, 3); store8(d + 5, 22);       # ES descriptor
+    store8(d + 6, 0); store8(d + 7, 1); store8(d + 8, 0);
+    store8(d + 9, 4); store8(d + 10, 17);      # decoder config
+    store8(d + 11, 0x40);                      # MPEG-4 audio
+    store8(d + 24, 5); store8(d + 25, 2);      # specific info
+    store8(d + 26, 0x12); store8(d + 27, 0x10);   # AOT 2, index 4, 2 channels
+    var out = alloc(32);
+    assert_eq(mp4_parse_esds(d, 0, 28, out), 0, "esds parses");
+    assert_eq(load64(out), 2, "esds channels");
+    assert_eq(load64(out + 8), 44100, "esds rate");
+
+    # An explicit 24-bit rate: index 15 escapes.
+    store8(d + 25, 5);
+    store8(d + 26, 0x17); store8(d + 27, 0x80);
+    store8(d + 28, 0x7D); store8(d + 29, 0x00);   # 64000, then 2 channels
+    store8(d + 30, 0x10);
+    assert_eq(mp4_parse_esds(d, 0, 31, out), 0, "esds explicit rate parses");
+    assert_eq(load64(out + 8), 64000, "esds explicit rate");
+
+    # HE-AAC is reported, not played at half rate with no high band.
+    store8(d + 25, 2);
+    store8(d + 26, 0x2A); store8(d + 27, 0x10);   # AOT 5
+    assert_eq(mp4_parse_esds(d, 0, 28, out), MP4_UNSUPPORTED, "HE-AAC is unsupported");
+
+    # Truncated: the descriptor runs past the box.
+    assert_eq(mp4_parse_esds(d, 0, 12, out), MP4_MALFORMED, "truncated esds is malformed");
+    return 0;
+}
+
+fn test_interop_all() {
+    test_interop_flac();
+    test_interop_flac_midside_exact();
+    test_interop_alac();
+    test_interop_aac_tables();
+    test_interop_aac();
+    test_interop_mp3();
+    test_interop_mp4_boxes();
+    return 0;
+}

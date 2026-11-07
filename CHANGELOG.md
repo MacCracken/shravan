@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.2] - 2026-11-07
+
+**Real files, at last.** This release set out to swap in a smaller JSON dependency and clear the
+roadmap's quick items. Checking that work against ffmpeg, flac and lame found that **FLAC, ALAC, AAC
+and MP3 were all decoding real files wrongly**, behind a green suite, because nearly every test
+decoded what shravan itself had encoded. All four now match their references. 11,938 assertions (was
+11,706; +232).
+
+### Fixed — decoders that were wrong on real files
+
+| Codec | What was wrong | Effect | Now |
+|---|---|---|---|
+| **FLAC decode** | LPC prediction rounded toward zero where the format needs an arithmetic shift | Nearly every real file was garbage (correlation 0.07). Only Fixed subframes worked, the one type shravan's encoder writes | 18 of 18 depth × channel × level files from `flac` bit-exact |
+| **FLAC encode** | The mid channel had the same bug | Stereo output was lossy: `flac -t` rejected it with an MD5 mismatch | `flac -t` passes: stereo at 8/16/24-bit to 96 kHz, mono at 16/24-bit to 384 kHz |
+| **ALAC** | Rice parameter, history, suffix coding, coefficient order and non-adaptive LPC were all wrong, stereo width was one bit short, and shifted low bytes were never read | Never ran on a real frame, and unreachable from any container | Rewritten. 0 differing samples against ffmpeg: mono to 7 channels, 16/24-bit, up to 96 kHz, noise, silence gaps, MP4 and QuickTime |
+| **AAC rates** | One band table, the 44.1/48 kHz layout, at all 13 sample rates | Everything else was garbage, returned as success with sample values around 3.9e14 | Per-rate tables generated from libavcodec, not transcribed. All 13 rates decode |
+| **AAC stereo** | With `common_window = 0`, the right channel used the left's window shape, and PNS read it with the left's layout | Errors up to 0.32 whenever transients differ between channels | 0 of 130 frames differ |
+| **AAC TNS** | One filter kept of up to three, measured from `max_sfb` rather than the band table's top, no `TNS_MAX_BANDS` limit, never applied to short windows | Errors up to 0.32 on transients | 0 frames differ at every band layout, with TNS on |
+| **MP3** | Count1 table B's offset was 2261, inside table 24, where the real table sits at 2773. **A test asserted the wrong value** | Every granule using it was corrupted, at every rate. LAME picks it for high-frequency bursts, so simple tones were clean and transients were not | 0 bad granules in 48 rate × bitrate × channel combinations, worst error 3e-6 |
+| **MP3 8 kHz** | The short-block region boundary was fixed at 36 lines. It is 72 at 8 kHz, and now comes from the band table | The roadmap's "known edge": transients at 8 kHz correlated at 0.05, at every bitrate | Exact, as above |
+
+AAC comparisons have PNS off where sample equality is the claim: its noise is defined only by energy,
+so it can never match a reference sample for sample. That is the format, not a defect, and the roadmap
+entry calling it one is gone.
+
+### Added
+
+- **Real encoder output in the suite.** `scripts/gen-interop-fixtures.py` captures ffmpeg, flac and lame
+  output with ffmpeg's decodes into `src/interop_fixtures.cyr`, and refuses to write a fixture that does
+  not exercise its path. `src/interop_tests.cyr` compares shravan against them: every sample by hash for
+  lossless, sampled points for lossy. Each of 15 fixes was then reverted in turn: all 15 failed on the
+  right assertion, and an unmodified control passed.
+- **ALAC is live.** `mp4_decode` routes `alac` tracks to the new `alac_decode_frames`. Scratch buffers
+  are reused across frames: allocating per frame would cost about 380 MB on a three-minute track.
+- **`flac_verify(data, len)`** checks a stream against its STREAMINFO MD5. Returns 0 on a match, 1 if the
+  file stores no signature, or a negative error. It is separate from `flac_decode` because hashing costs
+  about as much again as the decode.
+- **WAV `PCM_F64`**, encode and decode, bit-exact with ffmpeg both ways.
+- **ID3v2 de-unsynchronisation**, whole-tag in v2.2/2.3 and per-frame in v2.4, plus v2.4's group and data
+  length prefixes. Compressed or encrypted v2.4 frames are skipped rather than read as text. ffprobe
+  agrees on v2.4. On v2.3 it drops the title's last character, and shravan returns the text as written.
+- **MP4**: 64-bit box sizes and chunk offsets (the high word was ignored), QuickTime v1/v2 sample entries,
+  `wave`-nested config, and esds/AudioSpecificConfig parsing, so rate and channels come from the stream.
+  At 96 kHz the sample entry says something else entirely.
+- **Hi-res round-trip tests**, 88.2–384 kHz through WAV, AIFF and FLAC.
+- **Real-encoder fuzz seeds.** `fuzz_decode` previously mutated only shravan's own output, which never
+  reaches FLAC LPC, ALAC, TNS, short blocks or an esds.
+
+### Changed
+
+- **bayan: JSON-only bundle.** `[deps.bayan]` now takes `dist/bayan-json.cyr` at tag `1.11.1` in place of
+  the full stdlib `bayan`. `lib/bayan.cyr` and `lib/unicode/` are gone. `build/shravan` goes from 3,779,024
+  to 3,052,408 bytes, below where it was before 2.9.1, even with the new fixtures.
+- **`dist/shravan.deps` narrows to 3 leaves** (`ganita`, `assert`, `syscalls`), the rest arriving through
+  `bayan-json`. **No consumer manifest needs changing:** `cyrius deps` follows shravan's own `[deps.bayan]`.
+  Tested with a manifest with no bayan at all (dhvani's shape) and one keeping stdlib `bayan` (jalwa's and
+  nidhi's). The latter still links the full bayan.
+- **`detect_format` no longer decides `codec_open`.** sankoch defines the same name and the last definition
+  wins, so with sankoch included after shravan, `codec_open` called sankoch's and **failed outright**.
+  Internals now use `shravan_detect_format`, and that case passes. `detect_format` stays as a wrapper until
+  3.0, so one duplicate-function warning remains. No consumer calls it.
+- **`silk.cyr` duplicates removed.** `silk_bwexpander_32` and `silk_div32_varq` were each defined twice with
+  different bodies. The earlier definitions were never live, so behaviour is unchanged.
+- **MP4 is stricter.** HE-AAC reports `ERR_UNSUPPORTED_FMT` rather than playing its core at half rate, as
+  does any track that is neither AAC nor ALAC. Both used to be fed to the AAC decoder.
+- Internal ALAC helpers `alac_lg3`, `alac_rice_decode` and `alac_unfilter` are gone, and
+  `alac_rice_decode_block` and `alac_decode_element` take different arguments. None of the consumer repos
+  call them. `mp4_audio_info` now needs a 32-byte output buffer.
+- **Roadmap rewritten.** Completed work removed, open items checked against the code and regrouped into
+  v2.10.x–2.12.x with a 3.0 backlog. v2.9.3 is scheduled as a P(-1) sweep.
+
+### Verified
+
+- 11,938 assertions, 0 failing. `./fuzz/run.sh 90000`: 914,764 calls, 0 crashes. `cyrius vet`: 0 untrusted,
+  0 missing. Write lengths correct.
+- CI's `lib sync` + `deps` sequence passes on the tree as committed and from an empty `lib/`, reproducing all
+  44 files and `cyrius.lock` byte for byte, then passes `test-all.sh`.
+- **Benchmarks**: flat, median −0.1%, range −2.7% to +7.3% across 12 benchmarks. Taken under heavy load from
+  other work (load average 26), so these are CPU time rather than wall clock, pinned to one core, best of
+  five alternating runs against 2.9.1. `flac_encode` (+7.3%, with a 9.4% spread on the 2.9.1 side) and
+  `flac_decode` (+3.6%) cannot be separated from noise under that load. For the same reason no row was
+  added to `bench-history.csv` for this release.
+
+### Correction to 2.9.0 and 2.9.1
+
+Both entries say the build shows 6 warnings. It was 9: the count missed `detect_format`, which the compiler
+prints on the same line as its `compile` banner. All three duplicates predate those releases, so nothing
+regressed. This release takes it to 3, all `detect_format`.
+
+### Known issues, scheduled for 2.9.3
+
+- **One-shot decoders stop at about 6.3 minutes of stereo**: the 2^25-sample cap makes a 7-minute 44.1 kHz
+  FLAC return `ERR_DECODE`.
+- **PCM encoders are not the inverse of the decoders**: WAV, AIFF and FLAC encoding scale by 2^(N-1) - 1 and
+  truncate, and decoders divide by 2^(N-1), so a decode then re-encode moves nearly every sample by one LSB.
+- **AAC decode runs about 4× slower than real time on transients**: `f64_pow` per nonzero coefficient.
+
 ## [2.9.1] - 2026-11-07
 
 Toolchain release. One source change, a rename in `src/serde.cyr` that bayan's deprecation requires.

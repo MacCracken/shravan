@@ -11,7 +11,7 @@ dependencies. Pure Cyrius.
 ## Quick start
 
 ```sh
-# Build + run the full test suite (three harness binaries, 11,706 assertions)
+# Build + run the full test suite (three harness binaries, 11,938 assertions)
 ./scripts/test-all.sh
 
 # Or build/run one suite at a time:
@@ -29,15 +29,15 @@ cyrius build src/bench.cyr build/bench
 | Module | Description |
 |--------|-------------|
 | **wav** | RIFF WAVE encoder/decoder (PCM 8/16/24/32-bit, IEEE float 32-bit) |
-| **flac** | FLAC encoder/decoder (all subframe types, SEEKTABLE seeking, MD5) |
+| **flac** | FLAC decoder (all subframe types, SEEKTABLE seeking, `flac_verify` MD5 check), encoder (Fixed prediction) |
 | **aiff** | AIFF/AIFF-C encoder/decoder (big-endian, 80-bit extended sample rate) |
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |
 | **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo, 10/20 ms, all bandwidths, bit-exact vs libopus; RFC-6716 CELT-frame encoder (mono, 20 ms); header parsing, duration estimation |
 | **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus |
 | **mp3** | MP3 decoder to PCM (MPEG-1/2/2.5 Layer I/II/III — reservoir, Huffman, requant, IMDCT, polyphase synthesis); ID3v2 tag skipping |
-| **aac** | AAC-LC encoder/decoder (ADTS, Huffman codebooks, M/S stereo, short windows) |
-| **mp4** | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
+| **aac** | AAC-LC decoder (all 13 sample rates, TNS, short windows, M/S, intensity, PNS), encoder (ADTS, long windows, M/S, intensity, PNS) |
+| **mp4** | MP4/M4A and QuickTime demux (box tree, sample table, esds, AAC → aac_decode, ALAC → alac_decode_frames) |
 | **serde** | JSON serialization of format/pcm/error + codec config/metadata types |
 | **pcm** | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
 | **fft** | Mixed-radix FFT (2,3,5), forward/inverse MDCT |

@@ -1,11 +1,10 @@
 # mp4.cyr — MP4 / M4A (ISO Base Media File Format) container demux (2.5.7)
 #
 # Parses the box tree (ftyp / moov / trak / mdia / minf / stbl), locates the audio
-# track's sample table, computes each AAC access unit's byte range in the file
-# (stsc + stco/co64 + stsz), and decodes by wrapping each AU in an ADTS header and
-# handing the stream to the existing aac_decode. Big-endian throughout (read_*_be
-# come from shravan.cyr). Assumes files < 2 GiB (32-bit offsets suffice; co64 high
-# word is taken as 0).
+# track's sample table and computes each sample's byte range in the file (stsc +
+# stco/co64 + stsz). ALAC frames decode directly. AAC decodes by wrapping each
+# access unit in an ADTS header and handing the stream to the existing aac_decode.
+# Big-endian throughout (read_*_be come from shravan.cyr).
 
 # Box type FourCCs as big-endian u32 (matches read_u32_be of the type field).
 var MP4_FTYP = 0x66747970;   # "ftyp"
@@ -21,6 +20,9 @@ var MP4_CO64 = 0x636F3634;   # "co64"
 var MP4_STSC = 0x73747363;   # "stsc"
 var MP4_HDLR = 0x68646C72;   # "hdlr"
 var MP4_MP4A = 0x6D703461;   # "mp4a"
+var MP4_ALAC = 0x616C6163;   # "alac"
+var MP4_ESDS = 0x65736473;   # "esds"
+var MP4_WAVE = 0x77617665;   # "wave"
 var MP4_SOUN = 0x736F756E;   # "soun"
 var MP4_MDAT = 0x6D646174;   # "mdat"
 
@@ -30,7 +32,16 @@ var MP4_DX_RATE = 8;
 var MP4_DX_COUNT = 16;
 var MP4_DX_OFFSETS = 24;   # ptr to sample_count u64 file offsets
 var MP4_DX_SIZES = 32;     # ptr to sample_count u64 sizes
-var MP4_DX_SIZE = 40;
+var MP4_DX_CODEC = 40;     # MP4_CODEC_*
+var MP4_DX_COOKIE = 48;    # ALAC only: ptr to the 24-byte ALACSpecificConfig
+var MP4_DX_SIZE = 56;
+
+var MP4_CODEC_AAC = 1;
+var MP4_CODEC_ALAC = 2;
+
+# mp4_audio_info outcomes other than 0.
+var MP4_MALFORMED = 0 - 1;
+var MP4_UNSUPPORTED = 0 - 2;
 
 # Is this buffer an MP4/ISOBMFF file? ("ftyp" at offset 4).
 fn mp4_detect(data, len) {
@@ -50,8 +61,9 @@ fn mp4_find(data, start, end, type, out_end) {
         var box_end = pos + size;
         if (size == 1) {
             if (pos + 16 > end) { return 0 - 1; }   # largesize needs a 16-byte header
-            # 64-bit largesize (pos+8 hi, pos+12 lo); assume < 4 GiB -> use lo.
-            box_end = pos + read_u32_be(data, pos + 12);
+            # 64-bit largesize. A hostile high word gives a value that wraps
+            # negative or runs past `end`; both are handled just below.
+            box_end = pos + ((read_u32_be(data, pos + 8) << 32) | read_u32_be(data, pos + 12));
             hdr = 16;
         }
         if (size == 0) { box_end = end; }
@@ -111,22 +123,195 @@ fn mp4_find_audio_stbl(data, len, out_end) {
     return 0 - 1;
 }
 
-# Read channel count + sample rate from the stsd mp4a AudioSampleEntry into out
-# ([0]=channels, [8]=sample_rate). Returns 0 or -1.
+# Read an MPEG-4 descriptor's variable-length size at *pp_ptr, which starts just
+# past the tag. Each byte carries 7 bits, and a set top bit means another follows.
+# Advances *pp_ptr. Returns the size, or -1 if it runs past `end`.
+fn _mp4_desc_len(data, pp_ptr, end) {
+    var p = load64(pp_ptr);
+    var size = 0;
+    var i = 0;
+    while (i < 4) {
+        if (p >= end) { return MP4_MALFORMED; }
+        var b = load8(data + p);
+        p = p + 1;
+        size = (size << 7) | (b & 0x7F);
+        i = i + 1;
+        if ((b & 0x80) == 0) {
+            store64(pp_ptr, p);
+            return size;
+        }
+    }
+    return MP4_MALFORMED;
+}
+
+# Read n bits (n <= 24) at bit offset `bit` of the bytes at p, MSB first.
+fn _mp4_bits(data, p, bit, n) {
+    var v = 0;
+    var i = 0;
+    while (i < n) {
+        var at = bit + i;
+        v = (v << 1) | ((load8(data + p + at / 8) >> (7 - (at & 7))) & 1);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _mp4_sf_rate(index) {
+    if (index == 0)  { return 96000; }
+    if (index == 1)  { return 88200; }
+    if (index == 2)  { return 64000; }
+    if (index == 3)  { return 48000; }
+    if (index == 4)  { return 44100; }
+    if (index == 5)  { return 32000; }
+    if (index == 6)  { return 24000; }
+    if (index == 7)  { return 22050; }
+    if (index == 8)  { return 16000; }
+    if (index == 9)  { return 12000; }
+    if (index == 10) { return 11025; }
+    if (index == 11) { return 8000; }
+    if (index == 12) { return 7350; }
+    return 0;
+}
+
+# Parse an esds box body: ES_Descriptor > DecoderConfigDescriptor > the
+# AudioSpecificConfig, whose object type, rate and channels replace what the
+# sample entry claims. Only AAC-LC decodes: HE-AAC would play at half rate with no
+# high band, so it is reported unsupported rather than as wrong audio.
+# Writes out[0]=channels and out[8]=rate; channel config 0 leaves out[0] alone.
+fn mp4_parse_esds(data, p, end, out) {
+    var pp = alloc(8);
+    p = p + 4;                                         # version + flags
+    if (p >= end) { return MP4_MALFORMED; }
+    if (load8(data + p) != 3) { return MP4_MALFORMED; }   # ES_DescrTag
+    store64(pp, p + 1);
+    if (_mp4_desc_len(data, pp, end) < 0) { return MP4_MALFORMED; }
+    p = load64(pp);
+    if (p + 3 > end) { return MP4_MALFORMED; }
+    var es_flags = load8(data + p + 2);
+    p = p + 3;
+    if ((es_flags & 0x80) != 0) { p = p + 2; }         # dependsOn_ES_ID
+    if ((es_flags & 0x40) != 0) {                      # URL
+        if (p >= end) { return MP4_MALFORMED; }
+        p = p + 1 + load8(data + p);
+    }
+    if ((es_flags & 0x20) != 0) { p = p + 2; }         # OCR_ES_ID
+
+    if (p >= end) { return MP4_MALFORMED; }
+    if (load8(data + p) != 4) { return MP4_MALFORMED; }   # DecoderConfigDescrTag
+    store64(pp, p + 1);
+    if (_mp4_desc_len(data, pp, end) < 0) { return MP4_MALFORMED; }
+    p = load64(pp);
+    if (p + 13 > end) { return MP4_MALFORMED; }
+    var oti = load8(data + p);
+    # 0x40 is MPEG-4 audio, and 0x67 is MPEG-2 AAC LC. The rest is MP3 and others.
+    if (oti != 0x40) {
+        if (oti != 0x67) { return MP4_UNSUPPORTED; }
+    }
+    p = p + 13;
+
+    if (p >= end) { return MP4_MALFORMED; }
+    if (load8(data + p) != 5) { return MP4_MALFORMED; }   # DecSpecificInfoTag
+    store64(pp, p + 1);
+    var asc_len = _mp4_desc_len(data, pp, end);
+    if (asc_len < 2) { return MP4_MALFORMED; }
+    p = load64(pp);
+    if (p + asc_len > end) { return MP4_MALFORMED; }
+
+    # 5 bits of object type (31 escapes), then a 4-bit rate index (15 escapes to
+    # a 24-bit rate), then 4 bits of channel config. That is at most 42 bits.
+    if (asc_len < 6) {
+        if (_mp4_bits(data, p, 0, 5) == 31) { return MP4_UNSUPPORTED; }
+    }
+    var aot = _mp4_bits(data, p, 0, 5);
+    if (aot != 2) { return MP4_UNSUPPORTED; }
+    var index = _mp4_bits(data, p, 5, 4);
+    var bit = 9;
+    var rate = 0;
+    if (index == 15) {
+        if (asc_len < 5) { return MP4_MALFORMED; }
+        rate = _mp4_bits(data, p, bit, 24);
+        bit = bit + 24;
+    } else {
+        rate = _mp4_sf_rate(index);
+    }
+    if (rate <= 0) { return MP4_MALFORMED; }
+    var chan = _mp4_bits(data, p, bit, 4);
+    store64(out + 8, rate);
+    if (chan >= 1) {
+        if (chan <= 6) { store64(out, chan); }
+        if (chan == 7) { store64(out, 8); }
+    }
+    return 0;
+}
+
+# Read the codec, channel count and sample rate from the first sample entry into
+# out ([0]=channels, [8]=rate, [16]=codec, [24]=ALAC cookie ptr).
+#
+# An AudioSampleEntry is 28 bytes ahead of its child boxes: 8 of SampleEntry, then
+# version(2) revision(2) vendor(4), channels(2) samplesize(2) predefined(2)
+# reserved(2) and rate(4, 16.16 fixed). ISO files use version 0. QuickTime's
+# version 1 adds 16 bytes, and its version 2 adds 36 and moves the rate (an f64 at
+# +32) and channels (a u32 at +40) into them.
+# Returns 0, MP4_MALFORMED or MP4_UNSUPPORTED.
 fn mp4_audio_info(data, stbl, stbl_end, out) {
-    var stsd_end = alloc(8);
-    var stsd = mp4_find(data, stbl, stbl_end, MP4_STSD, stsd_end);
-    if (stsd < 0) { return 0 - 1; }
+    var e = alloc(8);
+    var stsd = mp4_find(data, stbl, stbl_end, MP4_STSD, e);
+    if (stsd < 0) { return MP4_MALFORMED; }
+    var stsd_end = load64(e);
     # stsd: version+flags(4) + entry_count(4) + first sample entry box
     var entry = stsd + 8;
-    var body = entry + 8;   # skip the entry box's [size][type]
-    # AudioSampleEntry: 8 (SampleEntry) + 8 reserved + 2 channelcount + 2 samplesize
-    #                 + 2 predefined + 2 reserved + 4 samplerate (16.16 fixed)
-    # The fields read below end at body+26; reject a truncated/undersized entry.
-    if (body + 26 > load64(stsd_end)) { return 0 - 1; }
-    store64(out, read_u16_be(data, body + 16));       # channelcount
-    store64(out + 8, read_u16_be(data, body + 24));   # sample rate (integer part)
-    return 0;
+    if (entry + 8 > stsd_end) { return MP4_MALFORMED; }
+    var entry_size = read_u32_be(data, entry);
+    var entry_type = read_u32_be(data, entry + 4);
+    if (entry_size < 8) { return MP4_MALFORMED; }
+    var entry_end = entry + entry_size;
+    if (entry_end > stsd_end) { entry_end = stsd_end; }
+    var body = entry + 8;
+    if (body + 28 > entry_end) { return MP4_MALFORMED; }
+
+    var version = read_u16_be(data, body + 8);
+    var channels = read_u16_be(data, body + 16);
+    var rate = read_u16_be(data, body + 24);
+    var children = body + 28;
+    if (version == 1) { children = body + 44; }
+    if (version == 2) {
+        if (body + 64 > entry_end) { return MP4_MALFORMED; }
+        children = body + 64;
+        rate = f64_to((read_u32_be(data, body + 32) << 32) | read_u32_be(data, body + 36));
+        channels = read_u32_be(data, body + 40);
+    }
+    if (version > 2) { return MP4_MALFORMED; }
+    store64(out, channels);
+    store64(out + 8, rate);
+
+    if (entry_type == MP4_MP4A) {
+        store64(out + 16, MP4_CODEC_AAC);
+        var esds = mp4_find(data, children, entry_end, MP4_ESDS, e);
+        if (esds < 0) {
+            # QuickTime nests it inside a `wave` box.
+            var wave = mp4_find(data, children, entry_end, MP4_WAVE, e);
+            if (wave >= 0) { esds = mp4_find(data, wave, load64(e), MP4_ESDS, e); }
+        }
+        if (esds >= 0) { return mp4_parse_esds(data, esds, load64(e), out); }
+        return 0;
+    }
+
+    if (entry_type == MP4_ALAC) {
+        # A child box of the same name: version+flags(4), then the config.
+        # QuickTime nests it inside a `wave` box, as it does esds.
+        var alac = mp4_find(data, children, entry_end, MP4_ALAC, e);
+        if (alac < 0) {
+            var wave = mp4_find(data, children, entry_end, MP4_WAVE, e);
+            if (wave >= 0) { alac = mp4_find(data, wave, load64(e), MP4_ALAC, e); }
+        }
+        if (alac < 0) { return MP4_MALFORMED; }
+        if (alac + 28 > load64(e)) { return MP4_MALFORMED; }
+        store64(out + 16, MP4_CODEC_ALAC);
+        store64(out + 24, data + alac + 4);
+        return 0;
+    }
+
+    return MP4_UNSUPPORTED;
 }
 
 # Build the per-sample (offset, size) table from stsz + stco/co64 + stsc into the
@@ -177,8 +362,10 @@ fn mp4_build_sample_table(data, len, stbl, stbl_end, dx) {
     var c = 0;
     while (c < chunk_count) {
         if (is64 == 1) {
-            # 64-bit: hi at +8+c*8, lo at +12+c*8; assume < 4 GiB
-            store64(chunk_off + c * 8, read_u32_be(data, stco + 12 + c * 8));
+            # 64-bit: hi at +8+c*8, lo at +12+c*8. The decoders reject an offset
+            # that is negative or past the end of the buffer.
+            store64(chunk_off + c * 8, (read_u32_be(data, stco + 8 + c * 8) << 32)
+              | read_u32_be(data, stco + 12 + c * 8));
         } else {
             store64(chunk_off + c * 8, read_u32_be(data, stco + 8 + c * 4));
         }
@@ -242,16 +429,21 @@ fn mp4_demux(data, len) {
     var stbl = mp4_find_audio_stbl(data, len, stbl_end);
     if (stbl < 0) { return err(ERR_UNSUPPORTED_FMT); }
     var dx = alloc(MP4_DX_SIZE);
-    var info = alloc(16);
-    if (mp4_audio_info(data, stbl, load64(stbl_end), info) < 0) { return err(ERR_INVALID_HEADER); }
+    var info = alloc(32);
+    var rc = mp4_audio_info(data, stbl, load64(stbl_end), info);
+    if (rc == MP4_UNSUPPORTED) { return err(ERR_UNSUPPORTED_FMT); }
+    if (rc < 0) { return err(ERR_INVALID_HEADER); }
     store64(dx + MP4_DX_CHANNELS, load64(info));
     store64(dx + MP4_DX_RATE, load64(info + 8));
+    store64(dx + MP4_DX_CODEC, load64(info + 16));
+    store64(dx + MP4_DX_COOKIE, load64(info + 24));
     if (mp4_build_sample_table(data, len, stbl, load64(stbl_end), dx) < 0) { return err(ERR_INVALID_HEADER); }
     return dx;
 }
 
-# Decode an MP4/M4A (AAC) buffer to PCM: extract each access unit, prepend an ADTS
-# header (from the track's rate/channels), and hand the ADTS stream to aac_decode.
+# Decode an MP4/M4A buffer to PCM. ALAC frames go straight to the decoder. For AAC,
+# extract each access unit, prepend an ADTS header (from the track's rate and
+# channels), and hand the ADTS stream to aac_decode.
 fn mp4_decode(data, len) {
     var dx = mp4_demux(data, len);
     if (is_err(dx) == 1) { return dx; }
@@ -260,6 +452,9 @@ fn mp4_decode(data, len) {
     var count = load64(dx + MP4_DX_COUNT);
     var offsets = load64(dx + MP4_DX_OFFSETS);
     var sizes = load64(dx + MP4_DX_SIZES);
+    if (load64(dx + MP4_DX_CODEC) == MP4_CODEC_ALAC) {
+        return alac_decode_frames(load64(dx + MP4_DX_COOKIE), data, len, offsets, sizes, count);
+    }
     # total ADTS stream size = sum(AU sizes) + 7 bytes header per AU
     var total = 0;
     var i = 0;

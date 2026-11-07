@@ -87,6 +87,25 @@ fn _tag_extract_text(frame_data, frame_len) {
     return str_new(buf, text_len);
 }
 
+# Undo ID3v2 unsynchronisation: an 0x00 written after an 0xFF is dropped. `out`
+# must hold `len` bytes. Returns the restored length.
+fn _tag_deunsync(src, len, out) {
+    var i = 0;
+    var o = 0;
+    while (i < len) {
+        var b = load8(src + i);
+        store8(out + o, b);
+        o = o + 1;
+        i = i + 1;
+        if (b == 0xFF) {
+            if (i < len) {
+                if (load8(src + i) == 0) { i = i + 1; }
+            }
+        }
+    }
+    return o;
+}
+
 # Extract the text of an ID3v2 COMM (comment) frame.
 #
 # The COMM body is  encoding(1) | language(3) | description(NUL-terminated) | text
@@ -226,6 +245,20 @@ fn tag_read_id3v2(data, len) {
     var meta = tag_meta_new();
     var tag_data = data + 10;
 
+    # Unsynchronisation (0x80) inserts an 0x00 after an 0xFF. In v2.2 and v2.3 it
+    # covers the whole tag, frame headers and any extended header included, so
+    # the walk below has to run over the restored bytes. In v2.4 it is per frame
+    # (see below): frame sizes there count the stored bytes, so the walk reads
+    # the tag as it is.
+    if ((flags & 0x80) != 0) {
+        if (major_version < 4) {
+            var restored = alloc(tag_size + 1);
+            if (restored == 0) { return err(ERR_DECODE); }
+            tag_size = _tag_deunsync(tag_data, tag_size, restored);
+            tag_data = restored;
+        }
+    }
+
     # ID3v2.3 / v2.4 frames: 4-byte ID + 4-byte size + 2-byte flags
     var pos = 0;
 
@@ -252,11 +285,6 @@ fn tag_read_id3v2(data, len) {
         }
     }
 
-    # Unsynchronisation (0x80) rewrites the frame bytes (an 0x00 is inserted
-    # after every 0xFF), so the frame walk below would read shifted sizes and
-    # mis-slice every frame. shravan does not de-unsynchronise yet; report the
-    # tag as unsupported rather than returning confidently wrong metadata.
-    if ((flags & 0x80) != 0) { return err(ERR_UNSUPPORTED_FMT); }
     # Frame header geometry differs by version:
     #   v2.2 — 3-char ID + 3-byte big-endian size, NO flag bytes  -> 6 bytes
     #   v2.3 — 4-char ID + 4-byte big-endian size + 2 flag bytes  -> 10 bytes
@@ -303,6 +331,35 @@ fn tag_read_id3v2(data, len) {
         if (pos + frame_size > tag_size) { break; }
 
         var frame_data = tag_data + pos;
+        var body_size = frame_size;
+        var usable = 1;
+
+        # v2.4 keeps per-frame format flags in the second flag byte. A group byte
+        # and a data length indicator sit ahead of the data, and unsynchronisation
+        # applies to the data after them. The tag-level bit means the same as the
+        # frame bit; some writers set only that one. Compressed or encrypted bodies
+        # cannot be read as text, so those frames are skipped.
+        if (major_version == 4) {
+            var fflags = load8(id_ptr + 9);
+            if ((fflags & 0x0C) != 0) { usable = 0; }
+            if ((fflags & 0x40) != 0) {
+                frame_data = frame_data + 1;
+                body_size = body_size - 1;
+            }
+            if ((fflags & 0x01) != 0) {
+                frame_data = frame_data + 4;
+                body_size = body_size - 4;
+            }
+            if (body_size <= 0) { usable = 0; }
+            if (usable == 1) {
+                if (((fflags & 0x02) != 0) || ((flags & 0x80) != 0)) {
+                    var clean = alloc(body_size + 1);
+                    if (clean == 0) { return err(ERR_DECODE); }
+                    body_size = _tag_deunsync(frame_data, body_size, clean);
+                    frame_data = clean;
+                }
+            }
+        }
 
         # Comment frames carry a language code and description, so they need the
         # COMM-aware extractor rather than the plain-text one. v2.2 spells the
@@ -314,19 +371,21 @@ fn tag_read_id3v2(data, len) {
             if (_tag_id_eq(id_ptr, 0x43, 0x4F, 0x4D, 0x4D) == 1) { is_comment = 1; }
         }
 
-        if (is_comment == 1) {
-            # SEC-018's frame_size > 4 bound is preserved inside the extractor.
-            var comm_text = _tag_extract_comm(frame_data, frame_size);
-            if (comm_text != 0) {
-                tag_meta_set_comment(meta, comm_text);
-            }
-        } else {
-            # Standard text frame
-            var text = _tag_extract_text(frame_data, frame_size);
-            if (major_version == 2) {
-                _tag_assign_text_v22(meta, id_ptr, text);
+        if (usable == 1) {
+            if (is_comment == 1) {
+                # SEC-018's frame_size > 4 bound is preserved inside the extractor.
+                var comm_text = _tag_extract_comm(frame_data, body_size);
+                if (comm_text != 0) {
+                    tag_meta_set_comment(meta, comm_text);
+                }
             } else {
-                _tag_assign_text(meta, id_ptr, text);
+                # Standard text frame
+                var text = _tag_extract_text(frame_data, body_size);
+                if (major_version == 2) {
+                    _tag_assign_text_v22(meta, id_ptr, text);
+                } else {
+                    _tag_assign_text(meta, id_ptr, text);
+                }
             }
         }
 

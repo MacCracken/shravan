@@ -22,9 +22,10 @@ is split into three entry points** — each `include`s the same library + codecs
 runs a different test subset, so no single build overflows the Cyrius code buffer
 (~3.15 MB): `src/main.cyr` (core codecs + Opus decode + API), `src/main_encoder.cyr`
 (Opus CELT RFC-6716 encoder), `src/main_silk.cyr` (SILK decode golden vectors). The
-11,706-assertion suite is 1209 / 138 / 10359 across the three. `cyrius distlib`
+11,938-assertion suite is 1441 / 138 / 10359 across the three. `cyrius distlib`
 concatenates the `[lib]` modules into `dist/shravan.cyr`, the **self-contained bundle
-consumers include** (they supply stdlib + bayan + sankoch from their own manifest);
+consumers include** (they supply stdlib + sankoch from their own manifest, and
+`cyrius deps` pulls `bayan-json` in through shravan's own `[deps.bayan]`);
 none of the test files are in `[lib]`.
 
 ```
@@ -35,14 +36,16 @@ src/*.cyr        -- codec modules (flac, ogg, mp3, tag, fft, opus, silk, opus_le
 src/main.cyr     -- test harness: core codecs + Opus decode + API  -> build/shravan
 src/main_encoder.cyr -- test harness: Opus CELT RFC-6716 encoder   -> build/shravan-encoder
 src/main_silk.cyr    -- test harness: SILK decode golden vectors   -> build/shravan-silk
-src/*_tests.cyr / opus_test_helpers.cyr -- test suites (opus_rfc_tests, opus_encoder_tests, silk_tests); NOT in [lib]
+src/*_tests.cyr / opus_test_helpers.cyr -- test suites (opus_rfc_tests, opus_encoder_tests, silk_tests, interop_tests); NOT in [lib]
+src/interop_fixtures.cyr -- real ffmpeg/flac/lame output with reference decodes (generated); NOT in [lib]
 src/bench.cyr    -- benchmarks (clock_gettime timing)
 dist/shravan.cyr -- distlib bundle for consumers (committed; regenerate via `cyrius distlib`)
 dist/shravan.deps -- stdlib leaf sidecar `cyrius deps` consumes (emitted alongside the bundle)
 lib/             -- vendored Cyrius stdlib snapshot ONLY (cyrius lib sync)
 build/           -- compiled binaries (gitignored)
 scripts/         -- test-all.sh, bench-history.sh, version-bump.sh,
-                    check-write-lengths.py (CI guard: syscall write byte counts)
+                    check-write-lengths.py (CI guard: syscall write byte counts),
+                    gen-interop-fixtures.py (regenerates src/interop_fixtures.cyr)
 fuzz/            -- fuzz_codecs.cyr (stubbed lib), fuzz_decode.cyr (real lib:
                     codec_open/WAV/AIFF/ALAC/FLAC/MP3/Ogg/MP4/AAC/tags), run.sh
 docs/            -- architecture, roadmap
@@ -64,16 +67,16 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run ALL three test binaries (11,706 assertions)
+./scripts/test-all.sh                       # build + run ALL three test binaries (11,938 assertions)
 cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.7.18)
-./build/shravan                             # run core codecs + Opus decode + API (1209 assertions)
+./build/shravan                             # run core codecs + Opus decode + API (1441 assertions)
 cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
 ./build/shravan-encoder                     # run encoder tests (138 assertions)
 cyrius build src/main_silk.cyr build/shravan-silk        # SILK decode golden-vector suite
 ./build/shravan-silk                        # run SILK tests (10359 assertions)
 cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./build/bench                               # run benchmarks
-./fuzz/run.sh 90000                         # hostile-input gate (903,500 calls, 0 crashes)
+./fuzz/run.sh 90000                         # hostile-input gate (914,764 calls, 0 crashes)
 ./scripts/check-write-lengths.py            # verify syscall write byte counts (--fix to repair)
 ```
 
@@ -84,20 +87,20 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | error | src/shravan.cyr | ShravanErr enum, packed Result helpers |
 | format | src/shravan.cyr | AudioFormat enum, FormatInfo struct, format detection |
 | pcm | src/shravan.cyr | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
-| wav | src/shravan.cyr | RIFF WAVE encode/decode (PCM 8/16/24/32-bit, IEEE float 32-bit) |
+| wav | src/shravan.cyr | RIFF WAVE encode/decode (PCM 8/16/24/32-bit, IEEE float 32/64-bit) |
 | aiff | src/shravan.cyr | AIFF encode/decode (big-endian, 80-bit extended sample rate) |
-| alac | src/shravan.cyr | Apple Lossless Audio Codec decoder |
+| alac | src/shravan.cyr | Apple Lossless decoder: adaptive Rice and LPC, stereo unmix, shifted bytes, surround channel order. `alac_decode_frames` takes container frames; MP4/QuickTime route to it. Bit-exact vs ffmpeg |
 | codec | src/shravan.cyr | Auto-detect format and dispatch to decoder |
-| flac | src/flac.cyr | FLAC encode/decode (all subframe types, Rice coding, channel decorrelation) |
+| flac | src/flac.cyr | FLAC decode (all subframe types, Rice coding, channel decorrelation; `flac_verify` checks the STREAMINFO MD5) and encode (Fixed prediction only). Decode bit-exact vs the flac CLI |
 | ogg | src/ogg.cyr | Ogg container parse/mux (CRC32, page extraction, lacing) |
-| mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM). Sample-exact vs minimp3 (one edge: MPEG-2.5 8 kHz low-bitrate short blocks) |
-| tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading |
+| mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM). Layer III exact vs ffmpeg at all 9 rates, transients included |
+| tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading and writing. ID3v2 de-unsynchronisation, v2.4 frame flags |
 | fft | src/fft.cyr | Mixed-radix FFT for MDCT |
 | opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
 | silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
 | opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by the test harnesses but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
-| aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE, long/short windows, sine+KBD, PNS, intensity, per-band M/S, ISO codebooks 1--11 (ffmpeg streams decode frame-for-frame). Encode: ISO-ordered `individual_channel_stream()`, per-band M/S + PNS + intensity (ffmpeg decodes shravan's output) |
-| mp4 | src/mp4.cyr | MP4/M4A container demux (box tree, sample table, AAC extraction → aac_decode) |
+| aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE, all 13 sample rates (`_aac_select_swb`), long/short windows, sine+KBD, full TNS, PNS, intensity, per-band M/S, ISO codebooks 1--11, independent windows. Exact vs ffmpeg apart from PNS noise. Encode: ISO-ordered `individual_channel_stream()`, per-band M/S + PNS + intensity (ffmpeg decodes shravan's output) |
+| mp4 | src/mp4.cyr | MP4/M4A and QuickTime demux: box tree, sample table, 64-bit sizes and offsets, sample entry v0/v1/v2, esds/AudioSpecificConfig. AAC → aac_decode, ALAC → alac_decode_frames, HE-AAC reported unsupported |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
 | dither | src/dither.cyr | Dithering for sample depth reduction |
 | simd | src/simd.cyr | SIMD-optimized inner loops |
@@ -120,7 +123,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,706 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh` (builds all three harnesses), verify all 11,938 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
@@ -152,6 +155,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 - **All samples are f64 internally** -- Cyrius native, higher precision than f32.
 - **Zero panics** -- return error codes, never abort.
 - **Caller-provided buffers** where possible -- avoid heap allocation in hot paths.
+- **A round-trip through shravan's own encoder proves nothing.** Decoders are judged by maximum sample error against a reference on real encoder output, encoders by what that reference does with their output. New decode paths need a fixture from `scripts/gen-interop-fixtures.py`, and a fix is proven by reverting it and watching that fixture fail.
 - **All tests must pass** before any changes are considered complete.
 
 ## Conventions

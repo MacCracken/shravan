@@ -175,81 +175,110 @@ var AAC_SHORT_SIZE = 128;
 var AAC_NUM_SHORT_WINDOWS = 8;
 
 # Scale factor band boundaries for 48kHz / 44.1kHz (long window, 49 bands)
+# The active scalefactor band layout. The bands depend on the sample rate, so these
+# are selected per stream by _aac_select_swb, and code reads them as variables.
 var _aac_swb_offset = 0;
 var _aac_swb_short = 0;
 var _AAC_NUM_SWB = 49;
 var _AAC_NUM_SWB_SHORT = 14;
+var _aac_tns_max_long = 42;
+var _aac_tns_max_short = 14;
 
+# The most bands any rate uses: 51 at 32 kHz.
+var _AAC_MAX_SWB = 51;
+
+# Per sample rate index (13 entries each): layout pointers and band counts.
+var _aac_swb_long_by_sr = 0;
+var _aac_swb_short_by_sr = 0;
+var _aac_swb_nlong_by_sr = 0;
+var _aac_swb_nshort_by_sr = 0;
+
+# TNS_MAX_BANDS for AAC-LC, by sample rate index.
+var _aac_tns_max_long_by_sr = 0;
+var _aac_tns_max_short_by_sr = 0;
+
+# Build a band offset table of n + 1 entries. Each letter gives a band's width in
+# units of 4 coefficients, with 'A' as 4.
+fn _aac_swb_build(widths, n) {
+    var t = alloc((n + 1) * 8);
+    var off = 0;
+    var i = 0;
+    while (i < n) {
+        store64(t + i * 8, off);
+        off = off + (load8(widths + i) - 64) * 4;
+        i = i + 1;
+    }
+    store64(t + n * 8, off);
+    return t;
+}
+
+fn _aac_swb_register(sr_index, long_tbl, long_n, short_tbl, short_n) {
+    store64(_aac_swb_long_by_sr + sr_index * 8, long_tbl);
+    store64(_aac_swb_nlong_by_sr + sr_index * 8, long_n);
+    store64(_aac_swb_short_by_sr + sr_index * 8, short_tbl);
+    store64(_aac_swb_nshort_by_sr + sr_index * 8, short_n);
+    return 0;
+}
+
+# Make the band layout for a sample rate index the active one.
+fn _aac_select_swb(sr_index) {
+    _aac_swb_offset = load64(_aac_swb_long_by_sr + sr_index * 8);
+    _aac_swb_short = load64(_aac_swb_short_by_sr + sr_index * 8);
+    _AAC_NUM_SWB = load64(_aac_swb_nlong_by_sr + sr_index * 8);
+    _AAC_NUM_SWB_SHORT = load64(_aac_swb_nshort_by_sr + sr_index * 8);
+    _aac_tns_max_long = load64(_aac_tns_max_long_by_sr + sr_index * 8);
+    _aac_tns_max_short = load64(_aac_tns_max_short_by_sr + sr_index * 8);
+    return 0;
+}
+
+# ISO/IEC 14496-3 scalefactor band tables. Generated from libavcodec's tables, not
+# transcribed. Rates share layouts: 96/88.2, 48/44.1, 24/22.05, 16/12/11.025 and
+# 8/7.35 kHz for both window lengths, and 96/88.2/64 and 48/44.1/32 for short.
 fn _aac_init_swb() {
-    _aac_swb_offset = alloc(50 * 8);
-    store64(_aac_swb_offset + 0 * 8, 0);
-    store64(_aac_swb_offset + 1 * 8, 4);
-    store64(_aac_swb_offset + 2 * 8, 8);
-    store64(_aac_swb_offset + 3 * 8, 12);
-    store64(_aac_swb_offset + 4 * 8, 16);
-    store64(_aac_swb_offset + 5 * 8, 20);
-    store64(_aac_swb_offset + 6 * 8, 24);
-    store64(_aac_swb_offset + 7 * 8, 28);
-    store64(_aac_swb_offset + 8 * 8, 32);
-    store64(_aac_swb_offset + 9 * 8, 36);
-    store64(_aac_swb_offset + 10 * 8, 40);
-    store64(_aac_swb_offset + 11 * 8, 48);
-    store64(_aac_swb_offset + 12 * 8, 56);
-    store64(_aac_swb_offset + 13 * 8, 64);
-    store64(_aac_swb_offset + 14 * 8, 72);
-    store64(_aac_swb_offset + 15 * 8, 80);
-    store64(_aac_swb_offset + 16 * 8, 88);
-    store64(_aac_swb_offset + 17 * 8, 96);
-    store64(_aac_swb_offset + 18 * 8, 108);
-    store64(_aac_swb_offset + 19 * 8, 120);
-    store64(_aac_swb_offset + 20 * 8, 132);
-    store64(_aac_swb_offset + 21 * 8, 144);
-    store64(_aac_swb_offset + 22 * 8, 160);
-    store64(_aac_swb_offset + 23 * 8, 176);
-    store64(_aac_swb_offset + 24 * 8, 196);
-    store64(_aac_swb_offset + 25 * 8, 216);
-    store64(_aac_swb_offset + 26 * 8, 240);
-    store64(_aac_swb_offset + 27 * 8, 264);
-    store64(_aac_swb_offset + 28 * 8, 292);
-    store64(_aac_swb_offset + 29 * 8, 320);
-    store64(_aac_swb_offset + 30 * 8, 352);
-    store64(_aac_swb_offset + 31 * 8, 384);
-    store64(_aac_swb_offset + 32 * 8, 416);
-    store64(_aac_swb_offset + 33 * 8, 448);
-    store64(_aac_swb_offset + 34 * 8, 480);
-    store64(_aac_swb_offset + 35 * 8, 512);
-    store64(_aac_swb_offset + 36 * 8, 544);
-    store64(_aac_swb_offset + 37 * 8, 576);
-    store64(_aac_swb_offset + 38 * 8, 608);
-    store64(_aac_swb_offset + 39 * 8, 640);
-    store64(_aac_swb_offset + 40 * 8, 672);
-    store64(_aac_swb_offset + 41 * 8, 704);
-    store64(_aac_swb_offset + 42 * 8, 736);
-    store64(_aac_swb_offset + 43 * 8, 768);
-    store64(_aac_swb_offset + 44 * 8, 800);
-    store64(_aac_swb_offset + 45 * 8, 832);
-    store64(_aac_swb_offset + 46 * 8, 864);
-    store64(_aac_swb_offset + 47 * 8, 896);
-    store64(_aac_swb_offset + 48 * 8, 928);
-    store64(_aac_swb_offset + 49 * 8, 1024);
+    _aac_swb_long_by_sr = alloc(13 * 8);
+    _aac_swb_short_by_sr = alloc(13 * 8);
+    _aac_swb_nlong_by_sr = alloc(13 * 8);
+    _aac_swb_nshort_by_sr = alloc(13 * 8);
+    _aac_tns_max_long_by_sr = alloc(13 * 8);
+    _aac_tns_max_short_by_sr = alloc(13 * 8);
 
-    # Short window SWB offsets (48kHz/44.1kHz, 14 bands)
-    _aac_swb_short = alloc(15 * 8);
-    store64(_aac_swb_short + 0 * 8, 0);
-    store64(_aac_swb_short + 1 * 8, 4);
-    store64(_aac_swb_short + 2 * 8, 8);
-    store64(_aac_swb_short + 3 * 8, 12);
-    store64(_aac_swb_short + 4 * 8, 16);
-    store64(_aac_swb_short + 5 * 8, 20);
-    store64(_aac_swb_short + 6 * 8, 28);
-    store64(_aac_swb_short + 7 * 8, 36);
-    store64(_aac_swb_short + 8 * 8, 44);
-    store64(_aac_swb_short + 9 * 8, 56);
-    store64(_aac_swb_short + 10 * 8, 68);
-    store64(_aac_swb_short + 11 * 8, 80);
-    store64(_aac_swb_short + 12 * 8, 96);
-    store64(_aac_swb_short + 13 * 8, 112);
-    store64(_aac_swb_short + 14 * 8, 128);
+    var l96 = _aac_swb_build("AAAAAAAAAAAAAABBBBBCCCCCDDFGIKPPPPPPPPPPP", 41);
+    var l64 = _aac_swb_build("AAAAAAAAAAAAAABBBBCCCDDDEFFGIJJJJJJJJJJJJJJJJJJ", 47);
+    var l24 = _aac_swb_build("AAAAAAAAAAABBBBBBBBBBCCCCDDDEEFFGGHIIJKLMMPPPPP", 47);
+    var l48 = _aac_swb_build("AAAAAAAAAABBBBBBBCCCCDDEEFFGGHHHHHHHHHHHHHHHHHHHX", 49);
+    var l32 = _aac_swb_build("AAAAAAAAAABBBBBBBCCCCDDEEFFGGHHHHHHHHHHHHHHHHHHHHHH", 51);
+    var l16 = _aac_swb_build("BBBBBBBBBBBCCCCCCCCCDDDDEEEFFGGHIJJKLMNOPPP", 43);
+    var l8 = _aac_swb_build("CCCCCCCCCCCCCDDDDDDDEEEEFFFGGHIIJKLMNOPT", 40);
+    var s96 = _aac_swb_build("AAAAAABBBDGI", 12);
+    var s48 = _aac_swb_build("AAAAABBBCCCDDD", 14);
+    var s24 = _aac_swb_build("AAAAAAABBBCCDDE", 15);
+    var s16 = _aac_swb_build("AAAAAAAABBCCDEE", 15);
+    var s8 = _aac_swb_build("AAAAAAABBBBCDEE", 15);
+
+    _aac_swb_register(0, l96, 41, s96, 12);
+    _aac_swb_register(1, l96, 41, s96, 12);
+    _aac_swb_register(2, l64, 47, s96, 12);
+    _aac_swb_register(3, l48, 49, s48, 14);
+    _aac_swb_register(4, l48, 49, s48, 14);
+    _aac_swb_register(5, l32, 51, s48, 14);
+    _aac_swb_register(6, l24, 47, s24, 15);
+    _aac_swb_register(7, l24, 47, s24, 15);
+    _aac_swb_register(8, l16, 43, s16, 15);
+    _aac_swb_register(9, l16, 43, s16, 15);
+    _aac_swb_register(10, l16, 43, s16, 15);
+    _aac_swb_register(11, l8, 40, s8, 15);
+    _aac_swb_register(12, l8, 40, s8, 15);
+
+    var tl = "\x1f\x1f\x22\x28\x2a\x33\x2e\x2e\x2a\x2a\x2a\x27\x27";
+    var ts = "\x09\x09\x0a\x0e\x0e\x0e\x0e\x0e\x0e\x0e\x0e\x0e\x0e";
+    var i = 0;
+    while (i < 13) {
+        store64(_aac_tns_max_long_by_sr + i * 8, load8(tl + i));
+        store64(_aac_tns_max_short_by_sr + i * 8, load8(ts + i));
+        i = i + 1;
+    }
+
+    _aac_select_swb(4);    # 44.1 kHz until a stream says otherwise
     return 0;
 }
 
@@ -358,7 +387,23 @@ var TNS_ST_LEN = 40;       # region length in SFBs (bitstream field)
 var TNS_ST_RESBITS = 48;   # coef resolution bits (3 or 4)
 var TNS_ST_COMPRESS = 56;  # coef_compress flag
 var TNS_ST_COEF = 64;      # coef_index[0..order-1] (signed), 12 slots
-var TNS_ST_SIZE = 168;     # 64 + 12*8 = 160, padded
+var TNS_ST_PARSED = 160;   # set by _tns_parse_data: the records below are valid
+var TNS_ST_MAX_SFB = 168;
+var TNS_ST_IS_SHORT = 176;
+var TNS_ST_NREC = 184;     # filter records, in bitstream order
+var TNS_ST_REC = 192;
+var TNS_ST_SIZE = 1280;    # 192 + 8 * TNS_REC_SIZE
+
+# One filter as read from a stream: its window, length in bands, order, direction
+# and resolution, then up to 12 coefficient indices. Long windows have up to 3
+# filters and short windows 1 each, so 8 records cover any frame.
+var TNS_REC_WINDOW = 0;
+var TNS_REC_LEN = 8;
+var TNS_REC_ORDER = 16;
+var TNS_REC_DIR = 24;
+var TNS_REC_RESBITS = 32;
+var TNS_REC_COEF = 40;
+var TNS_REC_SIZE = 136;    # 40 + 12*8
 
 # Autocorrelation of x[start..end) for lags 0..maxlag into r_out[0..maxlag].
 fn _tns_autocorr(x, start, end, maxlag, r_out) {
@@ -595,9 +640,69 @@ fn _tns_analyze_apply(spec, max_sfb, st) {
     return 0;
 }
 
+# Apply every filter a stream carried, in place. Within a window the filters work
+# down from the top of the band table, not from max_sfb, each taking `length` bands
+# below the last. The bin range is then limited by TNS_MAX_BANDS for the sample rate
+# and by max_sfb, so a filter can end up narrower than its length says, or empty.
+fn _tns_decode_apply(spec, st) {
+    var n = load64(st + TNS_ST_NREC);
+    if (n == 0) { return 0; }
+    var tbl = _aac_swb_offset;
+    var num_swb = _AAC_NUM_SWB;
+    var limit = _aac_tns_max_long;
+    var is_short = load64(st + TNS_ST_IS_SHORT);
+    if (is_short == 1) {
+        tbl = _aac_swb_short;
+        num_swb = _AAC_NUM_SWB_SHORT;
+        limit = _aac_tns_max_short;
+    }
+    var max_sfb = load64(st + TNS_ST_MAX_SFB);
+    if (max_sfb < limit) { limit = max_sfb; }
+    if (num_swb < limit) { limit = num_swb; }
+
+    var kbuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    var abuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    var cur_w = 0 - 1;
+    var bottom = 0;
+    var r = 0;
+    while (r < n) {
+        var rec = st + TNS_ST_REC + r * TNS_REC_SIZE;
+        r = r + 1;
+        var w = load64(rec + TNS_REC_WINDOW);
+        if (w != cur_w) {
+            cur_w = w;
+            bottom = num_swb;
+        }
+        var top = bottom;
+        bottom = top - load64(rec + TNS_REC_LEN);
+        if (bottom < 0) { bottom = 0; }
+
+        var order = load64(rec + TNS_REC_ORDER);
+        if (order > 0) {
+            var lo = bottom;
+            var hi = top;
+            if (lo > limit) { lo = limit; }
+            if (hi > limit) { hi = limit; }
+            var resbits = load64(rec + TNS_REC_RESBITS);
+            var i = 1;
+            while (i <= order) {
+                store64(kbuf + i * 8, _tns_dequant_coef(load64(rec + TNS_REC_COEF + (i - 1) * 8), resbits));
+                i = i + 1;
+            }
+            _tns_parcor_to_lpc(kbuf, order, abuf);
+            var base = spec;
+            if (is_short == 1) { base = spec + w * AAC_SHORT_SIZE * 8; }
+            _tns_filter(base, load64(tbl + lo * 8), load64(tbl + hi * 8), abuf, order,
+                        load64(rec + TNS_REC_DIR), 1);
+        }
+    }
+    return 0;
+}
+
 # Decoder: rebuild the LPC from the decoded reflection coefficients and apply the
 # synthesis (IIR) filter to the dequantized spectrum IN PLACE, before the IMDCT.
 fn _tns_synth_apply(spec, st) {
+    if (load64(st + TNS_ST_PARSED) == 1) { return _tns_decode_apply(spec, st); }
     if (load64(st + TNS_ST_PRESENT) == 0) { return 0; }
     var order = load64(st + TNS_ST_ORDER);
     if (order <= 0) { return 0; }
@@ -651,6 +756,9 @@ fn _aac_write_ics_ext(bw, st) {
 # Parse tns_data() into the TNS state (long window stores filter 0; short windows
 # are consumed to stay in sync but not applied — the encoder is long-only).
 fn _tns_parse_data(br, is_short, max_sfb, st) {
+    store64(st + TNS_ST_PARSED, 1);
+    store64(st + TNS_ST_MAX_SFB, max_sfb);
+    store64(st + TNS_ST_IS_SHORT, is_short);
     var n_filt_bits = 2;
     var len_bits = 6;
     var order_bits = 5;
@@ -672,11 +780,23 @@ fn _tns_parse_data(br, is_short, max_sfb, st) {
                 var order = _br_read(br, order_bits);
                 if (is_err(order) == 1) { return order; }
                 if (order > TNS_MAX_ORDER) { return err(ERR_DECODE); }
+                # Every filter gets a record, even at order 0: its length still
+                # moves the next filter's band range.
+                var nrec = load64(st + TNS_ST_NREC);
+                if (nrec >= 8) { return err(ERR_DECODE); }
+                var rec = st + TNS_ST_REC + nrec * TNS_REC_SIZE;
+                store64(st + TNS_ST_NREC, nrec + 1);
+                store64(rec + TNS_REC_WINDOW, w);
+                store64(rec + TNS_REC_LEN, length);
+                store64(rec + TNS_REC_ORDER, order);
+                store64(rec + TNS_REC_DIR, 0);
+                store64(rec + TNS_REC_RESBITS, res_bits);
                 if (order > 0) {
                     var direction = _br_read(br, 1);
                     if (is_err(direction) == 1) { return direction; }
                     var compress = _br_read(br, 1);
                     if (is_err(compress) == 1) { return compress; }
+                    store64(rec + TNS_REC_DIR, direction);
                     var coef_len = res_bits - compress;
                     var signbit = 1;
                     var sb = 0;
@@ -689,6 +809,7 @@ fn _tns_parse_data(br, is_short, max_sfb, st) {
                         if (is_err(raw) == 1) { return raw; }
                         var ci = raw;
                         if (raw >= signbit) { ci = raw - signbit * 2; }
+                        store64(rec + TNS_REC_COEF + i * 8, ci);
                         if (store_it == 1) { store64(st + TNS_ST_COEF + i * 8, ci); }
                         i = i + 1;
                     }
@@ -749,11 +870,11 @@ var _aac_psy_up_gain = 0;   # up_gain[d]   = 10^(-PSY_SLOPE_UP*d/10)
 var _aac_psy_down_gain = 0; # down_gain[d] = 10^(-PSY_SLOPE_DOWN*d/10)
 
 fn _aac_psy_init() {
-    _aac_psy_up_gain = alloc(_AAC_NUM_SWB * 8);
-    _aac_psy_down_gain = alloc(_AAC_NUM_SWB * 8);
+    _aac_psy_up_gain = alloc(_AAC_MAX_SWB * 8);
+    _aac_psy_down_gain = alloc(_AAC_MAX_SWB * 8);
     var ten = f64_from(10);
     var d = 0;
-    while (d < _AAC_NUM_SWB) {
+    while (d < _AAC_MAX_SWB) {
         store64(_aac_psy_up_gain + d * 8, f64_pow(ten, f64_neg(f64_div(f64_from(PSY_SLOPE_UP * d), ten))));
         store64(_aac_psy_down_gain + d * 8, f64_pow(ten, f64_neg(f64_div(f64_from(PSY_SLOPE_DOWN * d), ten))));
         d = d + 1;
@@ -1665,6 +1786,7 @@ fn aac_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     if (channels == 0) { return err(ERR_INVALID_CHANNELS); }
     if (channels > 2) { return err(ERR_INVALID_CHANNELS); }
     if (bitrate == 0) { return err(ERR_ENCODE); }
+    _aac_select_swb(_aac_find_sr_index(sample_rate));
 
     var ch = channels;
     var total_samples = vec_len(samples_vec);
@@ -3801,6 +3923,39 @@ fn _aac_skip_dse(br) {
     return 0;
 }
 
+# Fill one channel's noise bands using that channel's own window layout.
+fn _aac_pns_channel(spec, sect_cb, sf, max_sfb, n_groups, group_lens, is_short) {
+    var tbl = _aac_swb_offset;
+    var cnt = _AAC_NUM_SWB;
+    if (is_short == 1) { tbl = _aac_swb_short; cnt = _AAC_NUM_SWB_SHORT; }
+    var wbase = 0;
+    var g = 0;
+    while (g < n_groups) {
+        var glen = 1;
+        if (is_short == 1) {
+            glen = load64(group_lens + g * 8);
+            if (glen < 1) { glen = 1; }
+        }
+        var bnd = 0;
+        while (bnd < max_sfb) {
+            if (load64(sect_cb + (g * cnt + bnd) * 8) == 13) {
+                var w = 0;
+                while (w < glen) {
+                    var wb = 0;
+                    if (is_short == 1) { wb = (wbase + w) * AAC_SHORT_SIZE; }
+                    _aac_pns_fill(spec, wb, load64(tbl + bnd * 8), load64(tbl + (bnd + 1) * 8),
+                                  load64(sf + (g * cnt + bnd) * 8));
+                    w = w + 1;
+                }
+            }
+            bnd = bnd + 1;
+        }
+        wbase = wbase + glen;
+        g = g + 1;
+    }
+    return 0;
+}
+
 fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
     if (_aac_swb_offset == 0) { _aac_init_swb(); }
     var br = _br_new(fdata, flen);
@@ -3932,6 +4087,7 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         }
 
         if (is_short == 1) {
+            _tns_synth_apply(spec_m, tns_st);
             var rcs = _aac_synth_short_spec(spec_m, overlap, out_samples,
                                             cur_shape, prev_shape);
             if (is_err(rcs) == 1) { return rcs; }
@@ -4057,6 +4213,15 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         var nwin = 1;
         if (is_short == 1) { swb_tbl = _aac_swb_short; swb_cnt = _AAC_NUM_SWB_SHORT; nwin = 8; }
 
+        # Without a common window the channels may not even share a window type,
+        # and M/S and intensity need one, so each channel fills its own noise bands
+        # and the joint loop below has nothing to do.
+        if (common_window == 0) {
+            _aac_pns_channel(spec0, sect_cb0, sf0, msfb0, n_groups, info0 + 16, is_short);
+            _aac_pns_channel(spec1, sect_cb1, sf1, msfb1, n_groups1, info1 + 16, is_short1);
+            n_groups = 0;
+        }
+
         var wbase = 0;
         var gi2 = 0;
         while (gi2 < n_groups) {
@@ -4108,21 +4273,28 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         var out_l = alloc(AAC_FRAME_SIZE * 8);
         var out_r = alloc(AAC_FRAME_SIZE * 8);
 
+        # Each channel has its own window shape, and overlaps with its own previous
+        # one. info1 is a copy of info0 when the window is common.
         var shape_slot2 = overlap + AAC_FRAME_SIZE * 2 * 8;
-        var cur_shape2 = load64(info0 + 88);
-        var prev_shape2 = load64(shape_slot2);
-        store64(shape_slot2, cur_shape2);
+        var cur_shape_l = load64(info0 + 88);
+        var cur_shape_r = load64(info1 + 88);
+        var prev_shape_l = load64(shape_slot2);
+        var prev_shape_r = load64(shape_slot2 + 8);
+        store64(shape_slot2, cur_shape_l);
+        store64(shape_slot2 + 8, cur_shape_r);
 
         if (is_short == 1) {
-            _aac_synth_short_spec(spec0, overlap_l, out_l, cur_shape2, prev_shape2);
+            _tns_synth_apply(spec0, tns0);
+            _aac_synth_short_spec(spec0, overlap_l, out_l, cur_shape_l, prev_shape_l);
         } else {
-            _aac_synth_spec(spec0, overlap_l, out_l, tns0, cur_shape2, prev_shape2,
+            _aac_synth_spec(spec0, overlap_l, out_l, tns0, cur_shape_l, prev_shape_l,
                             load64(info0));
         }
         if (is_short1 == 1) {
-            _aac_synth_short_spec(spec1, overlap_r, out_r, cur_shape2, prev_shape2);
+            _tns_synth_apply(spec1, tns1);
+            _aac_synth_short_spec(spec1, overlap_r, out_r, cur_shape_r, prev_shape_r);
         } else {
-            _aac_synth_spec(spec1, overlap_r, out_r, tns1, cur_shape2, prev_shape2,
+            _aac_synth_spec(spec1, overlap_r, out_r, tns1, cur_shape_r, prev_shape_r,
                             load64(info1));
         }
 
@@ -4149,6 +4321,7 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
 
 fn aac_decode(data, len) {
     if (_aac_sample_rates == 0) { aac_init(); }
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
 
     if (len < 7) { return err(ERR_INVALID_HEADER); }
 
@@ -4225,6 +4398,7 @@ fn aac_decode(data, len) {
         if (pa2 == 0) { hs2 = 9; }
         var plen = fl2 - hs2;
         if (plen > 0) {
+            _aac_select_swb(aac_adts_sr_index(hdr2));
             var rc = _aac_decode_frame(data + pos + hs2, plen, overlap, frame_buf);
             if (res_ok(rc) == 1) {
                 # rc = number of channels decoded (1 or 2)

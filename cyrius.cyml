@@ -44,13 +44,19 @@ modules = [
 #   - `ganita` ADDED: the transcendentals shravan calls (f64_pow/asin/acos/
 #     atan2/sinh/cosh/tanh/hypot) moved OUT of `math` into `ganita` in the 6.x
 #     line; without it the build fails on undefined f64_pow.
-#   - `json` -> `bayan`: the json stdlib was carved into `bayan` at 6.1.25.
-#     `bayan` provides bayan_json_* (parse/get_int/build/…); serde.cyr uses them.
-#     bayan's result/io needs resolve via `io` (already listed).
+#   - `json` -> `bayan`: the json stdlib was carved into `bayan` at 6.1.25, and
+#     from 2.9.2 only its JSON profile is used, as [deps.bayan] below: the full
+#     stdlib `bayan` costs about 980 KB of binary and pulls in lib/unicode/ for
+#     formats shravan never reads. serde.cyr needs bayan_json_* only.
 [deps]
-stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "tagged", "math", "ganita", "thread", "fnptr", "bayan"]
+stdlib = ["string", "fmt", "alloc", "vec", "str", "syscalls", "io", "args", "assert", "tagged", "math", "ganita", "thread", "fnptr"]
 
 [deps.sankoch]
 git = "https://github.com/MacCracken/sankoch.git"
 tag = "2.8.9"
 modules = ["dist/sankoch.cyr"]
+
+[deps.bayan]
+git = "https://github.com/MacCracken/bayan.git"
+tag = "1.11.1"
+modules = ["dist/bayan-json.cyr"]

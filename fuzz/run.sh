@@ -22,7 +22,7 @@ echo "=== fuzz_codecs ($ITERS iters) ==="
 "$CYRIUS" build fuzz/fuzz_codecs.cyr build/fuzz_codecs 2>&1 | tail -2
 ./build/fuzz_codecs "$ITERS"
 
-# fuzz_decode makes 17 calls per iteration; size each batch to stay well under
+# fuzz_decode makes at least 17 calls per iteration; size each batch to stay well under
 # the memory ceiling and use as many batches as needed to reach ITERS calls.
 BATCH_ITERS=500
 BATCHES=$(( (ITERS + (BATCH_ITERS * 17) - 1) / (BATCH_ITERS * 17) ))

@@ -1,7 +1,7 @@
 # shravan — test harness entry point.
 # The library lives in src/shravan.cyr (bundled into dist/shravan.cyr via
 # `cyrius distlib`); this file includes it plus the codec modules and runs the
-# 1039-assertion suite. Consumers use dist/shravan.cyr, not this file.
+# core suite. Consumers use dist/shravan.cyr, not this file.
 include "src/shravan.cyr"
 include "src/flac.cyr"
 include "src/ogg.cyr"
@@ -20,6 +20,8 @@ include "src/stream.cyr"
 include "src/serde.cyr"
 include "src/opus_test_helpers.cyr"
 include "src/opus_rfc_tests.cyr"
+include "src/interop_fixtures.cyr"
+include "src/interop_tests.cyr"
 
 # ================================================================
 # Tests
@@ -285,7 +287,6 @@ fn test_wav_errors() {
     var buf = alloc(256);
     assert(is_err(wav_encode(s, 44100, 0, PCM_I16, buf)) == 1, "0 channels rejected");
     assert(is_err(wav_encode(s, 0, 1, PCM_I16, buf)) == 1, "0 rate rejected");
-    assert(is_err(wav_encode(s, 44100, 1, PCM_F64, buf)) == 1, "f64 encoding rejected");
 
     return 0;
 }
@@ -1601,10 +1602,168 @@ fn test_sec_id3v2_comm_frame() {
     var m2 = tag_read_id3v2(buf, 30);
     assert(is_err(m2) == 0, "id3v2 with extended header parses without error");
 
-    # Unsynchronised tags are reported unsupported rather than mis-sliced.
-    store8(buf + 5, 0x80);
-    var m3 = tag_read_id3v2(buf, 30);
-    assert(is_err(m3) == 1, "unsynchronised id3v2 is reported unsupported");
+    return 0;
+}
+
+# Build an ID3v2 tag holding one TIT2 frame into buf. `stored` is the frame body
+# as it sits in the file. Returns the total length.
+fn _id3_tag_one_frame(buf, major, tag_flags, frame_flags, stored, stored_len) {
+    store8(buf, 0x49); store8(buf + 1, 0x44); store8(buf + 2, 0x33);   # "ID3"
+    store8(buf + 3, major);
+    store8(buf + 4, 0);
+    store8(buf + 5, tag_flags);
+    var tag_size = 10 + stored_len;
+    store8(buf + 6, 0); store8(buf + 7, 0); store8(buf + 8, 0);
+    store8(buf + 9, tag_size);
+    store8(buf + 10, 0x54); store8(buf + 11, 0x49);                    # "TIT2"
+    store8(buf + 12, 0x54); store8(buf + 13, 0x32);
+    store8(buf + 14, 0); store8(buf + 15, 0); store8(buf + 16, 0);
+    store8(buf + 17, stored_len);
+    store8(buf + 18, 0);
+    store8(buf + 19, frame_flags);
+    memcpy(buf + 20, stored, stored_len);
+    return 20 + stored_len;
+}
+
+# Unsynchronised bytes are restored before the text is read. The stored title is
+# 0x41 0xFF 0x00 0xE0 0x42 and the real one 0x41 0xFF 0xE0 0x42; reading it as
+# stored gives the wrong length, and the NUL would cut it short for any caller
+# treating it as a C string.
+fn _assert_unsynced_title(m, label) {
+    assert(is_err(m) == 0, label);
+    var t = tag_meta_title(m);
+    assert(t != 0, label);
+    assert_eq(str_len(t), 4, label);
+    assert_eq(load8(str_data(t) + 1), 0xFF, label);
+    assert_eq(load8(str_data(t) + 2), 0xE0, label);
+    return 0;
+}
+
+fn test_id3v2_unsync() {
+    syscall(1, 1, "test: id3v2 unsynchronisation\n", 30);
+    var buf = alloc(128);
+    var body = alloc(16);
+    store8(body, 0);                 # encoding: Latin-1
+    store8(body + 1, 0x41);
+    store8(body + 2, 0xFF);
+    store8(body + 3, 0x00);          # the inserted byte
+    store8(body + 4, 0xE0);
+    store8(body + 5, 0x42);
+
+    # v2.3: the flag covers the whole tag, so the walk reads the restored bytes.
+    var n = _id3_tag_one_frame(buf, 3, 0x80, 0, body, 6);
+    # the frame size counts restored bytes in v2.3
+    store8(buf + 17, 5);
+    _assert_unsynced_title(tag_read_id3v2(buf, n), "v2.3 tag-level unsync");
+
+    # v2.2 has the same whole-tag rule and a 6-byte frame header.
+    store8(buf, 0x49); store8(buf + 1, 0x44); store8(buf + 2, 0x33);
+    store8(buf + 3, 2); store8(buf + 4, 0); store8(buf + 5, 0x80);
+    store8(buf + 6, 0); store8(buf + 7, 0); store8(buf + 8, 0); store8(buf + 9, 12);
+    store8(buf + 10, 0x54); store8(buf + 11, 0x54); store8(buf + 12, 0x32);  # "TT2"
+    store8(buf + 13, 0); store8(buf + 14, 0); store8(buf + 15, 5);
+    memcpy(buf + 16, body, 6);
+    _assert_unsynced_title(tag_read_id3v2(buf, 22), "v2.2 tag-level unsync");
+
+    # v2.4: per frame, and the frame size counts the stored bytes.
+    n = _id3_tag_one_frame(buf, 4, 0, 0x02, body, 6);
+    _assert_unsynced_title(tag_read_id3v2(buf, n), "v2.4 frame-level unsync");
+
+    # v2.4 where a writer set only the tag-level bit.
+    n = _id3_tag_one_frame(buf, 4, 0x80, 0, body, 6);
+    _assert_unsynced_title(tag_read_id3v2(buf, n), "v2.4 tag-level unsync");
+
+    # v2.4 with a data length indicator ahead of the unsynchronised data.
+    var dli = alloc(16);
+    store8(dli + 3, 5);
+    memcpy(dli + 4, body, 6);
+    n = _id3_tag_one_frame(buf, 4, 0, 0x03, dli, 10);
+    _assert_unsynced_title(tag_read_id3v2(buf, n), "v2.4 data length indicator");
+
+    # A compressed or encrypted v2.4 body is not text and is skipped.
+    n = _id3_tag_one_frame(buf, 4, 0, 0x04, body, 6);
+    var enc = tag_read_id3v2(buf, n);
+    assert(is_err(enc) == 0, "encrypted frame leaves the tag readable");
+    assert(tag_meta_title(enc) == 0, "encrypted frame is not read as text");
+
+    # A trailing 0xFF has nothing after it to check.
+    assert_eq(_tag_deunsync(body, 3, dli), 3, "trailing 0xFF kept");
+    return 0;
+}
+
+# PCM_F64 WAV is copied, not converted, so every bit survives. One third has no
+# exact f32 form, so a narrower path through the code would show up here.
+fn test_wav_f64() {
+    syscall(1, 1, "test: wav f64 roundtrip\n", 24);
+    var third = f64_div(F64_ONE, f64_from(3));
+    var samples = vec_new();
+    vec_push(samples, F64_ZERO);
+    vec_push(samples, F64_HALF);
+    vec_push(samples, F64_NEG_HALF);
+    vec_push(samples, third);
+    var buf = alloc(256);
+    var size = wav_encode(samples, 96000, 2, PCM_F64, buf);
+    assert(res_ok(size) == 1, "wav f64 encode ok");
+    assert_eq(size, 44 + 4 * 8, "wav f64 size");
+    assert_eq(read_u16_le(buf, 20), WAV_FMT_IEEE_FLOAT, "wav f64 format tag");
+    assert_eq(read_u16_le(buf, 34), 64, "wav f64 bits");
+    var r = wav_decode(buf, size);
+    assert(res_ok(r) == 1, "wav f64 decode ok");
+    var fi = decode_result_info(r);
+    assert_eq(fmtinfo_sample_rate(fi), 96000, "wav f64 rate");
+    assert_eq(fmtinfo_bit_depth(fi), 64, "wav f64 depth");
+    var out = decode_result_samples(r);
+    assert_eq(vec_len(out), 4, "wav f64 count");
+    assert_eq(vec_get(out, 1), F64_HALF, "wav f64 half");
+    assert_eq(vec_get(out, 3), third, "wav f64 third is bit-exact");
+    return 0;
+}
+
+# 88.2 kHz through 384 kHz round-trip through every format that stores the rate
+# itself. AIFF's 80-bit extended field and FLAC's frame-header rate codes are the
+# two places a high rate could go wrong.
+fn test_hires_rates() {
+    syscall(1, 1, "test: hi-res sample rates\n", 26);
+    var rates = alloc(6 * 8);
+    store64(rates, 88200);      store64(rates + 8, 96000);
+    store64(rates + 16, 176400); store64(rates + 24, 192000);
+    store64(rates + 32, 352800); store64(rates + 40, 384000);
+    var samples = vec_new();
+    for (var i = 0; i < 512; i = i + 1) {
+        vec_push(samples, f64_div(f64_from((i % 64) - 32), f64_from(64)));
+    }
+    var buf = alloc(65536);
+    for (var r = 0; r < 6; r = r + 1) {
+        var rate = load64(rates + r * 8);
+
+        var n = wav_encode(samples, rate, 1, PCM_I24, buf);
+        var wv = wav_decode(buf, n);
+        assert(res_ok(wv) == 1, "hi-res wav decode ok");
+        assert_eq(fmtinfo_sample_rate(decode_result_info(wv)), rate, "hi-res wav rate");
+
+        n = aiff_encode(samples, rate, 1, 24, buf);
+        var af = aiff_decode(buf, n);
+        assert(res_ok(af) == 1, "hi-res aiff decode ok");
+        assert_eq(fmtinfo_sample_rate(decode_result_info(af)), rate, "hi-res aiff rate");
+
+        n = flac_encode(samples, rate, 1, 24, buf);
+        assert(res_ok(n) == 1, "hi-res flac encode ok");
+        var fl = flac_decode(buf, n);
+        assert(res_ok(fl) == 1, "hi-res flac decode ok");
+        var fi = decode_result_info(fl);
+        assert_eq(fmtinfo_sample_rate(fi), rate, "hi-res flac rate");
+        assert_eq(vec_len(decode_result_samples(fl)), 512, "hi-res flac count");
+    }
+    return 0;
+}
+
+# Both names answer the same; the long one is what shravan calls internally.
+fn test_detect_format_names() {
+    syscall(1, 1, "test: format detection names\n", 29);
+    var buf = alloc(64);
+    store8(buf, 0x66); store8(buf + 1, 0x4C); store8(buf + 2, 0x61); store8(buf + 3, 0x43);
+    assert_eq(shravan_detect_format(buf, 64), FMT_FLAC, "shravan_detect_format");
+    assert_eq(detect_format(buf, 64), FMT_FLAC, "detect_format");
     return 0;
 }
 
@@ -2110,7 +2269,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.9.1 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.9.2 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2122,6 +2281,9 @@ test_wav_stereo();
 test_wav_24bit();
 test_wav_32bit();
 test_wav_errors();
+test_wav_f64();
+test_hires_rates();
+test_detect_format_names();
 test_codec_open();
 test_interleave();
 test_aiff_roundtrip();
@@ -2145,6 +2307,7 @@ test_flac_encode_decode_sine();
 test_flac_encode_decode_stereo();
 test_flac_encode_decode_8bit();
 test_flac_encode_decode_24bit();
+test_flac_verify();
 test_flac_reject_invalid();
 test_flac_block_size_codes();
 test_ogg_crc32_known_vectors();
@@ -2209,6 +2372,8 @@ test_aac_reserved_cb_no_hang();
 test_aac_encode_decode_roundtrip();
 test_tag_write_id3v2_roundtrip();
 test_tag_write_vorbis_roundtrip();
+test_id3v2_unsync();
+test_interop_all();
 test_stream_aiff_chunking();
 test_stream_edge_cases();
 
