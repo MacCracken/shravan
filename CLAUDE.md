@@ -50,7 +50,7 @@ docs/            -- architecture, roadmap
 
 ## Build
 
-Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.6.20**). The
+Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.7.9**). The
 cyrius toolchain rolls fast, so the pin is a deliberate stability anchor — hold it;
 bump only on explicit instruction. Bumping the pin: edit `[package].cyrius` (and
 `[deps.NAME].tag`), `cyrius lib sync`, then `cyrius deps --relock`. `lib sync` only
@@ -62,7 +62,7 @@ refuses that as a lock/snapshot disagreement. Relock only when the pin really mo
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
 ./scripts/test-all.sh                       # build + run ALL three test binaries (11,706 assertions)
-cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.6.20)
+cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.7.9)
 ./build/shravan                             # run core codecs + Opus decode + API (1209 assertions)
 cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
 ./build/shravan-encoder                     # run encoder tests (138 assertions)

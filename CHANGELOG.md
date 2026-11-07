@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-11-07
+
+Toolchain release, moving to the Cyrius 6.7 line. No codec source change, and none of the roadmap's
+v2.9.0 codec work is in it. 11,706 assertions (unchanged).
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`**, sankoch `2.8.1` → `2.8.3`, bayan `1.5.12` → `1.5.13` — the
+  versions the 6.7.9 snapshot bundles. `lib/` re-vendored: all 41 files are byte-identical to the
+  snapshot, whose 113 files match the `6.7.9` tag; sankoch resolved from its tag is byte-identical
+  to the bundled copy. No vendored files added or removed.
+- **`dist/` regenerated.** The only change is the version stamp; `dist/shravan.deps` is unchanged.
+- **Version banners** in `src/main.cyr` and `src/bench.cyr`, and toolchain references in the README,
+  CONTRIBUTING, roadmap and CLAUDE.md, updated.
+
+### Verified
+
+- **The 6.7 language changes do not reach shravan.** `true`, `false`, `const`, `do` and `dyn` are now
+  reserved, forward calls are arity-checked, and a `for` step must end at its `)`. All three harnesses
+  compile with the same 6 warnings as 6.6.20. `!` is now a real operator, where a lone `!` used to be
+  dropped silently; shravan never used it as an operator (two comments and a string literal).
+- **Numerics did not move.** The stdout of all three test binaries is identical to the 6.6.20 build
+  apart from the version banner.
+- `./fuzz/run.sh 90000`: 903,500 calls, 0 crashes. `cyrius vet`: 0 untrusted, 0 missing. Write lengths
+  correct. CI's `lib sync` + `deps` sequence replayed from an empty `lib/` reproduces `lib/` and
+  `cyrius.lock` byte for byte. A consumer declaring only the 7 sidecar leaves builds and runs.
+- **Benchmarks** (same session, three alternating runs against a 6.6.20 build): median −0.5%, range
+  −2.3% to +2.0% across 12 benchmarks. No delta exceeds the run-to-run spread, so this is neither a
+  win nor a regression.
+
+### Notes
+
+- Binary sizes are flat: `build/shravan` 3,169,800 → 3,169,704 bytes, `build/shravan-silk` +4,000.
+- `cyrius.lock` now retains the `2.7.14` and `2.8.1` sankoch commit rows beside `2.8.3` (see 2.8.2).
+- Unchanged from 2.8.2: the distlib `is_err` warning for `x86_64-windows`, and the same nine
+  non-canonical `src/*.cyr` files.
+
 ## [2.8.2] - 2026-11-07
 
 Maintenance release. No codec source change. 11,706 assertions (unchanged).
