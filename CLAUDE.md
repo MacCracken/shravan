@@ -50,19 +50,22 @@ docs/            -- architecture, roadmap
 
 ## Build
 
-Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.7.9**). The
+Toolchain pinned in `cyrius.cyml [package].cyrius` (currently **6.7.18**). The
 cyrius toolchain rolls fast, so the pin is a deliberate stability anchor — hold it;
 bump only on explicit instruction. Bumping the pin: edit `[package].cyrius` (and
-`[deps.NAME].tag`), `cyrius lib sync`, then `cyrius deps --relock`. `lib sync` only
-copies declared modules, so the transitive leaves (`atomic`, `result`, `boxed`,
-`mmap`, `sync*`) stay at the old pin until `deps` moves them, and plain `deps`
-refuses that as a lock/snapshot disagreement. Relock only when the pin really moved.
+`[deps.NAME].tag`), then run `cyrius deps --relock`, which moves all of `lib/`. Do not
+run `cyrius lib sync` first: since 6.7.13 it refuses a pin move while `lib/` holds
+transitive leaves outside the declared set, and its suggested `--full` would dump the
+whole snapshot into `lib/`. Relock only when the pin really moved; a lock/snapshot
+disagreement under an unchanged pin means the snapshot changed. `lib sync` + `deps`
+stay correct under an unchanged pin, which is what CI runs. New transitive leaves can
+appear in `lib/` untracked and must be added.
 
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
 ./scripts/test-all.sh                       # build + run ALL three test binaries (11,706 assertions)
-cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.7.9)
+cyrius build src/main.cyr build/shravan    # compile core+decode suite (Cyrius 6.7.18)
 ./build/shravan                             # run core codecs + Opus decode + API (1209 assertions)
 cyrius build src/main_encoder.cyr build/shravan-encoder  # Opus CELT encoder suite
 ./build/shravan-encoder                     # run encoder tests (138 assertions)

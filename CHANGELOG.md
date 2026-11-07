@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] - 2026-11-07
+
+Toolchain release. One source change, a rename in `src/serde.cyr` that bayan's deprecation requires.
+11,706 assertions (unchanged).
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`**, sankoch `2.8.3` → `2.8.9`, bayan `1.5.13` → `1.11.1`. Each is both
+  what the 6.7.18 snapshot bundles and the newest upstream tag; ganita stays at `1.2.15`, also the
+  newest. `lib/` re-vendored: all 51 files are byte-identical to the snapshot, whose 113 files match
+  the `6.7.18` tag; sankoch resolved from its tag is byte-identical to the bundled copy.
+- **New vendored leaves**, all pulled in by bayan 1.11.1: `chrono.cyr`, `hashseed.cyr`, `slice.cyr` and
+  `lib/unicode/` (7 files).
+- **`src/serde.cyr` moves off a deprecated bayan name.** bayan 1.11.0 deprecated
+  `bayan_json_get_int`, so all seven hand-written `*_from_json` lookups now call
+  `bayan_json_get_int_by_cstr(pairs, "value")`. Same lookup and null guards, without the `Str`
+  allocated per call. Consumers of the bundle no longer inherit the seven warnings.
+- **`dist/` regenerated.** The bundle changes by the version stamp and that rename;
+  `dist/shravan.deps` is unchanged.
+- **Version banners** and toolchain references updated, and the pin-bump procedure in CLAUDE.md
+  corrected (see Notes).
+
+### Verified
+
+- **Numerics did not move.** The stdout of all three test binaries is identical to the 6.7.9 build
+  apart from the version banner.
+- **bayan's stricter parser cannot crash serde.** `bayan_json_parse` now returns 0 for a duplicate
+  key, where it used to return a list. All 12 `*_from_json` functions, hand-written and derived,
+  survive a null `pairs`.
+- `./fuzz/run.sh 90000`: 903,500 calls, 0 crashes. `cyrius vet`: 0 untrusted, 0 missing. Write lengths
+  correct. Warnings are back to the original 6.
+- **CI's `lib sync` + `deps` sequence passes both ways**, on the tree as committed and from an empty
+  `lib/`. Each reproduces all 51 files and `cyrius.lock` byte for byte, then passes `test-all.sh`.
+- **Benchmarks** (same session, three alternating runs against a 6.7.9 build): median −1.2%, range
+  −21.9% to +2.0% across 12 benchmarks. This session was noisy, with 3.6–10.9% run-to-run spread.
+  The one outlier is `pcm_u8_to_f64_4096`, the layout-sensitive loop from 2.8.2, returning from 67 µs
+  to 53 µs. That is the same code-layout effect in reverse, not a speedup, and no other delta exceeds
+  the spread.
+
+### Notes
+
+- ⚠ **Binaries grow by about 609 KB** (`build/shravan` 3,169,704 → 3,779,024 bytes, +19%), and bayan is
+  nearly all of it: linking bayan into an empty program costs 386,480 bytes on 6.7.9 and 980,080 on
+  6.7.18, a 593,600-byte increase. A consumer of the bundle grows the same way (1,668,184 →
+  2,214,544 bytes in a minimal test, +33%). Building that consumer with `CYRIUS_DCE=1` takes it to
+  526,992 bytes.
+- ⚠ **The pin-move sequence is now just `cyrius deps --relock`.** Since 6.7.13 `cyrius lib sync` refuses
+  to cross a pin move while `lib/` holds files outside the declared set (`mmap`, `result`, `sankoch`),
+  and its suggested `--full` would vendor the whole snapshot. `deps --relock` alone moves everything.
+  Under an unchanged pin, as in CI, `lib sync` still works.
+- `cyrius.lock` now retains the `2.7.14`, `2.8.1` and `2.8.3` sankoch rows beside `2.8.9`, and the
+  toolchain prints a note for each. Deleting the lock would re-pin; there is no need to.
+- Unchanged from 2.9.0: the distlib `is_err` warning for `x86_64-windows`, and the same nine
+  non-canonical `src/*.cyr` files.
+
 ## [2.9.0] - 2026-11-07
 
 Toolchain release, moving to the Cyrius 6.7 line. No codec source change, and none of the roadmap's
