@@ -186,6 +186,7 @@ fn _rs_build_phase_table(scaled_half, kernel_scale) {
 }
 
 fn resample_mono(samples_vec, source_rate, target_rate, quality) {
+    if (_RS_PI == 0) { resample_init(); }
     # SEC-021: resample_mono is public API but had none of the rate guards its
     # sibling resample() carries. A zero or negative rate produced ratio = inf
     # or a negative, so new_frames came out <= 0 and the function returned an
@@ -291,6 +292,7 @@ fn resample_mono(samples_vec, source_rate, target_rate, quality) {
 # Returns: new vec of resampled interleaved samples, or negative error
 
 fn resample(samples_vec, channels, source_rate, target_rate, quality) {
+    if (_RS_PI == 0) { resample_init(); }
     # SEC-021: `<= 0`, not `== 0` — a negative rate slipped past the old
     # equality check and yielded an empty vec reported as success.
     if (source_rate <= 0)  { return err(ERR_INVALID_RATE); }

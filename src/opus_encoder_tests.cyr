@@ -1,7 +1,6 @@
 # ================================================================
 # opus_encoder_tests.cyr — RFC-6716 Opus CELT ENCODER conformance tests.
-# Split out of opus_rfc_tests.cyr so no single build overflows the code buffer.
-# Built via src/main_encoder.cyr. NOT part of the [lib] distlib bundle.
+# Run by src/main.cyr. NOT part of the [lib] distlib bundle.
 # Requires src/opus_test_helpers.cyr (shared helpers) + src/opus.cyr symbols.
 # ================================================================
 

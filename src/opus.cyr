@@ -25,6 +25,29 @@
 #   +32: output_gain          (i64, signed)
 #   +40: channel_mapping_family (i64)
 
+# ---- per-frame scratch ----
+# alloc() never frees, and CELT and SILK allocate scratch in nearly every function,
+# so an Opus decode allocated eight times its output (about 4 GB for a file at the
+# one-shot ceiling). opus_decode_from_packets brackets each packet with a growable
+# arena that is reset between packets; outside a decode (the encoder, unit tests)
+# _opus_tmp is plain alloc(). Decoder state, resamplers and lazily built tables
+# allocate with alloc() and live on.
+var _opus_arena = 0;
+var _opus_in_frame = 0;
+
+fn _opus_frame_begin() {
+    if (_opus_arena == 0) { _opus_arena = arena_new_growable(262144); }
+    if (_opus_arena != 0) { arena_reset(_opus_arena); _opus_in_frame = 1; }
+    return 0;
+}
+
+fn _opus_frame_end() { _opus_in_frame = 0; return 0; }
+
+fn _opus_tmp(size) {
+    if (_opus_in_frame == 1) { return arena_alloc(_opus_arena, size); }
+    return alloc(size);
+}
+
 fn opus_head_new() {
     var h = alloc(48);
     memset(h, 0, 48);
@@ -196,7 +219,7 @@ fn _rc_push_byte(rc, byte) {
     var bcap = load64(rc + 16);
     if (blen >= bcap) {
         var new_cap = bcap * 2;
-        var new_buf = alloc(new_cap);
+        var new_buf = _opus_tmp(new_cap);
         memcpy(new_buf, buf, blen);
         store64(rc, new_buf);
         store64(rc + 16, new_cap);
@@ -1153,10 +1176,10 @@ fn quant_coarse_energy(start, end, eBands, oldEBands, error, enc, C, LM, force_i
     }
     var prob_intra = _celt_eprob_intra; if (LM == 2) { prob_intra = _celt_eprob_intra2; }
     var prob_inter = _celt_eprob_inter; if (LM == 2) { prob_inter = _celt_eprob_inter2; }
-    var enc_start = alloc(96);
+    var enc_start = _opus_tmp(96);
     var k = 0; while (k < 12) { store64(enc_start + k * 8, load64(enc + k * 8)); k = k + 1; }
-    var oldE_intra = alloc(C * 21 * 8);
-    var err_intra = alloc(C * 21 * 8);
+    var oldE_intra = _opus_tmp(C * 21 * 8);
+    var err_intra = _opus_tmp(C * 21 * 8);
     k = 0; while (k < C * 21) { store64(oldE_intra + k * 8, load64(oldEBands + k * 8)); k = k + 1; }
     var badness1 = 0;
     if ((two_pass != 0) | (intra != 0)) {
@@ -1164,12 +1187,12 @@ fn quant_coarse_energy(start, end, eBands, oldEBands, error, enc, C, LM, force_i
     }
     if (intra == 0) {
         var tell_intra = ec_tell_frac(enc);
-        var enc_intra = alloc(96);
+        var enc_intra = _opus_tmp(96);
         k = 0; while (k < 12) { store64(enc_intra + k * 8, load64(enc + k * 8)); k = k + 1; }
         var nstart = load64(enc_start + 48);
         var save_n = load64(enc + 48) - nstart;
         var buf = load64(enc + 0);
-        var intra_bytes = alloc(save_n + 1);
+        var intra_bytes = _opus_tmp(save_n + 1);
         var b = 0; while (b < save_n) { store8(intra_bytes + b, load8(buf + nstart + b)); b = b + 1; }
         k = 0; while (k < 12) { store64(enc + k * 8, load64(enc_start + k * 8)); k = k + 1; }
         var badness2 = quant_coarse_energy_impl(start, end, eBands, oldEBands, budget, prob_inter, error, enc, C, LM, 0, max_decay);
@@ -1587,7 +1610,7 @@ fn _celt_median5(x) {
 # (1 unit = 6.02 dB; GCONST(.5)=+3 dB). lsb_depth = 24 (the float default).
 fn celt_dynalloc_analysis(bandLogE, end, LM, effectiveBytes, offsets, importance, isTransient) {
     var lsb_depth = 24;
-    var nf = alloc(end * 8);
+    var nf = _opus_tmp(end * 8);
     var c0062 = f64_div(f64_from(62), f64_from(10000));       # 0.0062
     var c00625 = f64_div(f64_from(1), f64_from(16));          # 0.0625
     var i = 0;
@@ -1605,7 +1628,7 @@ fn celt_dynalloc_analysis(bandLogE, end, LM, effectiveBytes, offsets, importance
     }
     if (effectiveBytes < (30 + 5 * LM)) { return 0; }        # dynalloc disabled at very low rate
     # --- masking follower over bandLogE (bandLogE2 == bandLogE for long/low-complexity blocks) ---
-    var f = alloc(end * 8);
+    var f = _opus_tmp(end * 8);
     var last = 0;
     store64(f + 0, load64(bandLogE + 0));
     i = 1;
@@ -1728,11 +1751,11 @@ fn celt_tf_analysis(X, N0, len, isTransient, LM, tf_estimate, tf_chan, lambda, t
     var neg025 = f64_neg(f64_div(f64_from(1), f64_from(4)));
     if (f64_lt(b_arg, neg025) != 0) { b_arg = neg025; }
     var bias = f64_mul(f64_div(f64_from(4), f64_from(100)), b_arg);
-    var metric = alloc(len * 8);
-    var path0 = alloc(len * 8);
-    var path1 = alloc(len * 8);
-    var tmp = alloc(960 * 8);
-    var tmp1 = alloc(960 * 8);
+    var metric = _opus_tmp(len * 8);
+    var path0 = _opus_tmp(len * 8);
+    var path1 = _opus_tmp(len * 8);
+    var tmp = _opus_tmp(960 * 8);
+    var tmp1 = _opus_tmp(960 * 8);
     var i = 0;
     while (i < len) {
         var w = load64(_celt_eBands + (i + 1) * 8) - load64(_celt_eBands + i * 8);
@@ -1844,8 +1867,8 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
             total = total - dual_stereo_rsv;
         }
     }
-    var thresh = alloc(21 * 8);
-    var trim_offset = alloc(21 * 8);
+    var thresh = _opus_tmp(21 * 8);
+    var trim_offset = _opus_tmp(21 * 8);
     var j = start;
     while (j < end) {
         var N0 = load64(_celt_eBands + (j + 1) * 8) - load64(_celt_eBands + j * 8);
@@ -1890,8 +1913,8 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
     hi = lo;
     lo = lo - 1;
     # bits1/bits2 endpoints
-    var bits1 = alloc(21 * 8);
-    var bits2 = alloc(21 * 8);
+    var bits1 = _opus_tmp(21 * 8);
+    var bits2 = _opus_tmp(21 * 8);
     j = start;
     while (j < end) {
         var nc = load64(_celt_eBands + (j + 1) * 8) - load64(_celt_eBands + j * 8);
@@ -1918,7 +1941,7 @@ fn celt_compute_allocation(offsets, cap, alloc_trim, intensity_out, dual_out, to
     var stereo = 0;
     if (C > 1) { stereo = 1; }
     var logM = LM << 3;
-    var bits = alloc(21 * 8);
+    var bits = _opus_tmp(21 * 8);
     var ilo = 0;
     var ihi = 64;
     var it = 0;
@@ -2143,6 +2166,12 @@ fn celt_decode_frame_prefix(payload, len, C, oldBandE, tf_res, offsets, pulses, 
 # coarse+fine energy, tf, spread, dynalloc, allocation) over bands [start,end) from a
 # caller-owned range decoder. Postfilter is only present when start==0 (hybrid skips it).
 fn celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal) {
+    return _celt_decode_prefix_st(0, ec, len, C, LM, start, end, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal);
+}
+
+# `st` (or 0) supplies the loss state: after concealed frames, an inter-coded frame
+# first makes the energy prediction safe (celt_decoder.c).
+fn _celt_decode_prefix_st(st, ec, len, C, LM, start, end, oldBandE, tf_res, offsets, pulses, fine_quant, fine_priority, cap, scal) {
     if (_celt_allocVec == 0) { _celt_alloc_tables_init(); }
     if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
     var M = 1 << LM;
@@ -2191,6 +2220,9 @@ fn celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf_res, off
     tell = ec_tell(ec);
     var intra = 0;
     if (tell + 3 <= total_bits) { intra = ec_dec_bit_logp(ec, 3); }
+    if ((intra == 0) & (st != 0)) {
+        if (load64(st + 112) != 0) { _celt_loss_safety(st, C, start, end, LM); }
+    }
     # R5 coarse energy
     celt_unquant_coarse_energy(oldBandE, intra, ec, C, start, end, LM);
     # R6 tf_decode
@@ -2247,9 +2279,9 @@ fn celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf_res, off
     if ((isTransient != 0) & (LM >= 2) & (bits >= ((LM + 2) << 3))) { acr = 8; }
     bits = bits - acr;
     # R12 allocation
-    var intensity = alloc(8);
-    var dual = alloc(8);
-    var balance = alloc(8);
+    var intensity = _opus_tmp(8);
+    var dual = _opus_tmp(8);
+    var balance = _opus_tmp(8);
     var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, intensity, dual, bits, balance, pulses, fine_quant, fine_priority, C, LM, ec, start, end, 0, 0, end);
     # R13 fine energy
     celt_unquant_fine_energy(oldBandE, fine_quant, ec, C, start, end);
@@ -2544,8 +2576,8 @@ fn bitexact_log2tan(isin, icos) {
     icos = icos << (15 - lc);
     isin = isin << (15 - ls);
     return (ls - lc) * 2048
-         + frac_mul16(isin, frac_mul16(isin, 0 - 2597) + 7932)
-         - frac_mul16(icos, frac_mul16(icos, 0 - 2597) + 7932);
+    + frac_mul16(isin, frac_mul16(isin, 0 - 2597) + 7932)
+    - frac_mul16(icos, frac_mul16(icos, 0 - 2597) + 7932);
 }
 
 # isqrt32: floor(sqrt(v)) for v>=0 (exact).
@@ -2711,8 +2743,8 @@ fn exp_rotation_enc(X, len, stride, K, spread) {
 # Rxy^2/Ryy), via a projection pre-search (K>N/2) + greedy one-pulse-at-a-time refinement.
 # X is overwritten with |X| (sign restored into iy). Returns yy = sum(iy^2).
 fn op_pvq_search(X, iy, K, N) {
-    var y = alloc(N * 8);
-    var signx = alloc(N * 8);
+    var y = _opus_tmp(N * 8);
+    var signx = _opus_tmp(N * 8);
     var j = 0;
     while (j < N) {
         var xj = load64(X + j * 8);
@@ -2823,7 +2855,7 @@ fn celt_encode_pulses(enc, n, k, y) {
 # alg_quant (encode): rotate into search domain -> PVQ search -> encode pulses ->
 # resynth the quantized unit shape into X (rotate back). Returns the collapse mask.
 fn alg_quant(X, N, K, spread, B, enc, gain) {
-    var iy = alloc((N + 3) * 8);
+    var iy = _opus_tmp((N + 3) * 8);
     exp_rotation_enc(X, N, B, K, spread);
     var yy = op_pvq_search(X, iy, K, N);
     var collapse_mask = extract_collapse_mask(iy, N, B);
@@ -2835,7 +2867,7 @@ fn alg_quant(X, N, K, spread, B, enc, gain) {
 
 # alg_unquant (decode): decode_pulses -> normalise -> rotation -> collapse mask.
 fn alg_unquant(ec, X, N, K, spread, B, gain) {
-    var iy = alloc(N * 8);
+    var iy = _opus_tmp(N * 8);
     var ryy = celt_decode_pulses(ec, N, K, iy);
     normalise_residual(iy, X, N, ryy, gain);
     exp_rotation(X, N, B, K, spread);
@@ -2863,7 +2895,7 @@ fn haar1(X, N0, stride) {
 
 fn deinterleave_hadamard(X, N0, stride, hadamard) {
     var N = N0 * stride;
-    var tmp = alloc(N * 8);
+    var tmp = _opus_tmp(N * 8);
     if (hadamard != 0) {
         var ordery = _celt_ordery + (stride - 2) * 8;
         var i = 0;
@@ -2894,7 +2926,7 @@ fn deinterleave_hadamard(X, N0, stride, hadamard) {
 
 fn interleave_hadamard(X, N0, stride, hadamard) {
     var N = N0 * stride;
-    var tmp = alloc(N * 8);
+    var tmp = _opus_tmp(N * 8);
     if (hadamard != 0) {
         var ordery = _celt_ordery + (stride - 2) * 8;
         var i = 0;
@@ -3084,7 +3116,7 @@ fn compute_theta(ctx, X, Y, N, b, B, B0, LM, stereo, fill, sctx) {
             } else {
                 var bias = 0 - (32767 / qn);
                 if (itheta > 8192) { bias = 32767 / qn; }
-                var down = (itheta * qn + bias) >> 14;
+                var down = sar(itheta * qn + bias, 14);   # floor: the sum is negative for small itheta (bands.c)
                 if (down < 0) { down = 0; }
                 if (down > qn - 1) { down = qn - 1; }
                 itheta = down;
@@ -3231,7 +3263,7 @@ fn quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill) {
         var LMn = LM - 1;
         if (B == 1) { fill = (fill & 1) | (fill << 1); }
         var Bn = (B + 1) >> 1;
-        var sctx = alloc(64);
+        var sctx = _opus_tmp(64);
         compute_theta(ctx, X, Y, Nh, b, Bn, B0, LMn, 0, fill, sctx);
         var imid = load64(sctx + 0);
         var iside = load64(sctx + 8);
@@ -3408,7 +3440,7 @@ fn quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scrat
             else { while (jz < N) { store64(X + jz * 8, load64(Y + jz * 8)); jz = jz + 1; } }
         }
     }
-    var sctx = alloc(64);
+    var sctx = _opus_tmp(64);
     compute_theta(ctx, X, Y, N, b, B, B, LM, 1, fill, sctx);
     var inv = load64(sctx + 40);
     var imid = load64(sctx + 0);
@@ -3494,14 +3526,14 @@ fn quant_all_bands(X_, Y_, collapse_masks, pulses, shortBlocks, spread, dual_ste
     var Bf = 1;
     if (shortBlocks != 0) { Bf = M; }
     var normsz = M * load64(_celt_eBands + 20 * 8);
-    var norm = alloc(C * normsz * 8);
+    var norm = _opus_tmp(C * normsz * 8);
     var norm2 = norm + normsz * 8;
     # norm is indexed absolutely (norm[M*eBands[i]]); norm_offset = M*eBands[start] is
     # the frequency of the first coded band, used to clamp the fold source so hybrid
     # (start=17) never folds from the un-decoded low region. Zero for config-31.
     var norm_offset = M * load64(_celt_eBands + start * 8);
     var lowband_scratch_base = X_ + M * load64(_celt_eBands + 20 * 8) * 8;
-    var ctx = alloc(96);
+    var ctx = _opus_tmp(96);
     store64(ctx + 0, ec);
     store64(ctx + 8, load64(seed_ptr));
     store64(ctx + 32, spread);
@@ -3798,8 +3830,8 @@ fn clt_mdct_backward(inp, in_stride, out, shift) {
     var t = load64(_mdct_trig + shift * 8);
     var dc = load64(_mdct_dc + shift * 8);
     var ds = load64(_mdct_ds + shift * 8);
-    var Cr = alloc(N4 * 8);
-    var Ci = alloc(N4 * 8);
+    var Cr = _opus_tmp(N4 * 8);
+    var Ci = _opus_tmp(N4 * 8);
     var i = 0;
     while (i < N4) {
         var x1 = load64(inp + (2 * i * in_stride) * 8);
@@ -3811,8 +3843,8 @@ fn clt_mdct_backward(inp, in_stride, out, shift) {
         i = i + 1;
     }
     # forward DFT: Fout[k] = sum_i C[i]*(cos(2pi ki/N4) - j sin)
-    var Fr = alloc(N4 * 8);
-    var Fi = alloc(N4 * 8);
+    var Fr = _opus_tmp(N4 * 8);
+    var Fi = _opus_tmp(N4 * 8);
     var k = 0;
     while (k < N4) {
         var sr = F64_ZERO;
@@ -3883,9 +3915,9 @@ fn clt_mdct_forward(inp, out, out_stride, shift) {
     var ds = load64(_mdct_ds + shift * 8);
     var w = _celt_window;
     var scale = f64_div(F64_ONE, f64_from(N4));
-    var f = alloc(N2 * 8);          # interleaved re/im: N4 complex
-    var Cr = alloc(N4 * 8);
-    var Ci = alloc(N4 * 8);
+    var f = _opus_tmp(N2 * 8);          # interleaved re/im: N4 complex
+    var Cr = _opus_tmp(N4 * 8);
+    var Ci = _opus_tmp(N4 * 8);
     # --- window / shuffle / fold: input [a,b,c,d] -> f ---
     var nfirst = (120 + 3) >> 2;    # (overlap+3)>>2 = 30
     var xp1 = 60;                   # in + overlap/2
@@ -3926,8 +3958,8 @@ fn clt_mdct_forward(inp, out, out_stride, shift) {
         i = i + 1;
     }
     # --- N4-point forward DFT (same kernel as backward) ---
-    var Fr = alloc(N4 * 8);
-    var Fi = alloc(N4 * 8);
+    var Fr = _opus_tmp(N4 * 8);
+    var Fi = _opus_tmp(N4 * 8);
     var k = 0;
     while (k < N4) {
         var sr = F64_ZERO;
@@ -3962,14 +3994,41 @@ fn clt_mdct_forward(inp, out, out_stride, shift) {
 }
 
 # celt_synthesis: per channel denormalise + IMDCT into decode_mem+1088.
-fn celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end, LM) {
+# C is the coded channel count, CC the output's. A mono stream into stereo output
+# runs the IMDCT once per output channel, each with its own overlap memory; a
+# stereo stream into mono output averages the two spectra first (celt_decoder.c).
+fn celt_synthesis(X, dm0, dm1, oldBandE, C, CC, isTransient, silence, start, end, LM) {
     var N = 120 << LM;
     var B = 1;
     var NB = 120 << LM;
     var shift = 3 - LM;
     if (isTransient != 0) { B = 1 << LM; NB = 120; shift = 3; }
     var osoff = 2048 - N;
-    var freq = alloc(N * 8);
+    var freq = _opus_tmp(N * 8);
+    if (CC != C) {
+        denormalise_bands(X, freq, oldBandE, silence, start, end, LM);
+        if (C == 2) {
+            var freq2 = _opus_tmp(N * 8);
+            denormalise_bands(X + N * 8, freq2, oldBandE + 21 * 8, silence, start, end, LM);
+            var k = 0;
+            while (k < N) {
+                store64(freq + k * 8, f64_add(f64_mul(F64_HALF, load64(freq + k * 8)), f64_mul(F64_HALF, load64(freq2 + k * 8))));
+                k = k + 1;
+            }
+        }
+        var oc = 0;
+        while (oc < CC) {
+            var odm = dm0;
+            if (oc == 1) { odm = dm1; }
+            var ob = 0;
+            while (ob < B) {
+                clt_mdct_backward(freq + ob * 8, B, odm + osoff * 8 + NB * ob * 8, shift);
+                ob = ob + 1;
+            }
+            oc = oc + 1;
+        }
+        return 0;
+    }
     var c = 0;
     while (c < C) {
         var Xc = X + c * N * 8;
@@ -4084,9 +4143,9 @@ fn comb_filter_const(y, x, T, N, g10, g11, g12) {
     while (i < N) {
         var x0 = load64(x + (i - T + 2) * 8);
         var yv = f64_add(load64(x + i * 8),
-            f64_add(f64_mul(g10, x2),
+          f64_add(f64_mul(g10, x2),
             f64_add(f64_mul(g11, f64_add(x1, x3)),
-                    f64_mul(g12, f64_add(x0, x4)))));
+              f64_mul(g12, f64_add(x0, x4)))));
         store64(y + i * 8, yv);
         x4 = x3; x3 = x2; x2 = x1; x1 = x0;
         i = i + 1;
@@ -4118,11 +4177,11 @@ fn comb_filter(y, x, T0, T1, N, g0, g1, tapset0, tapset1, overlap) {
         var f = f64_mul(load64(_celt_window + i * 8), load64(_celt_window + i * 8));
         var omf = f64_sub(F64_ONE, f);
         var yv = f64_add(load64(x + i * 8),
-            f64_add(f64_mul(f64_mul(omf, g00), load64(x + (i - T0) * 8)),
+          f64_add(f64_mul(f64_mul(omf, g00), load64(x + (i - T0) * 8)),
             f64_add(f64_mul(f64_mul(omf, g01), f64_add(load64(x + (i - T0 + 1) * 8), load64(x + (i - T0 - 1) * 8))),
-            f64_add(f64_mul(f64_mul(omf, g02), f64_add(load64(x + (i - T0 + 2) * 8), load64(x + (i - T0 - 2) * 8))),
-            f64_add(f64_mul(f64_mul(f, g10), x2),
-            f64_add(f64_mul(f64_mul(f, g11), f64_add(x1, x3)),
+              f64_add(f64_mul(f64_mul(omf, g02), f64_add(load64(x + (i - T0 + 2) * 8), load64(x + (i - T0 - 2) * 8))),
+                f64_add(f64_mul(f64_mul(f, g10), x2),
+                  f64_add(f64_mul(f64_mul(f, g11), f64_add(x1, x3)),
                     f64_mul(f64_mul(f, g12), f64_add(x0, x4))))))));
         store64(y + i * 8, yv);
         x4 = x3; x3 = x2; x2 = x1; x1 = x0;
@@ -4139,8 +4198,518 @@ fn comb_filter(y, x, T0, T1, N, g0, g1, tapset0, tapset1, overlap) {
 #   +40 preemph(2) +48 rng +56 pf_period +64 pf_period_old +72 pf_gain +80 pf_gain_old
 #   +88 pf_tapset +96 pf_tapset_old
 
+# ---- CELT packet-loss concealment (celt_decode_lost, celt_decoder.c) ----
+# Float libopus, in f64: a pitch-periodic extrapolation through an LPC filter for
+# the first losses, noise at the decayed band energies after that, or when the
+# CELT band range does not start at 0 (hybrid). Pitch choices compare float
+# correlations, so a near-tie could pick a different lag than libopus does.
+
+fn _f64c(num, den) { return f64_div(f64_from(num), f64_from(den)); }
+
+# _celt_autocorr: ac[0..lag] of x[n], windowed over `overlap` samples at both ends.
+fn _celt_autocorr(x, ac, overlap, lag, n) {
+    if (_celt_window == 0) { _celt_window_init(); }
+    var xx = _opus_tmp(n * 8);
+    var i = 0;
+    while (i < n) { store64(xx + i * 8, load64(x + i * 8)); i = i + 1; }
+    i = 0;
+    while (i < overlap) {
+        var w = load64(_celt_window + i * 8);
+        store64(xx + i * 8, f64_mul(load64(x + i * 8), w));
+        store64(xx + (n - i - 1) * 8, f64_mul(load64(x + (n - i - 1) * 8), w));
+        i = i + 1;
+    }
+    var k = 0;
+    while (k <= lag) {
+        var d = F64_ZERO;
+        i = k;
+        while (i < n) { d = f64_add(d, f64_mul(load64(xx + i * 8), load64(xx + (i - k) * 8))); i = i + 1; }
+        store64(ac + k * 8, d);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# _celt_lpc (float): Levinson-Durbin, stopping at 30 dB of prediction gain.
+fn _celt_lpc(lpc, ac, p) {
+    var i = 0;
+    while (i < p) { store64(lpc + i * 8, F64_ZERO); i = i + 1; }
+    var err = load64(ac);
+    if (f64_gt(err, _f64c(1, 10000000000)) == 0) { return 0; }
+    i = 0;
+    while (i < p) {
+        var rr = F64_ZERO;
+        var j = 0;
+        while (j < i) { rr = f64_add(rr, f64_mul(load64(lpc + j * 8), load64(ac + (i - j) * 8))); j = j + 1; }
+        rr = f64_add(rr, load64(ac + (i + 1) * 8));
+        var r = f64_neg(f64_div(rr, err));
+        store64(lpc + i * 8, r);
+        j = 0;
+        while (j < ((i + 1) >> 1)) {
+            var t1 = load64(lpc + j * 8);
+            var t2 = load64(lpc + (i - 1 - j) * 8);
+            store64(lpc + j * 8, f64_add(t1, f64_mul(r, t2)));
+            store64(lpc + (i - 1 - j) * 8, f64_add(t2, f64_mul(r, t1)));
+            j = j + 1;
+        }
+        err = f64_sub(err, f64_mul(f64_mul(r, r), err));
+        if (f64_gt(err, f64_mul(_f64c(1, 1000), load64(ac))) == 0) { break; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# pitch_downsample: x_lp[len] at half rate from 1 or 2 channels, then whitened by
+# a 4th-order LPC with an added zero (celt_fir5).
+fn _celt_pitch_downsample(x0, x1, x_lp, len, C) {
+    var q = _f64c(1, 4);
+    var i = 1;
+    while (i < len) {
+        var v = f64_add(f64_add(f64_mul(q, load64(x0 + (2 * i - 1) * 8)), f64_mul(q, load64(x0 + (2 * i + 1) * 8))), f64_mul(F64_HALF, load64(x0 + (2 * i) * 8)));
+        if (C == 2) {
+            v = f64_add(v, f64_add(f64_add(f64_mul(q, load64(x1 + (2 * i - 1) * 8)), f64_mul(q, load64(x1 + (2 * i + 1) * 8))), f64_mul(F64_HALF, load64(x1 + (2 * i) * 8))));
+        }
+        store64(x_lp + i * 8, v);
+        i = i + 1;
+    }
+    var v0 = f64_add(f64_mul(q, load64(x0 + 8)), f64_mul(F64_HALF, load64(x0)));
+    if (C == 2) { v0 = f64_add(v0, f64_add(f64_mul(q, load64(x1 + 8)), f64_mul(F64_HALF, load64(x1)))); }
+    store64(x_lp, v0);
+    var ac = _opus_tmp(5 * 8);
+    _celt_autocorr(x_lp, ac, 0, 4, len);
+    store64(ac, f64_mul(load64(ac), _f64c(10001, 10000)));
+    i = 1;
+    while (i <= 4) {
+        var t = f64_mul(_f64c(8, 1000), f64_from(i));
+        store64(ac + i * 8, f64_sub(load64(ac + i * 8), f64_mul(load64(ac + i * 8), f64_mul(t, t))));
+        i = i + 1;
+    }
+    var lpc = _opus_tmp(4 * 8);
+    _celt_lpc(lpc, ac, 4);
+    var tmp = F64_ONE;
+    i = 0;
+    while (i < 4) {
+        tmp = f64_mul(_f64c(9, 10), tmp);
+        store64(lpc + i * 8, f64_mul(load64(lpc + i * 8), tmp));
+        i = i + 1;
+    }
+    var c1 = _f64c(8, 10);
+    var n0 = f64_add(load64(lpc), c1);
+    var n1 = f64_add(load64(lpc + 8), f64_mul(c1, load64(lpc)));
+    var n2 = f64_add(load64(lpc + 16), f64_mul(c1, load64(lpc + 8)));
+    var n3 = f64_add(load64(lpc + 24), f64_mul(c1, load64(lpc + 16)));
+    var n4 = f64_mul(c1, load64(lpc + 24));
+    var m0 = F64_ZERO; var m1 = F64_ZERO; var m2 = F64_ZERO; var m3 = F64_ZERO; var m4 = F64_ZERO;
+    i = 0;
+    while (i < len) {
+        var xi = load64(x_lp + i * 8);
+        var sum = f64_add(xi, f64_add(f64_mul(n0, m0), f64_add(f64_mul(n1, m1), f64_add(f64_mul(n2, m2), f64_add(f64_mul(n3, m3), f64_mul(n4, m4))))));
+        m4 = m3; m3 = m2; m2 = m1; m1 = m0; m0 = xi;
+        store64(x_lp + i * 8, sum);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# find_best_pitch (float): the two lags with the best normalised correlation.
+fn _celt_find_best_pitch(xcorr, y, len, max_pitch, best) {
+    var syy = F64_ONE;
+    var bn0 = f64_from(0 - 1);
+    var bn1 = f64_from(0 - 1);
+    var bd0 = F64_ZERO;
+    var bd1 = F64_ZERO;
+    store64(best, 0);
+    store64(best + 8, 1);
+    var j = 0;
+    while (j < len) { syy = f64_add(syy, f64_mul(load64(y + j * 8), load64(y + j * 8))); j = j + 1; }
+    var scale = _f64c(1, 1000000000000);
+    var i = 0;
+    while (i < max_pitch) {
+        var xc = load64(xcorr + i * 8);
+        if (f64_gt(xc, F64_ZERO) == 1) {
+            var x16 = f64_mul(xc, scale);
+            var num = f64_mul(x16, x16);
+            if (f64_gt(f64_mul(num, bd1), f64_mul(bn1, syy)) == 1) {
+                if (f64_gt(f64_mul(num, bd0), f64_mul(bn0, syy)) == 1) {
+                    bn1 = bn0; bd1 = bd0; store64(best + 8, load64(best));
+                    bn0 = num; bd0 = syy; store64(best, i);
+                } else {
+                    bn1 = num; bd1 = syy; store64(best + 8, i);
+                }
+            }
+        }
+        var ya = load64(y + (i + len) * 8);
+        var yb = load64(y + i * 8);
+        syy = f64_add(syy, f64_sub(f64_mul(ya, ya), f64_mul(yb, yb)));
+        syy = f64_max(F64_ONE, syy);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _celt_inner(x, y, n) {
+    var s = F64_ZERO;
+    var i = 0;
+    while (i < n) { s = f64_add(s, f64_mul(load64(x + i * 8), load64(y + i * 8))); i = i + 1; }
+    return s;
+}
+
+# pitch_search: coarse at 1/4 rate, refined at 1/2 around the two best lags.
+fn _celt_pitch_search(x_lp, y, len, max_pitch) {
+    var lag = len + max_pitch;
+    var x4 = _opus_tmp((len >> 2) * 8);
+    var y4 = _opus_tmp((lag >> 2) * 8);
+    var xcorr = _opus_tmp((max_pitch >> 1) * 8);
+    var j = 0;
+    while (j < (len >> 2)) { store64(x4 + j * 8, load64(x_lp + (2 * j) * 8)); j = j + 1; }
+    j = 0;
+    while (j < (lag >> 2)) { store64(y4 + j * 8, load64(y + (2 * j) * 8)); j = j + 1; }
+    var i = 0;
+    while (i < (max_pitch >> 2)) { store64(xcorr + i * 8, _celt_inner(x4, y4 + i * 8, len >> 2)); i = i + 1; }
+    var best = _opus_tmp(16);
+    _celt_find_best_pitch(xcorr, y4, len >> 2, max_pitch >> 2, best);
+    var b0 = load64(best);
+    var b1 = load64(best + 8);
+    i = 0;
+    while (i < (max_pitch >> 1)) {
+        store64(xcorr + i * 8, F64_ZERO);
+        var d0 = i - 2 * b0;
+        if (d0 < 0) { d0 = 0 - d0; }
+        var d1 = i - 2 * b1;
+        if (d1 < 0) { d1 = 0 - d1; }
+        if ((d0 <= 2) | (d1 <= 2)) {
+            store64(xcorr + i * 8, f64_max(f64_from(0 - 1), _celt_inner(x_lp, y + i * 8, len >> 1)));
+        }
+        i = i + 1;
+    }
+    _celt_find_best_pitch(xcorr, y, len >> 1, max_pitch >> 1, best);
+    b0 = load64(best);
+    var offset = 0;
+    if ((b0 > 0) & (b0 < (max_pitch >> 1) - 1)) {
+        var a = load64(xcorr + (b0 - 1) * 8);
+        var b = load64(xcorr + b0 * 8);
+        var c = load64(xcorr + (b0 + 1) * 8);
+        var k7 = _f64c(7, 10);
+        if (f64_gt(f64_sub(c, a), f64_mul(k7, f64_sub(b, a))) == 1) { offset = 1; }
+        else { if (f64_gt(f64_sub(a, c), f64_mul(k7, f64_sub(b, c))) == 1) { offset = 0 - 1; } }
+    }
+    return 2 * b0 - offset;
+}
+
+# celt_plc_pitch_search: the pitch of the last 2048 decoded samples, 100..720.
+fn _celt_plc_pitch_search(st, CC) {
+    var lp = _opus_tmp(1024 * 8);
+    _celt_pitch_downsample(load64(st + 24), load64(st + 32), lp, 1024, CC);
+    return 720 - _celt_pitch_search(lp + 360 * 8, lp, 2048 - 720, 720 - 100);
+}
+
+# prefilter_and_fold: re-apply the pre-filter to the overlap after a periodic
+# concealment and fold it, simulating TDAC so the next MDCT blends in.
+fn _celt_prefilter_and_fold(st, N, CC) {
+    if (_comb_gains == 0) { _comb_gains_init(); }
+    if (_celt_window == 0) { _celt_window_init(); }
+    var etmp = _opus_tmp(120 * 8);
+    var g1 = f64_neg(load64(st + 72));
+    var T1 = load64(st + 56);
+    if (T1 < 15) { T1 = 15; }
+    var tap = load64(st + 88);
+    var c = 0;
+    while (c < CC) {
+        var dm = load64(st + 24);
+        if (c == 1) { dm = load64(st + 32); }
+        var x = dm + (2048 - N) * 8;
+        var i = 0;
+        if (g1 == F64_ZERO) {
+            while (i < 120) { store64(etmp + i * 8, load64(x + i * 8)); i = i + 1; }
+        } else {
+            comb_filter_const(etmp, x, T1, 120,
+              f64_mul(g1, load64(_comb_gains + (tap * 3 + 0) * 8)),
+              f64_mul(g1, load64(_comb_gains + (tap * 3 + 1) * 8)),
+              f64_mul(g1, load64(_comb_gains + (tap * 3 + 2) * 8)));
+        }
+        i = 0;
+        while (i < 60) {
+            store64(dm + (2048 - N + i) * 8, f64_add(
+                f64_mul(load64(_celt_window + i * 8), load64(etmp + (119 - i) * 8)),
+                f64_mul(load64(_celt_window + (119 - i) * 8), load64(etmp + i * 8))));
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# After concealment, an inter-coded frame's energy prediction continues a falling
+# trend, or starts from the minimum of the recent frames, less a margin for the
+# shorter frames' larger natural swings. Both channels' memories, whatever C is.
+fn _celt_loss_safety(st, C, start, end, LM) {
+    var oldBandE = load64(st + 0);
+    var oldLogE = load64(st + 8);
+    var oldLogE2 = load64(st + 16);
+    var missing = silk_min(10, load64(st + 112) >> LM);
+    var safety = F64_ZERO;
+    if (LM == 0) { safety = _f64c(3, 2); }
+    if (LM == 1) { safety = F64_HALF; }
+    var c = 0;
+    while (c < 2) {
+        var i = start;
+        while (i < end) {
+            var k = c * 21 + i;
+            var e0 = load64(oldBandE + k * 8);
+            var e1 = load64(oldLogE + k * 8);
+            var e2 = load64(oldLogE2 + k * 8);
+            if (f64_lt(e0, f64_max(e1, e2)) == 1) {
+                var slope = f64_max(f64_sub(e1, e0), f64_mul(F64_HALF, f64_sub(e2, e0)));
+                slope = f64_min(slope, F64_TWO);
+                e0 = f64_sub(e0, f64_max(F64_ZERO, f64_mul(f64_from(1 + missing), slope)));
+                e0 = f64_max(f64_from(0 - 20), e0);
+            } else {
+                e0 = f64_min(f64_min(e0, e1), e2);
+            }
+            store64(oldBandE + k * 8, f64_sub(e0, safety));
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# celt_decode_lost + deemphasis: conceal one CELT frame of N = 120 << LM samples
+# into CC interleaved channels of pcm (added to it when accum is set). `start`
+# and `end` are the band range in force (start 17 conceals a hybrid frame).
+fn celt_decode_lost(st, LM, CC, start, end, accum, pcm) {
+    if (_celt_window == 0) { _celt_window_init(); }
+    if (_celt_band_edges == 0) { _opus_init_bands(); }
+    var N = 120 << LM;
+    var oldBandE = load64(st + 0);
+    var bg = load64(st + 168);
+    var lpcs = load64(st + 160);
+    var loss = load64(st + 112);
+    var ftype = 3;
+    if ((load64(st + 120) >= 40) | (start != 0) | (load64(st + 136) != 0)) { ftype = 2; }
+    var c = 0;
+    var i = 0;
+    if (ftype == 2) {
+        var eff = end;
+        if (eff > 21) { eff = 21; }
+        if (eff < start) { eff = start; }
+        c = 0;
+        while (c < CC) {
+            var dmn = load64(st + 24);
+            if (c == 1) { dmn = load64(st + 32); }
+            i = 0;
+            while (i < 2168 - N) { store64(dmn + i * 8, load64(dmn + (i + N) * 8)); i = i + 1; }
+            c = c + 1;
+        }
+        if (load64(st + 152) != 0) { _celt_prefilter_and_fold(st, N, CC); }
+        var decay = F64_HALF;
+        if (loss == 0) { decay = _f64c(3, 2); }
+        c = 0;
+        while (c < CC) {
+            i = start;
+            while (i < end) {
+                var k = c * 21 + i;
+                store64(oldBandE + k * 8, f64_max(load64(bg + k * 8), f64_sub(load64(oldBandE + k * 8), decay)));
+                i = i + 1;
+            }
+            c = c + 1;
+        }
+        var X = _opus_tmp(CC * N * 8);
+        var z = 0;
+        while (z < CC * N) { store64(X + z * 8, F64_ZERO); z = z + 1; }
+        var seed = load64(st + 48);
+        c = 0;
+        while (c < CC) {
+            i = start;
+            while (i < eff) {
+                var boffs = N * c + (load64(_celt_eBands + i * 8) << LM);
+                var blen = (load64(_celt_eBands + (i + 1) * 8) - load64(_celt_eBands + i * 8)) << LM;
+                var j = 0;
+                while (j < blen) {
+                    seed = celt_lcg_rand(seed);
+                    store64(X + (boffs + j) * 8, f64_from(sar(silk_sx32(seed), 20)));
+                    j = j + 1;
+                }
+                renormalise_vector(X + boffs * 8, blen, F64_ONE);
+                i = i + 1;
+            }
+            c = c + 1;
+        }
+        store64(st + 48, seed);
+        celt_synthesis(X, load64(st + 24), load64(st + 32), oldBandE, CC, CC, 0, 0, start, eff, LM);
+        var pp = load64(st + 56);
+        var ppo = load64(st + 64);
+        if (pp < 15) { pp = 15; }
+        if (ppo < 15) { ppo = 15; }
+        store64(st + 56, pp);
+        store64(st + 64, ppo);
+        c = 0;
+        while (c < CC) {
+            var dmp = load64(st + 24);
+            if (c == 1) { dmp = load64(st + 32); }
+            var os = dmp + (2048 - N) * 8;
+            comb_filter(os, os, ppo, pp, 120, load64(st + 80), load64(st + 72), load64(st + 96), load64(st + 88), 120);
+            if (LM != 0) {
+                comb_filter(os + 120 * 8, os + 120 * 8, pp, pp, N - 120, load64(st + 72), load64(st + 72), load64(st + 88), load64(st + 88), 120);
+            }
+            c = c + 1;
+        }
+        store64(st + 64, pp);
+        store64(st + 80, load64(st + 72));
+        store64(st + 96, load64(st + 88));
+        store64(st + 152, 0);
+        store64(st + 136, 1);
+    } else {
+        var pitch = 0;
+        var fade = F64_ONE;
+        var fresh = 0;
+        if (load64(st + 128) != 3) {
+            fresh = 1;
+            pitch = _celt_plc_pitch_search(st, CC);
+            store64(st + 144, pitch);
+        } else {
+            pitch = load64(st + 144);
+            fade = _f64c(8, 10);
+        }
+        var exc_len = silk_min(2 * pitch, 1024);
+        var excb = _opus_tmp((1024 + 24) * 8);
+        var exc = excb + 24 * 8;
+        var firt = _opus_tmp(exc_len * 8);
+        c = 0;
+        while (c < CC) {
+            var buf = load64(st + 24);
+            if (c == 1) { buf = load64(st + 32); }
+            var lpc = lpcs + c * 24 * 8;
+            i = 0;
+            while (i < 1024 + 24) { store64(excb + i * 8, load64(buf + (2048 - 1024 - 24 + i) * 8)); i = i + 1; }
+            if (fresh == 1) {
+                var ac = _opus_tmp(25 * 8);
+                _celt_autocorr(exc, ac, 120, 24, 1024);
+                store64(ac, f64_mul(load64(ac), _f64c(10001, 10000)));
+                var lw = f64_mul(_f64c(8, 1000), _f64c(8, 1000));
+                i = 1;
+                while (i <= 24) {
+                    store64(ac + i * 8, f64_sub(load64(ac + i * 8), f64_mul(f64_mul(load64(ac + i * 8), lw), f64_from(i * i))));
+                    i = i + 1;
+                }
+                _celt_lpc(lpc, ac, 24);
+            }
+            # celt_fir: the excitation over the last exc_len samples.
+            var base = 1024 - exc_len;
+            i = 0;
+            while (i < exc_len) {
+                var sum = load64(exc + (base + i) * 8);
+                var k = 1;
+                while (k <= 24) {
+                    sum = f64_add(sum, f64_mul(load64(lpc + (k - 1) * 8), load64(exc + (base + i - k) * 8)));
+                    k = k + 1;
+                }
+                store64(firt + i * 8, sum);
+                i = i + 1;
+            }
+            i = 0;
+            while (i < exc_len) { store64(exc + (base + i) * 8, load64(firt + i * 8)); i = i + 1; }
+            # How fast the waveform is decaying, so concealment does not add energy.
+            var e1 = F64_ONE;
+            var e2 = F64_ONE;
+            var dl = exc_len >> 1;
+            i = 0;
+            while (i < dl) {
+                var ea = load64(exc + (1024 - dl + i) * 8);
+                var eb2 = load64(exc + (1024 - 2 * dl + i) * 8);
+                e1 = f64_add(e1, f64_mul(ea, ea));
+                e2 = f64_add(e2, f64_mul(eb2, eb2));
+                i = i + 1;
+            }
+            e1 = f64_min(e1, e2);
+            var decay2 = f64_sqrt(f64_div(e1, e2));
+            i = 0;
+            while (i < 2048 - N) { store64(buf + i * 8, load64(buf + (i + N) * 8)); i = i + 1; }
+            var xoff = 1024 - pitch;
+            var xlen = N + 120;
+            var att = f64_mul(fade, decay2);
+            var s1 = F64_ZERO;
+            var j2 = 0;
+            i = 0;
+            while (i < xlen) {
+                if (j2 >= pitch) { j2 = j2 - pitch; att = f64_mul(att, decay2); }
+                store64(buf + (2048 - N + i) * 8, f64_mul(att, load64(exc + (xoff + j2) * 8)));
+                var t = load64(buf + (2048 - 1024 - N + xoff + j2) * 8);
+                s1 = f64_add(s1, f64_mul(t, t));
+                i = i + 1;
+                j2 = j2 + 1;
+            }
+            # celt_iir through the LPC synthesis filter, from the last decoded samples.
+            var mem = _opus_tmp(24 * 8);
+            i = 0;
+            while (i < 24) { store64(mem + i * 8, load64(buf + (2048 - N - 1 - i) * 8)); i = i + 1; }
+            var yb = _opus_tmp((xlen + 24) * 8);
+            i = 0;
+            while (i < 24) { store64(yb + i * 8, load64(mem + (23 - i) * 8)); i = i + 1; }
+            i = 0;
+            while (i < xlen) {
+                var acc = load64(buf + (2048 - N + i) * 8);
+                var k2 = 1;
+                while (k2 <= 24) {
+                    acc = f64_sub(acc, f64_mul(load64(lpc + (k2 - 1) * 8), load64(yb + (24 + i - k2) * 8)));
+                    k2 = k2 + 1;
+                }
+                store64(yb + (24 + i) * 8, acc);
+                store64(buf + (2048 - N + i) * 8, acc);
+                i = i + 1;
+            }
+            var s2 = F64_ZERO;
+            i = 0;
+            while (i < xlen) {
+                var t2 = load64(buf + (2048 - N + i) * 8);
+                s2 = f64_add(s2, f64_mul(t2, t2));
+                i = i + 1;
+            }
+            # An "explosion" in the synthesis (or a NaN) zeroes the frame; more
+            # energy than the source attenuates it.
+            if (f64_gt(s1, f64_mul(_f64c(2, 10), s2)) == 0) {
+                i = 0;
+                while (i < xlen) { store64(buf + (2048 - N + i) * 8, F64_ZERO); i = i + 1; }
+            } else {
+                if (f64_lt(s1, s2) == 1) {
+                    var ratio = f64_sqrt(f64_div(f64_add(s1, F64_ONE), f64_add(s2, F64_ONE)));
+                    i = 0;
+                    while (i < 120) {
+                        var tg = f64_sub(F64_ONE, f64_mul(load64(_celt_window + i * 8), f64_sub(F64_ONE, ratio)));
+                        store64(buf + (2048 - N + i) * 8, f64_mul(tg, load64(buf + (2048 - N + i) * 8)));
+                        i = i + 1;
+                    }
+                    while (i < xlen) {
+                        store64(buf + (2048 - N + i) * 8, f64_mul(ratio, load64(buf + (2048 - N + i) * 8)));
+                        i = i + 1;
+                    }
+                }
+            }
+            c = c + 1;
+        }
+        store64(st + 152, 1);
+    }
+    store64(st + 112, silk_min(10000, loss + (1 << LM)));
+    store64(st + 120, silk_min(10000, load64(st + 120) + (1 << LM)));
+    store64(st + 128, ftype);
+    var preemph = load64(st + 40);
+    c = 0;
+    while (c < CC) {
+        var dmd = load64(st + 24);
+        if (c == 1) { dmd = load64(st + 32); }
+        celt_deemphasis(dmd + (2048 - N) * 8, pcm, c, CC, preemph, accum, LM);
+        c = c + 1;
+    }
+    return N;
+}
+
+# State: +0 oldBandE, +8 oldLogE, +16 oldLogE2, +24/+32 decode memory per channel,
+# +40 preemph[2], +48 rng, +56..+96 postfilter, then the concealment state:
+# +112 loss_duration, +120 plc_duration, +128 last_frame_type (0 none, 1 normal,
+# 2 noise PLC, 3 periodic PLC), +136 skip_plc, +144 last_pitch_index,
+# +152 prefilter_and_fold, +160 lpc[2*24], +168 backgroundLogE[42].
 fn celt_dec_state_new() {
-    var st = alloc(112);
+    var st = alloc(176);
     var obe = alloc(42 * 8);
     var ole = alloc(42 * 8);
     var ol2 = alloc(42 * 8);
@@ -4172,7 +4741,29 @@ fn celt_dec_state_new() {
     store64(st + 80, F64_ZERO);
     store64(st + 88, 0);
     store64(st + 96, 0);
+    store64(st + 104, 0);
+    store64(st + 160, alloc(48 * 8));
+    store64(st + 168, alloc(42 * 8));
+    _celt_plc_state_clear(st);
     return st;
+}
+
+# The concealment part of OPUS_RESET_STATE: counters cleared, no LPC, background
+# energy 0, and pitch PLC off until two good frames have arrived.
+fn _celt_plc_state_clear(st) {
+    store64(st + 112, 0);
+    store64(st + 120, 0);
+    store64(st + 128, 0);
+    store64(st + 136, 1);
+    store64(st + 144, 0);
+    store64(st + 152, 0);
+    var lpc = load64(st + 160);
+    var bg = load64(st + 168);
+    var i = 0;
+    while (i < 48) { store64(lpc + i * 8, F64_ZERO); i = i + 1; }
+    i = 0;
+    while (i < 42) { store64(bg + i * 8, F64_ZERO); i = i + 1; }
+    return 0;
 }
 
 # Payload wrapper: CELT-only fullband (start=0, end=21, no accumulate, fresh ec).
@@ -4249,7 +4840,7 @@ fn celt_transient_analysis(in_buf, len, C) {
     var c_875 = f64_div(f64_from(7), f64_from(8));                # 0.875 (backward mask)
     var c_125 = f64_div(f64_from(1), f64_from(8));                # 0.125
     var eps = f64_div(f64_from(1), f64_from(1000000000000000));   # EPSILON 1e-15
-    var tmp = alloc(len * 8);
+    var tmp = _opus_tmp(len * 8);
     var mask_metric = 0;
     var tf_chan = 0;
     var c = 0;
@@ -4378,14 +4969,14 @@ fn celt_compute_mdcts(pre, freq, C, LM, isTransient, nsamp) {
 fn celt_encode(st, ec, pcm, C, LM, force_intra, isTransient, mem_ptr) {
     var N = 120 << LM;
     var nsamp = N + 120;
-    var pre = alloc(C * nsamp * 8);
+    var pre = _opus_tmp(C * nsamp * 8);
     celt_preemphasis(pcm, pre, nsamp, C, mem_ptr);
     var it = isTransient;
     if (it < 0) {                                    # sentinel: auto-detect from the signal
         it = 0;
         if (LM > 0) { it = celt_transient_analysis(pre, nsamp, C); }
     }
-    var freq = alloc(C * N * 8);
+    var freq = _opus_tmp(C * N * 8);
     celt_compute_mdcts(pre, freq, C, LM, it, nsamp);
     return celt_encode_frame_ec(st, ec, freq, C, LM, 0, 21, force_intra, it);
 }
@@ -4402,9 +4993,9 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var total_bits = len * 8;
     var oldBandE = load64(st + 0);
     # --- band energies -> log, normalize ---
-    var bandE = alloc(C * 21 * 8);
+    var bandE = _opus_tmp(C * 21 * 8);
     compute_band_energies(freq, bandE, end, C, LM);
-    var bandLogE = alloc(C * 21 * 8);
+    var bandLogE = _opus_tmp(C * 21 * 8);
     var c0 = 0;
     while (c0 < C) {
         var bi = 0;
@@ -4415,11 +5006,11 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
         }
         c0 = c0 + 1;
     }
-    var X = alloc(C * N * 8);
+    var X = _opus_tmp(C * N * 8);
     normalise_bands(freq, X, bandE, end, C, LM);
     # --- dynalloc analysis (offsets + tf importance) — mono; stereo keeps the flat fallback ---
-    var offsets = alloc(21 * 8);
-    var importance = alloc(21 * 8);
+    var offsets = _opus_tmp(21 * 8);
+    var importance = _opus_tmp(21 * 8);
     var idf = 0; while (idf < 21) { store64(offsets + idf * 8, 0); store64(importance + idf * 8, 13); idf = idf + 1; }
     if (C == 1) { celt_dynalloc_analysis(bandLogE, end, LM, len, offsets, importance, isTransient); }
     # --- prefix ---
@@ -4429,19 +5020,19 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     if ((start == 0) & (tell + 16 <= total_bits)) { ec_enc_bit_logp(ec, 0, 1); }  # R2 postfilter=0
     tell = ec_tell(ec);
     if (tell + 3 <= total_bits) { ec_enc_bit_logp(ec, isTransient, 3); }         # R3 transient=0
-    var error = alloc(C * 21 * 8);
+    var error = _opus_tmp(C * 21 * 8);
     var chosen_intra = quant_coarse_energy(start, end, bandLogE, oldBandE, error, ec, C, LM, force_intra, len);  # R5 (writes intra+coarse)
-    var tf = alloc(21 * 8);
+    var tf = _opus_tmp(21 * 8);
     var ti = 0; while (ti < 21) { store64(tf + ti * 8, 0); ti = ti + 1; }
     var lambda = 20480 / len + 2; if (lambda < 80) { lambda = 80; }              # rate.c-style tf-change cost
     var tfc = _celt_tf_chan; if (tfc >= C) { tfc = 0; }
     var tf_select = celt_tf_analysis(X, N, end, isTransient, LM, _celt_tf_estimate, tfc, lambda, tf, importance);
     celt_tf_encode(tf, isTransient, tf_select, ec, start, end, LM);                  # R6 tf (real per-band)
-    var spread_avg = alloc(8); store64(spread_avg, 0);
+    var spread_avg = _opus_tmp(8); store64(spread_avg, 0);
     var spread = celt_spreading_decision(X, end, C, LM, spread_avg, 2);   # R7 spread (adaptive)
     tell = ec_tell(ec);
     if (tell + 4 <= total_bits) { ec_enc_icdf(ec, spread, _celt_spreadIcdf, 5); }
-    var cap = alloc(21 * 8);
+    var cap = _opus_tmp(21 * 8);
     celt_init_caps(cap, LM, C);                                                  # R8 caps
     # R9 dynalloc — encode the per-band boosts computed above (offsets in 1/64-bit units)
     var dynalloc_logp = 6;
@@ -4476,12 +5067,12 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     var acr = 0;
     if ((isTransient != 0) & (LM >= 2) & (bits >= ((LM + 2) << 3))) { acr = 8; }
     bits = bits - acr;
-    var pulses = alloc(21 * 8);
-    var fine_quant = alloc(21 * 8);
-    var fine_priority = alloc(21 * 8);
-    var intensity = alloc(8);
-    var dual = alloc(8);
-    var balance = alloc(8);
+    var pulses = _opus_tmp(21 * 8);
+    var fine_quant = _opus_tmp(21 * 8);
+    var fine_priority = _opus_tmp(21 * 8);
+    var intensity = _opus_tmp(8);
+    var dual = _opus_tmp(8);
+    var balance = _opus_tmp(8);
     store64(intensity, 0); store64(dual, 0);
     if (C == 2) {                                                                # intensity from bitrate
         var eq_kbps = (len * 384) / (120 << LM);
@@ -4497,7 +5088,7 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
     # --- bands ---
     var shortBlocks = 0;
     if (isTransient != 0) { shortBlocks = M; }
-    var collapse = alloc(C * 21);
+    var collapse = _opus_tmp(C * 21);
     var Y = 0;
     if (C == 2) { Y = X + N * 8; }
     store64(st + 48, 0);   # fold-noise seed (matches decode)
@@ -4512,6 +5103,12 @@ fn celt_encode_frame_ec(st, ec, freq, C, LM, start, end, force_intra, isTransien
 # optionally accumulating onto pcm_out (hybrid: start=17, accum=1). Config-31 passes
 # (start=0, end=21, accum=0) for bit-identical behaviour.
 fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
+    return celt_decode_frame_ec_cc(st, ec, len, C, C, start, end, accum, LM, pcm_out);
+}
+
+# Decode one CELT frame of C coded channels into CC interleaved output channels
+# (an Opus stream can switch between mono and stereo packets).
+fn celt_decode_frame_ec_cc(st, ec, len, C, CC, start, end, accum, LM, pcm_out) {
     var oldBandE = load64(st + 0);
     var oldLogE = load64(st + 8);
     var oldLogE2 = load64(st + 16);
@@ -4524,33 +5121,35 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
     var osoff = 2048 - N;             # out_syn offset into decode_mem
     # R14 slide history: OPUS_MOVE(dm, dm+N, 2168-N)
     var c0 = 0;
-    while (c0 < C) {
+    while (c0 < CC) {
         var dm = dm0;
         if (c0 == 1) { dm = dm1; }
         var mi = 0;
         while (mi < dmove) { store64(dm + mi * 8, load64(dm + (mi + N) * 8)); mi = mi + 1; }
         c0 = c0 + 1;
     }
-    var tf = alloc(21 * 8);
-    var off = alloc(21 * 8);
-    var pul = alloc(21 * 8);
-    var fq = alloc(21 * 8);
-    var fp = alloc(21 * 8);
-    var cap = alloc(21 * 8);
-    var scal = alloc(16 * 8);
-    celt_decode_frame_prefix_ec(ec, len, C, LM, start, end, oldBandE, tf, off, pul, fq, fp, cap, scal);
+    # Pitch PLC needs two good frames in a row.
+    if (load64(st + 112) == 0) { store64(st + 136, 0); }
+    var tf = _opus_tmp(21 * 8);
+    var off = _opus_tmp(21 * 8);
+    var pul = _opus_tmp(21 * 8);
+    var fq = _opus_tmp(21 * 8);
+    var fp = _opus_tmp(21 * 8);
+    var cap = _opus_tmp(21 * 8);
+    var scal = _opus_tmp(16 * 8);
+    _celt_decode_prefix_st(st, ec, len, C, LM, start, end, oldBandE, tf, off, pul, fq, fp, cap, scal);
     var silence = load64(scal + 0);
     var isTransient = load64(scal + 8);
     var acr = load64(scal + 40);
     var pf_pitch = load64(scal + 80);
     var pf_tapset = load64(scal + 88);
     var pf_gain = load64(scal + 96);
-    var X = alloc(C * N * 8);
+    var X = _opus_tmp(C * N * 8);
     var z = 0;
     while (z < C * N) { store64(X + z * 8, F64_ZERO); z = z + 1; }
     var Y = 0;
     if (C == 2) { Y = X + N * 8; }
-    var collapse = alloc(C * 21);
+    var collapse = _opus_tmp(C * 21);
     var shortBlocks = 0;
     if (isTransient != 0) { shortBlocks = M; }
     var total_bits = len * 64 - acr;
@@ -4565,7 +5164,8 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
         var s = 0;
         while (s < C * 21) { store64(oldBandE + s * 8, f64_neg(f64_from(28))); s = s + 1; }
     }
-    celt_synthesis(X, dm0, dm1, oldBandE, C, isTransient, silence, start, end, LM);
+    if (load64(st + 152) != 0) { _celt_prefilter_and_fold(st, N, CC); }
+    celt_synthesis(X, dm0, dm1, oldBandE, C, CC, isTransient, silence, start, end, LM);
     # R22 postfilter (comb_filter) — in place on out_syn = dm+1088
     var pperiod = load64(st + 56);
     var pperiod_old = load64(st + 64);
@@ -4576,20 +5176,24 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
     if (pperiod < 15) { pperiod = 15; }
     if (pperiod_old < 15) { pperiod_old = 15; }
     var c = 0;
-    while (c < C) {
+    while (c < CC) {
         var dm = dm0;
         if (c == 1) { dm = dm1; }
         var os = dm + osoff * 8;
         comb_filter(os, os, pperiod_old, pperiod, 120, pgain_old, pgain, ptap_old, ptap, 120);
-        comb_filter(os + 120 * 8, os + 120 * 8, pperiod, pf_pitch, N - 120, pgain, pf_gain, ptap, pf_tapset, 120);
+        # A 2.5 ms frame (LM 0) is one short MDCT long, so there is no second
+        # segment: the new parameters take effect from the next frame (celt_decoder.c).
+        if (LM != 0) {
+            comb_filter(os + 120 * 8, os + 120 * 8, pperiod, pf_pitch, N - 120, pgain, pf_gain, ptap, pf_tapset, 120);
+        }
         c = c + 1;
     }
     # de-emphasis -> pcm (out_syn = dm+1088)
     c = 0;
-    while (c < C) {
+    while (c < CC) {
         var dm2 = dm0;
         if (c == 1) { dm2 = dm1; }
-        celt_deemphasis(dm2 + osoff * 8, pcm_out, c, C, preemph, accum, LM);
+        celt_deemphasis(dm2 + osoff * 8, pcm_out, c, CC, preemph, accum, LM);
         c = c + 1;
     }
     # R23 energy memory rotation
@@ -4611,6 +5215,31 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
             r2 = r2 + 1;
         }
     }
+    # The background noise floor rises by at most 2.4 dB/s, or by the whole gap
+    # after concealed frames (DTX); concealment decays toward it.
+    var bg = load64(st + 168);
+    var bginc = f64_mul(f64_from(silk_min(160, load64(st + 112) + M)), f64_div(F64_ONE, f64_from(1000)));
+    var bgi = 0;
+    while (bgi < 42) {
+        store64(bg + bgi * 8, f64_min(f64_add(load64(bg + bgi * 8), bginc), load64(oldBandE + bgi * 8)));
+        bgi = bgi + 1;
+    }
+    # Bands outside [start, end) are cleared, in case the next frame's start or end
+    # differs (hybrid starts at band 17; the bandwidth sets end) (celt_decoder.c).
+    var neg28 = f64_neg(f64_from(28));
+    var cb = 0;
+    while (cb < 2) {
+        var bi = 0;
+        while (bi < 21) {
+            if ((bi < start) | (bi >= end)) {
+                store64(oldBandE + (cb * 21 + bi) * 8, F64_ZERO);
+                store64(oldLogE + (cb * 21 + bi) * 8, neg28);
+                store64(oldLogE2 + (cb * 21 + bi) * 8, neg28);
+            }
+            bi = bi + 1;
+        }
+        cb = cb + 1;
+    }
     # R24 persist rng
     store64(st + 48, load64(ec + 56));
     # postfilter state rotation
@@ -4620,9 +5249,17 @@ fn celt_decode_frame_ec(st, ec, len, C, start, end, accum, LM, pcm_out) {
     store64(st + 56, pf_pitch);
     store64(st + 72, pf_gain);
     store64(st + 88, pf_tapset);
-    store64(st + 64, pf_pitch);
-    store64(st + 80, pf_gain);
-    store64(st + 96, pf_tapset);
+    # At LM 0 the new parameters were not applied this frame, so the old ones stay
+    # pending for the next frame's crossfade.
+    if (LM != 0) {
+        store64(st + 64, pf_pitch);
+        store64(st + 80, pf_gain);
+        store64(st + 96, pf_tapset);
+    }
+    store64(st + 112, 0);     # loss_duration
+    store64(st + 120, 0);     # plc_duration
+    store64(st + 128, 1);     # last_frame_type = normal
+    store64(st + 152, 0);     # prefilter_and_fold
     return 0;
 }
 
@@ -4765,6 +5402,7 @@ fn celt_dec_state_reset(st) {
     store64(st + 48, 0); store64(st + 56, 0); store64(st + 64, 0);
     store64(st + 72, F64_ZERO); store64(st + 80, F64_ZERO);
     store64(st + 88, 0); store64(st + 96, 0);
+    _celt_plc_state_clear(st);
     return 0;
 }
 
@@ -4780,7 +5418,7 @@ fn _opus_smooth_fade(in1, in2, out, overlap, C) {
             var a = load64(in1 + (i * C + c) * 8);
             var b = load64(in2 + (i * C + c) * 8);
             store64(out + (i * C + c) * 8,
-                    f64_add(f64_mul(w, b), f64_mul(f64_sub(F64_ONE, w), a)));
+              f64_add(f64_mul(w, b), f64_mul(f64_sub(F64_ONE, w), a)));
             i = i + 1;
         }
         c = c + 1;
@@ -4793,12 +5431,12 @@ fn _opus_smooth_fade(in1, in2, out, overlap, C) {
 # For a SILK->CELT transition (celt_to_silk == 0) the CELT decoder is stale, so
 # libopus resets it first and the decode doubles as priming for the CELT run that
 # follows (opus_decoder.c:637). Returns the 240-frame, C-channel buffer.
-fn _opus_redundancy_decode(cst, fdata, newlen, rb, celt_to_silk, endband, C) {
-    var red = alloc(2 * 240 * 8);
+fn _opus_redundancy_decode(cst, fdata, newlen, rb, celt_to_silk, endband, C, CC) {
+    var red = _opus_tmp(2 * 240 * 8);
     var zz = 0;
     while (zz < 2 * 240) { store64(red + zz * 8, F64_ZERO); zz = zz + 1; }
     if (celt_to_silk == 0) { celt_dec_state_reset(cst); }
-    celt_decode_frame_ec(cst, ec_dec_new(fdata + newlen, rb), rb, C, 0, endband, 0, 1, red);
+    celt_decode_frame_ec_cc(cst, ec_dec_new(fdata + newlen, rb), rb, C, CC, 0, endband, 0, 1, red);
     return red;
 }
 
@@ -4808,7 +5446,7 @@ fn _opus_redundancy_mix(red, celt_to_silk, C, pcm, fsamp) {
         # SILK -> CELT: the redundant frame covers the END of this frame.
         if (fsamp >= 120) {
             _opus_smooth_fade(pcm + (fsamp - 120) * C * 8, red + 120 * C * 8,
-                              pcm + (fsamp - 120) * C * 8, 120, C);
+              pcm + (fsamp - 120) * C * 8, 120, C);
         }
     } else {
         # CELT -> SILK: it covers the START -- copied outright over the first
@@ -4823,42 +5461,11 @@ fn _opus_redundancy_mix(red, celt_to_silk, C, pcm, fsamp) {
             i = i + 1;
         }
         _opus_smooth_fade(red + 120 * C * 8, pcm + 120 * C * 8,
-                          pcm + 120 * C * 8, 120, C);
+          pcm + 120 * C * 8, 120, C);
     }
     return 0;
 }
 
-# Read the redundancy header off the tail of a SILK-mode frame, decode the 5 ms
-# CELT frame it points at, and mix it into `pcm`. `pcm` holds `fsamp` interleaved
-# frames of `C` channels. Returns 1 if a redundant frame was decoded.
-#   is_hybrid: hybrid frames carry an explicit flag and an explicit size;
-#              SILK-only frames have neither (flag implied, size = the rest).
-# Must be called with `ec` positioned exactly where the SILK data ended.
-fn _opus_decode_redundancy(cst, ec, fdata, flen, is_hybrid, endband, C, pcm, fsamp) {
-    var need = 17;
-    if (is_hybrid == 1) { need = 37; }          # +20 for hybrid (opus_decoder.c:454)
-    if (ec_tell(ec) + need > 8 * flen) { return 0; }
-    var redundancy = 1;
-    if (is_hybrid == 1) { redundancy = ec_dec_bit_logp(ec, 12); }
-    if (redundancy == 0) { return 0; }
-    var celt_to_silk = ec_dec_bit_logp(ec, 1);
-    var rb = 0;
-    if (is_hybrid == 1) {
-        rb = ec_dec_uint(ec, 256) + 2;
-    } else {
-        rb = flen - ((ec_tell(ec) + 7) >> 3);
-    }
-    var newlen = flen - rb;
-    # Sanity check; a valid packet never trips it (opus_decoder.c:471).
-    if (newlen < 0) { return 0; }
-    if (newlen * 8 < ec_tell(ec)) { return 0; }
-    if (rb < 2) { return 0; }
-    store64(ec + 8, load64(ec + 8) - rb);       # shrink storage past the raw bytes
-
-    var red = _opus_redundancy_decode(cst, fdata, newlen, rb, celt_to_silk, endband, C);
-    _opus_redundancy_mix(red, celt_to_silk, C, pcm, fsamp);
-    return 1;
-}
 
 # ---- RFC 6716 section 3.2: Opus packet framing -------------------------------
 # A packet's TOC byte carries a 2-bit frame-count code, and until 2.7.3 shravan
@@ -4939,7 +5546,7 @@ fn _opus_split_frames(data, plen, offs, lens, maxf) {
         # Two frames, the first with an explicit length.
         if (maxf < 2) { return err(ERR_DECODE); }
         if (fsz * 2 > 5760) { return err(ERR_DECODE); }
-        var n1 = alloc(8);
+        var n1 = _opus_tmp(8);
         var used = _opus_parse_size(data, pos, plen, n1);
         if (used < 0) { return err(ERR_DECODE); }
         pos = pos + used;
@@ -4984,7 +5591,7 @@ fn _opus_split_frames(data, plen, offs, lens, maxf) {
         # VBR: count-1 explicit lengths, the last frame taking what is left.
         var i = 0;
         var used_total = 0;
-        var tmp = alloc(8);
+        var tmp = _opus_tmp(8);
         while (i < count - 1) {
             var u = _opus_parse_size(data, pos, plen, tmp);
             if (u < 0) { return err(ERR_DECODE); }
@@ -5020,7 +5627,79 @@ fn _opus_split_frames(data, plen, offs, lens, maxf) {
     return count;
 }
 
+# A frame decoded without data (opus_decode_frame with data NULL): DTX frames, and
+# the 5 ms that cover a mode switch whose redundant frame was dropped. `mode` is
+# the previous frame's (CELT if it ended in a redundant CELT frame); `endband`
+# is the CELT end band still in force. Writes `audiosize` frames of CC channels
+# to pcm (more than 20 ms runs as 20 ms pieces) and returns the count.
+fn _opus_plc_frame(st, sk, mode, CC, endband, audiosize, pcm) {
+    var i = 0;
+    if (mode == 0) {
+        while (i < audiosize * CC) { store64(pcm + i * 8, F64_ZERO); i = i + 1; }
+        return audiosize;
+    }
+    if (audiosize > 960) {
+        var done = 0;
+        while (done < audiosize) {
+            var piece = audiosize - done;
+            if (piece > 960) { piece = 960; }
+            done = done + _opus_plc_frame(st, sk, mode, CC, endband, piece, pcm + done * CC * 8);
+        }
+        return audiosize;
+    }
+    if (audiosize < 960) {
+        if (audiosize > 480) { audiosize = 480; }
+        else { if ((mode != 1) & (audiosize > 240) & (audiosize < 480)) { audiosize = 240; } }
+    }
+    i = 0;
+    while (i < audiosize * CC) { store64(pcm + i * 8, F64_ZERO); i = i + 1; }
+    if (mode != 3) {
+        # The SILK PLC runs 10 or 20 ms frames; under 10 ms it conceals 10 and the
+        # front is used.
+        var nsub = 2;
+        if (audiosize > 480) { nsub = 4; }
+        var sbuf = _opus_tmp(2 * 960 * 8);
+        silk_dec_lost(sk, nsub, CC, sbuf);
+        i = 0;
+        while (i < audiosize * CC) {
+            store64(pcm + i * 8, f64_div(f64_from(load64(sbuf + i * 8)), f64_from(32768)));
+            i = i + 1;
+        }
+    }
+    if (mode != 1) {
+        var n = audiosize;
+        var lm = 3;
+        if (n == 480) { lm = 2; }
+        if (n == 240) { lm = 1; }
+        if (n == 120) { lm = 0; }
+        var start = 0;
+        var accum = 0;
+        if (mode != 3) { start = 17; accum = 1; }
+        celt_decode_lost(st, lm, CC, start, endband, accum, pcm);
+    }
+    return audiosize;
+}
+
+# The transition cross-fade: the first 2.5 ms from the concealment, the next 2.5 ms
+# faded into the decoded frame (shorter frames fade over the first 2.5 ms).
+fn _opus_apply_transition(tbuf, pcm, fsamp, CC) {
+    if (fsamp >= 240) {
+        var i = 0;
+        while (i < 120 * CC) { store64(pcm + i * 8, load64(tbuf + i * 8)); i = i + 1; }
+        _opus_smooth_fade(tbuf + 120 * CC * 8, pcm + 120 * CC * 8, pcm + 120 * CC * 8, 120, CC);
+    } else {
+        _opus_smooth_fade(tbuf, pcm, pcm, 120, CC);
+    }
+    return 0;
+}
+
 fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
+    var r = _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len);
+    _opus_frame_end();        # whatever path returned, scratch is off again
+    return r;
+}
+
+fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
     if (vec_len(packets_vec) == 0) { return err(ERR_END_OF_STREAM); }
 
     var pkt0 = vec_get(packets_vec, 0);
@@ -5049,6 +5728,10 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
 
     var channels = opus_head_channels(head);
     var pre_skip = opus_head_pre_skip(head);
+    # Mapping family 0 is one stream of 1 or 2 channels. Families 1 and 255 carry
+    # several streams per packet (RFC 7845 5.1.1), which this decoder does not
+    # demultiplex: decoding them as one stream returned garbage with success.
+    if ((opus_head_mapping(head) != 0) | (channels > 2)) { return err(ERR_UNSUPPORTED_FMT); }
     if (_celt_band_edges == 0) { _opus_init_bands(); }
 
     var samples = vec_new();
@@ -5074,6 +5757,7 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
         # either way the old size was a heap overrun waiting for the right file.
         var maxsamp = 0;
         var pf = 0;
+        var pdur = 960;     # a lost (empty) packet conceals the previous packet's duration
         while (pf < num_frames) {
             var ppkt = vec_get(packets_vec, pf + 2);
             var ppd = str_data(ppkt);
@@ -5082,40 +5766,75 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
                 var pcfg = (load8(ppd) >> 3) & 0x1F;
                 var pn = _opus_split_frames(ppd, ppl, offs, lens, 48);
                 if (res_ok(pn) == 1) {
-                    maxsamp = maxsamp + pn * _opus_frame_samples(pcfg);
+                    pdur = pn * _opus_frame_samples(pcfg);
                 } else {
-                    maxsamp = maxsamp + _opus_frame_samples(pcfg);   # unparseable: one frame of silence
+                    pdur = _opus_frame_samples(pcfg);   # unparseable: one frame of silence
                 }
             }
+            maxsamp = maxsamp + pdur;
             pf = pf + 1;
         }
         if (maxsamp < 1) { maxsamp = 1; }
-        var allpcm = alloc(maxsamp * channels * 8);
-        # Persistent SILK decode state (created lazily on first SILK packet; the SILK
-        # decoder, resampler and 1-sample mid history all carry across packets).
-        var silk_st = 0;
-        var silk_rst = 0;
-        var silk_mid = 0;
-        var silk_fs = 0;
-        var silk_nsub = 0;   # nb_subfr the mono SILK state was inited with (2=10ms, 4=20ms)
-        var silk_out = alloc(2880 * 8);
-        # Persistent SILK stereo state (created lazily on the first stereo SILK packet).
-        var sk_st0 = 0;
-        var sk_st1 = 0;
-        var sk_rstL = 0;
-        var sk_rstR = 0;
-        var sk_stereo = 0;
-        var sk_sfs = 0;
-        var sk_nsub = 0;
-        var sk_outL = alloc(2880 * 8);
-        var sk_outR = alloc(2880 * 8);
+        # Bounded before allocating: packet headers alone promise up to 120 ms each,
+        # so a crafted Ogg of tiny packets could ask for terabytes, and a failed
+        # alloc() returns 0, which the decode then wrote through.
+        if (maxsamp * channels > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
+        # The result vector itself is the decode buffer: frames are written into its
+        # storage and the pre-skip is shifted out in place at the end, so the output
+        # exists once.
+        samples = _vec_new_cap(maxsamp * channels);
+        if (is_err(samples) == 1) { return samples; }
+        var allpcm = load64(samples);
+        if (allpcm == 0) { return err(ERR_DECODE); }
+        # One SILK decoder for the whole stream (silk_dec_packet), and the mode and
+        # redundancy of the previous frame, which decide the resets at a switch.
+        var sk = silk_dec_new();
+        var silk_out = alloc(2 * 2880 * 8);
+        var prev_mode = 0;     # 0 none yet, 1 SILK-only, 2 hybrid, 3 CELT-only
+        var prev_red = 0;      # previous frame ended in a SILK->CELT redundant frame
+        var last_end = 21;     # the CELT end band last set (from the last frame's bandwidth)
+        var last_dur = 960;    # the last packet's duration, and its frame size: an empty
+        var last_fsamp = 960;  # packet is a lost one, concealed for that long in frame-size pieces
+        var lostbuf = alloc(2 * 2880 * 8);
+        var tbuf = alloc(2 * 240 * 8);
+        var silence_frame = alloc(2);
+        store8(silence_frame, 0xFF);
+        store8(silence_frame + 1, 0xFF);
         var F64_32768 = f64_from(32768);
         var wpos = 0;
         var f = 0;
         while (f < num_frames) {
+            _opus_frame_begin();
             var pkt = vec_get(packets_vec, f + 2);
             var pkt_data = str_data(pkt);
             var pkt_len = str_len(pkt);
+            if (pkt_len == 0) {
+                # A lost packet, as libopus is told of one (opus_decode with no data and
+                # the missing duration): conceal in the previous mode.
+                var lmode = prev_mode;
+                if (prev_red == 1) { lmode = 3; }
+                var remain = last_dur;
+                while (remain > 0) {
+                    var chunk = remain;
+                    if (chunk > last_fsamp) { chunk = last_fsamp; }
+                    var got = _opus_plc_frame(st, sk, lmode, channels, last_end, chunk, lostbuf);
+                    var li = 0;
+                    while (li < got) {
+                        if (wpos < maxsamp) {
+                            var lc = 0;
+                            while (lc < channels) {
+                                store64(allpcm + (wpos * channels + lc) * 8, load64(lostbuf + (li * channels + lc) * 8));
+                                lc = lc + 1;
+                            }
+                            wpos = wpos + 1;
+                        }
+                        li = li + 1;
+                    }
+                    remain = remain - got;
+                    prev_mode = lmode;
+                    prev_red = 0;
+                }
+            }
             var config = 0;
             var stbit = 0;
             if (pkt_len >= 1) {
@@ -5131,235 +5850,170 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             # so config/stbit/fsamp are computed once, above.
             var nfr = _opus_split_frames(pkt_data, pkt_len, offs, lens, 48);
             if (res_ok(nfr) == 0) { nfr = 1; store64(offs, 1); store64(lens, 0); }
+            if (pkt_len == 0) { nfr = 0; }
+            if (pkt_len >= 1) {
+                last_dur = nfr * fsamp;
+                last_fsamp = fsamp;
+            }
             var fr = 0;
             while (fr < nfr) {
-            var pdata = pkt_data + load64(offs + fr * 8);
-            var plen = load64(lens + fr * 8);
-            var handled = 0;
-            # CELT-only 10/20ms: configs 18/22/26/30 (LM=2, 10ms) + 19/23/27/31 (LM=3, 20ms).
-            # LM = config&3 (2 or 3); bandwidth = (config>>2)&3 → end band NB13/WB17/SWB19/FB21.
-            if ((config >= 16) & (config <= 31)) {
-                if (plen >= 1) {
-                    var clm = config & 3;
-                    var cbw = (config >> 2) & 3;
-                    var ceb = 21;
-                    if (cbw == 0) { ceb = 13; }
-                    if (cbw == 1) { ceb = 17; }
-                    if (cbw == 2) { ceb = 19; }
-                    celt_decode_frame_ec(st, ec_dec_new(pdata, plen), plen, Cf, 0, ceb, 0, clm, pcm);
+                var pdata = pkt_data + load64(offs + fr * 8);
+                var plen = load64(lens + fr * 8);
+                var handled = 0;
+                var trans = 0;
+                # A frame of 0 or 1 bytes carries nothing: DTX, concealed in the
+                # previous mode (opus_decode_frame, len <= 1).
+                if (plen <= 1) {
+                    var pmode = prev_mode;
+                    if (prev_red == 1) { pmode = 3; }
+                    _opus_plc_frame(st, sk, pmode, channels, last_end, fsamp, pcm);
+                    prev_mode = pmode;
+                    prev_red = 0;
                     handled = 1;
                 }
-            }
-            # SILK-only mono: NB (8kHz internal) config 0 (10ms)/1 (20ms), WB (16kHz)
-            # config 8 (10ms)/9 (20ms). code 0 (one frame/packet), mono. → 48kHz.
-            # nb_subfr = 2 (10ms) or 4 (20ms); resampler emits fsamp (480/960) samples.
-            if ((handled == 0) & (stbit == 0) & (plen >= 1)) {
-                if (config < 12) {
-                    # SILK internal rate from the config's bandwidth: NB 8, MB 12, WB 16.
-                    var sfs = 8;
-                    if ((config >= 4) & (config <= 7)) { sfs = 12; }
-                    if (config >= 8) { sfs = 16; }
-                    # 40 and 60 ms Opus frames are 2 and 3 sequential 20 ms SILK
-                    # frames sharing one range coder; each is nb_subfr = 4.
-                    var nsub = 4;
-                    if ((config & 3) == 0) { nsub = 2; }
-                    var nsf = 1;
-                    if ((config & 3) == 2) { nsf = 2; }
-                    if ((config & 3) == 3) { nsf = 3; }
-                    if ((silk_fs != sfs) | (silk_nsub != nsub)) {
-                        silk_st = silk_decoder_init(sfs, nsub);
-                        silk_rst = silk_resampler_init(sfs);
-                        silk_mid = alloc(2 * 8);
-                        store64(silk_mid + 0, 0); store64(silk_mid + 8, 0);
-                        silk_fs = sfs;
-                        silk_nsub = nsub;
+                # CELT-only 10/20ms: configs 18/22/26/30 (LM=2, 10ms) + 19/23/27/31 (LM=3, 20ms).
+                # LM = config&3 (2 or 3); bandwidth = (config>>2)&3 → end band NB13/WB17/SWB19/FB21.
+                if ((handled == 0) & (config >= 16) & (config <= 31)) {
+                    if (plen >= 1) {
+                        var clm = config & 3;
+                        var cbw = (config >> 2) & 3;
+                        var ceb = 21;
+                        if (cbw == 0) { ceb = 13; }
+                        if (cbw == 1) { ceb = 17; }
+                        if (cbw == 2) { ceb = 19; }
+                        # A switch into CELT with no redundant frame to prime it: conceal
+                        # 5 ms in the old mode to fade from, then discard the CELT state.
+                        if ((prev_mode != 3) & (prev_mode > 0) & (prev_red == 0)) {
+                            var tl = fsamp;
+                            if (tl > 240) { tl = 240; }
+                            _opus_plc_frame(st, sk, prev_mode, channels, last_end, tl, tbuf);
+                            trans = 1;
+                            celt_dec_state_reset(st);
+                        }
+                        celt_decode_frame_ec_cc(st, ec_dec_new(pdata, plen), plen, Cf, channels, 0, ceb, 0, clm, pcm);
+                        last_end = ceb;
+                        if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
+                        prev_mode = 3;
+                        prev_red = 0;
+                        handled = 1;
                     }
-                    var mec = ec_dec_new(pdata, plen);
-                    silk_decode_pcm_multi(silk_st, silk_rst, silk_mid, mec, nsf, silk_out);
+                }
+                # SILK-only (configs 0-11) and hybrid (12-15), mono or stereo coded,
+                # into the stream's channel count. The order of the redundant CELT
+                # frame, the CELT reset and the main CELT decode follows
+                # opus_decode_frame: each one changes the CELT state the next uses.
+                if ((handled == 0) & (plen >= 1) & (config < 16)) {
+                    var mode = 1;
+                    var sfs = 16;
+                    var nsub = 4;
+                    var nsf = 1;
+                    var bend = 17;       # CELT end band for this bandwidth: NB 13, MB/WB 17, SWB 19, FB 21
+                    var hlm = 3;
+                    if (config < 12) {
+                        sfs = 8;
+                        bend = 13;
+                        if (config >= 4) { sfs = 12; bend = 17; }
+                        if (config >= 8) { sfs = 16; }
+                        if ((config & 3) == 0) { nsub = 2; }
+                        if ((config & 3) == 2) { nsf = 2; }
+                        if ((config & 3) == 3) { nsf = 3; }
+                    } else {
+                        mode = 2;
+                        bend = 21;
+                        if (config < 14) { bend = 19; }
+                        if ((config & 1) == 0) { nsub = 2; hlm = 2; }
+                    }
+                    # From CELT-only back to a SILK mode, libopus restarts SILK.
+                    if (prev_mode == 3) { silk_dec_reset(sk); }
+                    var sec = ec_dec_new(pdata, plen);
+                    silk_dec_packet(sk, sec, sfs, nsub, nsf, Cf, channels, silk_out);
                     var q = 0;
-                    while (q < fsamp) {
+                    while (q < fsamp * channels) {
                         store64(pcm + q * 8, f64_div(f64_from(load64(silk_out + q * 8)), F64_32768));
                         q = q + 1;
                     }
-                    # Bandwidth -> CELT end band for the redundant frame: NB 13,
-                    # MB/WB 17 (RFC 6716 4.5.1.4 puts MB on the WB band layout).
-                    var reb = 13;
-                    if (config >= 4) { reb = 17; }
-                    _opus_decode_redundancy(st, mec, pdata, plen, 0, reb, 1, pcm, fsamp);
-                    handled = 1;
-                }
-            }
-            # SILK stereo: config 0/1 (NB) or 8/9 (WB), stereo bit set. 10ms = config 0/8
-            # (nb_subfr=2), 20ms = config 1/9 (nb_subfr=4). Mid/side decoded from the shared
-            # range coder, silk_stereo_MS_to_LR reconstruction, resample per channel → fsamp.
-            if ((handled == 0) & (stbit == 1) & (plen >= 1) & (channels == 2)) {
-                if (config < 12) {
-                    var ssfs = 8;
-                    if ((config >= 4) & (config <= 7)) { ssfs = 12; }
-                    if (config >= 8) { ssfs = 16; }
-                    var snsub = 4;
-                    if ((config & 3) == 0) { snsub = 2; }
-                    var snsf = 1;
-                    if ((config & 3) == 2) { snsf = 2; }
-                    if ((config & 3) == 3) { snsf = 3; }
-                    if ((sk_sfs != ssfs) | (sk_nsub != snsub)) {
-                        sk_st0 = silk_decoder_init(ssfs, snsub);
-                        sk_st1 = silk_decoder_init(ssfs, snsub);
-                        sk_rstL = silk_resampler_init(ssfs);
-                        sk_rstR = silk_resampler_init(ssfs);
-                        sk_stereo = alloc(6 * 8);
-                        var sz = 0; while (sz < 6) { store64(sk_stereo + sz * 8, 0); sz = sz + 1; }
-                        sk_sfs = ssfs;
-                        sk_nsub = snsub;
-                    }
-                    var sec = ec_dec_new(pdata, plen);
-                    silk_decode_stereo_multi(sk_st0, sk_st1, sk_rstL, sk_rstR, sk_stereo, sec, ssfs, snsf, sk_outL, sk_outR);
-                    var sq = 0;
-                    while (sq < fsamp) {
-                        store64(pcm + (sq * 2 + 0) * 8, f64_div(f64_from(load64(sk_outL + sq * 8)), F64_32768));
-                        store64(pcm + (sq * 2 + 1) * 8, f64_div(f64_from(load64(sk_outR + sq * 8)), F64_32768));
-                        sq = sq + 1;
-                    }
-                    var sreb = 13;
-                    if (config >= 4) { sreb = 17; }
-                    _opus_decode_redundancy(st, sec, pdata, plen, 0, sreb, 2, pcm, fsamp);
-                    handled = 1;
-                }
-            }
-            # Hybrid 20ms mono: config 13 (SWB, CELT end=19) or 15 (FB, end=21). SILK
-            # decodes the low band (WB 16kHz) from the front of the shared range coder;
-            # CELT decodes the high band (start=17) from the same ec and accumulates.
-            # Hybrid mono: SWB config 12 (10ms)/13 (20ms, CELT end=19), FB config 14 (10ms)/
-            # 15 (20ms, end=21). SILK is always WB 16kHz; nb_subfr=2 (10ms)/4 (20ms), CELT
-            # LM=2 (10ms)/3 (20ms). SILK low band + CELT high band (start=17, accumulate).
-            if ((handled == 0) & (stbit == 0) & (plen >= 1)) {
-                if ((config == 12) | (config == 13) | (config == 14) | (config == 15)) {
-                    var hnsub = 4;
-                    var hlm = 3;
-                    if ((config == 12) | (config == 14)) { hnsub = 2; hlm = 2; }
-                    if ((silk_fs != 16) | (silk_nsub != hnsub)) {
-                        silk_st = silk_decoder_init(16, hnsub);
-                        silk_rst = silk_resampler_init(16);
-                        silk_mid = alloc(2 * 8);
-                        store64(silk_mid + 0, 0); store64(silk_mid + 8, 0);
-                        silk_fs = 16;
-                        silk_nsub = hnsub;
-                    }
-                    var hb_end = 21;
-                    if ((config == 12) | (config == 13)) { hb_end = 19; }
-                    var hec = ec_dec_new(pdata, plen);
-                    # SILK low band -> silk_out (int16 48k), normalized into pcm.
-                    silk_decode_pcm_ec(silk_st, silk_rst, silk_mid, hec, silk_out);
-                    var hq = 0;
-                    while (hq < fsamp) {
-                        store64(pcm + hq * 8, f64_div(f64_from(load64(silk_out + hq * 8)), F64_32768));
-                        hq = hq + 1;
-                    }
-                    # Redundancy: hybrid signals it explicitly, with an explicit size.
-                    var hlen = plen;
-                    var hcts = 0;
-                    var hrb = 0;
-                    var hred = 0;
-                    if (ec_tell(hec) + 17 + 20 <= 8 * hlen) {
-                        if (ec_dec_bit_logp(hec, 12) != 0) {
-                            hcts = ec_dec_bit_logp(hec, 1);
-                            hrb = ec_dec_uint(hec, 256) + 2;
-                            hlen = hlen - hrb;
-                            if (hlen * 8 < ec_tell(hec)) { hlen = plen; hrb = 0; }
-                            else { hred = 1; store64(hec + 8, load64(hec + 8) - hrb); }
+                    # Redundancy: hybrid signals it with a flag and an explicit size;
+                    # SILK-only implies it and it takes the rest of the frame.
+                    var flen = plen;
+                    var red = 0;
+                    var cts = 0;
+                    var rb = 0;
+                    var need = 17;
+                    if (mode == 2) { need = 37; }
+                    if (ec_tell(sec) + need <= 8 * flen) {
+                        red = 1;
+                        if (mode == 2) { red = ec_dec_bit_logp(sec, 12); }
+                        if (red != 0) {
+                            cts = ec_dec_bit_logp(sec, 1);
+                            if (mode == 2) { rb = ec_dec_uint(sec, 256) + 2; }
+                            else { rb = flen - ((ec_tell(sec) + 7) >> 3); }
+                            flen = flen - rb;
+                            # Sanity check; a valid packet never trips it (opus_decoder.c).
+                            if ((flen * 8 < ec_tell(sec)) | (flen < 0)) { flen = 0; rb = 0; red = 0; }
+                            else { store64(sec + 8, load64(sec + 8) - rb); }
                         }
                     }
-                    var hredbuf = 0;
-                    # A CELT->SILK redundant frame is decoded BEFORE the main CELT
-                    # frame; a SILK->CELT one after, with a state reset in between
-                    # (opus_decoder.c:578 vs 637). Getting the order wrong silently
-                    # corrupts the CELT state the following frames depend on.
-                    if ((hred == 1) & (hcts != 0)) {
-                        hredbuf = _opus_redundancy_decode(st, pdata, hlen, hrb, hcts, hb_end, 1);
+                    # Out of CELT with no redundant frame: conceal 5 ms of CELT to fade from.
+                    if ((prev_mode == 3) & (red == 0)) {
+                        var tl2 = fsamp;
+                        if (tl2 > 240) { tl2 = 240; }
+                        _opus_plc_frame(st, sk, 3, channels, last_end, tl2, tbuf);
+                        trans = 1;
                     }
-                    # CELT high band from the same ec, accumulated onto the SILK low band.
-                    celt_decode_frame_ec(st, hec, hlen, 1, 17, hb_end, 1, hlm, pcm);
-                    if ((hred == 1) & (hcts == 0)) {
-                        hredbuf = _opus_redundancy_decode(st, pdata, hlen, hrb, hcts, hb_end, 1);
+                    last_end = bend;
+                    var redbuf = 0;
+                    if ((red == 1) & (cts == 1)) {
+                        redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 1, bend, Cf, channels);
                     }
-                    if (hred == 1) { _opus_redundancy_mix(hredbuf, hcts, 1, pcm, fsamp); }
-                    handled = 1;
-                }
-            }
-            # Hybrid STEREO: SWB config 12 (10ms)/13 (20ms), FB config 14 (10ms)/15 (20ms),
-            # stereo bit set. SILK stereo (mid/side → L/R, WB) low band from the front of the
-            # shared ec; CELT stereo (C=2, start=17) high band, accumulated onto interleaved L/R.
-            # nb_subfr=2/CELT LM=2 (10ms) or nb_subfr=4/LM=3 (20ms).
-            if ((handled == 0) & (stbit == 1) & (plen >= 1) & (channels == 2)) {
-                if ((config == 12) | (config == 13) | (config == 14) | (config == 15)) {
-                    var hsnsub = 4;
-                    var hslm = 3;
-                    if ((config == 12) | (config == 14)) { hsnsub = 2; hslm = 2; }
-                    if ((sk_sfs != 16) | (sk_nsub != hsnsub)) {
-                        sk_st0 = silk_decoder_init(16, hsnsub);
-                        sk_st1 = silk_decoder_init(16, hsnsub);
-                        sk_rstL = silk_resampler_init(16);
-                        sk_rstR = silk_resampler_init(16);
-                        sk_stereo = alloc(6 * 8);
-                        var hsz = 0; while (hsz < 6) { store64(sk_stereo + hsz * 8, 0); hsz = hsz + 1; }
-                        sk_sfs = 16;
-                        sk_nsub = hsnsub;
-                    }
-                    var hsbe = 21;
-                    if ((config == 12) | (config == 13)) { hsbe = 19; }
-                    var hsec = ec_dec_new(pdata, plen);
-                    silk_decode_stereo(sk_st0, sk_st1, sk_rstL, sk_rstR, sk_stereo, hsec, 16, sk_outL, sk_outR);
-                    var hsq = 0;
-                    while (hsq < fsamp) {
-                        store64(pcm + (hsq * 2 + 0) * 8, f64_div(f64_from(load64(sk_outL + hsq * 8)), F64_32768));
-                        store64(pcm + (hsq * 2 + 1) * 8, f64_div(f64_from(load64(sk_outR + hsq * 8)), F64_32768));
-                        hsq = hsq + 1;
-                    }
-                    var hslen = plen;
-                    var hscts = 0;
-                    var hsrb = 0;
-                    var hsred = 0;
-                    if (ec_tell(hsec) + 17 + 20 <= 8 * hslen) {
-                        if (ec_dec_bit_logp(hsec, 12) != 0) {
-                            hscts = ec_dec_bit_logp(hsec, 1);
-                            hsrb = ec_dec_uint(hsec, 256) + 2;
-                            hslen = hslen - hsrb;
-                            if (hslen * 8 < ec_tell(hsec)) { hslen = plen; hsrb = 0; }
-                            else { hsred = 1; store64(hsec + 8, load64(hsec + 8) - hsrb); }
+                    if (mode == 2) {
+                        if ((prev_mode != 2) & (prev_mode > 0) & (prev_red == 0)) { celt_dec_state_reset(st); }
+                        celt_decode_frame_ec_cc(st, sec, flen, Cf, channels, 17, bend, 1, hlm, pcm);
+                    } else {
+                        # Hybrid -> SILK: the CELT MDCT fades out by decoding a silence
+                        # frame onto the first 2.5 ms.
+                        var fade = 0;
+                        if (prev_mode == 2) {
+                            fade = 1;
+                            if ((red == 1) & (cts == 1) & (prev_red == 1)) { fade = 0; }
+                        }
+                        if (fade == 1) {
+                            celt_decode_frame_ec_cc(st, ec_dec_new(silence_frame, 2), 2, Cf, channels, 0, bend, 1, 0, pcm);
                         }
                     }
-                    var hsredbuf = 0;
-                    if ((hsred == 1) & (hscts != 0)) {
-                        hsredbuf = _opus_redundancy_decode(st, pdata, hslen, hsrb, hscts, hsbe, 2);
+                    if ((red == 1) & (cts == 0)) {
+                        redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 0, bend, Cf, channels);
                     }
-                    # CELT stereo high band from the same ec, accumulated onto L/R.
-                    celt_decode_frame_ec(st, hsec, hslen, 2, 17, hsbe, 1, hslm, pcm);
-                    if ((hsred == 1) & (hscts == 0)) {
-                        hsredbuf = _opus_redundancy_decode(st, pdata, hslen, hsrb, hscts, hsbe, 2);
+                    if ((red == 1) & (cts == 0)) { _opus_redundancy_mix(redbuf, 0, channels, pcm, fsamp); }
+                    # A CELT->SILK redundant frame is ignored after a SILK-only frame:
+                    # the CELT decoder it continues is stale (opus_decoder.c).
+                    if ((red == 1) & (cts == 1)) {
+                        if ((prev_mode != 1) | (prev_red == 1)) { _opus_redundancy_mix(redbuf, 1, channels, pcm, fsamp); }
                     }
-                    if (hsred == 1) { _opus_redundancy_mix(hsredbuf, hscts, 2, pcm, fsamp); }
+                    if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
+                    prev_mode = mode;
+                    prev_red = 0;
+                    if ((red == 1) & (cts == 0)) { prev_red = 1; }
                     handled = 1;
                 }
-            }
-            if (handled == 0) {
-                var zz = 0;
-                while (zz < 2 * fsamp) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
-            }
-            var i = 0;
-            while (i < fsamp) {
-                if (wpos < maxsamp) {
-                    var cc = 0;
-                    while (cc < channels) {
-                        var v = F64_ZERO;
-                        if (cc < Cf) { v = load64(pcm + (i * Cf + cc) * 8); }
-                        store64(allpcm + (wpos * channels + cc) * 8, v);
-                        cc = cc + 1;
-                    }
-                    wpos = wpos + 1;
+                if (handled == 0) {
+                    var zz = 0;
+                    while (zz < channels * fsamp) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
                 }
-                i = i + 1;
-            }
-            fr = fr + 1;
+                var i = 0;
+                while (i < fsamp) {
+                    if (wpos < maxsamp) {
+                        var cc = 0;
+                        while (cc < channels) {
+                            var v = F64_ZERO;
+                            if (cc < 2) { v = load64(pcm + (i * channels + cc) * 8); }
+                            store64(allpcm + (wpos * channels + cc) * 8, v);
+                            cc = cc + 1;
+                        }
+                        wpos = wpos + 1;
+                    }
+                    i = i + 1;
+                }
+                fr = fr + 1;
             }
             f = f + 1;
         }
@@ -5370,15 +6024,21 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
             if (eff < out_frames) { out_frames = eff; }
         }
         if (out_frames < 0) { out_frames = 0; }
+        # RFC 7845 5.1: the header's output gain (Q7.8 dB) MUST be applied.
+        var gain = F64_ONE;
+        var og = opus_head_output_gain(head);
+        if (og != 0) { gain = f64_pow(f64_from(10), f64_div(f64_from(og), f64_from(5120))); }
+        # Shift the pre-skip out in place (forward copy: destination below source).
         var si = 0;
-        while (si < out_frames) {
-            var cc2 = 0;
-            while (cc2 < channels) {
-                vec_push(samples, load64(allpcm + ((pre_skip + si) * channels + cc2) * 8));
-                cc2 = cc2 + 1;
-            }
+        var nout = out_frames * channels;
+        var skip = pre_skip * channels;
+        while (si < nout) {
+            var sv = load64(allpcm + (skip + si) * 8);
+            if (og != 0) { sv = f64_mul(sv, gain); }
+            store64(allpcm + si * 8, sv);
             si = si + 1;
         }
+        store64(samples + 8, nout);
         total_samples = out_frames;
         duration_secs = f64_div(f64_from(total_samples), F64_48000);
     }

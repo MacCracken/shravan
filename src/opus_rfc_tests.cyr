@@ -2613,7 +2613,7 @@ fn test_opus_hybrid_stereo_rfc() {
     store8(pl + 112, 25); store8(pl + 113, 130); store8(pl + 114, 8); store8(pl + 115, 80); store8(pl + 116, 66); store8(pl + 117, 72); store8(pl + 118, 87);
     var s0 = silk_decoder_init(16, 4); var s1 = silk_decoder_init(16, 4);
     var rL = silk_resampler_init(16); var rR = silk_resampler_init(16);
-    var sst = alloc(6 * 8); var zz = 0; while (zz < 6) { store64(sst + zz * 8, 0); zz = zz + 1; }
+    var sst = silk_stereo_state_new();
     var cst = celt_dec_state_new();
     var ec = ec_dec_new(pl, 119);
     var oL = alloc(960 * 8); var oR = alloc(960 * 8);

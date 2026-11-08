@@ -40,14 +40,11 @@ jobs:
         # (shravan has one: sankoch — this also writes the lib/ hash lock.)
         run: cyrius deps
 
-      - name: Build & test all three harnesses
-        # The suite is split across three entry points so no single build
-        # overflows the ~3.15 MB Cyrius code buffer. Gating on src/main.cyr
-        # alone covered 1039 of 11,495 assertions and left the Opus CELT
-        # encoder and the SILK golden vectors untested in CI; test-all.sh
-        # builds and runs all three and fails on any build or assertion error.
-        # pipefail matters: without it `tee` supplies the exit status and a
-        # failing suite would pass the step silently.
+      - name: Build & test
+        # One harness, src/main.cyr, runs every assertion (core codecs, interop
+        # fixtures, Opus decode, CELT encoder, SILK golden vectors). pipefail
+        # matters: without it `tee` supplies the exit status and a failing suite
+        # would pass the step silently.
         run: |
           set -o pipefail
           ./scripts/test-all.sh 2>&1 | tee /tmp/test-output.txt
@@ -56,14 +53,19 @@ jobs:
         run: file build/shravan | grep -q "ELF 64-bit" || { echo "Not a valid ELF binary"; exit 1; }
 
       - name: Verify assertion totals
-        # Guard against a harness silently running zero tests: each must report
-        # "0 failed", and all three result lines must be present.
+        # Guard against tests silently dropping out: the result line must report
+        # 0 failed and at least MIN_ASSERTIONS run. Raise the floor when tests
+        # are added; lowering it is a decision, not a fix.
         run: |
-          grep -c "0 failed" /tmp/test-output.txt | grep -q '^3$' \
-            || { echo "Expected 3 passing harnesses"; cat /tmp/test-output.txt; exit 1; }
-          for b in build/shravan build/shravan-encoder build/shravan-silk; do
-            echo "$b: $(wc -c < "$b") bytes"
-          done
+          MIN_ASSERTIONS=12960
+          LINE=$(grep '^shravan tests: ' /tmp/test-output.txt) \
+            || { echo "No result line"; cat /tmp/test-output.txt; exit 1; }
+          echo "$LINE"
+          echo "$LINE" | grep -q ' 0 failed' || { echo "Failures reported"; exit 1; }
+          TOTAL=$(echo "$LINE" | sed -E 's/.* ([0-9]+) total.*/\1/')
+          [ "$TOTAL" -ge "$MIN_ASSERTIONS" ] \
+            || { echo "Only $TOTAL assertions ran; expected at least $MIN_ASSERTIONS"; exit 1; }
+          echo "build/shravan: $(wc -c < build/shravan) bytes"
 
       - name: Build & run benchmarks
         run: |
@@ -83,17 +85,28 @@ jobs:
         run: scripts/check-write-lengths.py
 
       - name: Fuzz smoke
-        # Two harnesses: fuzz_codecs stubs a minimal library (FLAC metadata,
+        # Three harnesses: fuzz_codecs stubs a minimal library (FLAC metadata,
         # Ogg, MP3 scan, ID3v2); fuzz_decode includes the real src/shravan.cyr
-        # and covers codec_open, WAV, AIFF, ALAC, FLAC, MP3, Ogg, MP4, AAC and
-        # Vorbis tags. Short pass here; full >=90K gate: ./fuzz/run.sh 90000
+        # and covers codec_open, WAV, AIFF, ALAC, FLAC, MP3, Ogg, MP4, AAC, the
+        # streaming decoders, compressed ID3v2 and Vorbis tags; fuzz_opus feeds
+        # damaged libopus packets to the Opus decoder. A short pass of each, then
+        # fuzz_decode and fuzz_opus again under the allocator poison mode (a
+        # redzone hit exits 86). Full gate: ./fuzz/run.sh 90000 [--poison].
         run: |
+          set -o pipefail
           cyrius build fuzz/fuzz_codecs.cyr build/fuzz_codecs
           ./build/fuzz_codecs 1000 2>&1 | tee /tmp/fuzz-out.txt
           grep -q "0 crashes" /tmp/fuzz-out.txt || { echo "Fuzz crash detected"; exit 1; }
           cyrius build fuzz/fuzz_decode.cyr build/fuzz_decode
           ./build/fuzz_decode 200 1 2>&1 | tee /tmp/fuzz-dec.txt
           grep -q "0 crashes" /tmp/fuzz-dec.txt || { echo "Fuzz crash detected (decode)"; exit 1; }
+          cyrius build fuzz/fuzz_opus.cyr build/fuzz_opus
+          ./build/fuzz_opus 2000 1 2>&1 | tee /tmp/fuzz-opus.txt
+          grep -q "0 crashes" /tmp/fuzz-opus.txt || { echo "Fuzz crash detected (opus)"; exit 1; }
+          cyrius build -D CYRIUS_POISON fuzz/fuzz_decode.cyr build/fuzz_decode_poison
+          ./build/fuzz_decode_poison 100 2
+          cyrius build -D CYRIUS_POISON fuzz/fuzz_opus.cyr build/fuzz_opus_poison
+          ./build/fuzz_opus_poison 1000 2
 
       - name: Security scan
         # All shravan-authored code now lives in src/ + fuzz/ (lib/ is vendored
@@ -117,6 +130,37 @@ jobs:
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
           grep -q "\\[$FILE_VERSION\\]" CHANGELOG.md || { echo "Version $FILE_VERSION not in CHANGELOG.md"; exit 1; }
           echo "Version consistent: $FILE_VERSION"
+
+  interop:
+    name: Interop sweep (ffmpeg, flac, mpg123, libopus)
+    # Decoders judged against reference decoders on real encoder output, and
+    # encoders by what the references make of theirs, across rate x depth x
+    # channels. The in-suite fixtures pin a few dozen streams; this crosses the
+    # matrix. See scripts/interop.py.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+
+      - name: Install reference tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg flac twolame mpg123 libopus-dev gcc
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Vendor stdlib and resolve dependencies
+        run: |
+          cyrius lib sync
+          cyrius deps
+
+      - name: Sweep
+        run: ./scripts/interop.sh
 
   quality:
     name: Format & Lint (non-blocking)

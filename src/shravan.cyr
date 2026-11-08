@@ -80,6 +80,7 @@ enum ShravanErr {
     ERR_END_OF_STREAM     = 5;
     ERR_INVALID_RATE      = 6;
     ERR_INVALID_CHANNELS  = 7;
+    ERR_TOO_LARGE         = 8;    # over the one-shot sample ceiling (shravan_set_max_samples)
 }
 
 # Pack an error code into a negative result (bit 63 set)
@@ -106,8 +107,34 @@ fn err_print(code) {
     if (code == ERR_END_OF_STREAM)    { syscall(1, 2, "end of stream\n", 14); }
     if (code == ERR_INVALID_RATE)     { syscall(1, 2, "invalid sample rate\n", 20); }
     if (code == ERR_INVALID_CHANNELS) { syscall(1, 2, "invalid channel count\n", 22); }
+    if (code == ERR_TOO_LARGE)        { syscall(1, 2, "too long for a one-shot decode\n", 31); }
     return 0;
 }
+
+# ---- the one-shot sample ceiling ---------------------------------------------
+# A whole-file decode returns every sample at once, and alloc() never frees, so
+# without a ceiling a few KB of crafted FLAC or AAC can mint gigabytes (SEC-023,
+# 027, 029). Every one-shot decoder sizes its output once, from the declared
+# length or a cheap header count, and returns ERR_TOO_LARGE rather than allocate
+# past the ceiling. The default, 2^26 interleaved samples (512 MB of f64), is
+# about 12.7 minutes of 44.1 kHz stereo. Until 2.9.3 it was 2^25 (6.3 minutes),
+# fixed, and reported as ERR_DECODE; outputs grew by doubling, so peak memory ran
+# two to four times the payload.
+var _shravan_max_samples = 67108864;
+
+# Set the ceiling on interleaved samples a one-shot decode may return
+# (codec_open, decode_file and each codec's _decode). Returns the previous value.
+# n is clamped to [1, 2^28], the stdlib vector limit. A consumer that trusts its
+# input, or decodes long files, raises it; streaming avoids it.
+fn shravan_set_max_samples(n) {
+    var prev = _shravan_max_samples;
+    if (n < 1) { n = 1; }
+    if (n > 268435456) { n = 268435456; }
+    _shravan_max_samples = n;
+    return prev;
+}
+
+fn shravan_max_samples() { return _shravan_max_samples; }
 
 # ================================================================
 # Format module
@@ -267,7 +294,44 @@ fn shravan_detect_format(data, len) {
         }
     }
 
+    # MPEG audio after leading junk or silence padding (the ISO sin1k0db stream
+    # opens with 215 bytes before its first frame; ffmpeg and mpg123 scan for it).
+    # Two consecutive valid headers with matching version, layer and rate are
+    # required, so a stray 0xFFE sync in another format is not taken for MP3.
+    if (_mp3_find_stream(data, len) >= 0) { return FMT_MP3; }
+
     return err(ERR_UNSUPPORTED_FMT);
+}
+
+# Offset of the first MPEG audio frame that is followed by a second matching one,
+# within the first 64 KiB, or -1.
+fn _mp3_find_stream(data, len) {
+    if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
+    var lim = len - 4;
+    if (lim > 65536) { lim = 65536; }
+    var p = 0;
+    while (p < lim) {
+        if (load8(data + p) == 0xFF) {
+            if ((load8(data + p + 1) & 0xE0) == 0xE0) {
+                var h = mp3_parse_frame_header(data, p);
+                if (res_ok(h) == 1) {
+                    var fs = mp3_frame_size(h);
+                    if (fs > 0) {
+                        if (p + fs + 4 <= len) {
+                            var h2 = mp3_parse_frame_header(data, p + fs);
+                            if (res_ok(h2) == 1) {
+                                if ((mp3_frame_version(h2) == mp3_frame_version(h)) & (mp3_frame_layer(h2) == mp3_frame_layer(h)) & (mp3_frame_sample_rate(h2) == mp3_frame_sample_rate(h))) {
+                                    return p;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p = p + 1;
+    }
+    return 0 - 1;
 }
 
 # sankoch also defines detect_format(src, src_len), for compression formats, and
@@ -374,10 +438,18 @@ fn _safe_alloc_mul(a, b) {
 # Now every failure path returns a packed error for the caller to propagate.
 fn _vec_new_cap(n) {
     if (n < 0) { return err(ERR_DECODE); }
+    if (n > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
+    return _vec_alloc(n);
+}
+
+# A vec with room for exactly n samples, outside the one-shot ceiling: the
+# streaming decoders' output, whose size the decoder bounds (one chunk or frame).
+fn _vec_alloc(n) {
+    if (n < 0) { return err(ERR_DECODE); }
     # A zero-length conversion is legitimate (empty audio) — hand back a normal
     # growable vec rather than a zero-capacity one with a NULL buffer.
     if (n == 0) { return vec_new(); }
-    if (n > _ALLOC_MAX / 8) { return err(ERR_DECODE); }
+    if (n > 268435456) { return err(ERR_TOO_LARGE); }   # the stdlib's VEC_CAP_MAX
 
     var v = alloc(24);
     if (v == 0) { return err(ERR_DECODE); }
@@ -390,18 +462,179 @@ fn _vec_new_cap(n) {
     return v;
 }
 
+# ---- PCM sample layouts ----
+# Every integer and float layout the WAV and AIFF decoders read. _pcm_into does
+# the conversion for all of them; the public converters below wrap it with a
+# ceiling-checked vec, the streaming decoders with an unbounded one.
+var _PL_U8    = 1;     # WAV 8-bit: unsigned, centre 128
+var _PL_S8    = 2;     # AIFF 8-bit: signed
+var _PL_S16LE = 3;
+var _PL_S16BE = 4;
+var _PL_S24LE = 5;
+var _PL_S24BE = 6;
+var _PL_S32LE = 7;
+var _PL_S32BE = 8;
+var _PL_F32LE = 9;
+var _PL_F32BE = 10;
+var _PL_F64LE = 11;
+var _PL_F64BE = 12;
+
+fn _pl_bytes(pl) {
+    if (pl <= _PL_S8) { return 1; }
+    if (pl <= _PL_S16BE) { return 2; }
+    if (pl <= _PL_S24BE) { return 3; }
+    if (pl <= _PL_F32BE) { return 4; }
+    return 8;
+}
+
+# An IEEE single as the double of the same value. A normal number moves its
+# exponent from bias 127 to bias 1023 and its 23-bit fraction to the top of the
+# 52-bit one, which is exact; a subnormal is fraction * 2^-149. Infinity and NaN
+# decode as zero. This replaced an f64_pow per sample.
+fn _f32_bits_to_f64(bits) {
+    var exp = (bits >> 23) & 0xFF;
+    var mant = bits & 0x7FFFFF;
+    var f = F64_ZERO;
+    if (exp == 0) {
+        if (mant != 0) { f = f64_mul(f64_from(mant), F64_2_NEG_149); }
+    } else {
+        if (exp != 0xFF) { f = ((exp + 896) << 52) | (mant << 29); }
+    }
+    if (((bits >> 31) & 1) == 1) { f = f64_neg(f); }
+    return f;
+}
+
+# Append count samples of layout pl, read from src, to v, which must have room
+# for them. Integers scale by 1 / 2^(bits-1) (a power of two, so exact); doubles
+# are stored as they are. Writes the vec's buffer directly: vec_push per sample
+# cost a capacity check and a call each.
+fn _pcm_into(v, pl, src, count) {
+    var n0 = load64(v + 8);
+    var out = load64(v) + n0 * 8;
+    var i = 0;
+    if (pl == _PL_U8) {
+        while (i < count) {
+            store64(out + i * 8, f64_mul(f64_from(load8(src + i) - 128), F64_RCP_128));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S8) {
+        while (i < count) {
+            var b = load8(src + i);
+            if (b >= 128) { b = b - 256; }
+            store64(out + i * 8, f64_mul(f64_from(b), F64_RCP_128));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S16LE) {
+        while (i < count) {
+            var p = src + i * 2;
+            var x = load8(p) | (load8(p + 1) << 8);
+            if (x >= 32768) { x = x - 65536; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_32768));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S16BE) {
+        while (i < count) {
+            var p = src + i * 2;
+            var x = (load8(p) << 8) | load8(p + 1);
+            if (x >= 32768) { x = x - 65536; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_32768));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S24LE) {
+        while (i < count) {
+            var p = src + i * 3;
+            var x = load8(p) | (load8(p + 1) << 8) | (load8(p + 2) << 16);
+            if (x >= 8388608) { x = x - 16777216; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_8388608));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S24BE) {
+        while (i < count) {
+            var p = src + i * 3;
+            var x = (load8(p) << 16) | (load8(p + 1) << 8) | load8(p + 2);
+            if (x >= 8388608) { x = x - 16777216; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_8388608));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S32LE) {
+        while (i < count) {
+            var p = src + i * 4;
+            var x = load8(p) | (load8(p + 1) << 8) | (load8(p + 2) << 16) | (load8(p + 3) << 24);
+            if (x >= 2147483648) { x = x - 4294967296; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_2147483648));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_S32BE) {
+        while (i < count) {
+            var p = src + i * 4;
+            var x = (load8(p) << 24) | (load8(p + 1) << 16) | (load8(p + 2) << 8) | load8(p + 3);
+            if (x >= 2147483648) { x = x - 4294967296; }
+            store64(out + i * 8, f64_mul(f64_from(x), F64_RCP_2147483648));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_F32LE) {
+        while (i < count) {
+            var p = src + i * 4;
+            store64(out + i * 8, _f32_bits_to_f64(load8(p) | (load8(p + 1) << 8) | (load8(p + 2) << 16) | (load8(p + 3) << 24)));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_F32BE) {
+        while (i < count) {
+            var p = src + i * 4;
+            store64(out + i * 8, _f32_bits_to_f64((load8(p) << 24) | (load8(p + 1) << 16) | (load8(p + 2) << 8) | load8(p + 3)));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_F64LE) {
+        while (i < count) {
+            store64(out + i * 8, load64(src + i * 8));
+            i = i + 1;
+        }
+    }
+    if (pl == _PL_F64BE) {
+        while (i < count) {
+            var p = src + i * 8;
+            var hi = (load8(p) << 24) | (load8(p + 1) << 16) | (load8(p + 2) << 8) | load8(p + 3);
+            var lo = (load8(p + 4) << 24) | (load8(p + 5) << 16) | (load8(p + 6) << 8) | load8(p + 7);
+            store64(out + i * 8, (hi << 32) | lo);
+            i = i + 1;
+        }
+    }
+    store64(v + 8, n0 + count);
+    return v;
+}
+
+# count samples of layout pl as a new vec, under the one-shot ceiling.
+fn _pcm_conv(pl, src, count) {
+    var v = _vec_new_cap(count);
+    if (is_err(v) == 1) { return v; }
+    return _pcm_into(v, pl, src, count);
+}
+
 # Convert signed 16-bit samples to f64 vec.
 # src: pointer to i16 LE samples, count: number of samples
 # Returns: vec of f64 bit patterns
-fn i16_to_f64(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    var scale = F64_RCP_32768;
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = read_u16_le(src, i * 2);
-        var signed = sign_extend(raw, 16);
-        vec_push(v, f64_mul(f64_from(signed), scale));
-    }
+fn i16_to_f64(src, count) { return _pcm_conv(_PL_S16LE, src, count); }
+
+# The PCM quantiser every integer encoder uses: clamp to [-1, 1], scale by
+# 2^(bits-1), round half to even (lrint, as ffmpeg does), clamp to the type's
+# range. It is the exact inverse of the decoders' division by 2^(bits-1), so a
+# decode then re-encode hands every sample back. Until 2.9.3 the encoders scaled
+# by 2^(bits-1) - 1 and truncated, which moved most samples of a "lossless"
+# transcode by one LSB.
+fn _pcm_quant(x, scale, lo, hi) {
+    var v = f64_to(f64_round(f64_mul(f64_clamp_sample(x), scale)));
+    if (v > hi) { v = hi; }
+    if (v < lo) { v = lo; }
     return v;
 }
 
@@ -410,58 +643,37 @@ fn i16_to_f64(src, count) {
 # Returns: number of bytes written
 fn f64_to_i16(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_32767));
+        var val = _pcm_quant(load64(sd + i * 8), F64_32768, 0 - 32768, 32767);
         write_u16_le(out, i * 2, val & 0xFFFF);
     }
     return len * 2;
 }
 
 # Convert signed 32-bit samples to f64 vec.
-fn i32_to_f64(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    var scale = F64_RCP_2147483648;
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = read_u32_le(src, i * 4);
-        var signed = sign_extend(raw, 32);
-        vec_push(v, f64_mul(f64_from(signed), scale));
-    }
-    return v;
-}
+fn i32_to_f64(src, count) { return _pcm_conv(_PL_S32LE, src, count); }
 
 # Convert f64 vec to signed 32-bit samples.
 fn f64_to_i32(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_2147483647));
+        var val = _pcm_quant(load64(sd + i * 8), F64_2147483648, 0 - 2147483648, 2147483647);
         write_u32_le(out, i * 4, val);
     }
     return len * 4;
 }
 
 # Convert 24-bit packed LE samples (3 bytes each) to f64 vec.
-fn i24_packed_to_f64(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    var scale = F64_RCP_8388608;
-    for (var i = 0; i < count; i = i + 1) {
-        var off = i * 3;
-        var raw = load8(src + off) | (load8(src + off + 1) << 8) | (load8(src + off + 2) << 16);
-        var signed = sign_extend(raw, 24);
-        vec_push(v, f64_mul(f64_from(signed), scale));
-    }
-    return v;
-}
+fn i24_packed_to_f64(src, count) { return _pcm_conv(_PL_S24LE, src, count); }
 
 # Convert f64 vec to 24-bit packed LE samples.
 fn f64_to_i24_packed(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_8388607));
+        var val = _pcm_quant(load64(sd + i * 8), F64_8388608, 0 - 8388608, 8388607);
         var off = i * 3;
         store8(out + off, val & 0xFF);
         store8(out + off + 1, (val >> 8) & 0xFF);
@@ -490,85 +702,40 @@ fn i24_to_f64(src, count) {
 # Returns: number of samples written
 fn f64_to_i24(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_8388607));
+        var val = _pcm_quant(load64(sd + i * 8), F64_8388608, 0 - 8388608, 8388607);
         store64(out + i * 8, val & 0xFFFFFF);
     }
     return len;
 }
 
 # Convert unsigned 8-bit PCM (center=128) to f64 vec.
-fn u8_to_f64(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    var scale = F64_RCP_128;
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = load8(src + i);
-        vec_push(v, f64_mul(f64_sub(f64_from(raw), F64_128), scale));
-    }
-    return v;
-}
+fn u8_to_f64(src, count) { return _pcm_conv(_PL_U8, src, count); }
 
 # Convert f64 vec to unsigned 8-bit PCM.
 fn f64_to_u8(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_add(f64_mul(s, F64_128), F64_128));
-        if (val < 0)   { val = 0; }
-        if (val > 255) { val = 255; }
+        var val = _pcm_quant(load64(sd + i * 8), F64_128, 0 - 128, 127) + 128;
         store8(out + i, val);
     }
     return len;
 }
 
-# Convert IEEE 754 float32 (4 bytes LE) to f64 vec.
 # Read little-endian IEEE 754 doubles into a vec: the samples are stored as-is.
-fn f64le_to_f64_vec(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    for (var i = 0; i < count; i = i + 1) {
-        vec_push(v, load64(src + i * 8));
-    }
-    return v;
-}
+fn f64le_to_f64_vec(src, count) { return _pcm_conv(_PL_F64LE, src, count); }
 
-fn f32_to_f64_vec(src, count) {
-    var v = _vec_new_cap(count);
-    if (is_err(v) == 1) { return v; }
-    for (var i = 0; i < count; i = i + 1) {
-        var bits = read_u32_le(src, i * 4);
-        # Decompose f32: sign(1) | exp(8) | mantissa(23)
-        var sign = (bits >> 31) & 1;
-        var exp = (bits >> 23) & 0xFF;
-        var mant = bits & 0x7FFFFF;
+# Big-endian IEEE 754 doubles (AIFF-C fl64), stored as-is.
+fn f64be_to_f64_vec(src, count) { return _pcm_conv(_PL_F64BE, src, count); }
 
-        var f = F64_ZERO;
-        if (exp == 0) {
-            if (mant == 0) {
-                # +-0.0
-                f = F64_ZERO;
-            } else {
-                # Denormalized: mant * 2^(-149) — use pre-computed constant
-                f = f64_mul(f64_from(mant), F64_2_NEG_149);
-            }
-        } else {
-            if (exp == 0xFF) {
-                # Inf/NaN — just produce 0 for safety
-                f = F64_ZERO;
-            } else {
-                # Normalized: (2^23 + mant) * 2^(exp - 150)
-                var int_mant = 8388608 + mant;
-                var power = exp - 150;
-                f = f64_mul(f64_from(int_mant), f64_pow(F64_TWO, f64_from(power)));
-            }
-        }
-        if (sign == 1) { f = f64_neg(f); }
-        vec_push(v, f);
-    }
-    return v;
-}
+
+# Little-endian IEEE singles (WAV format 3) to f64.
+fn f32_to_f64_vec(src, count) { return _pcm_conv(_PL_F32LE, src, count); }
+
+# Big-endian IEEE singles (AIFF-C fl32) to f64.
+fn f32be_to_f64_vec(src, count) { return _pcm_conv(_PL_F32BE, src, count); }
 
 # Interleave channel buffers into a single vec.
 # channels: vec of vecs (each is a channel), ch_count: number of channels
@@ -631,11 +798,17 @@ fn decode_result_new(fi, samples) {
 fn decode_result_info(dr)    { return load64(dr); }
 fn decode_result_samples(dr) { return load64(dr + 8); }
 
-# Decode WAV data from a byte buffer.
-# data: pointer to WAV bytes, len: total byte length
-# Returns: decode_result pointer on success, negative error on failure
-fn wav_decode(data, len) {
-    if (len < 44) { return err(ERR_INVALID_HEADER); }
+# What a WAV header says, as _wav_header fills it (7 slots of 8 bytes):
+#   +0  format code (an EXTENSIBLE header's subformat)   +8  channels
+#   +16 sample rate          +24 container bits (wBitsPerSample)
+#   +32 valid bits (EXTENSIBLE wValidBitsPerSample; 0 = not stated)
+#   +40 offset of the audio  +48 declared audio bytes (0xFFFFFFFF from a pipe)
+#
+# Returns 1 once `fmt ` and `data` have both been read, 0 when the buffer ends
+# before they have, or an error. A one-shot decode treats 0 as a bad header; the
+# streaming decoder waits for more bytes.
+fn _wav_header(data, len, h) {
+    if (len < 12) { return 0; }
 
     # Validate RIFF magic ("RIFF" = 0x46464952 LE)
     if (read_u32_le(data, 0) != 0x46464952) { return err(ERR_INVALID_HEADER); }
@@ -669,7 +842,7 @@ fn wav_decode(data, len) {
             # about what is actually present. Demonstrated: a 44-byte WAV whose
             # `fmt ` header ends at byte 44 decoded successfully, reporting
             # rate/channels/depth taken entirely from beyond the buffer.
-            if (pos + 24 > len) { return err(ERR_INVALID_HEADER); }
+            if (pos + 24 > len) { return 0; }
             fmt_code = read_u16_le(data, pos + 8);
             fmt_ch   = read_u16_le(data, pos + 10);
             fmt_rate = read_u32_le(data, pos + 12);
@@ -679,23 +852,22 @@ fn wav_decode(data, len) {
             # WAVE_FORMAT_EXTENSIBLE
             if (fmt_code == WAV_FMT_EXTENSIBLE) {
                 if (ck_size >= 40) {
-                    if (pos + 34 <= len) {
-                        # wValidBitsPerSample says how many bits carry signal;
-                        # wBitsPerSample (read above into fmt_bps) is the
-                        # CONTAINER size and is what strides the sample data.
-                        # Overwriting fmt_bps with valid_bits mis-strode every
-                        # 24-in-32 file — the common "24-bit in a 32-bit
-                        # container" layout — reading 3-byte samples out of a
-                        # 4-byte grid and desynchronising after the first one.
-                        # (This is the roadmap's "wav WAVE_FORMAT_EXTENSIBLE
-                        # 24-in-32" item.) Keep them separate: stride by the
-                        # container, report the valid bits.
-                        var valid_bits = read_u16_le(data, pos + 26);
-                        if (valid_bits > 0) {
-                            if (valid_bits <= fmt_bps) { fmt_valid_bits = valid_bits; }
-                        }
-                        fmt_code = read_u16_le(data, pos + 32);
+                    if (pos + 34 > len) { return 0; }
+                    # wValidBitsPerSample says how many bits carry signal;
+                    # wBitsPerSample (read above into fmt_bps) is the
+                    # CONTAINER size and is what strides the sample data.
+                    # Overwriting fmt_bps with valid_bits mis-strode every
+                    # 24-in-32 file — the common "24-bit in a 32-bit
+                    # container" layout — reading 3-byte samples out of a
+                    # 4-byte grid and desynchronising after the first one.
+                    # (This is the roadmap's "wav WAVE_FORMAT_EXTENSIBLE
+                    # 24-in-32" item.) Keep them separate: stride by the
+                    # container, report the valid bits.
+                    var valid_bits = read_u16_le(data, pos + 26);
+                    if (valid_bits > 0) {
+                        if (valid_bits <= fmt_bps) { fmt_valid_bits = valid_bits; }
                     }
+                    fmt_code = read_u16_le(data, pos + 32);
                 }
             }
             fmt_found = 1;
@@ -723,47 +895,70 @@ fn wav_decode(data, len) {
         }
     }
 
-    if (fmt_found == 0) { return err(ERR_INVALID_HEADER); }
-    if (dat_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (fmt_found == 0) { return 0; }
+    if (dat_found == 0) { return 0; }
     if (fmt_ch == 0)    { return err(ERR_INVALID_CHANNELS); }
     if (fmt_rate == 0)  { return err(ERR_INVALID_RATE); }
+
+    store64(h, fmt_code);
+    store64(h + 8, fmt_ch);
+    store64(h + 16, fmt_rate);
+    store64(h + 24, fmt_bps);
+    store64(h + 32, fmt_valid_bits);
+    store64(h + 40, dat_start);
+    store64(h + 48, dat_size);
+    return 1;
+}
+
+# The sample layout of a WAV format shravan decodes, or 0 for one it does not.
+# Integer PCM rounds the declared depth up to whole bytes, as ffmpeg does: the
+# samples are left-justified in that container, so a 12-bit file decodes as
+# 16-bit.
+fn _wav_layout(code, bps) {
+    if (code == WAV_FMT_PCM) {
+        if (bps >= 1) {
+            if (bps <= 8)  { return _PL_U8; }
+            if (bps <= 16) { return _PL_S16LE; }
+            if (bps <= 24) { return _PL_S24LE; }
+            if (bps <= 32) { return _PL_S32LE; }
+        }
+    }
+    if (code == WAV_FMT_IEEE_FLOAT) {
+        if (bps == 32) { return _PL_F32LE; }
+        if (bps == 64) { return _PL_F64LE; }
+    }
+    return 0;
+}
+
+
+var _wav_h = 0;
+
+# Decode WAV data from a byte buffer.
+# data: pointer to WAV bytes, len: total byte length
+# Returns: decode_result pointer on success, negative error on failure
+fn wav_decode(data, len) {
+    if (len < 44) { return err(ERR_INVALID_HEADER); }
+    if (_wav_h == 0) { _wav_h = alloc(56); }
+    var h = _wav_h;
+    var r = _wav_header(data, len, h);
+    if (is_err(r) == 1) { return r; }
+    if (r == 0) { return err(ERR_INVALID_HEADER); }
+
+    var fmt_code = load64(h);
+    var fmt_ch = load64(h + 8);
+    var fmt_rate = load64(h + 16);
+    var fmt_bps = load64(h + 24);
+    var fmt_valid_bits = load64(h + 32);
+    var dat_start = load64(h + 40);
+    var dat_size = load64(h + 48);
 
     # Clamp data_size to available bytes
     var avail = len - dat_start;
     if (dat_size > avail) { dat_size = avail; }
-    var audio = data + dat_start;
 
-    # Decode samples to f64 based on format
     var samples = vec_new();
-
-    if (fmt_code == WAV_FMT_PCM) {
-        if (fmt_bps == 8) {
-            # Unsigned 8-bit PCM
-            samples = u8_to_f64(audio, dat_size);
-        }
-        if (fmt_bps == 16) {
-            var count = dat_size / 2;
-            samples = i16_to_f64(audio, count);
-        }
-        if (fmt_bps == 24) {
-            var count = dat_size / 3;
-            samples = i24_packed_to_f64(audio, count);
-        }
-        if (fmt_bps == 32) {
-            var count = dat_size / 4;
-            samples = i32_to_f64(audio, count);
-        }
-    }
-    if (fmt_code == WAV_FMT_IEEE_FLOAT) {
-        if (fmt_bps == 32) {
-            var count = dat_size / 4;
-            samples = f32_to_f64_vec(audio, count);
-        }
-        if (fmt_bps == 64) {
-            var count = dat_size / 8;
-            samples = f64le_to_f64_vec(audio, count);
-        }
-    }
+    var pl = _wav_layout(fmt_code, fmt_bps);
+    if (pl != 0) { samples = _pcm_conv(pl, data + dat_start, dat_size / _pl_bytes(pl)); }
 
     # SEC-025: the converters can now return a packed error (oversized or
     # failed allocation). vec_len() on a negative pointer segfaults, so the
@@ -871,53 +1066,61 @@ fn wav_encode(samples, sample_rate, channels, pcm_fmt, out) {
 # Convert f64 vec to IEEE 754 float32 LE bytes
 fn f64_to_f32_bytes(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var f = vec_get(samples, i);
-        # Convert f64 bit pattern to f32 bit pattern
-        var bits = f64_to_f32_bits(f);
-        write_u32_le(out, i * 4, bits);
+        var bits = f64_to_f32_bits(load64(sd + i * 8));
+        var p = out + i * 4;
+        store8(p, bits & 0xFF);
+        store8(p + 1, (bits >> 8) & 0xFF);
+        store8(p + 2, (bits >> 16) & 0xFF);
+        store8(p + 3, (bits >> 24) & 0xFF);
     }
     return len * 4;
 }
 
-# Convert an f64 bit pattern to f32 bit pattern
-# Handles normalized, denormalized, zero, inf, nan
+# An f64 bit pattern as the nearest f32 (round half to even), as C's (float) and
+# ffmpeg's float conversion give it: subnormal results kept, overflow to infinity,
+# NaN quiet. Until 2.9.3 this truncated the fraction, pulling every sample that is
+# not already a float toward zero by up to one f32 step, and flushed f32
+# subnormals to zero.
 fn f64_to_f32_bits(f) {
     # f64: sign(1) | exp(11) | mantissa(52)
     # f32: sign(1) | exp(8)  | mantissa(23)
-    var sign = (f >> 63) & 1;
+    var f32_sign = ((f >> 63) & 1) << 31;
     var exp = (f >> 52) & 0x7FF;
     var mant = f & 0xFFFFFFFFFFFFF;
 
-    var f32_sign = sign << 31;
-
-    if (exp == 0) {
-        # Zero or denorm → f32 zero (denorms too small for f32)
-        return f32_sign;
-    }
     if (exp == 0x7FF) {
-        # Inf or NaN
-        if (mant == 0) {
-            return f32_sign | 0x7F800000;
-        }
-        return f32_sign | 0x7FC00000;
+        if (mant == 0) { return f32_sign | 0x7F800000; }    # infinity
+        return f32_sign | 0x7FC00000;                       # NaN
     }
+    if (exp == 0) { return f32_sign; }      # zero, or an f64 subnormal (far below f32's range)
 
-    # Normalized: f64 bias=1023, f32 bias=127
     var unbiased = exp - 1023;
-    if (unbiased > 127) {
-        # Overflow → inf
-        return f32_sign | 0x7F800000;
-    }
+    if (unbiased > 127) { return f32_sign | 0x7F800000; }
+    if (unbiased < (0 - 150)) { return f32_sign; }
+
+    # Keep `keep` bits of the 53-bit significand and round on the rest. A normal
+    # f32 keeps 24 (the leading one implicit); a subnormal f32, whose unit is
+    # 2^-149, keeps fewer.
+    var sig = mant | (1 << 52);
+    var drop = 29;
+    if (unbiased < (0 - 126)) { drop = 29 + ((0 - 126) - unbiased); }   # 30..53
+    var q = sig >> drop;
+    var rem = sig & ((1 << drop) - 1);
+    var half = 1 << (drop - 1);
+    if (rem > half) { q = q + 1; }
+    if (rem == half) { q = q + (q & 1); }
+
     if (unbiased < (0 - 126)) {
-        # Underflow → zero
-        return f32_sign;
+        # Subnormal: q is the fraction field; rounding up to 2^23 is exactly the
+        # smallest normal, whose encoding is the same bits.
+        return f32_sign | q;
     }
-
-    var f32_exp = (unbiased + 127) & 0xFF;
-    var f32_mant = (mant >> 29) & 0x7FFFFF;
-
-    return f32_sign | (f32_exp << 23) | f32_mant;
+    var e32 = unbiased + 127;
+    if (q == 16777216) { q = 8388608; e32 = e32 + 1; }      # rounded up to the next power of two
+    if (e32 >= 255) { return f32_sign | 0x7F800000; }
+    return f32_sign | (e32 << 23) | (q & 0x7FFFFF);
 }
 
 # ================================================================
@@ -1024,78 +1227,54 @@ fn f64_to_extended(val, ext) {
 enum Endian { ENDIAN_BIG = 0; ENDIAN_LITTLE = 1; }
 
 # Decode signed big-endian 16-bit samples to f64 vec
-fn i16be_to_f64(src, count) {
-    var v = vec_new();
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = read_u16_be(src, i * 2);
-        var signed = sign_extend(raw, 16);
-        vec_push(v, f64_div(f64_from(signed), F64_32768));
-    }
-    return v;
-}
+fn i16be_to_f64(src, count) { return _pcm_conv(_PL_S16BE, src, count); }
 
 # Decode signed big-endian 24-bit samples to f64 vec
-fn i24be_to_f64(src, count) {
-    var v = vec_new();
-    for (var i = 0; i < count; i = i + 1) {
-        var off = i * 3;
-        var raw = (load8(src+off) << 16) | (load8(src+off+1) << 8) | load8(src+off+2);
-        var signed = sign_extend(raw, 24);
-        vec_push(v, f64_div(f64_from(signed), F64_8388608));
-    }
-    return v;
-}
+fn i24be_to_f64(src, count) { return _pcm_conv(_PL_S24BE, src, count); }
 
 # Decode signed big-endian 32-bit samples to f64 vec
-fn i32be_to_f64(src, count) {
-    var v = vec_new();
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = read_u32_be(src, i * 4);
-        var signed = sign_extend(raw, 32);
-        vec_push(v, f64_div(f64_from(signed), F64_2147483648));
-    }
-    return v;
-}
+fn i32be_to_f64(src, count) { return _pcm_conv(_PL_S32BE, src, count); }
 
 # Decode signed 8-bit AIFF samples (signed, not unsigned like WAV)
-fn i8_to_f64(src, count) {
-    var v = vec_new();
-    for (var i = 0; i < count; i = i + 1) {
-        var raw = load8(src + i);
-        var signed = sign_extend(raw, 8);
-        vec_push(v, f64_div(f64_from(signed), F64_128));
-    }
-    return v;
-}
+fn i8_to_f64(src, count) { return _pcm_conv(_PL_S8, src, count); }
 
-# Decode PCM bytes based on bit depth and endianness
+# Integer AIFF audio to f64. sampleSize may be any depth from 1 to 32 bits: the
+# samples sit left-justified in whole bytes, so they decode at the container size,
+# as ffmpeg decodes them (until 2.9.3 anything but 8/16/24/32 came back empty).
 fn aiff_decode_pcm(audio, audio_len, bits, endian) {
-    if (bits == 8) {
-        return i8_to_f64(audio, audio_len);
-    }
-    if (bits == 16) {
-        var count = audio_len / 2;
-        if (endian == ENDIAN_BIG) { return i16be_to_f64(audio, count); }
-        return i16_to_f64(audio, count);
-    }
-    if (bits == 24) {
-        var count = audio_len / 3;
-        if (endian == ENDIAN_BIG) { return i24be_to_f64(audio, count); }
-        return i24_packed_to_f64(audio, count);
-    }
-    if (bits == 32) {
-        var count = audio_len / 4;
-        if (endian == ENDIAN_BIG) { return i32be_to_f64(audio, count); }
-        return i32_to_f64(audio, count);
-    }
-    return vec_new();
+    var pl = _aiff_int_layout(bits, endian);
+    if (pl == 0) { return vec_new(); }
+    return _pcm_conv(pl, audio, audio_len / _pl_bytes(pl));
 }
 
-# Decode AIFF/AIFF-C data
-# data: pointer to AIFF bytes, len: total byte length
-# Returns: decode_result pointer, or negative error
-fn aiff_decode(data, len) {
-    if (len < 12) { return err(ERR_INVALID_HEADER); }
+# The layout of integer AIFF samples of the given depth: 1 to 32 bits, held
+# left-justified in whole bytes, so they decode at the container size. 0 = none.
+fn _aiff_int_layout(bits, endian) {
+    if (bits < 1) { return 0; }
+    if (bits > 32) { return 0; }
+    var w = (bits + 7) / 8;
+    if (w == 1) { return _PL_S8; }
+    if (endian == ENDIAN_BIG) {
+        if (w == 2) { return _PL_S16BE; }
+        if (w == 3) { return _PL_S24BE; }
+        return _PL_S32BE;
+    }
+    if (w == 2) { return _PL_S16LE; }
+    if (w == 3) { return _PL_S24LE; }
+    return _PL_S32LE;
+}
+
+# What an AIFF / AIFF-C header says, as _aiff_header fills it (7 slots):
+#   +0  channels   +8  sample size in bits (32 or 64 for float)   +16 sample rate
+#   +24 endian (ENDIAN_BIG, or ENDIAN_LITTLE for sowt)
+#   +32 float width (32 = fl32, 64 = fl64, 0 = integer PCM)
+#   +40 offset of the audio   +48 declared audio bytes
+#
+# Returns 1 once COMM and SSND have both been read, 0 when the buffer ends
+# before they have, or an error (a one-shot decode treats 0 as a bad header; the
+# streaming decoder waits for more bytes).
+fn _aiff_header(data, len, h) {
+    if (len < 12) { return 0; }
 
     # Check "FORM" magic
     if (load8(data) != 0x46)   { return err(ERR_INVALID_HEADER); }
@@ -1123,6 +1302,7 @@ fn aiff_decode(data, len) {
     var ssnd_len = 0;
     var ssnd_found = 0;
     var endian = ENDIAN_BIG;
+    var aifc_float = 0;     # AIFF-C fl32 (32) or fl64 (64): big-endian IEEE float
 
     while (pos + 8 <= len) {
         var ck0 = load8(data+pos);
@@ -1133,61 +1313,62 @@ fn aiff_decode(data, len) {
 
         # "COMM" = 0x43 0x4F 0x4D 0x4D
         if (ck0==0x43) { if (ck1==0x4F) { if (ck2==0x4D) { if (ck3==0x4D) {
-            var base = pos + 8;
-            # SEC-022: the loop only proves the 8-byte chunk header is present
-            # (pos + 8 <= len). The COMM body is 18 bytes — 2 channels,
-            # 4 numSampleFrames, 2 sampleSize, 10 extended sampleRate — so the
-            # reads below reach pos + 25. Unlike WAV this path did not even
-            # check the declared ck_size, so a COMM header at the end of the
-            # buffer read 18 bytes past it, including the 10-byte extended
-            # float handed to extended_to_f64.
-            if (ck_size < 18)     { return err(ERR_INVALID_HEADER); }
-            if (pos + 26 > len)   { return err(ERR_INVALID_HEADER); }
-            channels = read_u16_be(data, base);
-            # num_sample_frames at base+2 (4 bytes), skip
-            sample_size = read_u16_be(data, base + 6);
+                        var base = pos + 8;
+                        # SEC-022: the loop only proves the 8-byte chunk header is present
+                        # (pos + 8 <= len). The COMM body is 18 bytes — 2 channels,
+                        # 4 numSampleFrames, 2 sampleSize, 10 extended sampleRate — so the
+                        # reads below reach pos + 25. Unlike WAV this path did not even
+                        # check the declared ck_size, so a COMM header at the end of the
+                        # buffer read 18 bytes past it, including the 10-byte extended
+                        # float handed to extended_to_f64.
+                        if (ck_size < 18)     { return err(ERR_INVALID_HEADER); }
+                        if (pos + 26 > len)   { return 0; }
+                        channels = read_u16_be(data, base);
+                        # num_sample_frames at base+2 (4 bytes), skip
+                        sample_size = read_u16_be(data, base + 6);
 
-            # 10-byte extended float sample rate at base+8
-            sample_rate_f = extended_to_f64(data + base + 8);
+                        # 10-byte extended float sample rate at base+8
+                        sample_rate_f = extended_to_f64(data + base + 8);
 
-            if (is_aifc == 1) {
-                # Compression type at base+18 (4 bytes)
-                if (base + 22 <= len) {
-                    var c0 = load8(data+base+18);
-                    var c1 = load8(data+base+19);
-                    var c2 = load8(data+base+20);
-                    var c3 = load8(data+base+21);
-                    # "NONE" = 0x4E 0x4F 0x4E 0x45
-                    if (c0==0x4E) { if (c1==0x4F) { if (c2==0x4E) { if (c3==0x45) {
-                        endian = ENDIAN_BIG;
+                        if (is_aifc == 1) {
+                            # Compression type at base+18 (4 bytes)
+                            if (base + 22 > len) { return 0; }
+                            var c0 = load8(data+base+18);
+                            var c1 = load8(data+base+19);
+                            var c2 = load8(data+base+20);
+                            var c3 = load8(data+base+21);
+                            # Only uncompressed PCM is decodable: NONE and twos (big-endian
+                            # integers), sowt (little-endian), fl32/FL32 and fl64/FL64
+                            # (big-endian IEEE float). Anything else -- alaw, ulaw, ima4 --
+                            # used to be read as PCM and came out as noise.
+                            var ctype = (c0 << 24) | (c1 << 16) | (c2 << 8) | c3;
+                            var known = 0;
+                            if ((ctype == 0x4E4F4E45) | (ctype == 0x74776F73)) { endian = ENDIAN_BIG; known = 1; }
+                            if (ctype == 0x736F7774) { endian = ENDIAN_LITTLE; known = 1; }
+                            if ((ctype == 0x666C3332) | (ctype == 0x464C3332)) { aifc_float = 32; known = 1; }
+                            if ((ctype == 0x666C3634) | (ctype == 0x464C3634)) { aifc_float = 64; known = 1; }
+                            if (known == 0) { return err(ERR_UNSUPPORTED_FMT); }
+                        }
+                        comm_found = 1;
                     }}}}
-                    # "sowt" = 0x73 0x6F 0x77 0x74
-                    if (c0==0x73) { if (c1==0x6F) { if (c2==0x77) { if (c3==0x74) {
-                        endian = ENDIAN_LITTLE;
-                    }}}}
-                }
-            }
-            comm_found = 1;
-        }}}}
 
         # "SSND" = 0x53 0x53 0x4E 0x44
         if (ck0==0x53) { if (ck1==0x53) { if (ck2==0x4E) { if (ck3==0x44) {
-            if (ck_size >= 8) {
-                # SEC-022: ck_size is the DECLARED size; the 4-byte offset
-                # field at pos+8..pos+11 still has to be inside the buffer.
-                if (pos + 12 > len) { return err(ERR_INVALID_HEADER); }
-                var ssnd_offset = read_u32_be(data, pos + 8);
-                # Guard against underflow: ssnd_offset must fit within chunk
-                if (ssnd_offset <= ck_size - 8) {
-                    var pcm_start = pos + 8 + 8 + ssnd_offset;
-                    if (pcm_start <= len) {
-                        ssnd_len = ck_size - 8 - ssnd_offset;
-                        ssnd_start = pcm_start;
-                        ssnd_found = 1;
-                    }
-                }
-            }
-        }}}}
+                        if (ck_size >= 8) {
+                            # SEC-022: ck_size is the DECLARED size; the 4-byte offset
+                            # field at pos+8..pos+11 still has to be inside the buffer.
+                            if (pos + 12 > len) { return 0; }
+                            var ssnd_offset = read_u32_be(data, pos + 8);
+                            # Guard against underflow: ssnd_offset must fit within chunk
+                            if (ssnd_offset <= ck_size - 8) {
+                                var pcm_start = pos + 8 + 8 + ssnd_offset;
+                                if (pcm_start > len) { return 0; }
+                                ssnd_len = ck_size - 8 - ssnd_offset;
+                                ssnd_start = pcm_start;
+                                ssnd_found = 1;
+                            }
+                        }
+                    }}}}
 
         # Advance to next chunk with overflow guard
         if (ck_size > len - pos - 8) { pos = len + 1; }
@@ -1195,8 +1376,8 @@ fn aiff_decode(data, len) {
         if (comm_found == 1) { if (ssnd_found == 1) { pos = len + 1; } }
     }
 
-    if (comm_found == 0) { return err(ERR_INVALID_HEADER); }
-    if (ssnd_found == 0) { return err(ERR_INVALID_HEADER); }
+    if (comm_found == 0) { return 0; }
+    if (ssnd_found == 0) { return 0; }
     if (channels == 0)   { return err(ERR_INVALID_CHANNELS); }
 
     # SEC-028: validate the COMM fields as ranges, not just against zero.
@@ -1204,36 +1385,75 @@ fn aiff_decode(data, len) {
     # so 65535 channels or a 65535-bit sample depth reached the PCM converters
     # and the frame-count division below.
     if (channels > 256)     { return err(ERR_INVALID_CHANNELS); }
+    if (aifc_float != 0) { sample_size = aifc_float; }
     if (sample_size <= 0)   { return err(ERR_INVALID_HEADER); }
-    if (sample_size > 32)   { return err(ERR_INVALID_HEADER); }
+    if ((sample_size > 32) & (aifc_float != 64)) { return err(ERR_INVALID_HEADER); }
 
     var sample_rate = f64_to(sample_rate_f);
     if (sample_rate <= 0)       { return err(ERR_INVALID_RATE); }
     if (sample_rate > 4000000)  { return err(ERR_INVALID_RATE); }
 
+    store64(h, channels);
+    store64(h + 8, sample_size);
+    store64(h + 16, sample_rate);
+    store64(h + 24, endian);
+    store64(h + 32, aifc_float);
+    store64(h + 40, ssnd_start);
+    store64(h + 48, ssnd_len);
+    return 1;
+}
+
+# The sample layout of the format _aiff_header found (never 0: the header
+# parser has already refused depths outside 1..32 and 64-bit float).
+fn _aiff_layout(h) {
+    var fl = load64(h + 32);
+    if (fl == 32) { return _PL_F32BE; }
+    if (fl == 64) { return _PL_F64BE; }
+    return _aiff_int_layout(load64(h + 8), load64(h + 24));
+}
+
+
+var _aiff_h = 0;
+
+# Decode AIFF/AIFF-C data
+# data: pointer to AIFF bytes, len: total byte length
+# Returns: decode_result pointer, or negative error
+fn aiff_decode(data, len) {
+    if (len < 12) { return err(ERR_INVALID_HEADER); }
+    if (_aiff_h == 0) { _aiff_h = alloc(56); }
+    var h = _aiff_h;
+    var r = _aiff_header(data, len, h);
+    if (is_err(r) == 1) { return r; }
+    if (r == 0) { return err(ERR_INVALID_HEADER); }
+
+    var channels = load64(h);
+    var sample_rate = load64(h + 16);
+    var ssnd_start = load64(h + 40);
+    var ssnd_len = load64(h + 48);
     var avail = len - ssnd_start;
     if (ssnd_len > avail) { ssnd_len = avail; }
 
-    var samples = aiff_decode_pcm(data + ssnd_start, ssnd_len, sample_size, endian);
-    # SEC-025: same as wav_decode — the little-endian ("sowt") converter can
-    # return a packed error, and vec_len() on it would segfault.
+    var pl = _aiff_layout(h);
+    var samples = _pcm_conv(pl, data + ssnd_start, ssnd_len / _pl_bytes(pl));
+    # SEC-025: same as wav_decode — the converters can return a packed error,
+    # and vec_len() on it would segfault.
     if (is_err(samples) == 1) { return samples; }
     var sc = vec_len(samples);
     var tf = sc / channels;
     var dur = f64_div(f64_from(tf), f64_from(sample_rate));
 
     return decode_result_new(
-        fmtinfo_new(FMT_AIFF, sample_rate, channels, sample_size, dur, tf),
-        samples
-    );
+      fmtinfo_new(FMT_AIFF, sample_rate, channels, load64(h + 8), dur, tf),
+      samples
+      );
 }
 
 # Encode f64 samples to big-endian PCM bytes
 fn f64_to_i16_be(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_32767));
+        var val = _pcm_quant(load64(sd + i * 8), F64_32768, 0 - 32768, 32767);
         write_u16_be(out, i * 2, val & 0xFFFF);
     }
     return len * 2;
@@ -1241,9 +1461,9 @@ fn f64_to_i16_be(samples, out) {
 
 fn f64_to_i24_be(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_8388607));
+        var val = _pcm_quant(load64(sd + i * 8), F64_8388608, 0 - 8388608, 8388607);
         var off = i * 3;
         store8(out+off, (val >> 16) & 0xFF);
         store8(out+off+1, (val >> 8) & 0xFF);
@@ -1254,9 +1474,9 @@ fn f64_to_i24_be(samples, out) {
 
 fn f64_to_i32_be(samples, out) {
     var len = vec_len(samples);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_2147483647));
+        var val = _pcm_quant(load64(sd + i * 8), F64_2147483648, 0 - 2147483648, 2147483647);
         write_u32_be(out, i * 4, val);
     }
     return len * 4;
@@ -1264,10 +1484,9 @@ fn f64_to_i32_be(samples, out) {
 
 fn f64_to_i8_signed(samples, out) {
     var len = vec_len(samples);
-    var F64_127 = f64_from(127);
+    var sd = load64(samples);
     for (var i = 0; i < len; i = i + 1) {
-        var s = f64_clamp_sample(vec_get(samples, i));
-        var val = f64_to(f64_mul(s, F64_127));
+        var val = _pcm_quant(load64(sd + i * 8), F64_128, 0 - 128, 127);
         store8(out + i, val & 0xFF);
     }
     return len;
@@ -1281,8 +1500,8 @@ fn aiff_encode(samples, sample_rate, channels, bits, out) {
     if (channels == 0)    { return err(ERR_INVALID_CHANNELS); }
     if (sample_rate == 0) { return err(ERR_INVALID_RATE); }
     if (bits != 8) { if (bits != 16) { if (bits != 24) { if (bits != 32) {
-        return err(ERR_ENCODE);
-    }}}}
+                    return err(ERR_ENCODE);
+                }}}}
 
     var num_frames = vec_len(samples) / channels;
 
@@ -1362,8 +1581,8 @@ fn alac_parse_config(data, len) {
 
     var bit_depth = load8(data + 5);
     if (bit_depth != 16) { if (bit_depth != 20) { if (bit_depth != 24) { if (bit_depth != 32) {
-        return err(ERR_INVALID_HEADER);
-    }}}}
+                    return err(ERR_INVALID_HEADER);
+                }}}}
 
     var pb = load8(data + 6);
     var mb = load8(data + 7);
@@ -1825,10 +2044,10 @@ fn _alac_decode_frame(br, cfg, st, out) {
     if (slot != num_ch) { return err(ERR_DECODE); }
 
     # SEC-029: bound cumulative decoded samples. An element mints a full frame
-    # from a few bytes, and alloc() never reclaims. Same 2^25-sample ceiling as
+    # from a few bytes, and alloc() never reclaims. Same one-shot ceiling (_shravan_max_samples) as
     # FLAC (SEC-023) and AAC (SEC-027).
     var total = nframes * num_ch;
-    if (vec_len(out) + total > 33554432) { return err(ERR_DECODE); }
+    if (vec_len(out) + total > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
     for (var i = 0; i < total; i = i + 1) {
         vec_push(out, f64_mul(f64_from(load64(fb + i * 8)), scale));
     }
@@ -1842,9 +2061,9 @@ fn _alac_result(cfg, out) {
     var total_frames = vec_len(out) / num_ch;
     var dur = f64_div(f64_from(total_frames), f64_from(sample_rate));
     return decode_result_new(
-        fmtinfo_new(FMT_ALAC, sample_rate, num_ch, bit_depth, dur, total_frames),
-        out
-    );
+      fmtinfo_new(FMT_ALAC, sample_rate, num_ch, bit_depth, dur, total_frames),
+      out
+      );
 }
 
 # Decode a 24-byte ALACSpecificConfig followed by one frame.
@@ -1868,7 +2087,9 @@ fn alac_decode_frames(cookie, data, len, offsets, sizes, count) {
     if (is_err(cfg) == 1) { return cfg; }
     var st = _alac_state_new(cfg);
     if (is_err(st) == 1) { return st; }
-    var out = vec_new();
+    # Sized once: every frame holds at most frame_length samples per channel.
+    var out = _vec_new_cap(count * alac_config_get(cfg, 0) * alac_config_get(cfg, 5));
+    if (is_err(out) == 1) { return out; }
     var br = bitreader_new(data, 0);
     var i = 0;
     while (i < count) {
@@ -1959,61 +2180,74 @@ fn decode_file(path) {
     return codec_open(buf, total);
 }
 
-# Streaming decode: feed chunks of data, receive events.
-# Returns a stream decoder (wav/flac/aiff auto-detected on first feed).
-# chunk_frames: number of frames per SAMPLES event (0 = single-shot)
+# Streaming decode: feed chunks of data, receive events (see stream.cyr).
+# Returns a stream decoder; wav/flac/aiff is detected from the first 12 bytes,
+# however they are split across feeds. Any other format gets one ERROR event.
+# chunk_frames: frames per SAMPLES event for WAV/AIFF (0 = 4096); FLAC emits one
+# SAMPLES event per FLAC frame.
 fn decode_reader(chunk_frames) {
-    # Auto-detect stream type from first feed via wrapper struct.
-    # Layout (32 bytes):
-    #   +0:  state (0=detecting, 1=wav, 2=flac, 3=aiff)
+    # Layout (40 bytes):
+    #   +0:  state (0=detecting, 1=wav, 2=flac, 3=aiff, 4=refused)
     #   +8:  inner stream handle
     #   +16: chunk_frames
-    #   +24: header buffer pointer
-    var dr = alloc(32);
+    #   +24: detection buffer (the stream's first bytes, until 12 have arrived)
+    #   +32: bytes held in the detection buffer
+    var dr = alloc(40);
     store64(dr, 0);
     store64(dr + 8, 0);
     store64(dr + 16, chunk_frames);
-    store64(dr + 24, alloc(4096));
+    store64(dr + 24, alloc(16));
+    store64(dr + 32, 0);
     return dr;
 }
 
-fn decode_reader_feed(dr, data, len) {
-    var state = load64(dr);
-    var chunk_frames = load64(dr + 16);
-    if (chunk_frames == 0) { chunk_frames = 4096; }
-
-    if (state == 0) {
-        # Detecting: need at least 12 bytes for format magic
-        if (len < 12) { return vec_new(); }
-        var fmt = shravan_detect_format(data, len);
-        if (is_err(fmt) == 1) { return vec_new(); }
-
-        if (fmt == FMT_WAV) {
-            var s = wav_stream_new(chunk_frames);
-            store64(dr, 1);
-            store64(dr + 8, s);
-            return wav_stream_feed(s, data, len);
-        }
-        if (fmt == FMT_FLAC) {
-            var s = flac_stream_new();  # full-buffer decoder; ignores chunk_frames by design
-            store64(dr, 2);
-            store64(dr + 8, s);
-            return flac_stream_feed(s, data, len);
-        }
-        if (fmt == FMT_AIFF) {
-            var s = aiff_stream_new(chunk_frames);
-            store64(dr, 3);
-            store64(dr + 8, s);
-            return aiff_stream_feed(s, data, len);
-        }
-        return vec_new();  # unsupported format for streaming
-    }
-
-    var inner = load64(dr + 8);
+fn _decode_reader_inner(state, inner, data, len) {
     if (state == 1) { return wav_stream_feed(inner, data, len); }
     if (state == 2) { return flac_stream_feed(inner, data, len); }
     if (state == 3) { return aiff_stream_feed(inner, data, len); }
     return vec_new();
+}
+
+fn decode_reader_feed(dr, data, len) {
+    var state = load64(dr);
+    if (state == 0) {
+        var hb = load64(dr + 24);
+        var hl = load64(dr + 32);
+        if (len <= 0) { return vec_new(); }
+        if (hl + len < 12) {
+            # Not enough to detect yet: hold the bytes (until 2.9.3 they were dropped).
+            memcpy(hb + hl, data, len);
+            store64(dr + 32, hl + len);
+            return vec_new();
+        }
+        var take = 12 - hl;
+        memcpy(hb + hl, data, take);
+        var fmt = shravan_detect_format(hb, 12);
+        var chunk_frames = load64(dr + 16);
+        if (chunk_frames == 0) { chunk_frames = 4096; }
+        var s = 0;
+        if (fmt == FMT_WAV)  { s = wav_stream_new(chunk_frames); state = 1; }
+        if (fmt == FMT_FLAC) { s = flac_stream_new(); state = 2; }
+        if (fmt == FMT_AIFF) { s = aiff_stream_new(chunk_frames); state = 3; }
+        if (state == 0) {
+            store64(dr, 4);
+            var refused = vec_new();
+            var e = err(ERR_UNSUPPORTED_FMT);
+            if (is_err(fmt) == 1) { e = fmt; }
+            vec_push(refused, stream_evt_error(e));
+            return refused;
+        }
+        store64(dr, state);
+        store64(dr + 8, s);
+        # The held-back bytes first, then this call's.
+        var events = vec_new();
+        if (hl > 0) { events = _decode_reader_inner(state, s, hb, hl); }
+        var more = _decode_reader_inner(state, s, data, len);
+        var n = vec_len(more);
+        for (var i = 0; i < n; i = i + 1) { vec_push(events, vec_get(more, i)); }
+        return events;
+    }
+    return _decode_reader_inner(state, load64(dr + 8), data, len);
 }
 
 fn decode_reader_flush(dr) {
@@ -2022,5 +2256,12 @@ fn decode_reader_flush(dr) {
     if (state == 1) { return wav_stream_flush(inner); }
     if (state == 2) { return flac_stream_flush(inner); }
     if (state == 3) { return aiff_stream_flush(inner); }
-    return vec_new();
+    var events = vec_new();
+    if (state == 0) {
+        # Fewer than 12 bytes ever arrived: too short to be any of the formats.
+        if (load64(dr + 32) > 0) { vec_push(events, stream_evt_error(err(ERR_INVALID_HEADER))); }
+    }
+    store64(dr, 4);
+    vec_push(events, stream_evt_end());
+    return events;
 }

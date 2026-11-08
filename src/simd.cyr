@@ -69,26 +69,20 @@ fn simd_i16_to_f64(src_ptr, dst_vec, count) {
 # dst_ptr:  pointer to output buffer (2 bytes per sample, LE)
 # count:    number of samples to convert
 #
-# Converts f64 to clamped i16: clamp(sample, -1, 1) * 32767
+# Converts f64 to i16 with the shared PCM quantiser (_pcm_quant): 2^15, rounded.
 # Returns 0 on success.
 
 fn simd_f64_to_i16(src_vec, dst_ptr, count) {
-    var scale = F64_32767;
 
     var chunks = count / 4;
     var i = 0;
     while (i < chunks) {
         var off = i * 4;
 
-        var v0 = f64_clamp(vec_get(src_vec, off),     F64_NEG_ONE, F64_ONE);
-        var v1 = f64_clamp(vec_get(src_vec, off + 1), F64_NEG_ONE, F64_ONE);
-        var v2 = f64_clamp(vec_get(src_vec, off + 2), F64_NEG_ONE, F64_ONE);
-        var v3 = f64_clamp(vec_get(src_vec, off + 3), F64_NEG_ONE, F64_ONE);
-
-        var i0 = f64_to(f64_mul(v0, scale));
-        var i1 = f64_to(f64_mul(v1, scale));
-        var i2 = f64_to(f64_mul(v2, scale));
-        var i3 = f64_to(f64_mul(v3, scale));
+        var i0 = _pcm_quant(vec_get(src_vec, off),     F64_32768, 0 - 32768, 32767);
+        var i1 = _pcm_quant(vec_get(src_vec, off + 1), F64_32768, 0 - 32768, 32767);
+        var i2 = _pcm_quant(vec_get(src_vec, off + 2), F64_32768, 0 - 32768, 32767);
+        var i3 = _pcm_quant(vec_get(src_vec, off + 3), F64_32768, 0 - 32768, 32767);
 
         write_u16_le(dst_ptr, (off)     * 2, i0 & 0xFFFF);
         write_u16_le(dst_ptr, (off + 1) * 2, i1 & 0xFFFF);
@@ -101,8 +95,7 @@ fn simd_f64_to_i16(src_vec, dst_ptr, count) {
     var tail_start = chunks * 4;
     i = tail_start;
     while (i < count) {
-        var v = f64_clamp(vec_get(src_vec, i), F64_NEG_ONE, F64_ONE);
-        var iv = f64_to(f64_mul(v, scale));
+        var iv = _pcm_quant(vec_get(src_vec, i), F64_32768, 0 - 32768, 32767);
         write_u16_le(dst_ptr, i * 2, iv & 0xFFFF);
         i = i + 1;
     }

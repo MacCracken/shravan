@@ -55,6 +55,8 @@ fn dither_init() {
 }
 
 fn _dither_uniform(state_ptr) {
+    # Lazy: without it the divisor is 0.0 and every dithered sample is NaN.
+    if (_DITHER_U32_MAX_F64 == 0) { dither_init(); }
     var s = _dither_xorshift(state_ptr);
     var normalized = f64_div(f64_from(s), _DITHER_U32_MAX_F64);
     return f64_sub(f64_mul(F64_TWO, normalized), F64_ONE);

@@ -49,6 +49,7 @@ fn flac_crc8_init() {
 }
 
 fn flac_crc8(data, len) {
+    if (flac_crc8_table == 0) { flac_crc8_init(); }
     var crc = 0;
     var i = 0;
     while (i < len) {
@@ -85,6 +86,7 @@ fn flac_crc16_init() {
 }
 
 fn flac_crc16(data, len) {
+    if (flac_crc16_table == 0) { flac_crc16_init(); }
     var crc = 0;
     var i = 0;
     while (i < len) {
@@ -360,6 +362,7 @@ fn flac_decode_bps(code, si_bps) {
     if (code == 4) { return 16; }
     if (code == 5) { return 20; }
     if (code == 6) { return 24; }
+    if (code == 7) { return 32; }      # RFC 9639 9.1.4 (reserved before it)
     return err(ERR_DECODE);
 }
 
@@ -375,7 +378,7 @@ fn flac_decode_residual(br, buf, block_size, pred_order) {
     var rice_bits = 0;
     if (coding == 0) { rice_bits = 4; }
     else { if (coding == 1) { rice_bits = 5; }
-    else { return err(ERR_DECODE); } }
+        else { return err(ERR_DECODE); } }
 
     var part_order = bitreader_read(br, 4);
     if (is_err(part_order) == 1) { return part_order; }
@@ -451,7 +454,8 @@ fn flac_decode_constant(br, block_size, bps) {
     var raw = bitreader_read(br, bps);
     if (is_err(raw) == 1) { return raw; }
     var val = sign_extend(raw, bps);
-    var buf = alloc(block_size * 8);
+    var buf = _flac_take_buf(block_size);
+    if (is_err(buf) == 1) { return buf; }
     var i = 0;
     while (i < block_size) {
         store64(buf + i * 8, val);
@@ -462,7 +466,8 @@ fn flac_decode_constant(br, block_size, bps) {
 
 # Decode VERBATIM subframe
 fn flac_decode_verbatim(br, block_size, bps) {
-    var buf = alloc(block_size * 8);
+    var buf = _flac_take_buf(block_size);
+    if (is_err(buf) == 1) { return buf; }
     var i = 0;
     while (i < block_size) {
         var raw = bitreader_read(br, bps);
@@ -487,7 +492,8 @@ fn flac_decode_fixed(br, block_size, bps, order) {
     if (order < 0)           { return err(ERR_DECODE); }
     if (order >= block_size) { return err(ERR_DECODE); }
 
-    var buf = alloc(block_size * 8);
+    var buf = _flac_take_buf(block_size);
+    if (is_err(buf) == 1) { return buf; }
     # Read warm-up samples
     var i = 0;
     while (i < order) {
@@ -499,7 +505,8 @@ fn flac_decode_fixed(br, block_size, bps, order) {
 
     # Read residuals into temp buffer
     var num_res = block_size - order;
-    var res = alloc(num_res * 8);
+    var res = _flac_take_res(num_res);
+    if (is_err(res) == 1) { return res; }
     var rc = flac_decode_residual(br, res, block_size, order);
     if (is_err(rc) == 1) { return rc; }
 
@@ -544,7 +551,8 @@ fn flac_decode_lpc(br, block_size, bps, order) {
     if (order < 0)           { return err(ERR_DECODE); }
     if (order >= block_size) { return err(ERR_DECODE); }
 
-    var buf = alloc(block_size * 8);
+    var buf = _flac_take_buf(block_size);
+    if (is_err(buf) == 1) { return buf; }
     # Read warm-up samples
     var i = 0;
     while (i < order) {
@@ -566,7 +574,8 @@ fn flac_decode_lpc(br, block_size, bps, order) {
     var qlp_shift = sign_extend(shift_raw, 5);
 
     # Read coefficients
-    var coeffs = alloc(order * 8);
+    if (_flac_coef == 0) { _flac_frame_start(); }
+    var coeffs = _flac_coef;
     var ci = 0;
     while (ci < order) {
         var raw = bitreader_read(br, qlp_prec);
@@ -577,7 +586,8 @@ fn flac_decode_lpc(br, block_size, bps, order) {
 
     # Read residuals
     var num_res = block_size - order;
-    var res = alloc(num_res * 8);
+    var res = _flac_take_res(num_res);
+    if (is_err(res) == 1) { return res; }
     var rc = flac_decode_residual(br, res, block_size, order);
     if (is_err(rc) == 1) { return rc; }
 
@@ -607,6 +617,56 @@ fn flac_decode_lpc(br, block_size, bps, order) {
 }
 
 # Decode a single subframe, returns pointer to sample buffer or error
+# ---- per-frame scratch ----
+# alloc() never frees, and each subframe used to allocate its own sample and
+# residual buffers, so a decode allocated about three times its output (an hour
+# of stereo at the one-shot ceiling would have cost 1.5 GB more than its samples).
+# Subframe buffers now come from a ring of eight slots, one per channel, reset at
+# each frame and grown only when a larger block arrives; the residual and LPC
+# coefficient buffers are shared scratch.
+var _flac_ring = 0;
+var _flac_ring_buf = 0;    # [8] buffer pointers
+var _flac_ring_cap = 0;    # [8] capacities in samples
+var _flac_res = 0;
+var _flac_res_cap = 0;
+var _flac_coef = 0;        # [32]
+var _flac_chbufs = 0;      # [8] per-frame channel buffer table
+
+fn _flac_frame_start() {
+    if (_flac_ring_buf == 0) {
+        _flac_ring_buf = alloc(8 * 8); memset(_flac_ring_buf, 0, 64);
+        _flac_ring_cap = alloc(8 * 8); memset(_flac_ring_cap, 0, 64);
+        _flac_coef = alloc(32 * 8);
+        _flac_chbufs = alloc(8 * 8);
+    }
+    _flac_ring = 0;
+    return _flac_chbufs;
+}
+
+# A subframe's sample buffer: the next ring slot, at least n samples.
+fn _flac_take_buf(n) {
+    if (_flac_ring_buf == 0) { _flac_frame_start(); }
+    var k = _flac_ring & 7;
+    _flac_ring = _flac_ring + 1;
+    if (load64(_flac_ring_cap + k * 8) < n) {
+        var b = alloc(n * 8);
+        if (b == 0) { return err(ERR_DECODE); }
+        store64(_flac_ring_buf + k * 8, b);
+        store64(_flac_ring_cap + k * 8, n);
+    }
+    return load64(_flac_ring_buf + k * 8);
+}
+
+fn _flac_take_res(n) {
+    if (_flac_res_cap < n) {
+        var b = alloc(n * 8);
+        if (b == 0) { return err(ERR_DECODE); }
+        _flac_res = b;
+        _flac_res_cap = n;
+    }
+    return _flac_res;
+}
+
 fn flac_decode_subframe(br, block_size, bps) {
     # Subframe header: 1 zero bit + 6-bit type + wasted-bits flag
     var zero = bitreader_read(br, 1);
@@ -632,21 +692,21 @@ fn flac_decode_subframe(br, block_size, bps) {
     if (sf_type == 0) {
         buf = flac_decode_constant(br, block_size, eff_bps);
     } else { if (sf_type == 1) {
-        buf = flac_decode_verbatim(br, block_size, eff_bps);
-    } else { if (sf_type >= 8) { if (sf_type <= 12) {
-        var order = sf_type - 8;
-        if (order > 4) { return err(ERR_DECODE); }
-        buf = flac_decode_fixed(br, block_size, eff_bps, order);
-    } else { if (sf_type >= 32) { if (sf_type <= 63) {
-        var order = sf_type - 31;
-        buf = flac_decode_lpc(br, block_size, eff_bps, order);
-    } else {
-        return err(ERR_DECODE);
-    } } else {
-        return err(ERR_DECODE);
-    } } } else {
-        return err(ERR_DECODE);
-    } } }
+            buf = flac_decode_verbatim(br, block_size, eff_bps);
+        } else { if (sf_type >= 8) { if (sf_type <= 12) {
+                    var order = sf_type - 8;
+                    if (order > 4) { return err(ERR_DECODE); }
+                    buf = flac_decode_fixed(br, block_size, eff_bps, order);
+                } else { if (sf_type >= 32) { if (sf_type <= 63) {
+                            var order = sf_type - 31;
+                            buf = flac_decode_lpc(br, block_size, eff_bps, order);
+                        } else {
+                            return err(ERR_DECODE);
+                        } } else {
+                        return err(ERR_DECODE);
+                    } } } else {
+                return err(ERR_DECODE);
+            } } }
 
     if (is_err(buf) == 1) { return buf; }
 
@@ -706,6 +766,149 @@ fn flac_apply_decorrelation(ch0, ch1, block_size, mode) {
 }
 
 # ================================================================
+# Frame decode
+# ================================================================
+
+# Facts about the frame _flac_frame last decoded.
+var _flac_f_ch  = 0;    # channels
+var _flac_f_bps = 0;    # bits per sample
+var _flac_f_num = 0;    # frame number, or first sample number when _flac_f_var is 1
+var _flac_f_var = 0;    # 1 = variable-blocksize stream
+var _flac_f_crc = 0;    # 1 = the CRC-16 footer was in the buffer and matched
+
+# Decode the next frame from the reader's position (searching forward for its
+# sync code) into the per-frame channel buffers, _flac_chbufs. The one-shot, range
+# and streaming decoders all go through here.
+#
+# Returns the block size, 0 when no sync code is left in the buffer, or an error.
+# ERR_END_OF_STREAM means the buffer ends inside the frame, which a stream answers
+# by waiting for more bytes; any other error means the frame is corrupt. A frame
+# whose channel count disagrees with STREAMINFO is refused, as libFLAC (the flac
+# CLI) refuses it; before 2.9.3 the samples came back interleaved for the wrong
+# channel count. (ffmpeg follows the frames instead.)
+fn _flac_frame(br, data, len, si_rate, si_bps, si_ch) {
+    var sync_pos = flac_find_sync(br, data, len);
+    if (is_err(sync_pos) == 1) { return 0; }
+    var frame_start = sync_pos;
+    var blocking = load8(data + sync_pos + 1) & 1;
+
+    var bs_code = bitreader_read(br, 4);
+    if (is_err(bs_code) == 1) { return bs_code; }
+    var sr_code = bitreader_read(br, 4);
+    if (is_err(sr_code) == 1) { return sr_code; }
+    var ch_assign = bitreader_read(br, 4);
+    if (is_err(ch_assign) == 1) { return ch_assign; }
+    var ss_code = bitreader_read(br, 3);
+    if (is_err(ss_code) == 1) { return ss_code; }
+    var _reserved = bitreader_read(br, 1);
+    if (is_err(_reserved) == 1) { return _reserved; }
+
+    var num = flac_br_read_utf8_u64(br);
+    if (is_err(num) == 1) { return num; }
+    var block_size = flac_decode_block_size(bs_code, br);
+    if (is_err(block_size) == 1) { return block_size; }
+    var _frame_sr = flac_decode_sample_rate(sr_code, br, si_rate);
+    if (is_err(_frame_sr) == 1) { return _frame_sr; }
+    var frame_bps = flac_decode_bps(ss_code, si_bps);
+    if (is_err(frame_bps) == 1) { return frame_bps; }
+
+    # CRC-8 over the header
+    flac_br_align(br);
+    var crc8_pos = flac_br_byte_pos(br);
+    var expected_crc8 = bitreader_read(br, 8);
+    if (is_err(expected_crc8) == 1) { return expected_crc8; }
+    if (flac_crc8(data + frame_start, crc8_pos - frame_start) != expected_crc8) { return err(ERR_DECODE); }
+
+    # Channel count and decorrelation mode
+    var ch_count = 0;
+    var decor = FLAC_DECOR_INDEPENDENT;
+    if (ch_assign < FLAC_CH_LEFT_SIDE) {
+        ch_count = ch_assign + 1;
+    } else {
+        ch_count = 2;
+        if (ch_assign == FLAC_CH_LEFT_SIDE) { decor = FLAC_DECOR_LEFT_SIDE; }
+        if (ch_assign == FLAC_CH_RIGHT_SIDE) { decor = FLAC_DECOR_RIGHT_SIDE; }
+        if (ch_assign == FLAC_CH_MID_SIDE) { decor = FLAC_DECOR_MID_SIDE; }
+        if (ch_assign > FLAC_CH_MID_SIDE) { return err(ERR_DECODE); }
+    }
+    if (si_ch > 0) { if (ch_count != si_ch) { return err(ERR_DECODE); } }
+
+    var ch_bufs = _flac_frame_start();
+    var ch = 0;
+    while (ch < ch_count) {
+        var eff_bps = frame_bps;
+        if (decor == FLAC_DECOR_LEFT_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+        if (decor == FLAC_DECOR_RIGHT_SIDE) { if (ch == 0) { eff_bps = frame_bps + 1; } }
+        if (decor == FLAC_DECOR_MID_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
+        var sf_buf = flac_decode_subframe(br, block_size, eff_bps);
+        if (is_err(sf_buf) == 1) { return sf_buf; }
+        store64(ch_bufs + ch * 8, sf_buf);
+        ch = ch + 1;
+    }
+    if (ch_count == 2) {
+        flac_apply_decorrelation(load64(ch_bufs), load64(ch_bufs + 8), block_size, decor);
+    }
+
+    # CRC-16 footer. The last frame of a truncated file may lack it, which a
+    # one-shot decode tolerates; a stream reads _flac_f_crc to tell a complete
+    # frame from one still arriving.
+    flac_br_align(br);
+    var crc16_end = flac_br_byte_pos(br);
+    _flac_f_crc = 0;
+    if (crc16_end + 2 <= len) {
+        var expected_crc16 = bitreader_read(br, 16);
+        if (is_err(expected_crc16) == 1) { return expected_crc16; }
+        if (flac_crc16(data + frame_start, crc16_end - frame_start) != expected_crc16) { return err(ERR_DECODE); }
+        _flac_f_crc = 1;
+    }
+
+    _flac_f_var = blocking;
+    _flac_f_num = num;
+    _flac_f_ch = ch_count;
+    _flac_f_bps = frame_bps;
+    return block_size;
+}
+
+# Append samples [from, to) of the frame _flac_frame just decoded to out,
+# interleaved and scaled by 1 / 2^(bps-1). A presized vec (the one-shot decode
+# sized from STREAMINFO, a stream's per-frame vec) is written in place.
+fn _flac_emit(out, from, to) {
+    var ch_count = _flac_f_ch;
+    var scale = f64_div(F64_ONE, f64_from(1 << (_flac_f_bps - 1)));
+    var need = (to - from) * ch_count;
+    if (need <= 0) { return 0; }
+    var len = load64(out + 8);
+    if (load64(out + 16) - len >= need) {
+        var c = 0;
+        while (c < ch_count) {
+            var src = load64(_flac_chbufs + c * 8);
+            var dst = load64(out) + (len + c) * 8;
+            var step = ch_count * 8;
+            var i = from;
+            while (i < to) {
+                store64(dst, f64_mul(f64_from(load64(src + i * 8)), scale));
+                dst = dst + step;
+                i = i + 1;
+            }
+            c = c + 1;
+        }
+        store64(out + 8, len + need);
+        return 0;
+    }
+    var j = from;
+    while (j < to) {
+        var k = 0;
+        while (k < ch_count) {
+            var ival = load64(load64(_flac_chbufs + k * 8) + j * 8);
+            vec_push(out, f64_mul(f64_from(ival), scale));
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # Main FLAC decoder
 # ================================================================
 
@@ -734,135 +937,41 @@ fn flac_decode(data, len) {
     #  1. STREAMINFO total_samples, when non-zero, is the stream's own
     #     statement of its length. Frames beyond it contradict the header, so
     #     stopping there is correct decoding, not just defence.
-    #  2. When total_samples is 0 ("unknown"), an absolute ceiling. 2^25
-    #     interleaved samples is 256 MB of f64 payload, matching the _ALLOC_MAX
-    #     policy in shravan.cyr — ~6.3 minutes of 44.1 kHz stereo, which covers
-    #     a track. Whole-file decode is the wrong API past that; stream.cyr is.
-    #     (Note the vec's growth-doubling means peak RSS runs ~3x the payload,
-    #     since alloc() never frees, so the ceiling is deliberately not larger.)
-    var flac_max_samples = 33554432;
-    var sample_limit = flac_max_samples;
+    #  2. Otherwise the one-shot ceiling, _shravan_max_samples (2^26 interleaved
+    #     samples by default, settable with shravan_set_max_samples). Past it the
+    #     decode returns ERR_TOO_LARGE; the streaming decoder has no ceiling.
+    var sample_limit = _shravan_max_samples;
+    var declared = 0;
     if (si_total > 0) {
         if (si_ch > 0) {
-            var declared = si_total * si_ch;
-            if (declared > 0) {
-                if (declared < sample_limit) { sample_limit = declared; }
-            }
+            declared = si_total * si_ch;
+            if (declared > sample_limit) { return err(ERR_TOO_LARGE); }
+            if (declared > 0) { sample_limit = declared; }
         }
     }
 
+    # Sized once from STREAMINFO when it states the length (nearly always), so peak
+    # memory is the payload; growth by doubling held two to four times it.
     var all_samples = vec_new();
+    if (declared > 0) {
+        all_samples = _vec_new_cap(declared);
+        if (is_err(all_samples) == 1) { return all_samples; }
+    }
     var br = bitreader_new(data, len);
     flac_br_set_pos(br, audio_start);
 
-    var done = 0;
-    while (done == 0) {
-        var sync_pos = flac_find_sync(br, data, len);
-        if (is_err(sync_pos) == 1) { done = 1; }
-
-        if (done == 0) {
-            var frame_start = sync_pos;
-            # Read sync code second byte to get blocking strategy
-            var sync_byte2 = load8(data + sync_pos + 1);
-            var _blocking = sync_byte2 & 1;
-
-            var bs_code = bitreader_read(br, 4);
-            if (is_err(bs_code) == 1) { return bs_code; }
-            var sr_code = bitreader_read(br, 4);
-            if (is_err(sr_code) == 1) { return sr_code; }
-            var ch_assign = bitreader_read(br, 4);
-            if (is_err(ch_assign) == 1) { return ch_assign; }
-            var ss_code = bitreader_read(br, 3);
-            if (is_err(ss_code) == 1) { return ss_code; }
-            var _reserved = bitreader_read(br, 1);
-            if (is_err(_reserved) == 1) { return _reserved; }
-
-            var _frame_num = flac_br_read_utf8_u64(br);
-            if (is_err(_frame_num) == 1) { return _frame_num; }
-
-            var block_size = flac_decode_block_size(bs_code, br);
-            if (is_err(block_size) == 1) { return block_size; }
-            var _frame_sr = flac_decode_sample_rate(sr_code, br, si_rate);
-            if (is_err(_frame_sr) == 1) { return _frame_sr; }
-            var frame_bps = flac_decode_bps(ss_code, si_bps);
-            if (is_err(frame_bps) == 1) { return frame_bps; }
-
-            # CRC-8 verification
-            flac_br_align(br);
-            var crc8_pos = flac_br_byte_pos(br);
-            var expected_crc8 = bitreader_read(br, 8);
-            if (is_err(expected_crc8) == 1) { return expected_crc8; }
-            var computed_crc8 = flac_crc8(data + frame_start, crc8_pos - frame_start);
-            if (computed_crc8 != expected_crc8) { return err(ERR_DECODE); }
-
-            # Channel count and decorrelation mode
-            var ch_count = 0;
-            var decor = FLAC_DECOR_INDEPENDENT;
-            if (ch_assign < FLAC_CH_LEFT_SIDE) {
-                ch_count = ch_assign + 1;
-            } else {
-                ch_count = 2;
-                if (ch_assign == FLAC_CH_LEFT_SIDE) { decor = FLAC_DECOR_LEFT_SIDE; }
-                if (ch_assign == FLAC_CH_RIGHT_SIDE) { decor = FLAC_DECOR_RIGHT_SIDE; }
-                if (ch_assign == FLAC_CH_MID_SIDE) { decor = FLAC_DECOR_MID_SIDE; }
-                if (ch_assign > FLAC_CH_MID_SIDE) { return err(ERR_DECODE); }
-            }
-
-            # Decode subframes — store pointers in a small buffer
-            var ch_bufs = alloc(ch_count * 8);
-            var ch = 0;
-            while (ch < ch_count) {
-                var eff_bps = frame_bps;
-                if (decor == FLAC_DECOR_LEFT_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
-                if (decor == FLAC_DECOR_RIGHT_SIDE) { if (ch == 0) { eff_bps = frame_bps + 1; } }
-                if (decor == FLAC_DECOR_MID_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
-
-                var sf_buf = flac_decode_subframe(br, block_size, eff_bps);
-                if (is_err(sf_buf) == 1) { return sf_buf; }
-                store64(ch_bufs + ch * 8, sf_buf);
-                ch = ch + 1;
-            }
-
-            # Apply decorrelation
-            if (ch_count == 2) {
-                flac_apply_decorrelation(load64(ch_bufs), load64(ch_bufs + 8), block_size, decor);
-            }
-
-            # Compute scale: 1.0 / (1 << (bps-1))
-            var scale_div = f64_from(1 << (frame_bps - 1));
-            var scale = f64_div(F64_ONE, scale_div);
-
-            # SEC-023: refuse the frame that would breach the limit rather
-            # than truncating, so a caller never receives silently short audio.
-            if (vec_len(all_samples) + block_size * ch_count > sample_limit) {
-                return err(ERR_DECODE);
-            }
-
-            # Interleave and convert to f64
-            var si2 = 0;
-            while (si2 < block_size) {
-                var c = 0;
-                while (c < ch_count) {
-                    var ch_buf = load64(ch_bufs + c * 8);
-                    var ival = load64(ch_buf + si2 * 8);
-                    var fval = f64_mul(f64_from(ival), scale);
-                    vec_push(all_samples, fval);
-                    c = c + 1;
-                }
-                si2 = si2 + 1;
-            }
-
-            # CRC-16 verification
-            flac_br_align(br);
-            var crc16_end = flac_br_byte_pos(br);
-            if (crc16_end + 2 <= len) {
-                var expected_crc16 = bitreader_read(br, 16);
-                if (is_err(expected_crc16) == 1) { return expected_crc16; }
-                var computed_crc16 = flac_crc16(data + frame_start, crc16_end - frame_start);
-                if (computed_crc16 != expected_crc16) { return err(ERR_DECODE); }
-            }
+    var bs = _flac_frame(br, data, len, si_rate, si_bps, si_ch);
+    while (bs > 0) {
+        # SEC-023: refuse the frame that would breach the limit rather
+        # than truncating, so a caller never receives silently short audio.
+        if (vec_len(all_samples) + bs * _flac_f_ch > sample_limit) {
+            if (sample_limit == declared) { return err(ERR_DECODE); }   # contradicts STREAMINFO
+            return err(ERR_TOO_LARGE);
         }
+        _flac_emit(all_samples, 0, bs);
+        bs = _flac_frame(br, data, len, si_rate, si_bps, si_ch);
     }
+    if (is_err(bs) == 1) { return bs; }
 
     # Build FormatInfo
     var total_interleaved = vec_len(all_samples);
@@ -882,9 +991,11 @@ fn flac_decode_range(data, len, start_sample, num_samples) {
     var si = flac_parse_metadata(data, len);
     if (is_err(si) == 1) { return si; }
 
+    var si_max_bs = load64(si + 8);
     var si_rate = load64(si + 16);
     var si_ch   = load64(si + 24);
     var si_bps  = load64(si + 32);
+    var si_total = load64(si + 40);
     var audio_start = load64(si + 48);
     var seek_table  = load64(si + 56);
 
@@ -929,136 +1040,56 @@ fn flac_decode_range(data, len, start_sample, num_samples) {
         }
     }
 
+    # Sized from STREAMINFO when it states the length; the one-shot ceiling
+    # applies to the range as it does to a whole-file decode.
     var all_samples = vec_new();
+    if (si_total > 0) {
+        var want = si_total - start_sample;
+        if (has_end == 1) { if (num_samples < want) { want = num_samples; } }
+        if (want > 0) {
+            if (want > _shravan_max_samples / si_ch) { return err(ERR_TOO_LARGE); }
+            all_samples = _vec_new_cap(want * si_ch);
+            if (is_err(all_samples) == 1) { return all_samples; }
+        }
+    }
+
     var br = bitreader_new(data, len);
     flac_br_set_pos(br, start_byte);
 
+    # The first frame decoded fixes the position: a fixed-blocksize frame header
+    # carries its frame number, which counts STREAMINFO-size blocks (only the last
+    # block may be shorter), and a variable-blocksize one carries its first sample.
     var current_sample = 0;
-    var sample_pos_known = 0;
-    if (start_sample == 0) { sample_pos_known = 1; }
+    var known = 0;
+    if (start_sample == 0) { known = 1; }
 
     var done = 0;
     while (done == 0) {
-        var sync_pos = flac_find_sync(br, data, len);
-        if (is_err(sync_pos) == 1) { done = 1; }
-
+        if (known == 1) { if (has_end == 1) { if (current_sample >= end_sample) { done = 1; } } }
         if (done == 0) {
-            var frame_start = sync_pos;
-            var sync_byte2 = load8(data + sync_pos + 1);
-            var blocking_strategy = sync_byte2 & 1;
-
-            var bs_code = bitreader_read(br, 4);
-            if (is_err(bs_code) == 1) { return bs_code; }
-            var sr_code = bitreader_read(br, 4);
-            if (is_err(sr_code) == 1) { return sr_code; }
-            var ch_assign = bitreader_read(br, 4);
-            if (is_err(ch_assign) == 1) { return ch_assign; }
-            var ss_code = bitreader_read(br, 3);
-            if (is_err(ss_code) == 1) { return ss_code; }
-            var _reserved = bitreader_read(br, 1);
-            if (is_err(_reserved) == 1) { return _reserved; }
-
-            var frame_or_sample = flac_br_read_utf8_u64(br);
-            if (is_err(frame_or_sample) == 1) { return frame_or_sample; }
-
-            var block_size = flac_decode_block_size(bs_code, br);
-            if (is_err(block_size) == 1) { return block_size; }
-            var _frame_sr = flac_decode_sample_rate(sr_code, br, si_rate);
-            if (is_err(_frame_sr) == 1) { return _frame_sr; }
-            var frame_bps = flac_decode_bps(ss_code, si_bps);
-            if (is_err(frame_bps) == 1) { return frame_bps; }
-
-            flac_br_align(br);
-            var crc8_pos = flac_br_byte_pos(br);
-            var expected_crc8 = bitreader_read(br, 8);
-            if (is_err(expected_crc8) == 1) { return expected_crc8; }
-            var computed_crc8 = flac_crc8(data + frame_start, crc8_pos - frame_start);
-            if (computed_crc8 != expected_crc8) { return err(ERR_DECODE); }
-
-            if (sample_pos_known == 0) {
-                if (blocking_strategy == 0) {
-                    current_sample = frame_or_sample * block_size;
-                } else {
-                    current_sample = frame_or_sample;
-                }
-                sample_pos_known = 1;
-            }
-
-            var frame_end_sample = current_sample + block_size;
-
-            if (has_end == 1) {
-                if (current_sample >= end_sample) { done = 1; }
-            }
-
+            var bs = _flac_frame(br, data, len, si_rate, si_bps, si_ch);
+            if (bs == 0) { done = 1; }
             if (done == 0) {
-                var ch_count = 0;
-                var decor = FLAC_DECOR_INDEPENDENT;
-                if (ch_assign < FLAC_CH_LEFT_SIDE) {
-                    ch_count = ch_assign + 1;
-                } else {
-                    ch_count = 2;
-                    if (ch_assign == FLAC_CH_LEFT_SIDE) { decor = FLAC_DECOR_LEFT_SIDE; }
-                    if (ch_assign == FLAC_CH_RIGHT_SIDE) { decor = FLAC_DECOR_RIGHT_SIDE; }
-                    if (ch_assign == FLAC_CH_MID_SIDE) { decor = FLAC_DECOR_MID_SIDE; }
-                    if (ch_assign > FLAC_CH_MID_SIDE) { return err(ERR_DECODE); }
+                if (is_err(bs) == 1) { return bs; }
+                if (known == 0) {
+                    current_sample = _flac_f_num;
+                    if (_flac_f_var == 0) { current_sample = _flac_f_num * si_max_bs; }
+                    known = 1;
+                    if (has_end == 1) { if (current_sample >= end_sample) { done = 1; } }
                 }
-
-                var ch_bufs = alloc(ch_count * 8);
-                var ch = 0;
-                while (ch < ch_count) {
-                    var eff_bps = frame_bps;
-                    if (decor == FLAC_DECOR_LEFT_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
-                    if (decor == FLAC_DECOR_RIGHT_SIDE) { if (ch == 0) { eff_bps = frame_bps + 1; } }
-                    if (decor == FLAC_DECOR_MID_SIDE) { if (ch == 1) { eff_bps = frame_bps + 1; } }
-
-                    var sf_buf = flac_decode_subframe(br, block_size, eff_bps);
-                    if (is_err(sf_buf) == 1) { return sf_buf; }
-                    store64(ch_bufs + ch * 8, sf_buf);
-                    ch = ch + 1;
-                }
-
-                if (ch_count == 2) {
-                    flac_apply_decorrelation(load64(ch_bufs), load64(ch_bufs + 8), block_size, decor);
-                }
-
-                var scale_div = f64_from(1 << (frame_bps - 1));
-                var scale = f64_div(F64_ONE, scale_div);
-
-                var skip_start = 0;
-                if (current_sample < start_sample) {
-                    skip_start = start_sample - current_sample;
-                }
-                var take_end = block_size;
-                if (has_end == 1) {
-                    if (frame_end_sample > end_sample) {
-                        take_end = end_sample - current_sample;
+            }
+            if (done == 0) {
+                var skip = 0;
+                if (current_sample < start_sample) { skip = start_sample - current_sample; }
+                var take = bs;
+                if (has_end == 1) { if (current_sample + bs > end_sample) { take = end_sample - current_sample; } }
+                if (take > skip) {
+                    if (vec_len(all_samples) + (take - skip) * _flac_f_ch > _shravan_max_samples) {
+                        return err(ERR_TOO_LARGE);
                     }
+                    _flac_emit(all_samples, skip, take);
                 }
-                if (take_end > block_size) { take_end = block_size; }
-
-                var si2 = skip_start;
-                while (si2 < take_end) {
-                    var c = 0;
-                    while (c < ch_count) {
-                        var ch_buf = load64(ch_bufs + c * 8);
-                        var ival = load64(ch_buf + si2 * 8);
-                        var fval = f64_mul(f64_from(ival), scale);
-                        vec_push(all_samples, fval);
-                        c = c + 1;
-                    }
-                    si2 = si2 + 1;
-                }
-
-                flac_br_align(br);
-                var crc16_end = flac_br_byte_pos(br);
-                if (crc16_end + 2 <= len) {
-                    var expected_crc16 = bitreader_read(br, 16);
-                    if (is_err(expected_crc16) == 1) { return expected_crc16; }
-                    var computed_crc16 = flac_crc16(data + frame_start, crc16_end - frame_start);
-                    if (computed_crc16 != expected_crc16) { return err(ERR_DECODE); }
-                }
-
-                current_sample = frame_end_sample;
+                current_sample = current_sample + bs;
             }
         }
     }
@@ -1181,39 +1212,39 @@ fn flac_bw_write_utf8_u64(bw, value) {
     if (value < 0x80) {
         flac_bw_write_bits(bw, value, 8);
     } else { if (value < 0x800) {
-        flac_bw_write_bits(bw, 0xC0 | (value >> 6), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } else { if (value < 0x10000) {
-        flac_bw_write_bits(bw, 0xE0 | (value >> 12), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } else { if (value < 0x200000) {
-        flac_bw_write_bits(bw, 0xF0 | (value >> 18), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } else { if (value < 0x4000000) {
-        flac_bw_write_bits(bw, 0xF8 | (value >> 24), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } else { if (value < 0x80000000) {
-        flac_bw_write_bits(bw, 0xFC | (value >> 30), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } else {
-        flac_bw_write_bits(bw, 0xFE, 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 30) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
-        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
-    } } } } } }
+            flac_bw_write_bits(bw, 0xC0 | (value >> 6), 8);
+            flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+        } else { if (value < 0x10000) {
+                flac_bw_write_bits(bw, 0xE0 | (value >> 12), 8);
+                flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+                flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+            } else { if (value < 0x200000) {
+                    flac_bw_write_bits(bw, 0xF0 | (value >> 18), 8);
+                    flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+                    flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+                    flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+                } else { if (value < 0x4000000) {
+                        flac_bw_write_bits(bw, 0xF8 | (value >> 24), 8);
+                        flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+                        flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+                        flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+                        flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+                    } else { if (value < 0x80000000) {
+                            flac_bw_write_bits(bw, 0xFC | (value >> 30), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+                        } else {
+                            flac_bw_write_bits(bw, 0xFE, 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 30) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 24) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 18) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 12) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | ((value >> 6) & 0x3F), 8);
+                            flac_bw_write_bits(bw, 0x80 | (value & 0x3F), 8);
+                        } } } } } }
     return 0;
 }
 
@@ -1551,6 +1582,7 @@ fn u32_rotl(val, n) {
 # Compute MD5 digest. data: pointer, dlen: byte length.
 # Returns pointer to 16-byte digest buffer.
 fn flac_md5_compute(data, dlen) {
+    if (flac_md5_s == 0) { flac_md5_init(); }
     var orig_bits = dlen * 8;
 
     # Build padded message
@@ -1601,15 +1633,15 @@ fn flac_md5_compute(data, dlen) {
                 f = (b & c) | (u32_not(b) & d);
                 g = i;
             } else { if (i < 32) {
-                f = (d & b) | (u32_not(d) & c);
-                g = (5 * i + 1) % 16;
-            } else { if (i < 48) {
-                f = b ^ c ^ d;
-                g = (3 * i + 5) % 16;
-            } else {
-                f = c ^ (b | u32_not(d));
-                g = (7 * i) % 16;
-            } } }
+                    f = (d & b) | (u32_not(d) & c);
+                    g = (5 * i + 1) % 16;
+                } else { if (i < 48) {
+                        f = b ^ c ^ d;
+                        g = (3 * i + 5) % 16;
+                    } else {
+                        f = c ^ (b | u32_not(d));
+                        g = (7 * i) % 16;
+                    } } }
             f = f & 0xFFFFFFFF;
 
             var temp = d;
@@ -1762,9 +1794,10 @@ fn flac_encode(samples_vec, sample_rate, channels, bits_per_sample, out_buf) {
     var total_frames = total_interleaved / ch;
     var bps = bits_per_sample;
 
-    # Scale factor: (1 << (bps-1)) - 1
-    var scale_max = (1 << (bps - 1)) - 1;
-    var f64_scale = f64_from(scale_max);
+    # The shared PCM quantiser: 2^(bps-1), rounded and clamped (_pcm_quant).
+    var q_hi = (1 << (bps - 1)) - 1;
+    var q_lo = 0 - (1 << (bps - 1));
+    var f64_scale = f64_from(1 << (bps - 1));
 
     # Convert f64 samples -> i64 at target bit depth, deinterleave
     var ch_bufs = alloc(ch * 8);
@@ -1778,9 +1811,7 @@ fn flac_encode(samples_vec, sample_rate, channels, bits_per_sample, out_buf) {
     while (fi < total_frames) {
         c = 0;
         while (c < ch) {
-            var fval = vec_get(samples_vec, fi * ch + c);
-            var clamped = f64_clamp(fval, F64_NEG_ONE, F64_ONE);
-            var ival = f64_to(f64_mul(clamped, f64_scale));
+            var ival = _pcm_quant(vec_get(samples_vec, fi * ch + c), f64_scale, q_lo, q_hi);
             var cb = load64(ch_bufs + c * 8);
             store64(cb + fi * 8, ival);
             c = c + 1;
@@ -2183,12 +2214,12 @@ fn test_flac_encode_decode_sine() {
         if (phase < quarter) {
             val = f64_div(f64_from(phase), f64_from(quarter));
         } else { if (phase < quarter * 2) {
-            val = f64_div(f64_from(quarter * 2 - phase), f64_from(quarter));
-        } else { if (phase < quarter * 3) {
-            val = f64_neg(f64_div(f64_from(phase - quarter * 2), f64_from(quarter)));
-        } else {
-            val = f64_neg(f64_div(f64_from(num_samples - phase), f64_from(quarter)));
-        } } }
+                val = f64_div(f64_from(quarter * 2 - phase), f64_from(quarter));
+            } else { if (phase < quarter * 3) {
+                    val = f64_neg(f64_div(f64_from(phase - quarter * 2), f64_from(quarter)));
+                } else {
+                    val = f64_neg(f64_div(f64_from(num_samples - phase), f64_from(quarter)));
+                } } }
         # Scale to 0.9 to avoid clipping edge
         val = f64_mul(val, f64_div(f64_from(9), f64_from(10)));
         vec_push(samples, val);

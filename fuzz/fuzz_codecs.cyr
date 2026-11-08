@@ -58,8 +58,10 @@ fn shravan_init_constants() {
 enum ShravanErr {
     ERR_NONE = 0; ERR_UNSUPPORTED_FMT = 1; ERR_INVALID_HEADER = 2;
     ERR_DECODE = 3; ERR_ENCODE = 4; ERR_END_OF_STREAM = 5;
-    ERR_INVALID_RATE = 6; ERR_INVALID_CHANNELS = 7;
+    ERR_INVALID_RATE = 6; ERR_INVALID_CHANNELS = 7; ERR_TOO_LARGE = 8;
 }
+# The one-shot ceiling (src/shravan.cyr), which flac.cyr and mp3.cyr consult.
+var _shravan_max_samples = 67108864;
 fn err(code) { return 0 - code; }
 # is_err comes from the stdlib (syscalls via io) — byte-identical. res_ok is
 # shravan's packed-Result check (result.cyr's is_ok is for tagged Results).
@@ -86,6 +88,18 @@ fn read_u32_be(data, off) { return (load8(data+off)<<24) | (load8(data+off+1)<<1
 fn write_u32_be(buf, off, val) { store8(buf+off, (val>>24) & 0xFF); store8(buf+off+1, (val>>16) & 0xFF); store8(buf+off+2, (val>>8) & 0xFF); store8(buf+off+3, val & 0xFF); return 0; }
 fn sign_extend(val, bits) { var half = 1 << (bits - 1); if (val >= half) { return val - (1 << bits); } return val; }
 fn f64_clamp_sample(x) { return f64_clamp(x, F64_NEG_ONE, F64_ONE); }
+# Arithmetic right shift (src/opus.cyr), which flac.cyr uses.
+fn sar(x, n) {
+    if (x >= 0) { return x >> n; }
+    var nx = 0 - x - 1;
+    return 0 - (nx >> n) - 1;
+}
+fn _pcm_quant(x, scale, lo, hi) {
+    var v = f64_to(f64_round(f64_mul(f64_clamp_sample(x), scale)));
+    if (v > hi) { v = hi; }
+    if (v < lo) { v = lo; }
+    return v;
+}
 fn _vec_new_cap(n) { var v = alloc(24); var data = alloc(n * 8); store64(v, data); store64(v + 8, 0); store64(v + 16, n); return v; }
 # FormatInfo / decode_result accessors (mirror src/main.cyr) — referenced by the included codec modules
 fn fmtinfo_format(fi)       { return load64(fi); }

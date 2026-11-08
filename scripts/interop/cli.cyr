@@ -1,0 +1,361 @@
+# scripts/interop/cli.cyr -- command-line access to shravan for the interop sweep.
+#
+# scripts/interop.py drives this against ffmpeg, flac, lame and libopus. It is a
+# dev tool, not part of the library or the [lib] bundle. Build from the repo root:
+#
+#     cyrius build scripts/interop/cli.cyr build/interop-cli
+#
+# Commands (sample files are raw little-endian f64, interleaved):
+#   decode  <in> <out.f64>                         codec_open; prints "rate ch bits fmt n"
+#   stream  <wav|flac|aiff> <in> <out.f64> <chunk> feed <chunk> bytes at a time
+#   encode  <in.f64> <kind> <rate> <ch> <arg> <out> kind: wav (arg = bits), wavf32,
+#                                                  wavf64, aiff (bits), flac (bits),
+#                                                  aac (arg = bit rate)
+#   opusdec <in.pk> <channels> <out.f64>           raw Opus packets, each prefixed by
+#                                                  a u32le length; no pre-skip
+#   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
+#   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
+#   id3     <in>                                   ID3v2 title
+#   mem     <in>                                   codec_open, then print the sample
+#                                                  count and bytes allocated (bump
+#                                                  allocator high water)
+#
+# Exit status: 0 success, 3 shravan returned an error (printed as "ERR <code>"),
+# 2 usage or I/O error.
+
+include "src/shravan.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
+include "src/opus.cyr"
+include "src/silk.cyr"
+include "src/aac.cyr"
+include "src/mp4.cyr"
+include "src/resample.cyr"
+include "src/dither.cyr"
+include "src/simd.cyr"
+include "src/stream.cyr"
+include "src/serde.cyr"
+
+fn _cli_read(path, out_len) {
+    var fd = syscall(2, path, 0, 0);
+    if (fd < 0) { return 0; }
+    var size = syscall(8, fd, 0, 2);
+    syscall(8, fd, 0, 0);
+    var buf = alloc(size + 1);
+    if (buf == 0) { syscall(3, fd); return 0; }
+    var got = 0;
+    while (got < size) {
+        var r = syscall(0, fd, buf + got, size - got);
+        if (r <= 0) { break; }
+        got = got + r;
+    }
+    syscall(3, fd);
+    store64(out_len, got);
+    return buf;
+}
+
+fn _cli_write(path, buf, n) {
+    var fd = syscall(2, path, 0x241, 420);
+    if (fd < 0) { return -1; }
+    var put = 0;
+    while (put < n) {
+        var w = syscall(1, fd, buf + put, n - put);
+        if (w <= 0) { break; }
+        put = put + w;
+    }
+    syscall(3, fd);
+    return put;
+}
+
+fn _cli_int(v) {
+    var neg = 0;
+    if (v < 0) { neg = 1; v = 0 - v; }
+    var b = alloc(32);
+    var p = 31;
+    store8(b + p, 32);
+    if (v == 0) { p = p - 1; store8(b + p, 48); }
+    while (v > 0) { p = p - 1; store8(b + p, 48 + (v % 10)); v = v / 10; }
+    if (neg == 1) { p = p - 1; store8(b + p, 45); }
+    syscall(1, 1, b + p, 32 - p);
+    return 0;
+}
+
+fn _cli_nl() { syscall(1, 1, "\n", 1); return 0; }
+
+fn _cli_fail(r) {
+    syscall(1, 1, "ERR ", 4);
+    _cli_int(0 - r);
+    _cli_nl();
+    syscall(60, 3);
+    return 0;
+}
+
+fn _cli_usage() {
+    syscall(1, 2, "usage: interop-cli <decode|stream|encode|opusdec|celtenc|verify|id3|mem> ...\n", 77);
+    syscall(60, 2);
+    return 0;
+}
+
+fn _cli_load(path, lenp) {
+    var d = _cli_read(path, lenp);
+    if (d == 0) {
+        syscall(1, 2, "cannot read input\n", 18);
+        syscall(60, 2);
+    }
+    return d;
+}
+
+# Write a vec of f64 samples as raw little-endian doubles.
+fn _cli_write_vec(path, v) {
+    var n = vec_len(v);
+    var o = alloc(n * 8 + 8);
+    for (var i = 0; i < n; i = i + 1) { store64(o + i * 8, vec_get(v, i)); }
+    _cli_write(path, o, n * 8);
+    return n;
+}
+
+fn _cli_read_vec(path) {
+    var lenp = alloc(8);
+    var d = _cli_load(path, lenp);
+    var n = load64(lenp) / 8;
+    var v = vec_new();
+    for (var i = 0; i < n; i = i + 1) { vec_push(v, load64(d + i * 8)); }
+    return v;
+}
+
+fn _cli_decode() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var r = codec_open(d, load64(lenp));
+    if (is_err(r) == 1) { _cli_fail(r); }
+    var fi = decode_result_info(r);
+    var sm = decode_result_samples(r);
+    _cli_int(fmtinfo_sample_rate(fi));
+    _cli_int(fmtinfo_channels(fi));
+    _cli_int(fmtinfo_bit_depth(fi));
+    _cli_int(fmtinfo_format(fi));
+    _cli_int(vec_len(sm));
+    _cli_nl();
+    _cli_write_vec(argv(3), sm);
+    return 0;
+}
+
+fn _cli_stream() {
+    var kind = argv(2);
+    var lenp = alloc(8);
+    var d = _cli_load(argv(3), lenp);
+    var len = load64(lenp);
+    var chunk = atoi(argv(5));
+    if (chunk < 1) { chunk = 4096; }
+    var dec = 0;
+    var k = 0;
+    if (streq(kind, "wav") == 1) { dec = wav_stream_new(4096); k = 1; }
+    if (streq(kind, "flac") == 1) { dec = flac_stream_new(); k = 2; }
+    if (streq(kind, "aiff") == 1) { dec = aiff_stream_new(4096); k = 3; }
+    if (k == 0) { _cli_usage(); }
+    var out = vec_new();
+    var rate = 0;
+    var ch = 0;
+    var pos = 0;
+    var done = 0;
+    while (done == 0) {
+        var evs = 0;
+        if (pos < len) {
+            var take = chunk;
+            if (pos + take > len) { take = len - pos; }
+            if (k == 1) { evs = wav_stream_feed(dec, d + pos, take); }
+            if (k == 2) { evs = flac_stream_feed(dec, d + pos, take); }
+            if (k == 3) { evs = aiff_stream_feed(dec, d + pos, take); }
+            pos = pos + take;
+        } else {
+            if (k == 1) { evs = wav_stream_flush(dec); }
+            if (k == 2) { evs = flac_stream_flush(dec); }
+            if (k == 3) { evs = aiff_stream_flush(dec); }
+            done = 1;
+        }
+        var ne = vec_len(evs);
+        for (var e = 0; e < ne; e = e + 1) {
+            var ev = vec_get(evs, e);
+            var t = stream_evt_type(ev);
+            if (t == STREAM_EVT_HEADER) {
+                var fi = stream_evt_data(ev);
+                rate = fmtinfo_sample_rate(fi);
+                ch = fmtinfo_channels(fi);
+            }
+            if (t == STREAM_EVT_SAMPLES) {
+                var sv = stream_evt_data(ev);
+                var ns = vec_len(sv);
+                for (var j = 0; j < ns; j = j + 1) { vec_push(out, vec_get(sv, j)); }
+            }
+        }
+    }
+    _cli_int(rate);
+    _cli_int(ch);
+    _cli_int(vec_len(out));
+    _cli_nl();
+    _cli_write_vec(argv(4), out);
+    return 0;
+}
+
+fn _cli_encode() {
+    var v = _cli_read_vec(argv(2));
+    var kind = argv(3);
+    var rate = atoi(argv(4));
+    var ch = atoi(argv(5));
+    var arg = atoi(argv(6));
+    var n = vec_len(v);
+    var o = alloc(n * 16 + 65536);
+    var w = err(ERR_UNSUPPORTED_FMT);
+    if (streq(kind, "wav") == 1) {
+        var pf = PCM_I16;
+        if (arg == 8) { pf = PCM_I8; }
+        if (arg == 24) { pf = PCM_I24; }
+        if (arg == 32) { pf = PCM_I32; }
+        w = wav_encode(v, rate, ch, pf, o);
+    }
+    if (streq(kind, "wavf32") == 1) { w = wav_encode(v, rate, ch, PCM_F32, o); }
+    if (streq(kind, "wavf64") == 1) { w = wav_encode(v, rate, ch, PCM_F64, o); }
+    if (streq(kind, "aiff") == 1) { w = aiff_encode(v, rate, ch, arg, o); }
+    if (streq(kind, "flac") == 1) { w = flac_encode(v, rate, ch, arg, o); }
+    if (streq(kind, "aac") == 1) { w = aac_encode(v, rate, ch, arg, o); }
+    if (is_err(w) == 1) { _cli_fail(w); }
+    _cli_write(argv(7), o, w);
+    _cli_int(w);
+    _cli_nl();
+    return 0;
+}
+
+# Wrap raw packets in the vec shape opus_decode_from_packets takes: an OpusHead
+# with pre-skip 0 and an empty OpusTags first, so the output lines up sample for
+# sample with libopus's decode of the same packets.
+fn _cli_opusdec() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var len = load64(lenp);
+    var ch = atoi(argv(3));
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, ch);
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var pk = vec_new();
+    vec_push(pk, str_from_buf(head, 19));
+    vec_push(pk, str_from_buf(tags, 16));
+    var pos = 0;
+    while (pos + 4 <= len) {
+        var n = read_u32_le(d, pos);
+        pos = pos + 4;
+        if (pos + n > len) { break; }
+        vec_push(pk, str_from_buf(d + pos, n));
+        pos = pos + n;
+    }
+    var r = opus_decode_from_packets(pk, 0, 0);
+    if (is_err(r) == 1) { _cli_fail(r); }
+    var sm = decode_result_samples(r);
+    _cli_int(vec_len(pk) - 2);
+    _cli_int(vec_len(sm));
+    _cli_nl();
+    _cli_write_vec(argv(4), sm);
+    return 0;
+}
+
+# Encode 20 ms CELT-only frames (TOC config 31, fullband). celt_encode reads the
+# frame plus 120 samples of lookahead, so frame k covers input [960k, 960k + 1080).
+fn _cli_celtenc() {
+    var v = _cli_read_vec(argv(2));
+    var ch = atoi(argv(3));
+    var nbytes = atoi(argv(4));
+    var total = vec_len(v) / ch;
+    var frames = (total - 120) / 960;
+    if (frames < 1) { _cli_usage(); }
+    var st = celt_dec_state_new();
+    var mem = alloc(16);
+    store64(mem, 0);
+    store64(mem + 8, 0);
+    var pcm = alloc(ch * 1080 * 8);
+    var out = alloc(frames * (nbytes + 5) + 8);
+    var op = 0;
+    var buf = alloc(nbytes);
+    for (var f = 0; f < frames; f = f + 1) {
+        for (var i = 0; i < 1080 * ch; i = i + 1) {
+            store64(pcm + i * 8, vec_get(v, f * 960 * ch + i));
+        }
+        memset(buf, 0, nbytes);
+        var ec = ec_enc_new(buf, nbytes);
+        celt_encode(st, ec, pcm, ch, 3, 0, -1, mem);
+        ec_enc_done(ec);
+        if (load64(ec + 88) != 0) { _cli_fail(err(ERR_ENCODE)); }
+        write_u32_le(out, op, nbytes + 1);
+        var toc = 31 << 3;
+        if (ch == 2) { toc = toc | 4; }
+        store8(out + op + 4, toc);
+        memcpy(out + op + 5, buf, nbytes);
+        op = op + nbytes + 5;
+    }
+    _cli_write(argv(5), out, op);
+    _cli_int(frames);
+    _cli_nl();
+    return 0;
+}
+
+fn _cli_verify() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var r = flac_verify(d, load64(lenp));
+    if (is_err(r) == 1) { _cli_fail(r); }
+    _cli_int(r);
+    _cli_nl();
+    return 0;
+}
+
+fn _cli_mem() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var before = alloc_used();
+    var r = codec_open(d, load64(lenp));
+    if (is_err(r) == 1) { _cli_fail(r); }
+    var n = vec_len(decode_result_samples(r));
+    _cli_int(n);
+    _cli_int(alloc_used() - before);
+    _cli_int((alloc_used() - before) / (n * 8 + 1));
+    _cli_nl();
+    return 0;
+}
+
+fn _cli_id3() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var m = tag_read_id3v2(d, load64(lenp));
+    if (is_err(m) == 1) { _cli_fail(m); }
+    var t = tag_meta_title(m);
+    if (t != 0) { syscall(1, 1, str_data(t), str_len(t)); }
+    _cli_nl();
+    return 0;
+}
+
+# Only what the documented consumer contract requires (docs/architecture/overview.md):
+# every codec must initialise its own tables, and this tool is how that is checked.
+alloc_init();
+shravan_init_constants();
+args_init();
+
+if (argc() < 3) { _cli_usage(); }
+var cmd = argv(1);
+var known = 0;
+if (streq(cmd, "decode") == 1) { known = 1; _cli_decode(); }
+if (streq(cmd, "stream") == 1) { known = 1; _cli_stream(); }
+if (streq(cmd, "encode") == 1) { known = 1; _cli_encode(); }
+if (streq(cmd, "opusdec") == 1) { known = 1; _cli_opusdec(); }
+if (streq(cmd, "celtenc") == 1) { known = 1; _cli_celtenc(); }
+if (streq(cmd, "verify") == 1) { known = 1; _cli_verify(); }
+if (streq(cmd, "id3") == 1) { known = 1; _cli_id3(); }
+if (streq(cmd, "mem") == 1) { known = 1; _cli_mem(); }
+if (known == 0) { _cli_usage(); }
+syscall(60, 0);

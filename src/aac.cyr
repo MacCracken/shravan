@@ -114,8 +114,8 @@ fn aac_parse_adts_header(data, len) {
 
     # Frame length: 13 bits spanning bytes 3-5
     var frame_length = ((load8(data + 3) & 0x03) << 11)
-                     | (load8(data + 4) << 3)
-                     | ((load8(data + 5) >> 5) & 0x07);
+    | (load8(data + 4) << 3)
+    | ((load8(data + 5) >> 5) & 0x07);
 
     if (frame_length < 7) { return err(ERR_INVALID_HEADER); }
 
@@ -134,6 +134,8 @@ fn aac_parse_adts_header(data, len) {
 
 # Find sample rate index for a given rate.
 fn _aac_find_sr_index(sample_rate) {
+    # Lazy: mp4_decode builds ADTS headers before aac_decode has run its own init.
+    if (_aac_sample_rates == 0) { aac_init(); }
     var i = 0;
     while (i < 13) {
         if (load64(_aac_sample_rates + i * 8) == sample_rate) {
@@ -142,6 +144,17 @@ fn _aac_find_sr_index(sample_rate) {
         i = i + 1;
     }
     return 4;  # default to 44100
+}
+
+# The ADTS sampling-frequency index of a rate, or -1 if it has none.
+fn _aac_sr_index_exact(sample_rate) {
+    if (_aac_sample_rates == 0) { aac_init(); }
+    var i = 0;
+    while (i < 13) {
+        if (load64(_aac_sample_rates + i * 8) == sample_rate) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
 }
 
 # Build a 7-byte ADTS header into out_buf.
@@ -525,7 +538,7 @@ fn _tns_filter(spec, start, end, a, order, direction, is_synth) {
     var n = end - start;
     if (direction == 0) {
         if (is_synth == 0) {
-            var x0 = alloc(n * 8);
+            var x0 = _aac_tmp(n * 8);
             var t = 0;
             while (t < n) { store64(x0 + t * 8, load64(spec + (start + t) * 8)); t = t + 1; }
             var i = start;
@@ -558,7 +571,7 @@ fn _tns_filter(spec, start, end, a, order, direction, is_synth) {
         }
     } else {
         if (is_synth == 0) {
-            var x0 = alloc(n * 8);
+            var x0 = _aac_tmp(n * 8);
             var t = 0;
             while (t < n) { store64(x0 + t * 8, load64(spec + (start + t) * 8)); t = t + 1; }
             var i = end - 1;
@@ -660,8 +673,8 @@ fn _tns_decode_apply(spec, st) {
     if (max_sfb < limit) { limit = max_sfb; }
     if (num_swb < limit) { limit = num_swb; }
 
-    var kbuf = alloc((TNS_MAX_ORDER + 1) * 8);
-    var abuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    var kbuf = _aac_tmp((TNS_MAX_ORDER + 1) * 8);
+    var abuf = _aac_tmp((TNS_MAX_ORDER + 1) * 8);
     var cur_w = 0 - 1;
     var bottom = 0;
     var r = 0;
@@ -693,7 +706,7 @@ fn _tns_decode_apply(spec, st) {
             var base = spec;
             if (is_short == 1) { base = spec + w * AAC_SHORT_SIZE * 8; }
             _tns_filter(base, load64(tbl + lo * 8), load64(tbl + hi * 8), abuf, order,
-                        load64(rec + TNS_REC_DIR), 1);
+              load64(rec + TNS_REC_DIR), 1);
         }
     }
     return 0;
@@ -707,14 +720,14 @@ fn _tns_synth_apply(spec, st) {
     var order = load64(st + TNS_ST_ORDER);
     if (order <= 0) { return 0; }
     var resbits = load64(st + TNS_ST_RESBITS);
-    var kbuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    var kbuf = _aac_tmp((TNS_MAX_ORDER + 1) * 8);
     memset(kbuf, 0, (TNS_MAX_ORDER + 1) * 8);
     var i = 1;
     while (i <= order) {
         store64(kbuf + i * 8, _tns_dequant_coef(load64(st + TNS_ST_COEF + (i - 1) * 8), resbits));
         i = i + 1;
     }
-    var abuf = alloc((TNS_MAX_ORDER + 1) * 8);
+    var abuf = _aac_tmp((TNS_MAX_ORDER + 1) * 8);
     _tns_parcor_to_lpc(kbuf, order, abuf);
     _tns_filter(spec, load64(st + TNS_ST_START), load64(st + TNS_ST_END), abuf, order, load64(st + TNS_ST_DIR), 1);
     return 0;
@@ -970,9 +983,9 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     i = 0;
     while (i < windowed_size) {
         var angle = f64_div(
-            f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
-            f64_from(windowed_size)
-        );
+          f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
+          f64_from(windowed_size)
+          );
         var w = f64_sin(angle);
         store64(windowed + i * 8, f64_mul(load64(mono + i * 8), w));
         i = i + 1;
@@ -989,7 +1002,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
     var _mi = 0;
     while (_mi < AAC_FRAME_SIZE) {
         store64(mdct_out + _mi * 8,
-                f64_mul(load64(mdct_out + _mi * 8), _AAC_MDCT_DENORM));
+          f64_mul(load64(mdct_out + _mi * 8), _AAC_MDCT_DENORM));
         _mi = _mi + 1;
     }
 
@@ -1011,7 +1024,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         var si2 = 0;
         while (si2 < windowed_size) {
             var ang2 = f64_div(f64_mul(F64_PI, f64_add(f64_from(si2), F64_HALF)),
-                               f64_from(windowed_size));
+              f64_from(windowed_size));
             store64(swin + si2 * 8, f64_mul(load64(side + si2 * 8), f64_sin(ang2)));
             si2 = si2 + 1;
         }
@@ -1019,7 +1032,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
         var sj = 0;
         while (sj < AAC_FRAME_SIZE) {
             store64(side_mdct + sj * 8,
-                    f64_mul(load64(side_mdct + sj * 8), _AAC_MDCT_DENORM));
+              f64_mul(load64(side_mdct + sj * 8), _AAC_MDCT_DENORM));
             sj = sj + 1;
         }
 
@@ -1410,7 +1423,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                     if (ndiff > 60) { ndiff = 60; }
                     var nidx = ndiff + 60;
                     _bw_write(bw, load64(_aac_scf_codes + nidx * 8),
-                                  load64(_aac_scf_lens + nidx * 8));
+                      load64(_aac_scf_lens + nidx * 8));
                     noise_prev = noise_prev + ndiff;
                 }
             } else {
@@ -1471,93 +1484,93 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
 
         # Codebooks 3-4: unsigned quads (4 values + sign bits, 81 entries)
         if (cb >= 3) { if (cb <= 4) {
-            while (i + 3 < end) {
-                var w = load64(quant_spec + i * 8);
-                var x = load64(quant_spec + (i+1) * 8);
-                var y = load64(quant_spec + (i+2) * 8);
-                var z = load64(quant_spec + (i+3) * 8);
-                var aw = w; if (aw < 0) { aw = 0 - aw; }
-                var ax = x; if (ax < 0) { ax = 0 - ax; }
-                var ay = y; if (ay < 0) { ay = 0 - ay; }
-                var az = z; if (az < 0) { az = 0 - az; }
-                var idx = aw*27 + ax*9 + ay*3 + az;
-                if (idx > 80) { idx = 0; }
-                var nbits = load64(_aac_hcb3_lens + idx * 8);
-                var code = load64(_aac_hcb3_codes + idx * 8);
-                _bw_write(bw, code, nbits);
-                if (aw > 0) { if (w < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                if (ax > 0) { if (x < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                if (ay > 0) { if (y < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                if (az > 0) { if (z < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                i = i + 4;
-            }
-        }}
+                while (i + 3 < end) {
+                    var w = load64(quant_spec + i * 8);
+                    var x = load64(quant_spec + (i+1) * 8);
+                    var y = load64(quant_spec + (i+2) * 8);
+                    var z = load64(quant_spec + (i+3) * 8);
+                    var aw = w; if (aw < 0) { aw = 0 - aw; }
+                    var ax = x; if (ax < 0) { ax = 0 - ax; }
+                    var ay = y; if (ay < 0) { ay = 0 - ay; }
+                    var az = z; if (az < 0) { az = 0 - az; }
+                    var idx = aw*27 + ax*9 + ay*3 + az;
+                    if (idx > 80) { idx = 0; }
+                    var nbits = load64(_aac_hcb3_lens + idx * 8);
+                    var code = load64(_aac_hcb3_codes + idx * 8);
+                    _bw_write(bw, code, nbits);
+                    if (aw > 0) { if (w < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    if (ax > 0) { if (x < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    if (ay > 0) { if (y < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    if (az > 0) { if (z < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    i = i + 4;
+                }
+            }}
 
         # Codebooks 5-6: signed pairs (81 entries, values -4..4)
         if (cb >= 5) { if (cb <= 6) {
-            while (i + 1 < end) {
-                var qx = load64(quant_spec + i * 8);
-                var qy = load64(quant_spec + (i+1) * 8);
-                var idx = (qx+4)*9 + (qy+4);
-                if (idx < 0) { idx = 40; }
-                if (idx > 80) { idx = 40; }
-                # HCB5 and HCB6 span the same values but with different
-                # codewords, so the table must follow `cb`. This branch always
-                # wrote HCB5's codes, which meant a cb-6 band was written with
-                # the wrong codebook entirely.
-                var sp_lens = _aac_hcb5_lens;
-                var sp_codes = _aac_hcb5_codes;
-                if (cb == 6) { sp_lens = _aac_hcb6_lens; sp_codes = _aac_hcb6_codes; }
-                var nbits = load64(sp_lens + idx * 8);
-                var code = load64(sp_codes + idx * 8);
-                _bw_write(bw, code, nbits);
-                i = i + 2;
-            }
-        }}
+                while (i + 1 < end) {
+                    var qx = load64(quant_spec + i * 8);
+                    var qy = load64(quant_spec + (i+1) * 8);
+                    var idx = (qx+4)*9 + (qy+4);
+                    if (idx < 0) { idx = 40; }
+                    if (idx > 80) { idx = 40; }
+                    # HCB5 and HCB6 span the same values but with different
+                    # codewords, so the table must follow `cb`. This branch always
+                    # wrote HCB5's codes, which meant a cb-6 band was written with
+                    # the wrong codebook entirely.
+                    var sp_lens = _aac_hcb5_lens;
+                    var sp_codes = _aac_hcb5_codes;
+                    if (cb == 6) { sp_lens = _aac_hcb6_lens; sp_codes = _aac_hcb6_codes; }
+                    var nbits = load64(sp_lens + idx * 8);
+                    var code = load64(sp_codes + idx * 8);
+                    _bw_write(bw, code, nbits);
+                    i = i + 2;
+                }
+            }}
 
         # Codebooks 7-8: unsigned pairs (64 entries, values 0..7 + sign)
         if (cb >= 7) { if (cb <= 8) {
-            var hcb_lens = _aac_hcb7_lens;
-            var hcb_codes = _aac_hcb7_codes;
-            if (cb == 8) { hcb_lens = _aac_hcb8_lens; hcb_codes = _aac_hcb8_codes; }
-            while (i + 1 < end) {
-                var qx = load64(quant_spec + i * 8);
-                var qy = load64(quant_spec + (i+1) * 8);
-                var ax = qx; if (ax < 0) { ax = 0 - ax; }
-                var ay = qy; if (ay < 0) { ay = 0 - ay; }
-                if (ax > 7) { ax = 7; }
-                if (ay > 7) { ay = 7; }
-                var idx = ax * 8 + ay;
-                var nbits = load64(hcb_lens + idx * 8);
-                var code = load64(hcb_codes + idx * 8);
-                _bw_write(bw, code, nbits);
-                if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                i = i + 2;
-            }
-        }}
+                var hcb_lens = _aac_hcb7_lens;
+                var hcb_codes = _aac_hcb7_codes;
+                if (cb == 8) { hcb_lens = _aac_hcb8_lens; hcb_codes = _aac_hcb8_codes; }
+                while (i + 1 < end) {
+                    var qx = load64(quant_spec + i * 8);
+                    var qy = load64(quant_spec + (i+1) * 8);
+                    var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                    var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                    if (ax > 7) { ax = 7; }
+                    if (ay > 7) { ay = 7; }
+                    var idx = ax * 8 + ay;
+                    var nbits = load64(hcb_lens + idx * 8);
+                    var code = load64(hcb_codes + idx * 8);
+                    _bw_write(bw, code, nbits);
+                    if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    i = i + 2;
+                }
+            }}
 
         # Codebooks 9-10: unsigned pairs (169 entries, values 0..12 + sign)
         if (cb >= 9) { if (cb <= 10) {
-            var hcb_lens = _aac_hcb9_lens;
-            var hcb_codes = _aac_hcb9_codes;
-            if (cb == 10) { hcb_lens = _aac_hcb10_lens; hcb_codes = _aac_hcb10_codes; }
-            while (i + 1 < end) {
-                var qx = load64(quant_spec + i * 8);
-                var qy = load64(quant_spec + (i+1) * 8);
-                var ax = qx; if (ax < 0) { ax = 0 - ax; }
-                var ay = qy; if (ay < 0) { ay = 0 - ay; }
-                if (ax > 12) { ax = 12; }
-                if (ay > 12) { ay = 12; }
-                var idx = ax * 13 + ay;
-                var nbits = load64(hcb_lens + idx * 8);
-                var code = load64(hcb_codes + idx * 8);
-                _bw_write(bw, code, nbits);
-                if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
-                i = i + 2;
-            }
-        }}
+                var hcb_lens = _aac_hcb9_lens;
+                var hcb_codes = _aac_hcb9_codes;
+                if (cb == 10) { hcb_lens = _aac_hcb10_lens; hcb_codes = _aac_hcb10_codes; }
+                while (i + 1 < end) {
+                    var qx = load64(quant_spec + i * 8);
+                    var qy = load64(quant_spec + (i+1) * 8);
+                    var ax = qx; if (ax < 0) { ax = 0 - ax; }
+                    var ay = qy; if (ay < 0) { ay = 0 - ay; }
+                    if (ax > 12) { ax = 12; }
+                    if (ay > 12) { ay = 12; }
+                    var idx = ax * 13 + ay;
+                    var nbits = load64(hcb_lens + idx * 8);
+                    var code = load64(hcb_codes + idx * 8);
+                    _bw_write(bw, code, nbits);
+                    if (ax > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    if (ay > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
+                    i = i + 2;
+                }
+            }}
 
         # Codebook 11: escape pairs (17x17, 9-bit index + sign + escape)
         if (cb == 11) {
@@ -1574,7 +1587,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                 # shravan itself, and capped at magnitude 271.
                 var eidx = cx * 17 + cy;
                 _bw_write(bw, load64(_aac_hcb11_codes + eidx * 8),
-                              load64(_aac_hcb11_lens + eidx * 8));
+                  load64(_aac_hcb11_lens + eidx * 8));
                 if (cx > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
                 if (cy > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
                 if (ax >= 16) { _aac_write_escape(bw, ax); }
@@ -1728,7 +1741,7 @@ fn _aac_encode_frame(samples, channels, target_bytes) {
                 # shravan itself, and capped at magnitude 271.
                 var eidx = cx * 17 + cy;
                 _bw_write(bw, load64(_aac_hcb11_codes + eidx * 8),
-                              load64(_aac_hcb11_lens + eidx * 8));
+                  load64(_aac_hcb11_lens + eidx * 8));
                 if (cx > 0) { if (qx < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
                 if (cy > 0) { if (qy < 0) { _bw_write(bw, 1, 1); } else { _bw_write(bw, 0, 1); } }
                 if (ax >= 16) { _aac_write_escape(bw, ax); }
@@ -1878,8 +1891,31 @@ fn aac_encode_vbr(samples_vec, sample_rate, channels, quality, out_buf) {
 # MSB-first bit reader for AAC bitstream
 # ================================================================
 
+# ---- per-frame scratch ----
+# alloc() never frees, and a decoded frame allocated its scratch (section and
+# scalefactor tables, spectra, IMDCT and TNS buffers, the bit reader) afresh: a
+# decode allocated eight times its output, so a file at the one-shot ceiling
+# would have needed about 4 GB. aac_decode now brackets each frame with a growable
+# arena that is reset between frames; outside a decode (the encoder, unit tests)
+# _aac_tmp is plain alloc(). Tables built lazily on first use stay on the heap.
+var _aac_arena = 0;
+var _aac_in_frame = 0;
+
+fn _aac_frame_begin() {
+    if (_aac_arena == 0) { _aac_arena = arena_new_growable(262144); }
+    if (_aac_arena != 0) { arena_reset(_aac_arena); _aac_in_frame = 1; }
+    return 0;
+}
+
+fn _aac_frame_end() { _aac_in_frame = 0; return 0; }
+
+fn _aac_tmp(size) {
+    if (_aac_in_frame == 1) { return arena_alloc(_aac_arena, size); }
+    return alloc(size);
+}
+
 fn _br_new(data, len) {
-    var br = alloc(24);
+    var br = _aac_tmp(24);
     store64(br, data);
     store64(br + 8, len * 8);
     store64(br + 16, 0);
@@ -3037,7 +3073,7 @@ fn _aac_parse_ics_info(br, out_info) {
 
 # section_data() + scale_factor_data() for ONE channel, ISO Table 4.44.
 fn _aac_parse_sections_sf(br, sect_cb, scale_factors, max_sfb, num_groups,
-                          is_short, global_gain) {
+  is_short, global_gain) {
     # Section coding. section_data() and scale_factor_data() both run PER WINDOW
     # GROUP, so sect_cb and scale_factors are group-major: index g*num_swb + band.
     # (A long frame is simply the single-group case.)
@@ -3141,7 +3177,7 @@ fn _aac_parse_ics(br, sect_cb, scale_factors, out_info) {
     var is_short = 0;
     if (load64(out_info) == 2) { is_short = 1; }
     return _aac_parse_sections_sf(br, sect_cb, scale_factors, max_sfb,
-                                  load64(out_info + 8), is_short, global_gain);
+      load64(out_info + 8), is_short, global_gain);
 }
 
 # is_short selects the scalefactor-band table. A short frame's bands are the
@@ -3193,13 +3229,13 @@ fn _aac_write_escape(bw, val) {
 # writing into quant_spec at `base + i`. `base` is the window offset: 0 for a
 # long block, w * AAC_SHORT_SIZE for window w of a short block.
 fn _aac_decode_band_range(br, cb, quant_spec, base, bstart, bend) {
-    var pair_buf = alloc(16);
+    var pair_buf = _aac_tmp(16);
     var i = bstart;
 
     # Codebooks 1-4: 4-tuple codebooks (decode 4 values at a time)
     if (cb >= 1) {
         if (cb <= 4) {
-            var quad_buf = alloc(32);
+            var quad_buf = _aac_tmp(32);
             while (i + 3 < bend) {
                 if (_br_bits_left(br) < 2) { i = bend; }
                 if (i + 3 < bend) {
@@ -3282,7 +3318,7 @@ fn _aac_decode_band_range(br, cb, quant_spec, base, bstart, bend) {
             if (_br_bits_left(br) < 4) { i = bend; }
             if (i + 1 < bend) {
                 var pair_idx = _aac_huff_decode_lut(br, _aac_hcb11_lut,
-                                                    _aac_hcb11_sorted, 289);
+                  _aac_hcb11_sorted, 289);
                 if (is_err(pair_idx) == 1) { i = bend; }
                 if (is_err(pair_idx) == 0) {
                     var cx = pair_idx / 17;
@@ -3369,8 +3405,8 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec, is_short, num_groups, 
                 while (w < glen) {
                     if (win_base + w < 8) {
                         _aac_decode_band_range(br, cb, quant_spec,
-                                               (win_base + w) * AAC_SHORT_SIZE,
-                                               bstart, bend);
+                          (win_base + w) * AAC_SHORT_SIZE,
+                          bstart, bend);
                     }
                     w = w + 1;
                 }
@@ -3383,6 +3419,53 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec, is_short, num_groups, 
     return 0;
 }
 
+# ---- inverse quantiser tables ----
+# x = sign(q) * |q|^(4/3) * 2^((sf - 100)/4). Both factors came from f64_pow per
+# coefficient, which made dequantisation most of an AAC decode. |q| is at most
+# 8191 (an escape codes 13 bits) and a scalefactor 0..255, so both are tables,
+# built once from the same expressions and therefore bit-identical; anything
+# outside them (only a malformed stream) still takes f64_pow.
+var _aac_pow43_tab = 0;     # [8192] i^(4/3)
+var _aac_step_tab = 0;      # [256]  2^((sf - 100)/4)
+
+fn _aac_dequant_tables() {
+    var f43 = f64_div(f64_from(4), f64_from(3));
+    var f025 = f64_div(F64_ONE, f64_from(4));
+    var t = alloc(8192 * 8);
+    var i = 0;
+    while (i < 8192) {
+        store64(t + i * 8, f64_pow(f64_from(i), f43));
+        i = i + 1;
+    }
+    var st = alloc(256 * 8);
+    i = 0;
+    while (i < 256) {
+        store64(st + i * 8, f64_pow(F64_TWO, f64_mul(f025, f64_sub(f64_from(i), f64_from(100)))));
+        i = i + 1;
+    }
+    _aac_step_tab = st;
+    _aac_pow43_tab = t;
+    return 0;
+}
+
+fn _aac_pow43(aq) {
+    if (aq < 8192) {
+        if (_aac_pow43_tab == 0) { _aac_dequant_tables(); }
+        return load64(_aac_pow43_tab + aq * 8);
+    }
+    return f64_pow(f64_from(aq), f64_div(f64_from(4), f64_from(3)));
+}
+
+fn _aac_step(scf) {
+    if (scf >= 0) {
+        if (scf < 256) {
+            if (_aac_step_tab == 0) { _aac_dequant_tables(); }
+            return load64(_aac_step_tab + scf * 8);
+        }
+    }
+    return f64_pow(F64_TWO, f64_mul(f64_div(F64_ONE, f64_from(4)), f64_sub(f64_from(scf), f64_from(100))));
+}
+
 # Short window synthesis: 8 x MDCT-256 + overlap-add
 # num_groups/group_lens map each of the eight windows to its scalefactor group;
 # scale_factors is group-major. Applying group 0's gains to all eight windows
@@ -3390,8 +3473,6 @@ fn _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec, is_short, num_groups, 
 # Inverse quantiser for a SHORT block: eight 128-coefficient windows, with each
 # window taking ITS window group's scalefactors.
 fn _aac_dequant_short(scale_factors, quant_spec, spec, num_groups, group_lens) {
-    var f43 = f64_div(f64_from(4), f64_from(3));
-    var f025 = f64_div(F64_ONE, f64_from(4));
     if (num_groups < 1) { num_groups = 1; }
     var band = 0;
     while (band < _AAC_NUM_SWB_SHORT) {
@@ -3404,7 +3485,7 @@ fn _aac_dequant_short(scale_factors, quant_spec, spec, num_groups, group_lens) {
             if (group_lens != 0) { glen = load64(group_lens + g * 8); }
             if (glen < 1) { glen = 1; }
             var scf = load64(scale_factors + (g * _AAC_NUM_SWB_SHORT + band) * 8);
-            var step = f64_pow(F64_TWO, f64_mul(f025, f64_sub(f64_from(scf), f64_from(100))));
+            var step = _aac_step(scf);
             var gw = 0;
             while (gw < glen) {
                 if (w < 8) {
@@ -3415,7 +3496,7 @@ fn _aac_dequant_short(scale_factors, quant_spec, spec, num_groups, group_lens) {
                         if (q != 0) {
                             var aq = q;
                             if (aq < 0) { aq = 0 - aq; }
-                            var val = f64_mul(f64_pow(f64_from(aq), f43), step);
+                            var val = f64_mul(_aac_pow43(aq), step);
                             if (q < 0) { val = f64_neg(val); }
                             store64(spec + (woff + i) * 8, val);
                         }
@@ -3444,7 +3525,7 @@ fn _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape) {
     #   * the window shape was hardcoded to sine, ignoring window_shape.
     #   * the second half was discarded (`memset(overlap, 0, ...)`), so the tail
     #     that must overlap the NEXT frame was thrown away, corrupting it too.
-    var full = alloc(2048 * 8);
+    var full = _aac_tmp(2048 * 8);
     memset(full, 0, 2048 * 8);
     var base = (AAC_FRAME_SIZE - AAC_SHORT_SIZE) / 2;      # 448
 
@@ -3454,7 +3535,7 @@ fn _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape) {
     var w = 0;
     while (w < 8) {
         var mdct_in = spec + w * AAC_SHORT_SIZE * 8;
-        var mdct_out = alloc(256 * 8);
+        var mdct_out = _aac_tmp(256 * 8);
         memset(mdct_out, 0, 256 * 8);
         fft_imdct(mdct_in, 256, mdct_out);
 
@@ -3478,7 +3559,7 @@ fn _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape) {
             var idx = out_off + j;
             if (idx < 2048) {
                 store64(full + idx * 8,
-                        f64_add(load64(full + idx * 8), load64(mdct_out + j * 8)));
+                  f64_add(load64(full + idx * 8), load64(mdct_out + j * 8)));
             }
             j = j + 1;
         }
@@ -3488,8 +3569,8 @@ fn _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape) {
     var i = 0;
     while (i < AAC_FRAME_SIZE) {
         store64(out_samples + i * 8,
-                f64_mul(f64_add(load64(overlap + i * 8), load64(full + i * 8)),
-                        _AAC_IMDCT_NORM));
+          f64_mul(f64_add(load64(overlap + i * 8), load64(full + i * 8)),
+            _AAC_IMDCT_NORM));
         i = i + 1;
     }
     i = 0;
@@ -3501,8 +3582,8 @@ fn _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape) {
 }
 
 fn _aac_synth_short(scale_factors, quant_spec, overlap, out_samples,
-                    num_groups, group_lens, shape, prev_shape) {
-    var spec = alloc(AAC_FRAME_SIZE * 8);
+  num_groups, group_lens, shape, prev_shape) {
+    var spec = _aac_tmp(AAC_FRAME_SIZE * 8);
     memset(spec, 0, AAC_FRAME_SIZE * 8);
     _aac_dequant_short(scale_factors, quant_spec, spec, num_groups, group_lens);
     return _aac_synth_short_spec(spec, overlap, out_samples, shape, prev_shape);
@@ -3596,7 +3677,7 @@ fn _aac_build_sine(n) {
     var i = 0;
     while (i < n) {
         var angle = f64_div(f64_mul(F64_PI, f64_add(f64_from(i), F64_HALF)),
-                            f64_from(2 * n));
+          f64_from(2 * n));
         store64(tbl + i * 8, f64_sin(angle));
         i = i + 1;
     }
@@ -3683,12 +3764,12 @@ fn _aac_pns_fill(spec, base, bstart, bend, scf) {
     # 4/8/16 — i.e. the -100 offset does not apply here (the -90 noise offset
     # already carries it) and there is a further factor of two.
     var target = f64_pow(F64_TWO, f64_sub(f64_mul(f64_div(F64_ONE, f64_from(4)),
-                                                  f64_from(scf)), F64_ONE));
+          f64_from(scf)), F64_ONE));
     var gain = f64_mul(target, f64_div(f64_sqrt(f64_from(n)), f64_sqrt(energy)));
     i = bstart;
     while (i < bend) {
         store64(spec + (base + i) * 8,
-                f64_mul(load64(spec + (base + i) * 8), gain));
+          f64_mul(load64(spec + (base + i) * 8), gain));
         i = i + 1;
     }
     return 0;
@@ -3756,7 +3837,7 @@ fn _aac_apply_ms(spec_l, spec_r, base, bstart, bend) {
 # the sense again.
 fn _aac_apply_intensity(spec_l, spec_r, base, bstart, bend, is_pos, cb, ms_used) {
     var scale = f64_pow(F64_HALF, f64_mul(f64_div(F64_ONE, f64_from(4)),
-                                          f64_from(is_pos)));
+        f64_from(is_pos)));
     var neg = 0;
     if (cb == 14) { neg = 1; }
     if (ms_used == 1) { neg = 1 - neg; }
@@ -3764,7 +3845,7 @@ fn _aac_apply_intensity(spec_l, spec_r, base, bstart, bend, is_pos, cb, ms_used)
     var i = bstart;
     while (i < bend) {
         store64(spec_r + (base + i) * 8,
-                f64_mul(load64(spec_l + (base + i) * 8), scale));
+          f64_mul(load64(spec_l + (base + i) * 8), scale));
         i = i + 1;
     }
     return 0;
@@ -3776,21 +3857,19 @@ fn _aac_apply_intensity(spec_l, spec_r, base, bstart, bend, is_pos, cb, ms_used)
 # applying M/S to the time-domain output only happens to work when EVERY band is
 # M/S coded, and is simply wrong for a per-band mask.
 fn _aac_dequant_long(scale_factors, quant_spec, spec) {
-    var f43 = f64_div(f64_from(4), f64_from(3));
-    var f025 = f64_div(F64_ONE, f64_from(4));
     var band = 0;
     while (band < _AAC_NUM_SWB) {
         var bstart = load64(_aac_swb_offset + band * 8);
         var bend = load64(_aac_swb_offset + (band + 1) * 8);
         var scf = load64(scale_factors + band * 8);
-        var step = f64_pow(F64_TWO, f64_mul(f025, f64_sub(f64_from(scf), f64_from(100))));
+        var step = _aac_step(scf);
         var i = bstart;
         while (i < bend) {
             var q = load64(quant_spec + i * 8);
             if (q != 0) {
                 var aq = q;
                 if (aq < 0) { aq = 0 - aq; }
-                var val = f64_mul(f64_pow(f64_from(aq), f43), step);
+                var val = f64_mul(_aac_pow43(aq), step);
                 if (q < 0) { val = f64_neg(val); }
                 store64(spec + i * 8, val);
             }
@@ -3806,7 +3885,7 @@ fn _aac_synth_spec(spec, overlap, out_samples, tns_st, shape, prev_shape, win_se
     # TNS synthesis (all-pole IIR) on the dequantized spectrum before the IMDCT.
     _tns_synth_apply(spec, tns_st);
 
-    var mdct_out = alloc(2048 * 8);
+    var mdct_out = _aac_tmp(2048 * 8);
     memset(mdct_out, 0, 2048 * 8);
     fft_imdct(spec, 2048, mdct_out);
 
@@ -3849,8 +3928,8 @@ fn _aac_synth_spec(spec, overlap, out_samples, tns_st, shape, prev_shape, win_se
     i = 0;
     while (i < AAC_FRAME_SIZE) {
         store64(out_samples + i * 8,
-                f64_mul(f64_add(load64(overlap + i * 8), load64(mdct_out + i * 8)),
-                        _AAC_IMDCT_NORM));
+          f64_mul(f64_add(load64(overlap + i * 8), load64(mdct_out + i * 8)),
+            _AAC_IMDCT_NORM));
         i = i + 1;
     }
     i = 0;
@@ -3862,19 +3941,19 @@ fn _aac_synth_spec(spec, overlap, out_samples, tns_st, shape, prev_shape, win_se
 }
 
 fn _aac_synth_shaped(scale_factors, quant_spec, overlap, out_samples, tns_st,
-                     shape, prev_shape, win_seq) {
-    var spec = alloc(AAC_FRAME_SIZE * 8);
+  shape, prev_shape, win_seq) {
+    var spec = _aac_tmp(AAC_FRAME_SIZE * 8);
     memset(spec, 0, AAC_FRAME_SIZE * 8);
     _aac_dequant_long(scale_factors, quant_spec, spec);
     return _aac_synth_spec(spec, overlap, out_samples, tns_st,
-                           shape, prev_shape, win_seq);
+      shape, prev_shape, win_seq);
 }
 
 # Backwards-compatible wrapper: sine window on both halves (shravan's own
 # encoder emits window_shape = 0).
 fn _aac_synth(scale_factors, quant_spec, overlap, out_samples, tns_st) {
     return _aac_synth_shaped(scale_factors, quant_spec, overlap, out_samples,
-                             tns_st, 0, 0, 0);
+      tns_st, 0, 0, 0);
 }
 
 # Decode a single channel element (SCE) or channel pair element (CPE).
@@ -3944,7 +4023,7 @@ fn _aac_pns_channel(spec, sect_cb, sf, max_sfb, n_groups, group_lens, is_short) 
                     var wb = 0;
                     if (is_short == 1) { wb = (wbase + w) * AAC_SHORT_SIZE; }
                     _aac_pns_fill(spec, wb, load64(tbl + bnd * 8), load64(tbl + (bnd + 1) * 8),
-                                  load64(sf + (g * cnt + bnd) * 8));
+                      load64(sf + (g * cnt + bnd) * 8));
                     w = w + 1;
                 }
             }
@@ -4005,15 +4084,15 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         if (is_err(instance) == 1) { return instance; }
 
         # Room for 8 window groups: section and scalefactor data are group-major.
-        var sect_cb = alloc(8 * _AAC_NUM_SWB * 8);
+        var sect_cb = _aac_tmp(8 * _AAC_NUM_SWB * 8);
         memset(sect_cb, 0, 8 * _AAC_NUM_SWB * 8);
-        var scale_factors = alloc(8 * _AAC_NUM_SWB * 8);
+        var scale_factors = _aac_tmp(8 * _AAC_NUM_SWB * 8);
         memset(scale_factors, 0, 8 * _AAC_NUM_SWB * 8);
 
         # 128 bytes: window_seq(+0), num_groups(+8), group lengths(+16..+79),
         # window_shape(+88), max_sfb(+96). A 96-byte buffer overflowed on the
         # last field.
-        var ics_info = alloc(128);
+        var ics_info = _aac_tmp(128);
         memset(ics_info, 0, 128);
         var max_sfb = _aac_parse_ics(br, sect_cb, scale_factors, ics_info);
         if (is_err(max_sfb) == 1) { return max_sfb; }
@@ -4025,16 +4104,16 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         # (n_filt 2/6/5 bits vs 1/4/3, and eight windows instead of one), so
         # passing a hardcoded 0 here read a short frame's TNS with long-window
         # widths and desynchronised the rest of the frame.
-        var tns_st = alloc(TNS_ST_SIZE);
+        var tns_st = _aac_tmp(TNS_ST_SIZE);
         memset(tns_st, 0, TNS_ST_SIZE);
         var text = _aac_parse_ics_ext(br, is_short, max_sfb, tns_st);
         if (is_err(text) == 1) { return text; }
 
-        var quant_spec = alloc(AAC_FRAME_SIZE * 8);
+        var quant_spec = _aac_tmp(AAC_FRAME_SIZE * 8);
         memset(quant_spec, 0, AAC_FRAME_SIZE * 8);
         var n_groups = load64(ics_info + 8);
         _aac_decode_spectral(br, sect_cb, max_sfb, quant_spec, is_short,
-                             n_groups, ics_info + 16);
+          n_groups, ics_info + 16);
 
         # window_shape is per frame, and the IMDCT's first half overlaps the
         # PREVIOUS frame — so its shape is needed too. Carry it in the slot just
@@ -4047,7 +4126,7 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         # Dequantise, then substitute noise for any PNS band, then synthesise.
         # PNS bands carry no spectrum at all — only a coded energy — so without
         # this they decoded as silence.
-        var spec_m = alloc(AAC_FRAME_SIZE * 8);
+        var spec_m = _aac_tmp(AAC_FRAME_SIZE * 8);
         memset(spec_m, 0, AAC_FRAME_SIZE * 8);
         if (is_short == 1) {
             _aac_dequant_short(scale_factors, quant_spec, spec_m, n_groups, ics_info + 16);
@@ -4076,7 +4155,7 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
                         var base_m = (wb_m + wm) * AAC_SHORT_SIZE;
                         if (is_short == 0) { base_m = 0; }
                         _aac_pns_fill(spec_m, base_m, bs_m, be_m,
-                                      load64(scale_factors + (gm * swbn_m + bm) * 8));
+                          load64(scale_factors + (gm * swbn_m + bm) * 8));
                         wm = wm + 1;
                     }
                 }
@@ -4089,12 +4168,12 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         if (is_short == 1) {
             _tns_synth_apply(spec_m, tns_st);
             var rcs = _aac_synth_short_spec(spec_m, overlap, out_samples,
-                                            cur_shape, prev_shape);
+              cur_shape, prev_shape);
             if (is_err(rcs) == 1) { return rcs; }
             return 1;
         }
         var rc = _aac_synth_spec(spec_m, overlap, out_samples,
-                                 tns_st, cur_shape, prev_shape, load64(ics_info));
+          tns_st, cur_shape, prev_shape, load64(ics_info));
         if (is_err(rc) == 1) { return rc; }
         return 1;
     }
@@ -4117,11 +4196,11 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         var common_window = _br_read(br, 1);
         if (is_err(common_window) == 1) { return common_window; }
 
-        var info0 = alloc(128); memset(info0, 0, 128);
-        var info1 = alloc(128); memset(info1, 0, 128);
+        var info0 = _aac_tmp(128); memset(info0, 0, 128);
+        var info1 = _aac_tmp(128); memset(info1, 0, 128);
         var ms_mask_present = 0;
         # Mask is per (group, band): 8 groups x the long band count is plenty.
-        var ms_mask = alloc(8 * _AAC_NUM_SWB * 8);
+        var ms_mask = _aac_tmp(8 * _AAC_NUM_SWB * 8);
         memset(ms_mask, 0, 8 * _AAC_NUM_SWB * 8);
 
         var shared_max_sfb = 0;
@@ -4156,14 +4235,14 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
             while (ci < 128) { store8(info1 + ci, load8(info0 + ci)); ci = ci + 1; }
         }
 
-        var sect_cb0 = alloc(8 * _AAC_NUM_SWB * 8); memset(sect_cb0, 0, 8 * _AAC_NUM_SWB * 8);
-        var sf0 = alloc(8 * _AAC_NUM_SWB * 8);      memset(sf0, 0, 8 * _AAC_NUM_SWB * 8);
-        var sect_cb1 = alloc(8 * _AAC_NUM_SWB * 8); memset(sect_cb1, 0, 8 * _AAC_NUM_SWB * 8);
-        var sf1 = alloc(8 * _AAC_NUM_SWB * 8);      memset(sf1, 0, 8 * _AAC_NUM_SWB * 8);
-        var tns0 = alloc(TNS_ST_SIZE); memset(tns0, 0, TNS_ST_SIZE);
-        var tns1 = alloc(TNS_ST_SIZE); memset(tns1, 0, TNS_ST_SIZE);
-        var qs0 = alloc(AAC_FRAME_SIZE * 8); memset(qs0, 0, AAC_FRAME_SIZE * 8);
-        var qs1 = alloc(AAC_FRAME_SIZE * 8); memset(qs1, 0, AAC_FRAME_SIZE * 8);
+        var sect_cb0 = _aac_tmp(8 * _AAC_NUM_SWB * 8); memset(sect_cb0, 0, 8 * _AAC_NUM_SWB * 8);
+        var sf0 = _aac_tmp(8 * _AAC_NUM_SWB * 8);      memset(sf0, 0, 8 * _AAC_NUM_SWB * 8);
+        var sect_cb1 = _aac_tmp(8 * _AAC_NUM_SWB * 8); memset(sect_cb1, 0, 8 * _AAC_NUM_SWB * 8);
+        var sf1 = _aac_tmp(8 * _AAC_NUM_SWB * 8);      memset(sf1, 0, 8 * _AAC_NUM_SWB * 8);
+        var tns0 = _aac_tmp(TNS_ST_SIZE); memset(tns0, 0, TNS_ST_SIZE);
+        var tns1 = _aac_tmp(TNS_ST_SIZE); memset(tns1, 0, TNS_ST_SIZE);
+        var qs0 = _aac_tmp(AAC_FRAME_SIZE * 8); memset(qs0, 0, AAC_FRAME_SIZE * 8);
+        var qs1 = _aac_tmp(AAC_FRAME_SIZE * 8); memset(qs1, 0, AAC_FRAME_SIZE * 8);
 
         # --- channel 0: individual_channel_stream(common_window, 0) ---
         var gg0 = _br_read(br, 8);
@@ -4201,8 +4280,8 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
         _aac_decode_spectral(br, sect_cb1, msfb1, qs1, is_short1, n_groups1, info1 + 16);
 
         # --- dequantise, then run the stereo tools in the SPECTRAL domain ---
-        var spec0 = alloc(AAC_FRAME_SIZE * 8); memset(spec0, 0, AAC_FRAME_SIZE * 8);
-        var spec1 = alloc(AAC_FRAME_SIZE * 8); memset(spec1, 0, AAC_FRAME_SIZE * 8);
+        var spec0 = _aac_tmp(AAC_FRAME_SIZE * 8); memset(spec0, 0, AAC_FRAME_SIZE * 8);
+        var spec1 = _aac_tmp(AAC_FRAME_SIZE * 8); memset(spec1, 0, AAC_FRAME_SIZE * 8);
         if (is_short == 1) { _aac_dequant_short(sf0, qs0, spec0, n_groups, info0 + 16); }
         else { _aac_dequant_long(sf0, qs0, spec0); }
         if (is_short1 == 1) { _aac_dequant_short(sf1, qs1, spec1, n_groups1, info1 + 16); }
@@ -4244,18 +4323,18 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
                     # PNS: a noise band carries no spectrum, only an energy.
                     if (cb_l == 13) {
                         _aac_pns_fill(spec0, wb, bs, be,
-                                      load64(sf0 + (gi2 * swb_cnt + bnd) * 8));
+                          load64(sf0 + (gi2 * swb_cnt + bnd) * 8));
                     }
                     if (cb_r == 13) {
                         _aac_pns_fill(spec1, wb, bs, be,
-                                      load64(sf1 + (gi2 * swb_cnt + bnd) * 8));
+                          load64(sf1 + (gi2 * swb_cnt + bnd) * 8));
                     }
                     # Intensity: the right band is derived from the left.
                     if (cb_r >= 14) {
                         if (cb_r <= 15) {
                             _aac_apply_intensity(spec0, spec1, wb, bs, be,
-                                                 load64(sf1 + (gi2 * swb_cnt + bnd) * 8),
-                                                 cb_r, msu);
+                              load64(sf1 + (gi2 * swb_cnt + bnd) * 8),
+                              cb_r, msu);
                         }
                     } else {
                         if (msu == 1) { _aac_apply_ms(spec0, spec1, wb, bs, be); }
@@ -4270,8 +4349,8 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
 
         var overlap_l = overlap;
         var overlap_r = overlap + AAC_FRAME_SIZE * 8;
-        var out_l = alloc(AAC_FRAME_SIZE * 8);
-        var out_r = alloc(AAC_FRAME_SIZE * 8);
+        var out_l = _aac_tmp(AAC_FRAME_SIZE * 8);
+        var out_r = _aac_tmp(AAC_FRAME_SIZE * 8);
 
         # Each channel has its own window shape, and overlaps with its own previous
         # one. info1 is a copy of info0 when the window is common.
@@ -4288,14 +4367,14 @@ fn _aac_decode_frame(fdata, flen, overlap, out_samples) {
             _aac_synth_short_spec(spec0, overlap_l, out_l, cur_shape_l, prev_shape_l);
         } else {
             _aac_synth_spec(spec0, overlap_l, out_l, tns0, cur_shape_l, prev_shape_l,
-                            load64(info0));
+              load64(info0));
         }
         if (is_short1 == 1) {
             _tns_synth_apply(spec1, tns1);
             _aac_synth_short_spec(spec1, overlap_r, out_r, cur_shape_r, prev_shape_r);
         } else {
             _aac_synth_spec(spec1, overlap_r, out_r, tns1, cur_shape_r, prev_shape_r,
-                            load64(info1));
+              load64(info1));
         }
 
         var i = 0;
@@ -4365,8 +4444,12 @@ fn aac_decode(data, len) {
         }
 
         frame_count = frame_count + 1;
-        # SEC-011: cap frame count to prevent unbounded allocation
-        if (frame_count > 65536) { break; }
+        # SEC-011: bounded by the one-shot sample ceiling. It used to stop counting
+        # at 65536 frames, which cut anything longer than about 25 minutes short
+        # with success; now a file over the ceiling is refused.
+        if (frame_count * AAC_FRAME_SIZE * aac_adts_channels(first_header) > _shravan_max_samples) {
+            return err(ERR_TOO_LARGE);
+        }
         pos = pos + frame_length;
     }
 
@@ -4374,9 +4457,16 @@ fn aac_decode(data, len) {
 
     var sr = aac_adts_sample_rate(first_header);
     var ch = aac_adts_channels(first_header);
+    # More than two channels means several audio elements per frame (SCE + CPE +
+    # LFE ...), and the decoder handles one: 5.1 returned a sixth of the samples,
+    # all wrong, with success. Refused until multichannel decode exists.
+    if (ch > 2) { return err(ERR_UNSUPPORTED_FMT); }
 
-    # Second pass: decode frames
-    var all_samples = vec_new();
+    # Second pass: decode frames. The output is sized once from the first pass's
+    # frame count (1024 samples per channel each).
+    if (frame_count * AAC_FRAME_SIZE * ch > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
+    var all_samples = _vec_new_cap(frame_count * AAC_FRAME_SIZE * ch);
+    if (is_err(all_samples) == 1) { return all_samples; }
     # Overlap buffer: 1024 * max_channels (2 for stereo)
     # +16 bytes past the two overlap channels: the previous frame's window_shape
     # (and room for future per-stream synthesis state).
@@ -4399,7 +4489,9 @@ fn aac_decode(data, len) {
         var plen = fl2 - hs2;
         if (plen > 0) {
             _aac_select_swb(aac_adts_sr_index(hdr2));
+            _aac_frame_begin();
             var rc = _aac_decode_frame(data + pos + hs2, plen, overlap, frame_buf);
+            _aac_frame_end();
             if (res_ok(rc) == 1) {
                 # rc = number of channels decoded (1 or 2)
                 var frame_samples = AAC_FRAME_SIZE * rc;
@@ -4407,10 +4499,10 @@ fn aac_decode(data, len) {
                 # this second pass is the one that allocates and had no bound.
                 # A minimal 8-byte ADTS frame yields AAC_FRAME_SIZE (1024)
                 # samples, so a file of repeated 8-byte frames amplified ~1024x:
-                # a 560 KB input reached ~2.15 GB. Same 2^25-sample ceiling as
-                # FLAC's SEC-023 (256 MB of f64 payload).
-                if (vec_len(all_samples) + frame_samples > 33554432) {
-                    return err(ERR_DECODE);
+                # a 560 KB input reached ~2.15 GB. Same one-shot ceiling (_shravan_max_samples) as
+                # FLAC's SEC-023.
+                if (vec_len(all_samples) + frame_samples > _shravan_max_samples) {
+                    return err(ERR_TOO_LARGE);
                 }
                 var i = 0;
                 while (i < frame_samples) {

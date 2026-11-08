@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# test-all.sh — build + run every shravan test-harness binary.
+# test-all.sh — build + run the shravan test suite.
 #
-# The suite is split across three harness entry points so no single build
-# overflows the Cyrius code buffer (~3.15 MB):
-#   src/main.cyr          -> build/shravan          core codecs + Opus decode + API
-#   src/main_encoder.cyr  -> build/shravan-encoder  Opus CELT encoder (RFC-6716)
-#   src/main_silk.cyr     -> build/shravan-silk      SILK decode golden vectors
+# src/main.cyr -> build/shravan runs every assertion: core codecs, interop
+# fixtures, Opus decode, the CELT encoder and the SILK golden vectors. Until
+# 2.9.3 the suite was split across three binaries for a ~3.15 MB code buffer
+# that has been a growable 64 MiB region since Cyrius 6.4.49.
 #
-# Each binary shares the same library + codec modules (via include); only the
-# test subset differs. Exits non-zero if any binary fails to build or any
-# assertion fails.
+# Exits non-zero if the build fails or any assertion fails.
 
 cd "$(dirname "$0")/.."
 
@@ -25,33 +22,21 @@ fi
 
 mkdir -p build
 
-# name  src                   out
-SUITES=(
-    "main             src/main.cyr           build/shravan"
-    "encoder          src/main_encoder.cyr   build/shravan-encoder"
-    "silk             src/main_silk.cyr      build/shravan-silk"
-)
-
+echo "=== building src/main.cyr -> build/shravan ==="
 FAIL=0
-TOTAL=0
-for row in "${SUITES[@]}"; do
-    read -r name src out <<<"$row"
-    echo "=== building $name ($src -> $out) ==="
-    if ! "$CYRB" build "$src" "$out"; then
-        echo "BUILD FAILED: $name"
-        FAIL=1
-        continue
-    fi
-    echo "=== running $name ==="
-    if ! "./$out"; then
-        echo "TESTS FAILED: $name"
+if ! "$CYRB" build src/main.cyr build/shravan; then
+    echo "BUILD FAILED"
+    FAIL=1
+else
+    echo "=== running build/shravan ==="
+    if ! ./build/shravan; then
+        echo "TESTS FAILED"
         FAIL=1
     fi
-    echo
-done
+fi
 
 if [ "$FAIL" -ne 0 ]; then
     echo "test-all: FAILURES present"
     exit 1
 fi
-echo "test-all: all suites passed"
+echo "test-all: all tests passed"

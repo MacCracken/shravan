@@ -1,0 +1,210 @@
+# Fuzz: the RFC 6716 Opus decoder on damaged libopus packets.
+#
+# Seeds are the libopus packets of the in-suite Opus fixtures (src/interop_fixtures.cyr:
+# CELT 2.5 ms, SILK with FEC, hybrid, mode / bandwidth / frame-size / channel
+# switches, DTX, losses, CELT->SILK redundancy). Each call decodes 1 to 4 consecutive
+# packets of one fixture, damaged at random: bytes flipped, cut short, emptied (a
+# loss), replaced by random bytes behind a random TOC, or by a TOC alone. The
+# OpusHead is hostile too: channel count 0..9, mapping family 0/1/2/255, pre-skip
+# up to 2^16, any output gain.
+#
+# Invariant: opus_decode_from_packets returns a packed result and never crashes.
+#
+# Usage: ./build/fuzz_opus [calls] [seed]   (default 5000, seed 1). Each call's output
+# is never freed (bump allocator), so fuzz/run.sh sweeps seeds across processes. A
+# build with -D CYRIUS_POISON exits 86 on a redzone hit and sweeps at the end.
+
+include "src/shravan.cyr"
+include "src/flac.cyr"
+include "src/ogg.cyr"
+include "src/mp3.cyr"
+include "src/tag.cyr"
+include "src/fft.cyr"
+include "src/opus.cyr"
+include "src/silk.cyr"
+include "src/aac.cyr"
+include "src/mp4.cyr"
+include "src/interop_fixtures.cyr"
+
+var _fz_state = 88172645463325252;
+
+fn _fz_rand() {
+    _fz_state = _fz_state * 6364136223846793005 + 1442695040888963407;
+    return _fz_state;
+}
+
+fn _fz_u(m) {
+    if (m <= 0) { return 0; }
+    var r = _fz_rand();
+    if (r < 0) { r = 0 - r; }
+    if (r < 0) { r = 0; }
+    return r % m;
+}
+
+# Seed pool: every packet of every fixture, with the fixture it came from.
+var _pool = 0;        # vec of Str packets
+var _pool_fx = 0;     # vec: fixture start index in _pool for each fixture
+var _pool_fn = 0;     # vec: packet count per fixture
+
+fn _load(b64) {
+    var raw = alloc(strlen(b64) + 16);
+    var len = _mp3_b64_decode(b64, raw);
+    vec_push(_pool_fx, vec_len(_pool));
+    var count = 0;
+    var pos = 0;
+    while (pos + 4 <= len) {
+        var n = read_u32_le(raw, pos);
+        pos = pos + 4;
+        if (pos + n > len) { pos = len; }
+        else {
+            vec_push(_pool, str_from_buf(raw + pos, n));
+            count = count + 1;
+            pos = pos + n;
+        }
+    }
+    vec_push(_pool_fn, count);
+    return 0;
+}
+
+fn _head(channels, family, preskip, gain) {
+    var head = alloc(32);
+    memset(head, 0, 32);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, channels);
+    write_u16_le(head, 10, preskip);
+    write_u32_le(head, 12, 48000);
+    write_u16_le(head, 16, gain);
+    store8(head + 18, family);
+    var hlen = 19;
+    if (family != 0) {
+        # stream count, coupled count, channel mapping
+        store8(head + 19, _fz_u(4));
+        store8(head + 20, _fz_u(4));
+        var c = 0;
+        while (c < channels) { if (c < 8) { store8(head + 21 + c, _fz_u(4)); } c = c + 1; }
+        hlen = 21 + channels;
+        if (hlen > 32) { hlen = 32; }
+    }
+    return str_from_buf(head, hlen);
+}
+
+fn _call() {
+    var fx = _fz_u(vec_len(_pool_fx));
+    var first = vec_get(_pool_fx, fx);
+    var count = vec_get(_pool_fn, fx);
+    var npk = _fz_u(4) + 1;
+    var start = _fz_u(count);
+
+    var channels = _fz_u(2) + 1;
+    var family = 0;
+    var preskip = _fz_u(1000);
+    var gain = 0;
+    var hk = _fz_u(16);
+    if (hk == 0) { channels = _fz_u(10); }
+    if (hk == 1) { family = 1; channels = _fz_u(9) + 1; }
+    if (hk == 2) { family = 255; channels = _fz_u(9); }
+    if (hk == 3) { family = 2; }
+    if (hk == 4) { preskip = _fz_u(65536); }
+    if (hk == 5) { gain = _fz_u(65536); }
+
+    var pk = vec_new();
+    vec_push(pk, _head(channels, family, preskip, gain));
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    vec_push(pk, str_from_buf(tags, 16));
+
+    var i = 0;
+    while (i < npk) {
+        var src = vec_get(_pool, first + (start + i) % count);
+        var n = str_len(src);
+        var b = alloc(n + 64);
+        if (n > 0) { memcpy(b, str_data(src), n); }
+        var what = _fz_u(12);
+        if (what == 0) { n = 0; }                                   # lost
+        if (what == 1) { n = _fz_u(n + 1); }                        # cut short
+        if (what == 2) { if (n > 0) { store8(b, _fz_u(256)); } }   # another TOC
+        if (what == 3) {                                            # random body, real TOC
+            var j = 1;
+            while (j < n) { store8(b + j, _fz_u(256)); j = j + 1; }
+        }
+        if (what == 4) { n = 1; }                                   # TOC alone
+        if (what == 5) {                                            # random TOC and length
+            n = _fz_u(60) + 1;
+            var j2 = 0;
+            while (j2 < n) { store8(b + j2, _fz_u(256)); j2 = j2 + 1; }
+        }
+        if (what >= 6) {
+            if (what < 10) {                                        # a few bytes flipped
+                var k = _fz_u(4) + 1;
+                while (k > 0) { if (n > 0) { store8(b + _fz_u(n), _fz_u(256)); } k = k - 1; }
+            }
+        }
+        vec_push(pk, str_from_buf(b, n));
+        i = i + 1;
+    }
+    opus_decode_from_packets(pk, 0, 0);
+    return 0;
+}
+
+alloc_init();
+shravan_init_constants();
+#ifdef CYRIUS_POISON
+poison_trap_set(1);
+#endif
+
+var calls = 5000;
+args_init();
+if (argc() > 1) {
+    calls = atoi(argv(1));
+    if (calls <= 0) { calls = 5000; }
+}
+if (argc() > 2) {
+    var sd = atoi(argv(2));
+    if (sd > 0) {
+        _fz_state = _fz_state + sd * 6364136223846793005;
+        _fz_rand();
+    }
+}
+
+_pool = vec_new();
+_pool_fx = vec_new();
+_pool_fn = vec_new();
+_load(_FX_OPUS25_B64);
+_load(_FX_OPUSFEC_B64);
+_load(_FX_OPUSHFEC_B64);
+_load(_FX_OPUSMID_B64);
+_load(_FX_OPUSSW_B64);
+_load(_FX_OPUSBW_B64);
+_load(_FX_OPUSFS_B64);
+_load(_FX_OPUSCBW_B64);
+_load(_FX_OPUSPLC_B64);
+_load(_FX_OPUSDTX_B64);
+_load(_FX_OPUSCDTX_B64);
+_load(_FX_OPUSCLOSS_B64);
+_load(_FX_OPUSSLOSS_B64);
+_load(_FX_OPUSC2S_B64);
+_load(_FX_OPUSGCLAMP_B64);
+
+syscall(1, 1, "fuzz_opus: ", 11);
+fmt_int(vec_len(_pool));
+syscall(1, 1, " seed packets, stream ", 22);
+fmt_int(_fz_u(1000000));
+syscall(1, 1, "\n", 1);
+
+var c = 0;
+while (c < calls) { _call(); c = c + 1; }
+
+#ifdef CYRIUS_POISON
+poison_sweep();
+if (poison_violations() != 0) {
+    syscall(1, 1, "poison: redzone violations\n", 27);
+    syscall(60, 86);
+}
+#endif
+
+syscall(1, 1, "fuzz_opus: ", 11);
+fmt_int(calls);
+syscall(1, 1, " calls, 0 crashes\n", 18);
+syscall(60, 0);

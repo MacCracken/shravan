@@ -13,7 +13,13 @@
 #
 # Coverage added here: codec_open (unified dispatch), wav_decode, aiff_decode,
 # alac_decode, flac_decode + flac_decode_range, mp3_decode + mp3_decode_pcm,
-# ogg_decode, mp4_decode, aac_decode, tag_read_vorbis.
+# ogg_decode, mp4_decode, aac_decode, tag_read_vorbis; since 2.9.3 also
+# opus_decode_from_packets on libopus packets, the streaming decoders (through
+# decode_reader, split at random), and tag_read_id3v2 on compressed frames, which
+# reaches sankoch's inflate.
+#
+# Under `-D CYRIUS_POISON` (cyrius's poison mode: redzones around every alloc) a
+# redzone hit exits 86 at once, and the run ends with a full sweep.
 #
 # Two input strategies per target:
 #   (a) random bytes behind the format's magic  — reaches header validation
@@ -110,14 +116,14 @@ fn _fz_make_samples(n) {
 # Main
 # ================================================================
 
+# Only what the consumer contract requires (docs/architecture/overview.md). Calling
+# every module's init here hid that mp4_decode crashed without aac_init() and FLAC
+# without flac_init(): each codec must initialise its own tables.
 alloc_init();
 shravan_init_constants();
-flac_init();
-ogg_init();
-mp3_init();
-fft_init();
-aac_init();
-resample_init();
+#ifdef CYRIUS_POISON
+poison_trap_set(1);
+#endif
 
 var iters = 2000;
 args_init();
@@ -362,6 +368,96 @@ syscall(1, 1, "ok\n", 3);
 # targets above in time and in memory that alloc() never frees, so each runs once
 # per `every` iterations (a power of two). AAC runs least: about 0.1 s a frame.
 var real_buf = alloc(65536);
+
+# Feed n bytes to decode_reader in random pieces (1..512 bytes, so headers, frames
+# and samples split everywhere) with a random chunk size, then flush.
+fn _fz_stream(data, n) {
+    var dr = decode_reader(_fz_u(300));
+    var pos = 0;
+    while (pos < n) {
+        var take = _fz_u(512) + 1;
+        if (take > n - pos) { take = n - pos; }
+        decode_reader_feed(dr, data + pos, take);
+        pos = pos + take;
+    }
+    decode_reader_flush(dr);
+    return 0;
+}
+
+# Opus: a fixture's libopus packets (u32le length each) behind a synthesized
+# OpusHead, then damaged: bytes flipped, packets cut short, emptied (a loss),
+# dropped or repeated, the TOC byte replaced. Mono or stereo at random.
+var _fz_opus_pk = 0;
+var _fz_opus_n = 0;
+fn _fz_opus_load(b64) {
+    var raw = alloc(strlen(b64) + 16);
+    var len = _mp3_b64_decode(b64, raw);
+    _fz_opus_pk = vec_new();
+    var pos = 0;
+    while (pos + 4 <= len) {
+        var n = read_u32_le(raw, pos);
+        pos = pos + 4;
+        if (pos + n > len) { pos = len; }
+        else {
+            if (vec_len(_fz_opus_pk) < 24) { vec_push(_fz_opus_pk, str_from_buf(raw + pos, n)); }
+            pos = pos + n;
+        }
+    }
+    _fz_opus_n = vec_len(_fz_opus_pk);
+    return 0;
+}
+
+fn _fz_opus_once() {
+    var channels = _fz_u(2) + 1;
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, channels);
+    write_u32_le(head, 10, _fz_u(400));
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var pk = vec_new();
+    vec_push(pk, str_from_buf(head, 19));
+    vec_push(pk, str_from_buf(tags, 16));
+    var i = 0;
+    while (i < _fz_opus_n) {
+        var src = vec_get(_fz_opus_pk, i);
+        var n = str_len(src);
+        var what = _fz_u(16);
+        if (what == 0) { n = 0; }                       # lost
+        if (what == 1) { n = _fz_u(n + 1); }            # cut short
+        if (what == 2) { i = i + 1; }                   # dropped (next one skipped too)
+        var b = alloc(n + 4);
+        if (n > 0) { memcpy(b, str_data(src), n); }
+        if (what == 3) { if (n > 0) { store8(b, _fz_u(256)); } }   # TOC replaced
+        if (what >= 4) {
+            if (what < 8) {
+                var k = _fz_u(4) + 1;
+                while (k > 0) { if (n > 0) { store8(b + _fz_u(n), _fz_u(256)); } k = k - 1; }
+            }
+        }
+        vec_push(pk, str_from_buf(b, n));
+        if (what == 9) { vec_push(pk, str_from_buf(b, n)); }       # repeated
+        i = i + 1;
+    }
+    opus_decode_from_packets(pk, 0, 0);
+    return 0;
+}
+
+fn _fz_opus(b64, every) {
+    _fz_opus_load(b64);
+    var i = 0;
+    var calls = 0;
+    while (i < iters) {
+        if ((i & (every - 1)) == 0) { _fz_opus_once(); calls = calls + 1; }
+        i = i + 1;
+    }
+    return calls;
+}
+
 fn _fz_real(b64, kind, every, max_len) {
     var seed = alloc(strlen(b64) + 16);
     var slen = _mp3_b64_decode(b64, seed);
@@ -376,6 +472,9 @@ fn _fz_real(b64, kind, every, max_len) {
             if (kind == 1) { aac_decode(real_buf, n); }
             if (kind == 2) { mp3_decode_pcm(real_buf, n); }
             if (kind == 3) { flac_verify(real_buf, n); }
+            if (kind == 4) { flac_decode_range(real_buf, n, _fz_u(20000), _fz_u(20000)); }
+            if (kind == 5) { tag_read_id3v2(real_buf, n); }
+            if (kind == 6) { _fz_stream(real_buf, n); }
             calls = calls + 1;
         }
         i = i + 1;
@@ -389,10 +488,67 @@ total = total + _fz_real(_FX_FLAC8_B64, 0, 4, 0);
 total = total + _fz_real(_FX_ALAC16_B64, 0, 4, 0);
 total = total + _fz_real(_FX_ALAC24_B64, 0, 4, 0);
 total = total + _fz_real(_FX_ALACMOV_B64, 0, 4, 0);
-total = total + _fz_real(_FX_AAC22_B64, 1, 32, 700);
-total = total + _fz_real(_FX_AAC96_B64, 0, 64, 0);
+# AAC ran every 32nd iteration on 700 bytes while it decoded at about real time;
+# since 2.9.3's transforms it is some fifty times faster and runs like the rest.
+total = total + _fz_real(_FX_AAC22_B64, 1, 4, 0);
+total = total + _fz_real(_FX_AAC96_B64, 0, 4, 0);
 total = total + _fz_real(_FX_MP38_B64, 2, 4, 0);
 total = total + _fz_real(_FX_MP344_B64, 2, 4, 0);
+# 2.9.3's fixtures: WAV/AIFF as ffmpeg writes them, FLAC at 32 bits and with a
+# seek table (also through flac_decode_range), the ISO MPEG conformance excerpts,
+# a LAME Info frame, Ogg Opus with an output gain.
+total = total + _fz_real(_FX_WAV24_B64, 0, 2, 0);
+total = total + _fz_real(_FX_WAVF32_B64, 0, 2, 0);
+total = total + _fz_real(_FX_WAVEXT_B64, 0, 2, 0);
+total = total + _fz_real(_FX_WAVPIPE_B64, 0, 2, 0);
+total = total + _fz_real(_FX_WAV12_B64, 0, 2, 0);
+total = total + _fz_real(_FX_AIFF16_B64, 0, 2, 0);
+total = total + _fz_real(_FX_AIFF12_B64, 0, 2, 0);
+total = total + _fz_real(_FX_AIFCF32_B64, 0, 2, 0);
+total = total + _fz_real(_FX_FLAC32_B64, 0, 4, 0);
+total = total + _fz_real(_FX_FLACSEEK_B64, 0, 4, 0);
+total = total + _fz_real(_FX_FLACSEEK_B64, 4, 4, 0);
+total = total + _fz_real(_FX_ISOL1JS_B64, 0, 8, 0);
+total = total + _fz_real(_FX_ISOL2JS_B64, 0, 8, 0);
+total = total + _fz_real(_FX_ISOLSFIS_B64, 0, 8, 0);
+total = total + _fz_real(_FX_ISOFREE_B64, 0, 8, 0);
+total = total + _fz_real(_FX_MP3INFO_B64, 0, 8, 0);
+total = total + _fz_real(_FX_OGGGAIN_B64, 0, 8, 0);
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: streaming decoders (decode_reader, random splits)
+# ================================================================
+syscall(1, 1, "  streams... ", 13);
+total = total + _fz_real(_FX_WAV24_B64, 6, 2, 0);
+total = total + _fz_real(_FX_WAVPIPE_B64, 6, 2, 0);
+total = total + _fz_real(_FX_AIFF16_B64, 6, 2, 0);
+total = total + _fz_real(_FX_AIFCF32_B64, 6, 2, 0);
+total = total + _fz_real(_FX_FLAC16_B64, 6, 4, 0);
+total = total + _fz_real(_FX_FLACSEEK_B64, 6, 4, 0);
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: ID3v2 with compressed, grouped and encrypted frames (sankoch inflate)
+# ================================================================
+syscall(1, 1, "  tag_read_id3v2 compressed... ", 31);
+total = total + _fz_real(_FX_ID3V23Z_B64, 5, 1, 0);
+total = total + _fz_real(_FX_ID3V24Z_B64, 5, 1, 0);
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: Opus on libopus packets
+# ================================================================
+# Sequences of 24 packets, for the mode, bandwidth and loss transitions; the many
+# short calls are fuzz/fuzz_opus.cyr's.
+syscall(1, 1, "  opus packets... ", 18);
+total = total + _fz_opus(_FX_OPUS25_B64, 16);
+total = total + _fz_opus(_FX_OPUSFEC_B64, 16);
+total = total + _fz_opus(_FX_OPUSHFEC_B64, 16);
+total = total + _fz_opus(_FX_OPUSSW_B64, 16);
+total = total + _fz_opus(_FX_OPUSPLC_B64, 16);
+total = total + _fz_opus(_FX_OPUSDTX_B64, 16);
+total = total + _fz_opus(_FX_OPUSC2S_B64, 16);
 syscall(1, 1, "ok\n", 3);
 
 # ================================================================
@@ -407,6 +563,14 @@ while (fi < iters) {
     fi = fi + 1; total = total + 1;
 }
 syscall(1, 1, "ok\n", 3);
+
+#ifdef CYRIUS_POISON
+poison_sweep();
+if (poison_violations() != 0) {
+    syscall(1, 1, "poison: redzone violations\n", 27);
+    syscall(60, 86);
+}
+#endif
 
 syscall(1, 1, "\nfuzz_decode: ", 14);
 fmt_int(total);

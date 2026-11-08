@@ -1,6 +1,6 @@
 # ================================================================
 # opus_test_helpers.cyr — shared assertion/correlation helpers for the Opus
-# test suites (decode / encoder / silk). Included by each main_* harness.
+# test suites (decode / encoder / silk), included by src/main.cyr.
 # NOT part of the [lib] distlib bundle.
 # ================================================================
 

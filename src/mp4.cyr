@@ -89,13 +89,21 @@ fn mp4_find_audio_stbl(data, len, out_end) {
     while (pos + 8 <= mend) {
         var size = read_u32_be(data, pos);
         var btype = read_u32_be(data, pos + 4);
+        var hdr = 8;
         var box_end = pos + size;
+        # A 64-bit largesize, as mp4_find reads it. This walk used to take size 1
+        # literally and step through a large trak a byte at a time, never finding it.
+        if (size == 1) {
+            if (pos + 16 > mend) { return 0 - 1; }
+            box_end = pos + ((read_u32_be(data, pos + 8) << 32) | read_u32_be(data, pos + 12));
+            hdr = 16;
+        }
         if (size == 0) { box_end = mend; }
         if (box_end > mend) { box_end = mend; }
-        if (box_end <= pos) { return 0 - 1; }
+        if (box_end < pos + hdr) { return 0 - 1; }
         if (btype == MP4_TRAK) {
             var mdia_end = alloc(8);
-            var mdia = mp4_find(data, pos + 8, box_end, MP4_MDIA, mdia_end);
+            var mdia = mp4_find(data, pos + hdr, box_end, MP4_MDIA, mdia_end);
             if (mdia >= 0) {
                 var mdend = load64(mdia_end);
                 var hdlr_end = alloc(8);
@@ -279,6 +287,10 @@ fn mp4_audio_info(data, stbl, stbl_end, out) {
         children = body + 64;
         rate = f64_to((read_u32_be(data, body + 32) << 32) | read_u32_be(data, body + 36));
         channels = read_u32_be(data, body + 40);
+        # The f64 is the file's: negative, NaN or absurd values mean "unknown",
+        # as a v0 entry's overflowed 16.16 rate does; the esds or cookie decides.
+        if (rate < 0) { rate = 0; }
+        if (rate > 4000000) { rate = 0; }
     }
     if (version > 2) { return MP4_MALFORMED; }
     store64(out, channels);
@@ -316,6 +328,8 @@ fn mp4_audio_info(data, stbl, stbl_end, out) {
 
 # Build the per-sample (offset, size) table from stsz + stco/co64 + stsc into the
 # demux struct dx (offsets/sizes arrays allocated here). Returns 0 or -1.
+var _mp4_max_count = 0;   # set by mp4_demux from the ceiling and the codec's frame size
+
 fn mp4_build_sample_table(data, len, stbl, stbl_end, dx) {
     var e = alloc(8);
     # --- stsz: sample sizes ---
@@ -327,18 +341,37 @@ fn mp4_build_sample_table(data, len, stbl, stbl_end, dx) {
     var count = read_u32_be(data, stsz + 8);
     if (count <= 0) { return 0 - 1; }
     if (count > len) { return 0 - 1; }                 # can't have more samples than bytes
+    if (count > _mp4_max_count) { return 0 - 2; }      # more output than the one-shot ceiling
     if (size_default == 0) {
         if (stsz + 12 + count * 4 > stsz_end) { return 0 - 1; }   # inline table must fit the box
+    } else {
+        # SEC-033: a constant sample size needs no table, so nothing tied count to
+        # the box. count = len with size 1 made two count*8 tables, 16x the input
+        # (an 8 MiB file allocated 134 MB, a 256 MiB one about 4 GiB). Every sample
+        # has to fit in the file, and since 2.9.3 the bound counts at least 4 bytes
+        # a sample: `count <= len / size` alone still let size 1 through at 16x (a
+        # 2.9.3 audit measured 142 MiB resident from 8 MiB). With the floor the
+        # tables stay within 4x the input, as an explicit stsz table's 4-byte
+        # entries already bound them, and a real file (its samples never overlap)
+        # always passes.
+        var floor = size_default;
+        if (floor < 4) { floor = 4; }
+        if (count > len / floor) { return 0 - 1; }
     }
-    var sizes = alloc(count * 8);
-    if (sizes == 0) { return 0 - 1; }
+    var sizes = _safe_alloc_mul(count, 8);
+    if (sizes <= 0) { return 0 - 1; }
+    # The samples of a real file never overlap, so their sizes sum to at most the
+    # file. Chunk offsets can point many samples at the same bytes, each in bounds,
+    # and the AAC path then staged sum(sizes) bytes: a 270 KB file made a 520 MiB
+    # copy (2.9.3 audit). Refused here, for both codecs, before anything is staged.
+    var sum = 0;
     var i = 0;
     while (i < count) {
-        if (size_default == 0) {
-            store64(sizes + i * 8, read_u32_be(data, stsz + 12 + i * 4));
-        } else {
-            store64(sizes + i * 8, size_default);
-        }
+        var sv = size_default;
+        if (size_default == 0) { sv = read_u32_be(data, stsz + 12 + i * 4); }
+        store64(sizes + i * 8, sv);
+        sum = sum + sv;
+        if (sum > len) { return 0 - 1; }
         i = i + 1;
     }
     # --- stco (or co64): chunk offsets ---
@@ -381,8 +414,8 @@ fn mp4_build_sample_table(data, len, stbl, stbl_end, dx) {
     if (stsc + 8 + stsc_count * 12 > stsc_end) { return 0 - 1; }   # entries must fit the box
     var stsc_base = stsc + 8;   # entries: first_chunk(4) samples_per_chunk(4) desc(4)
     # --- walk chunks, assign consecutive samples ---
-    var offsets = alloc(count * 8);
-    if (offsets == 0) { return 0 - 1; }
+    var offsets = _safe_alloc_mul(count, 8);
+    if (offsets <= 0) { return 0 - 1; }
     var sample_idx = 0;
     var stsc_i = 0;
     var chunk = 1;   # 1-based
@@ -437,7 +470,20 @@ fn mp4_demux(data, len) {
     store64(dx + MP4_DX_RATE, load64(info + 8));
     store64(dx + MP4_DX_CODEC, load64(info + 16));
     store64(dx + MP4_DX_COOKIE, load64(info + 24));
-    if (mp4_build_sample_table(data, len, stbl, load64(stbl_end), dx) < 0) { return err(ERR_INVALID_HEADER); }
+    # The sample table is allocated before anything decodes, so its size is bounded
+    # by the output it implies: count * samples-per-frame * channels must fit the
+    # one-shot ceiling (1024 for AAC; the cookie's frameLength for ALAC).
+    var spf = 1024;
+    if (load64(info + 16) == MP4_CODEC_ALAC) {
+        spf = read_u32_be(load64(info + 24), 0);
+        if (spf < 1) { return err(ERR_INVALID_HEADER); }
+    }
+    var ch = load64(info);
+    if (ch < 1) { ch = 1; }
+    _mp4_max_count = _shravan_max_samples / (spf * ch);
+    var bt = mp4_build_sample_table(data, len, stbl, load64(stbl_end), dx);
+    if (bt == 0 - 2) { return err(ERR_TOO_LARGE); }
+    if (bt < 0) { return err(ERR_INVALID_HEADER); }
     return dx;
 }
 
@@ -455,6 +501,14 @@ fn mp4_decode(data, len) {
     if (load64(dx + MP4_DX_CODEC) == MP4_CODEC_ALAC) {
         return alac_decode_frames(load64(dx + MP4_DX_COOKIE), data, len, offsets, sizes, count);
     }
+    # The bridge writes an ADTS header per AU, which carries a 3-bit channel
+    # configuration, a 13-bit frame length and a 4-bit rate index. Channel config 7
+    # (8 channels) came out as 0 and rates outside the table as 44.1 kHz; more than
+    # two channels is refused by the decoder anyway (until 2.10.3), and an AU over
+    # 8184 bytes cannot be AAC-LC at two channels.
+    if (channels > 2) { return err(ERR_UNSUPPORTED_FMT); }
+    if (channels < 1) { return err(ERR_INVALID_CHANNELS); }
+    if (_aac_sr_index_exact(rate) < 0) { return err(ERR_UNSUPPORTED_FMT); }
     # total ADTS stream size = sum(AU sizes) + 7 bytes header per AU
     var total = 0;
     var i = 0;
@@ -467,6 +521,7 @@ fn mp4_decode(data, len) {
         # wrapped size and the memcpy loop below would run off the end of it.
         # Capping at 256 MB (the _ALLOC_MAX policy) makes the wrap unreachable.
         if (asz < 0) { return err(ERR_DECODE); }
+        if (asz > 8184) { return err(ERR_DECODE); }
         total = total + asz + 7;
         if (total > 268435456) { return err(ERR_DECODE); }
         i = i + 1;

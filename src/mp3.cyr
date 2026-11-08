@@ -165,9 +165,9 @@ fn mp3_frame_padding(f)        { return load64(f + 56); }
 
 fn mp3_syncsafe_to_u32(data, off) {
     return ((load8(data + off) & 0x7F) << 21)
-         | ((load8(data + off + 1) & 0x7F) << 14)
-         | ((load8(data + off + 2) & 0x7F) << 7)
-         | (load8(data + off + 3) & 0x7F);
+    | ((load8(data + off + 1) & 0x7F) << 14)
+    | ((load8(data + off + 2) & 0x7F) << 7)
+    | (load8(data + off + 3) & 0x7F);
 }
 
 # ================================================================
@@ -190,6 +190,79 @@ fn mp3_id3v2_skip(data, len) {
 
 # Parse a 4-byte MPEG audio frame header at data[off].
 # Returns heap-allocated frame info, or err() on invalid.
+var _mp3_free_bytes = 0;    # free-format frame length without padding, once learnt
+
+# minimp3 hdr_compare: same version and layer, same sample rate, both free format
+# or both not.
+fn _mp3_hdr_match(data, a, b) {
+    if (((load8(data + a + 1) ^ load8(data + b + 1)) & 0xFE) != 0) { return 0; }
+    if (((load8(data + a + 2) ^ load8(data + b + 2)) & 0x0C) != 0) { return 0; }
+    var fa = 0;
+    if ((load8(data + a + 2) >> 4) == 0) { fa = 1; }
+    var fb = 0;
+    if ((load8(data + b + 2) >> 4) == 0) { fb = 1; }
+    if (fa != fb) { return 0; }
+    return 1;
+}
+
+# Learn the free-format frame length at `pos`: the first later sync whose header
+# matches, confirmed by a third matching header one frame further on (or the end
+# of the data). Returns 1 if learnt.
+fn _mp3_learn_free(data, len, pos) {
+    var layer1 = 0;
+    if (((load8(data + pos + 1) >> 1) & 3) == 3) { layer1 = 1; }
+    var pad0 = (load8(data + pos + 2) >> 1) & 1;
+    if (layer1 == 1) { pad0 = pad0 * 4; }
+    var q = pos + 4;
+    var lim = pos + 4096;
+    if (lim > len - 4) { lim = len - 4; }
+    while (q < lim) {
+        if (load8(data + q) == 0xFF) {
+            if ((load8(data + q + 1) & 0xE0) == 0xE0) {
+                if (_mp3_hdr_match(data, pos, q) == 1) {
+                    var fb = q - pos - pad0;
+                    var pad1 = (load8(data + q + 2) >> 1) & 1;
+                    if (layer1 == 1) { pad1 = pad1 * 4; }
+                    var r = q + fb + pad1;
+                    var ok = 0;
+                    if (r + 4 > len) { ok = 1; }
+                    else {
+                        if (load8(data + r) == 0xFF) { if (_mp3_hdr_match(data, pos, r) == 1) { ok = 1; } }
+                    }
+                    if ((ok == 1) & (fb > 0)) { _mp3_free_bytes = fb; return 1; }
+                }
+            }
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
+# A Xing/Info (LAME) or VBRI tag in a Layer III frame: an index for seeking, not
+# audio. Decoders skip the frame (minimp3, mpg123, ffmpeg).
+fn _mp3_is_info_frame(data, pos, fs) {
+    var b1 = load8(data + pos + 1);
+    var mpeg1 = 0;
+    if (((b1 >> 3) & 3) == 3) { mpeg1 = 1; }
+    var mono = 0;
+    if (((load8(data + pos + 3) >> 6) & 3) == 3) { mono = 1; }
+    var si = 17;
+    if (mpeg1 == 1) { si = 32; if (mono == 1) { si = 17; } }
+    else { if (mono == 1) { si = 9; } }
+    var off = pos + 4 + si;
+    if ((b1 & 1) == 0) { off = off + 2; }
+    if (off + 4 <= pos + fs) {
+        var t0 = load8(data + off); var t1 = load8(data + off + 1);
+        var t2 = load8(data + off + 2); var t3 = load8(data + off + 3);
+        if ((t0 == 0x58) & (t1 == 0x69) & (t2 == 0x6E) & (t3 == 0x67)) { return 1; }   # Xing
+        if ((t0 == 0x49) & (t1 == 0x6E) & (t2 == 0x66) & (t3 == 0x6F)) { return 1; }   # Info
+    }
+    if (pos + 36 + 4 <= pos + fs) {
+        if ((load8(data + pos + 36) == 0x56) & (load8(data + pos + 37) == 0x42) & (load8(data + pos + 38) == 0x52) & (load8(data + pos + 39) == 0x49)) { return 1; }  # VBRI
+    }
+    return 0;
+}
+
 fn mp3_parse_frame_header(data, off) {
     # Sync word: first 11 bits must be 1
     if (load8(data + off) != 0xFF) { return err(ERR_INVALID_HEADER); }
@@ -232,7 +305,16 @@ fn mp3_parse_frame_header(data, off) {
         if (layer == MP3_LAYER_II)  { bitrate = load64(mp3_bitrate_v2_l3 + bitrate_index * 8); }
         if (layer == MP3_LAYER_III) { bitrate = load64(mp3_bitrate_v2_l3 + bitrate_index * 8); }
     }
-    if (bitrate == 0) { return err(ERR_INVALID_HEADER); }
+    # Free format (bitrate index 0): the frame length is fixed for the stream but not
+    # in the header. The decoder learns it (_mp3_free_bytes, padding excluded) from
+    # the distance to the next frame; until then the header is not usable.
+    var free_fmt = 0;
+    if (bitrate_index == 0) {
+        if (_mp3_free_bytes <= 0) { return err(ERR_INVALID_HEADER); }
+        free_fmt = 1;
+    } else {
+        if (bitrate == 0) { return err(ERR_INVALID_HEADER); }
+    }
 
     # Sample rate: bits 3-2 of byte 2
     var sr_index = (b2 >> 2) & 0x03;
@@ -273,16 +355,21 @@ fn mp3_parse_frame_header(data, off) {
     var padding_bytes = padding;
     var frame_size = 0;
 
-    if (layer == MP3_LAYER_I) {
-        frame_size = (12 * bitrate * 1000 / sample_rate + padding_bytes) * 4;
+    if (free_fmt == 1) {
+        frame_size = _mp3_free_bytes + padding_bytes;
+        if (layer == MP3_LAYER_I) { frame_size = _mp3_free_bytes + padding_bytes * 4; }
     } else {
-        # Layer II / III
-        var spf = 1152;
-        if (layer == MP3_LAYER_III) {
-            if (version == MP3_VERSION_V2) { spf = 576; }
-            if (version == MP3_VERSION_V25) { spf = 576; }
+        if (layer == MP3_LAYER_I) {
+            frame_size = (12 * bitrate * 1000 / sample_rate + padding_bytes) * 4;
+        } else {
+            # Layer II / III
+            var spf = 1152;
+            if (layer == MP3_LAYER_III) {
+                if (version == MP3_VERSION_V2) { spf = 576; }
+                if (version == MP3_VERSION_V25) { spf = 576; }
+            }
+            frame_size = spf * bitrate * 1000 / (8 * sample_rate) + padding_bytes;
         }
-        frame_size = spf * bitrate * 1000 / (8 * sample_rate) + padding_bytes;
     }
 
     # Build frame info struct
@@ -1203,7 +1290,7 @@ fn _mp3_read_huffman(part_2_start, gr, ch) {
         var table_num = 0;
         if (is_pos < region1) { table_num = load64(_si_tsel + (gc * 3 + 0) * 8); }
         else { if (is_pos < region2) { table_num = load64(_si_tsel + (gc * 3 + 1) * 8); }
-               else { table_num = load64(_si_tsel + (gc * 3 + 2) * 8); } }
+            else { table_num = load64(_si_tsel + (gc * 3 + 2) * 8); } }
         _mp3_huffman_decode(table_num);
         _mp3_iss(gr, ch, is_pos, f64_from(_hd_x));
         is_pos = is_pos + 1;
@@ -1254,46 +1341,46 @@ fn _mp3_read_main(nch, lsf) {
                 _mp3_read_huffman(part_2_start, gr, ch);
                 ch = ch + 1;
             } else {
-            var scfcomp = load64(_si_scfcomp + gc * 8);
-            var slen1 = load64(_mp3_scf_size + (scfcomp * 2 + 0) * 8);
-            var slen2 = load64(_mp3_scf_size + (scfcomp * 2 + 1) * 8);
-            var winsw = load64(_si_winsw + gc * 8);
-            var btype = load64(_si_btype + gc * 8);
-            var mixed = load64(_si_mixed + gc * 8);
-            if ((winsw == 1) && (btype == 2)) {
-                if (mixed != 0) {
-                    var sfb = 0;
-                    while (sfb < 8) {
-                        store64(_md_scf_l + (gc * 21 + sfb) * 8, _mp3_mbits(slen1));
-                        sfb = sfb + 1;
-                    }
-                    sfb = 3;
-                    while (sfb < 12) {
-                        var nb = slen2; if (sfb < 6) { nb = slen1; }
-                        var win = 0;
-                        while (win < 3) {
-                            store64(_md_scf_s + ((gc * 12 + sfb) * 3 + win) * 8, _mp3_mbits(nb));
-                            win = win + 1;
+                var scfcomp = load64(_si_scfcomp + gc * 8);
+                var slen1 = load64(_mp3_scf_size + (scfcomp * 2 + 0) * 8);
+                var slen2 = load64(_mp3_scf_size + (scfcomp * 2 + 1) * 8);
+                var winsw = load64(_si_winsw + gc * 8);
+                var btype = load64(_si_btype + gc * 8);
+                var mixed = load64(_si_mixed + gc * 8);
+                if ((winsw == 1) && (btype == 2)) {
+                    if (mixed != 0) {
+                        var sfb = 0;
+                        while (sfb < 8) {
+                            store64(_md_scf_l + (gc * 21 + sfb) * 8, _mp3_mbits(slen1));
+                            sfb = sfb + 1;
                         }
-                        sfb = sfb + 1;
+                        sfb = 3;
+                        while (sfb < 12) {
+                            var nb = slen2; if (sfb < 6) { nb = slen1; }
+                            var win = 0;
+                            while (win < 3) {
+                                store64(_md_scf_s + ((gc * 12 + sfb) * 3 + win) * 8, _mp3_mbits(nb));
+                                win = win + 1;
+                            }
+                            sfb = sfb + 1;
+                        }
+                    } else {
+                        var sfb = 0;
+                        while (sfb < 12) {
+                            var nb = slen2; if (sfb < 6) { nb = slen1; }
+                            var win = 0;
+                            while (win < 3) {
+                                store64(_md_scf_s + ((gc * 12 + sfb) * 3 + win) * 8, _mp3_mbits(nb));
+                                win = win + 1;
+                            }
+                            sfb = sfb + 1;
+                        }
                     }
                 } else {
-                    var sfb = 0;
-                    while (sfb < 12) {
-                        var nb = slen2; if (sfb < 6) { nb = slen1; }
-                        var win = 0;
-                        while (win < 3) {
-                            store64(_md_scf_s + ((gc * 12 + sfb) * 3 + win) * 8, _mp3_mbits(nb));
-                            win = win + 1;
-                        }
-                        sfb = sfb + 1;
-                    }
+                    _mp3_read_scf_long(gr, ch, slen1, slen2);
                 }
-            } else {
-                _mp3_read_scf_long(gr, ch, slen1, slen2);
-            }
-            _mp3_read_huffman(part_2_start, gr, ch);
-            ch = ch + 1;
+                _mp3_read_huffman(part_2_start, gr, ch);
+                ch = ch + 1;
             }
         }
         gr = gr + 1;
@@ -1341,11 +1428,19 @@ fn _mp3_scf_group(gr, ch, lo, hi, slen, scfsi) {
 fn _mp3_stab(n, bi, k) { return load64(_mp3_stab_t + ((n * 6 + bi) * 4 + k) * 8); }
 
 # read `count` scalefactors of `bits` each into scf[idx..]; returns new idx
+# MPEG-2 intensity positions: a scalefactor equal to 2^slen - 1 marks the band as
+# not intensity-coded (ISO 13818-3 2.4.3.2). _mp3_ist_bad[idx] records it for the
+# linear scalefactor index of the right channel.
+var _mp3_ist_bad = 0;
+
 fn _mp3_scf_part(scf, idx, count, bits) {
     var j = 0;
     while (j < count) {
         var v = 0;
         if (bits > 0) { v = _mp3_mbits(bits); }
+        var bad = 0;
+        if (bits > 0) { if (v == (1 << bits) - 1) { bad = 1; } }
+        store64(_mp3_ist_bad + idx * 8, bad);
         store64(scf + idx * 8, v);
         idx = idx + 1;
         j = j + 1;
@@ -1353,22 +1448,40 @@ fn _mp3_scf_part(scf, idx, count, bits) {
     return idx;
 }
 
+var _mp3_ist_l = 0;    # [21] MPEG-2 right channel: long band position illegal
+var _mp3_ist_s = 0;    # [36] same, short bands (band-major, sfb*3+win)
+
 fn _mp3_read_scf_lsf(ch, i_stereo) {
     var gc = ch;                       # LSF: gr=0, so gc = 0*2+ch = ch
     var sfc = load64(_si_scfcomp + gc * 8);
-    if (i_stereo == 1) { sfc = sfc >> 1; }
     var s0 = 0; var s1 = 0; var s2 = 0; var s3 = 0;
     var blockidx = 0; var pre = 0;
-    if (sfc < 400) {
-        s0 = (sfc >> 4) / 5; s1 = (sfc >> 4) % 5; s2 = (sfc % 16) >> 2; s3 = sfc % 4; blockidx = 0;
-    } else {
-        if (sfc < 500) {
-            var t = sfc - 400; s0 = (t >> 2) / 5; s1 = (t >> 2) % 5; s2 = t % 4; s3 = 0; blockidx = 1;
+    if (i_stereo == 1) {
+        # The intensity channel has its own partition of scalefac_compress >> 1
+        # (ISO 13818-3 2.4.3.2, mpg123 i_slen2): 180 + 64 + 12 values, rows 3-5 of
+        # the block table, and no preflag. Reading it with the non-intensity table
+        # desynchronised the main data of every intensity-stereo granule.
+        var x = sfc >> 1;
+        if (x < 180) {
+            s0 = x / 36; s1 = (x % 36) / 6; s2 = x % 6; blockidx = 3;
         } else {
-            var t2 = sfc - 500; s0 = t2 / 3; s1 = t2 % 3; s2 = 0; s3 = 0; blockidx = 2; pre = 1;
+            if (x < 244) {
+                var ti = x - 180; s0 = ti / 16; s1 = (ti % 16) / 4; s2 = ti % 4; blockidx = 4;
+            } else {
+                var tj = x - 244; s0 = tj / 3; s1 = tj % 3; blockidx = 5;
+            }
+        }
+    } else {
+        if (sfc < 400) {
+            s0 = (sfc >> 4) / 5; s1 = (sfc >> 4) % 5; s2 = (sfc % 16) >> 2; s3 = sfc % 4; blockidx = 0;
+        } else {
+            if (sfc < 500) {
+                var t = sfc - 400; s0 = (t >> 2) / 5; s1 = (t >> 2) % 5; s2 = t % 4; s3 = 0; blockidx = 1;
+            } else {
+                var t2 = sfc - 500; s0 = t2 / 3; s1 = t2 % 3; s2 = 0; s3 = 0; blockidx = 2; pre = 1;
+            }
         }
     }
-    if (i_stereo == 1) { blockidx = blockidx + 3; pre = 0; }
     store64(_si_pre + gc * 8, pre);
     var n = 0;
     var btype = load64(_si_btype + gc * 8);
@@ -1376,11 +1489,31 @@ fn _mp3_read_scf_lsf(ch, i_stereo) {
     if (btype == 2) { n = 1; if (mixed != 0) { n = 2; } }
     var scf = alloc(40 * 8);
     memset(scf, 0, 40 * 8);
+    if (_mp3_ist_bad == 0) { _mp3_ist_bad = alloc(40 * 8); }
+    memset(_mp3_ist_bad, 0, 40 * 8);
     var idx = 0;
     idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 0), s0);
     idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 1), s1);
     idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 2), s2);
     idx = _mp3_scf_part(scf, idx, _mp3_stab(n, blockidx, 3), s3);
+    # The illegal-position flags follow the same linear -> long/short mapping.
+    if (i_stereo == 1) {
+        if (_mp3_ist_l == 0) { _mp3_ist_l = alloc(21 * 8); _mp3_ist_s = alloc(36 * 8); }
+        memset(_mp3_ist_l, 0, 21 * 8);
+        memset(_mp3_ist_s, 0, 36 * 8);
+        var q = 0;
+        if (n == 0) {
+            while (q < 21) { store64(_mp3_ist_l + q * 8, load64(_mp3_ist_bad + q * 8)); q = q + 1; }
+        } else {
+            if (n == 1) {
+                while (q < 36) { store64(_mp3_ist_s + q * 8, load64(_mp3_ist_bad + q * 8)); q = q + 1; }
+            } else {
+                while (q < 6) { store64(_mp3_ist_l + q * 8, load64(_mp3_ist_bad + q * 8)); q = q + 1; }
+                q = 0;
+                while (q < 27) { store64(_mp3_ist_s + (9 + q) * 8, load64(_mp3_ist_bad + (6 + q) * 8)); q = q + 1; }
+            }
+        }
+    }
     # map linear scf -> scalefac_l / scalefac_s
     if (n == 0) {
         # long: 21 bands
@@ -1558,14 +1691,15 @@ fn _mp3_reorder_fn(gr, ch) {
         var win_len = load64(_mp3_sfb_s + (sfreq * 14 + (sfb + 1)) * 8) - load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8);
         var i = 0;
         if (sfb != 0) { i = 36; }
-        var count1 = load64(_si_count1 + gc * 8);
         var done = 0;
         while ((i < 576) && (done == 0)) {
             if (i == next_sfb) {
                 var base = 3 * load64(_mp3_sfb_s + (sfreq * 14 + sfb) * 8);
                 var j = 0;
                 while (j < 3 * win_len) { _mp3_iss(gr, ch, base + j, load64(_mp3_reorder + j * 8)); j = j + 1; }
-                if (i >= count1) { done = 1; }
+                # Every band is reordered. Stopping at the channel's own coded
+                # extent (count1) left the bands intensity stereo had just filled in
+                # the right channel in bitstream order.
                 if (done == 0) {
                     sfb = sfb + 1;
                     next_sfb = load64(_mp3_sfb_s + (sfreq * 14 + (sfb + 1)) * 8) * 3;
@@ -1723,7 +1857,10 @@ fn _mp3_stereo(gr) {
             store64(bstart + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
             store64(bwidth + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + (b + 1)) * 8) - load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
             var isv = 999;
-            if (b < 21) { isv = _mp3_scfl(gr, 1, b); }
+            if (b < 21) {
+                isv = _mp3_scfl(gr, 1, b);
+                if (_mp3_lsf == 1) { if (load64(_mp3_ist_l + b * 8) == 1) { isv = 999; } }
+            }
             store64(bist + nb * 8, isv);
             nb = nb + 1; b = b + 1;
         }
@@ -1738,7 +1875,9 @@ fn _mp3_stereo(gr) {
             while (b < nlong) {
                 store64(bstart + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
                 store64(bwidth + nb * 8, load64(_mp3_sfb_l + (sfreq * 23 + (b + 1)) * 8) - load64(_mp3_sfb_l + (sfreq * 23 + b) * 8));
-                store64(bist + nb * 8, _mp3_scfl(gr, 1, b));
+                var isl = _mp3_scfl(gr, 1, b);
+                if (_mp3_lsf == 1) { if (load64(_mp3_ist_l + b * 8) == 1) { isl = 999; } }
+                store64(bist + nb * 8, isl);
                 nb = nb + 1; b = b + 1;
             }
             startsfb = 3;
@@ -1753,7 +1892,10 @@ fn _mp3_stereo(gr) {
                 store64(bstart + nb * 8, pos);
                 store64(bwidth + nb * 8, w);
                 var isv = 999;
-                if (sfb < 12) { isv = _mp3_scfs(gr, 1, sfb, win); }
+                if (sfb < 12) {
+                    isv = _mp3_scfs(gr, 1, sfb, win);
+                    if (_mp3_lsf == 1) { if (load64(_mp3_ist_s + (sfb * 3 + win) * 8) == 1) { isv = 999; } }
+                }
                 store64(bist + nb * 8, isv);
                 pos = pos + w; nb = nb + 1;
                 win = win + 1;
@@ -1785,6 +1927,24 @@ fn _mp3_stereo(gr) {
         if (mb1 > mx) { mx = mb1; }
         if (mb2 > mx) { mx = mb2; }
         mb0 = mx; mb1 = mx; mb2 = mx;
+    }
+    # The top band carries no position of its own: it takes the band below's (per
+    # window for short blocks), or a default once the right channel reaches the band
+    # below (ISO 11172-3 2.4.3.4.9.3; minimp3 L3_intensity_stereo).
+    var max_blocks = 1;
+    if (isshort == 1) { max_blocks = 3; }
+    var wi = 0;
+    while (wi < max_blocks) {
+        var mbw = mb0;
+        if (wi == 1) { mbw = mb1; }
+        if (wi == 2) { mbw = mb2; }
+        var itop = nb - max_blocks + wi;
+        var prev = itop - max_blocks;
+        var defpos = 3;
+        if (_mp3_lsf == 1) { defpos = 0; }
+        if (mbw >= prev) { store64(bist + itop * 8, defpos); }
+        else { store64(bist + itop * 8, load64(bist + prev * 8)); }
+        wi = wi + 1;
     }
     var max_pos = 7;
     if (_mp3_lsf == 1) { max_pos = 64; }
@@ -2066,6 +2226,48 @@ fn _mp3_decode_frame(data, pos, info, samples) {
 
 # Decode a whole MPEG1 Layer III stream to interleaved f64 PCM.
 # Returns a decode_result, or err if no MPEG1-L3 frame was decoded.
+# 2 if any frame header in the stream is stereo, else 1. A header walk: frames
+# whose length is unknown yet (free format) are stepped over a byte at a time.
+fn _mp3_stream_channels(data, len, pos) {
+    var p = pos;
+    while (p + 4 <= len) {
+        var adv = 1;
+        if (load8(data + p) == 0xFF) {
+            if ((load8(data + p + 1) & 0xE0) == 0xE0) {
+                var h = mp3_parse_frame_header(data, p);
+                if (res_ok(h) == 1) {
+                    if (mp3_frame_channel_mode(h) != MP3_CHANNEL_MONO) { return 2; }
+                    if (mp3_frame_size(h) > 0) { adv = mp3_frame_size(h); }
+                }
+            }
+        }
+        p = p + adv;
+    }
+    return 1;
+}
+
+# Samples per channel in the stream, from its frame headers.
+fn _mp3_stream_samples(data, len, pos) {
+    var p = pos;
+    var total = 0;
+    while (p + 4 <= len) {
+        var adv = 1;
+        if (load8(data + p) == 0xFF) {
+            if ((load8(data + p + 1) & 0xE0) == 0xE0) {
+                var h = mp3_parse_frame_header(data, p);
+                if (res_ok(h) == 1) {
+                    if ((mp3_frame_size(h) > 0) & (p + mp3_frame_size(h) <= len)) {
+                        total = total + mp3_frame_samples_per_frame(h);
+                        adv = mp3_frame_size(h);
+                    }
+                }
+            }
+        }
+        p = p + adv;
+    }
+    return total;
+}
+
 fn mp3_decode_pcm(data, len) {
     if (mp3_bitrate_v1_l3 == 0) { mp3_init(); }
     _mp3_l3_init();
@@ -2077,10 +2279,30 @@ fn mp3_decode_pcm(data, len) {
     var nch = 1;
     var got = 0;
     var stop = 0;
+    var first_l3 = 1;
+    _mp3_free_bytes = 0;
+    # A stream may switch between mono and stereo frames (ISO he_mode does). The
+    # output keeps one layout: stereo if any frame is, with mono frames copied to
+    # both channels. Appending each frame in its own layout made the samples
+    # impossible to de-interleave.
+    var out_ch = _mp3_stream_channels(data, len, pos);
+    # Sized once from a header walk, and refused past the one-shot ceiling. (Free-
+    # format frames are not counted until their length is learnt; the vector grows
+    # for those, under the same ceiling.)
+    var expect = _mp3_stream_samples(data, len, pos) * out_ch;
+    if (expect > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
+    if (expect > 0) {
+        samples = _vec_new_cap(expect);
+        if (is_err(samples) == 1) { return samples; }
+    }
+    var mono_tmp = vec_new();
     while ((pos + 4 <= len) && (stop == 0)) {
         var advanced = 0;
         if (load8(data + pos) == 0xFF) {
             if ((load8(data + pos + 1) & 0xE0) == 0xE0) {
+                if ((load8(data + pos + 2) >> 4) == 0) {
+                    if (_mp3_free_bytes <= 0) { _mp3_learn_free(data, len, pos); }
+                }
                 var info = mp3_parse_frame_header(data, pos);
                 if (res_ok(info) == 1) {
                     var fs = mp3_frame_size(info);
@@ -2093,14 +2315,33 @@ fn mp3_decode_pcm(data, len) {
                             var cm = mp3_frame_channel_mode(info);
                             nch = 2;
                             if (cm == MP3_CHANNEL_MONO) { nch = 1; }
+                            var dst = samples;
+                            if ((out_ch == 2) & (nch == 1)) { dst = mono_tmp; store64(mono_tmp + 8, 0); }
                             if (lyr == MP3_LAYER_III) {
-                                if (_mp3_decode_frame(data, pos, info, samples) == 1) { got = 1; }
+                                var skip_info = 0;
+                                if (first_l3 == 1) {
+                                    first_l3 = 0;
+                                    skip_info = _mp3_is_info_frame(data, pos, fs);
+                                }
+                                if (skip_info == 0) {
+                                    if (_mp3_decode_frame(data, pos, info, dst) == 1) { got = 1; }
+                                } else { got = 1; }
                             } else {
                                 # Layer I / Layer II (subband PCM, no reservoir)
-                                if (_mp3_l12_frame(data, pos, info, samples) == 1) { got = 1; }
+                                if (_mp3_l12_frame(data, pos, info, dst) == 1) { got = 1; }
+                            }
+                            if (dst == mono_tmp) {
+                                var mi = 0;
+                                var mn = vec_len(mono_tmp);
+                                while (mi < mn) {
+                                    vec_push(samples, vec_get(mono_tmp, mi));
+                                    vec_push(samples, vec_get(mono_tmp, mi));
+                                    mi = mi + 1;
+                                }
                             }
                             pos = pos + fs;
                             advanced = 1;
+                            if (vec_len(samples) > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
                         }
                     }
                 }
@@ -2109,9 +2350,9 @@ fn mp3_decode_pcm(data, len) {
         if ((advanced == 0) && (stop == 0)) { pos = pos + 1; }
     }
     if (got == 0) { return err(ERR_INVALID_HEADER); }
-    var total = vec_len(samples) / nch;
+    var total = vec_len(samples) / out_ch;
     var dur = f64_div(f64_from(total), f64_from(sr));
-    var finfo = fmtinfo_new(FMT_MP3, sr, nch, 16, dur, total);
+    var finfo = fmtinfo_new(FMT_MP3, sr, out_ch, 16, dur, total);
     return decode_result_new(finfo, samples);
 }
 
@@ -2523,7 +2764,11 @@ fn _mp3_l12_read_scale_info(br, l1, mpeg1, mode, modext, kbps, sridx) {
         }
         var ba = load64(_mp3_bat + (tab_off + bitreader_read(br, ba_bits)) * 8);
         store64(_l12_bitalloc + (2 * i) * 8, ba);
-        var ba1 = 0;
+        # Above the joint-stereo bound the channels share the samples, but the right
+        # channel still carries its own scfsi and scalefactors, read with the left
+        # channel's allocation (ISO 11172-3 2.4.1.5). Its allocation is cleared only
+        # after the scalefactors, below; zeroing it first desynchronised the frame.
+        var ba1 = ba;
         if (i < _l12_stereo) { ba1 = load64(_mp3_bat + (tab_off + bitreader_read(br, ba_bits)) * 8); }
         if (_l12_stereo != 0) { store64(_l12_bitalloc + (2 * i + 1) * 8, ba1); }
         else { store64(_l12_bitalloc + (2 * i + 1) * 8, 0); }

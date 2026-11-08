@@ -29,7 +29,7 @@ PATTERN = re.compile(
     r'(syscall\(\s*(?:1|2)\s*,\s*\d+\s*,\s*")((?:[^"\\]|\\.)*)("\s*,\s*)(\d+)(\s*\))'
 )
 
-SOURCE_GLOBS = ["src/*.cyr", "fuzz/*.cyr", "tests/**/*.cyr"]
+SOURCE_GLOBS = ["src/*.cyr", "fuzz/*.cyr", "tests/**/*.cyr", "scripts/**/*.cyr"]
 
 
 def literal_bytes(raw: str) -> int:

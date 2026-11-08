@@ -5,6 +5,187 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.3] - 2026-11-07
+
+**The P(-1) sweep.** No new codecs. The 2.9.2 comparison rig became `scripts/interop.sh`, a CI job that
+sweeps every format across rate × depth × channels against ffmpeg, flac, mpg123 and libopus, and it was
+pointed at every path no reference had reached. It found defects in Opus, MP3, AIFF-C, FLAC, the
+streaming decoders, the PCM encoders and ID3v2; fuzzing found one crash; an independent audit found two
+memory amplifications in MP4. Every fix below was proven by reverting it in a scratch
+copy and watching a test fail, with an unmodified control passing. 12,960 assertions (was 11,938).
+
+### Fixed — wrong output, found against a reference
+
+| Area | What was wrong | Effect | Now |
+|---|---|---|---|
+| **Opus packet loss and DTX** | No concealment: lost packets and DTX frames were not concealed as libopus conceals them | Output diverged from libopus at every loss and every DTX frame | libopus's CELT PLC (pitch search, LPC extrapolation, fold) and SILK PLC + comfort noise ported. Lost packets and DTX match libopus within 3 LSB (its float32 against shravan's f64) |
+| **Opus SILK FEC** | LBRR (in-band FEC) frames were never skipped | Every regular frame after one decoded from the wrong bit position | Skipped as libopus does |
+| **Opus transitions** | Mode, bandwidth, frame-size and mono/stereo switches: CELT↔SILK redundancy, decoder resets, the transition PLC cross-fade and the hybrid→SILK fade were missing or wrong | Errors at every switch | Exact against libopus over streams that switch every packet |
+| **Opus stereo SILK** | Mid-only frames and the side channel's restart | Errors whenever the encoder dropped the side channel | Exact |
+| **Opus CELT 2.5 ms** | The second postfilter comb ran at LM 0 | Wrong output for every 2.5 ms CELT frame with the postfilter on | Exact |
+| **Ogg Opus output gain** | OpusHead's output gain was ignored; RFC 7845 says a decoder MUST apply it | Wrong level whenever a file sets it | Applied, as ffmpeg does |
+| **Opus multistream** | Channel mapping family 1/255 (more than two channels) was decoded as one stream | Garbage | `ERR_UNSUPPORTED_FMT`. Multistream decode is scheduled for 2.10.3 |
+| **MP3 intensity stereo** | MPEG-2 LSF intensity: the scalefactor partition, illegal positions and the top-band rule were wrong, and the short-block reorder stopped before intensity-coded bands | Wrong stereo image on LSF intensity files | ISO 11172-4 / 13818-4 conformance vectors (including l3-test46, l3-he_mode) within 1 LSB |
+| **MP3 Layer I/II joint stereo** | Joint-stereo subbands read the wrong allocation | Wrong output above the stereo bound | Conformance vectors l1-fl1 and l2-fl10 within 1 LSB |
+| **MP3 free format** | Bitrate index 0 was rejected | Free-format files did not decode | Frame length learnt from the first two frames; l3-he_free within 1 LSB |
+| **MP3 Info/Xing/VBRI frame** | Decoded as audio | About 1152 samples of silence at the start of nearly every LAME file | Skipped |
+| **MP3 mixed mono/stereo** | The channel count came from the last frame | Interleaving broke when a stream changed mode | One layout for the whole stream, mono frames duplicated |
+| **MP3 detection** | A stream behind leading junk was not recognised | `codec_open` refused it | Found by two matching headers within 64 KiB |
+| **AIFF-C** | fl32 was decoded as integers and fl64 refused; ulaw, alaw and ima4 were read as PCM | Noise, or no audio | Float decoded; unsupported compressions `ERR_UNSUPPORTED_FMT` |
+| **12-bit WAV and AIFF** | Depths other than 8/16/24/32 had no decoder | WAV returned `ERR_DECODE`; AIFF returned zero samples as success | Decoded in their whole-byte containers, as ffmpeg does |
+| **FLAC 32-bit** | Sample-size code 7 (RFC 9639) refused | 32-bit files did not decode | Exact against `flac` |
+| **FLAC range decode** | A seek landing in the last, shorter frame placed it with the frame's own block size | `flac_decode_range` returned nothing past that point | Placed by STREAMINFO's block size |
+| **FLAC channel count** | A frame whose channels contradicted STREAMINFO was decoded anyway | Output interleaved for the wrong channel count | Refused, as libFLAC refuses it |
+| **Streaming decoders** | WAV and AIFF decoded the first feed holding a complete header and ignored every later byte; FLAC re-decoded from its last seek point on each feed; `decode_reader` dropped a first feed shorter than 12 bytes. The tests only looked for a SAMPLES event | A WAV stream returned 461 of 44,100 samples; a minute of FLAC took 112 s to stream | Incremental: sample-identical to the one-shot decoders however the input is split, buffer bounded to one chunk or frame, 60 s of FLAC in 0.5 s |
+| **f32 encode** | f64 → f32 truncated the fraction and flushed subnormals | Every sample not already a float pulled toward zero by up to one f32 step | Rounds to nearest even; equals ffmpeg's conversion exactly |
+| **ID3v2.3 frame flags** | Never read: compressed, encrypted and grouped frames were taken as text | Compressed and encrypted frames came back as garbage text, grouped ones not at all | Compressed frames inflated (sankoch), encrypted skipped, group byte skipped |
+| **ID3v2.4 compressed frames** | Skipped | Missing tags | Inflated (sankoch), unsynchronisation undone first |
+
+### Fixed — crashes and hostile input
+
+- **Opus SILK first packet with LBRR** (found by the new fuzzing): a fresh decoder read the LBRR iCDF before
+  any table existed, a null pointer. libopus never writes such a first packet, so real streams did not hit
+  it; a warm process hid it. Fixed, with a regression test that clears the tables first.
+- **Lazy initialisation everywhere.** Consumers call only `alloc_init` and `shravan_init_constants`, but the
+  FFT, Ogg CRC, resampler, dither, AAC rate table and FLAC CRC/MD5 tables relied on init calls the test
+  harnesses made. `fuzz_decode` now calls only what consumers call.
+- **MP4, from an independent bounds audit of ALAC and MP4** (the roadmap's SEC re-audit item: no
+  out-of-bounds access or crash found, in code review and about 230,000 targeted fuzz runs):
+  - SEC-033's fix was incomplete. A constant `stsz` size of 1 still allowed as many samples as bytes, so
+    the two sample tables cost 16× the file: 142 MiB resident from 8 MiB. The bound now counts at least
+    4 bytes a sample, the same 4× that an explicit table's entries already imposed.
+  - Chunk offsets could point many AAC samples at the same bytes, each in bounds, and the ADTS staging
+    copy was the sum of their sizes: 520 MiB from a 270 KB file. Sample sizes must now sum to at most
+    the file (a real file's samples never overlap), checked before anything is staged.
+  - The audio-track search ignored 64-bit box sizes and never found a `trak` that used one; ffmpeg does.
+  - The per-AU ADTS bridge wrote channel configuration 7 as 0, wrapped AUs over 8184 bytes, and gave
+    rates outside the ADTS table 44.1 kHz. Those tracks are now refused (ffmpeg's decoder refuses the
+    explicit rate too).
+  - A QuickTime v2 sample entry's f64 rate could reach `mp4_demux` negative; it now reads as unknown.
+  - Also: sample counts larger than the box could hold are refused, the size and offset tables are
+    allocated with overflow checks, and a table past the one-shot ceiling returns `ERR_TOO_LARGE`.
+- **Streams**: a header declaring 65,535 channels can no longer make a stream buffer 2 GB for one chunk
+  (chunks are held to 16 MiB), and input that never completes a header or frame is refused at a bound.
+- **Compressed ID3v2 frames** are held to 256 KiB each and 1 MiB per tag: zlib expands about 1000:1.
+- `fuzz_codecs` did not build since the one-shot ceiling landed (its stub lacked the new symbols).
+
+### Changed — decisions
+
+- **One-shot ceiling: settable, and presized.** `shravan_set_max_samples(n)` (returns the previous value)
+  and `shravan_max_samples()`. The default doubles to 2^26 interleaved samples, about 12.7 minutes of
+  44.1 kHz stereo. Past it every one-shot decoder returns the new **`ERR_TOO_LARGE`** (8) before
+  allocating; until now a 7-minute FLAC returned `ERR_DECODE`. Decoders size their output once from the
+  declared length, so peak memory is the payload, not two to four times it. Streams have no ceiling.
+- **PCM encoders are the decoders' inverse.** WAV, AIFF and FLAC encoding scale by 2^(N-1), round half to
+  even and clamp, where they scaled by 2^(N-1) - 1 and truncated. A decode then re-encode now hands every
+  sample back; before, it moved nearly every sample by one LSB. -1.0 encodes to the minimum integer, +1.0
+  clamps to the maximum.
+- **sankoch has a call site**: compressed ID3v2 frames (above). Kept as a dependency on that basis.
+- **One test harness.** `src/main_encoder.cyr` and `src/main_silk.cyr` are gone; `src/main.cyr` runs
+  everything. The split existed for a ~3.15 MB code buffer that has been a growable 64 MiB region since
+  Cyrius 6.4.49. CI checks the single summary line.
+- **Stream events gain `STREAM_EVT_ERROR`** (3), carrying a packed error, after which the stream decodes
+  nothing further. `decode_reader` refuses formats it cannot stream with one ERROR event instead of
+  returning empty event lists forever, and its flush always ends with END.
+- **AAC with more than two channels** is refused with `ERR_UNSUPPORTED_FMT`; decode is scheduled for
+  2.10.3 with Opus multistream.
+
+### Performance
+
+| Path | Before | After |
+|---|---|---|
+| AAC decode, 30 s stereo, transients | 24.4 s (1.2× real time) | 0.47 s (63×) |
+| AAC encode, 10 s stereo | 5.36 s | 0.49 s, identical bitstream |
+| f32 → f64, 4M samples | 874 ms | 36 ms |
+| i16 / i24 → f64, 4M samples | 77 / 78 ms | 21 / 28 ms |
+| FLAC decode, 60 s stereo | 0.44 s | 0.39 s |
+| FLAC stream, 60 s stereo | 112 s | 0.50 s |
+
+"Before" is 2.9.2 for the PCM and stream rows. For the AAC and FLAC decode rows it is this release's tree
+with that optimisation reverted, measured in the same session; 2.9.2 itself was slower still on AAC
+transients, since it rebuilt the long-block cosine basis at every block switch.
+
+- **MDCT and IMDCT through an N/4-point FFT**, on a radix-2 FFT whose twiddles and bit-reversal tables are
+  cached per size. The O(N²) direct transforms remain as the fallback for other sizes and as the tests'
+  reference; the fast ones agree to 1e-9 on every size AAC uses. AAC output moves by at most 2e-9 LSB.
+- **AAC dequantisation tables**: |q|^(4/3) and 2^((sf-100)/4) from tables built with the same
+  expressions, bit-identical to the `f64_pow` they replace.
+- **PCM converters** share one layout loop that writes the output buffer directly; f32 decodes by moving
+  exponent and fraction bits instead of an `f64_pow` per sample.
+- **Memory**: per-frame scratch in FLAC (a buffer ring), Opus and AAC (frame arenas), so a one-shot decode
+  allocates about its own output: FLAC was 3× it, AAC 8×, Opus 8×.
+- `src/bench.cyr`, 2.9.2 against 2.9.3 in one session, alternating, pinned to one core, best of three
+  (2.9.2's PCM rows measured its inline copies, which is what this release removed):
+
+| Benchmark | 2.9.2 | 2.9.3 | Change |
+|---|---|---|---|
+| wav_decode_1sec_i16 | 884 µs | 170 µs | −80.8% |
+| wav_encode_1sec_i16 | 808 µs | 812 µs | +0.5% |
+| pcm_i16_to_f64_4096 | 83.1 µs | 16.0 µs | −80.7% |
+| pcm_i24_packed_4096 | 78.5 µs | 18.3 µs | −76.7% |
+| pcm_u8_to_f64_4096 | 51.0 µs | 11.0 µs | −78.5% |
+| fft_forward_1024 | 1.26 ms | 94.2 µs | −92.5% |
+| mdct_forward_2048 | 5.82 ms | 54.2 µs | −99.1% |
+| flac_encode_1sec_i16 | 10.41 ms | 10.81 ms | +3.9% |
+| flac_decode_1sec_i16 | 3.70 ms | 3.25 ms | −12.2% |
+| aac_encode_1sec_stereo | 571 ms | 50.1 ms | −91.2% |
+| aac_decode_1sec_stereo | 904 ms | 22.3 ms | −97.5% |
+| opus_celt_decode_20ms | 2.09 ms | 2.10 ms | +0.3% |
+| wav_stream_1sec_i16 (new) | — | 459 µs | |
+| pcm_f32_to_f64_4096 (new) | — | 40.2 µs | |
+| imdct_inverse_2048 (new) | — | 53.8 µs | |
+| flac_stream_1sec_i16 (new) | — | 3.79 ms | |
+
+  FLAC encode's +3.9% is plausibly the encoder now rounding where it truncated; the other two rises are
+  within noise. `bench-history.csv` gains the rows stamped `2026-11-08T01:14:29Z`. They were recorded
+  before commit, so they carry 2.9.2's hash (09b3632), like the 2.9.2 baseline rows taken at the start
+  of this work.
+
+### Added
+
+- **`scripts/interop.sh`** and the **`interop` CI job**: `scripts/interop/cli.cyr` drives shravan's
+  decoders, streams and encoders; `scripts/interop/opusref.c` generates libopus vectors (FEC, DTX, loss,
+  every kind of switch). 816 cases, all passing (850 against a default-build libopus). Lossless paths must match exactly, and again
+  through the streaming decoders.
+- **New real-file fixtures** (`scripts/gen-interop-fixtures.py`, now deterministic): 18 libopus packet
+  streams, Ogg Opus with an output gain, ISO MPEG conformance excerpts, a LAME Info frame, WAV with a LIST
+  chunk, float, EXTENSIBLE and from a pipe, 12-bit WAV and AIFF, AIFF-C fl32 and ulaw, FLAC at 32 bits
+  and with a seek table, ID3v2 tags with compressed frames (built from the specs, kept only once
+  ffprobe and mutagen read them back), and six MP4s from the bounds audit, built box by box.
+- **Opus concealment checked against a default libopus build.** Distributions may build libopus with deep
+  PLC (DRED/OSCE), which skips the SILK PLC fade-in at 16 kHz; this machine's does. `opusref caps` tells
+  the builds apart by decoder size (155 KB against 18 KB; the DRED entry points are exported as stubs
+  either way, so the old symbol check could not), `scripts/interop/build-libopus.sh` makes a default
+  static build, and `OPUS_PREFIX` links the interop tools and the fixture generator against it. Against
+  it, wideband SILK (10/20/40/60 ms) and hybrid SWB/FB, mono and stereo, under loss and DTX, are
+  sample-exact; the deep-PLC library differs from both by 25 to 3,094 LSB on the same packets. Three
+  fixtures pin it in the suite (reverting to the deep-PLC behaviour fails exactly those three), the
+  sweep adds 34 cases wherever its libopus is a default build, and the generator refuses a deep-PLC
+  one rather than record its references.
+- **Fuzzing**: `fuzz/fuzz_opus.cyr` feeds damaged libopus packets and hostile OpusHeads to the Opus
+  decoder; `fuzz_decode` gains the streaming decoders (split at random), compressed ID3v2 (sankoch's
+  inflate), Opus packet sequences and every new fixture, and runs AAC seeds at full rate now that AAC is
+  fast. `fuzz/run.sh` runs seeded batches until each harness reaches the call count, then **cold starts**
+  (one call per process, so every codec's first use precedes its tables), and takes `--poison` (allocator
+  redzones; a hit exits 86) and `--bounds`. CI runs a short pass of all three and a poison pass.
+- `src/bench.cyr` includes the library instead of carrying copies of it, which had drifted (they still
+  scaled by 2^(N-1) - 1). New benchmarks: f32 conversion, IMDCT, WAV and FLAC streaming.
+
+### Verified
+
+- 12,960 assertions, 0 failing. `./fuzz/run.sh 90000`: 998,846 calls (fuzz_codecs 810,000, fuzz_decode 98,846,
+  fuzz_opus 90,000) and 2,200 cold starts, 0 crashes. The same gate with `--poison`: the same
+  counts, 0 redzone violations.
+  Interop sweep: 816 of 816 cases against this machine's deep-PLC libopus, 850 of 850 against a default
+  build (`OPUS_PREFIX`). `cyrius deps --verify`: 44 verified, 0 failed. `cyrius distlib`
+  regenerates `dist/shravan.cyr` and `--check` passes, with the same single platform warning as 2.9.2
+  (`is_err` on x86_64-windows). Write lengths correct; every source file canonically formatted.
+
+### Not yet verified against a reference
+
+See the roadmap's "Paths no reference has reached": MPEG-2.5 8 kHz mixed blocks, AAC `pulse_data`
+(refused), Apple-encoded ALAC, variable-blocksize FLAC, and ID3v2 grouped frames.
+
 ## [2.9.2] - 2026-11-07
 
 **Real files, at last.** This release set out to swap in a smaller JSON dependency and clear the

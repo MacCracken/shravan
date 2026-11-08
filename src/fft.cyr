@@ -32,6 +32,12 @@ fn fft_init() {
     return 0;
 }
 
+# Lazy: consumers call only shravan_init_constants(), so the FFT initialises itself.
+fn _fft_two_pi() {
+    if (F64_TWO_PI == 0) { fft_init(); }
+    return F64_TWO_PI;
+}
+
 # ================================================================
 # Twiddle factor cache — pre-computed cos/sin tables per FFT size
 # ================================================================
@@ -47,7 +53,7 @@ fn _fft_ensure_twiddles(n) {
     if (n == _fft_tw_n) { return 0; }
     _fft_tw_re = alloc(n * 8);
     _fft_tw_im = alloc(n * 8);
-    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+    var angle_base = f64_neg(f64_div(_fft_two_pi(), f64_from(n)));
     var k = 0;
     while (k < n) {
         var theta = f64_mul(angle_base, f64_from(k));
@@ -120,7 +126,7 @@ fn _dft_naive(re, im, n) {
     memcpy(tmp_re, re, n * 8);
     memcpy(tmp_im, im, n * 8);
 
-    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+    var angle_base = f64_neg(f64_div(_fft_two_pi(), f64_from(n)));
 
     var k = 0;
     while (k < n) {
@@ -168,6 +174,18 @@ fn _dft_naive(re, im, n) {
 # and scale output by 1/n.
 
 fn fft_compute(re, im, n, inverse) {
+    if (_fft_pow2(n) == 1) {
+        if (inverse == 0) { _fft2(re, im, n, 0 - 1); return 0; }
+        _fft2(re, im, n, 1);
+        var sc = f64_div(F64_ONE, f64_from(n));
+        var q = 0;
+        while (q < n) {
+            store64(re + q * 8, f64_mul(load64(re + q * 8), sc));
+            store64(im + q * 8, f64_mul(load64(im + q * 8), sc));
+            q = q + 1;
+        }
+        return 0;
+    }
     if (inverse != 0) {
         # Conjugate input
         var ci = 0;
@@ -235,7 +253,7 @@ fn _fft_forward(re, im, n) {
     # Pre-compute all N twiddle factors for this level
     var tw_re_buf = alloc(n * 8);
     var tw_im_buf = alloc(n * 8);
-    var angle_base = f64_neg(f64_div(F64_TWO_PI, f64_from(n)));
+    var angle_base = f64_neg(f64_div(_fft_two_pi(), f64_from(n)));
     var ti = 0;
     while (ti < n) {
         var theta = f64_mul(angle_base, f64_from(ti));
@@ -277,6 +295,128 @@ fn _fft_forward(re, im, n) {
 }
 
 # ================================================================
+# Power-of-two FFT
+# ================================================================
+# Iterative radix-2, natural order in and out. The twiddles (cos and sin of
+# 2*pi*k/n) and the bit-reversal permutation are built once per size and cached
+# for four sizes. The mixed-radix path above recomputed n cosines at every level
+# of every call; this is what the MDCT runs on.
+
+fn _fft_pow2(n) {
+    if (n < 2) { return 0; }
+    if ((n & (n - 1)) != 0) { return 0; }
+    return 1;
+}
+
+var _fft2_slot_n = 0;     # [4] sizes
+var _fft2_slot_t = 0;     # [4] table blocks: cos[n/2] | sin[n/2] | rev[n]
+var _fft2_cur_n = 0;
+var _fft2_cos = 0;
+var _fft2_sin = 0;
+var _fft2_rev = 0;
+
+fn _fft2_tables(n) {
+    if (n == _fft2_cur_n) { return 0; }
+    if (_fft2_slot_n == 0) {
+        _fft2_slot_n = alloc(4 * 8);
+        _fft2_slot_t = alloc(4 * 8);
+        memset(_fft2_slot_n, 0, 32);
+        memset(_fft2_slot_t, 0, 32);
+    }
+    var t = 0;
+    var free = 0 - 1;
+    var j = 0;
+    while (j < 4) {
+        if (load64(_fft2_slot_n + j * 8) == n) { t = load64(_fft2_slot_t + j * 8); }
+        if (free < 0) { if (load64(_fft2_slot_n + j * 8) == 0) { free = j; } }
+        j = j + 1;
+    }
+    var h = n / 2;
+    if (t == 0) {
+        t = alloc((h + h + n) * 8);
+        var step = f64_div(_fft_two_pi(), f64_from(n));
+        var k = 0;
+        while (k < h) {
+            var th = f64_mul(step, f64_from(k));
+            store64(t + k * 8, f64_cos(th));
+            store64(t + (h + k) * 8, f64_sin(th));
+            k = k + 1;
+        }
+        var bits = 0;
+        while ((1 << bits) < n) { bits = bits + 1; }
+        var i = 0;
+        while (i < n) {
+            var r = 0;
+            var b = 0;
+            while (b < bits) {
+                if (((i >> b) & 1) == 1) { r = r | (1 << (bits - 1 - b)); }
+                b = b + 1;
+            }
+            store64(t + (h + h + i) * 8, r);
+            i = i + 1;
+        }
+        if (free < 0) { free = 3; }
+        store64(_fft2_slot_n + free * 8, n);
+        store64(_fft2_slot_t + free * 8, t);
+    }
+    _fft2_cur_n = n;
+    _fft2_cos = t;
+    _fft2_sin = t + h * 8;
+    _fft2_rev = t + (h + h) * 8;
+    return 0;
+}
+
+# In-place FFT of n (a power of two) complex values: X[k] = sum x[j] e^(sign*2*pi*i*jk/n),
+# sign -1 forward, +1 inverse (no 1/n).
+fn _fft2(re, im, n, sign) {
+    _fft2_tables(n);
+    var cs = _fft2_cos;
+    var sn = _fft2_sin;
+    var rev = _fft2_rev;
+    var i = 0;
+    while (i < n) {
+        var j = load64(rev + i * 8);
+        if (j > i) {
+            var t = load64(re + i * 8); store64(re + i * 8, load64(re + j * 8)); store64(re + j * 8, t);
+            t = load64(im + i * 8); store64(im + i * 8, load64(im + j * 8)); store64(im + j * 8, t);
+        }
+        i = i + 1;
+    }
+    var len = 2;
+    while (len <= n) {
+        var half = len / 2;
+        var tstep = (n / len) * 8;
+        var st = 0;
+        while (st < n) {
+            var k = 0;
+            var tw = 0;
+            while (k < half) {
+                var wr = load64(cs + tw);
+                var wi = load64(sn + tw);
+                if (sign < 0) { wi = f64_neg(wi); }
+                var pa = (st + k) * 8;
+                var pb = pa + half * 8;
+                var br = load64(re + pb);
+                var bi = load64(im + pb);
+                var tr = f64_sub(f64_mul(br, wr), f64_mul(bi, wi));
+                var ti = f64_add(f64_mul(br, wi), f64_mul(bi, wr));
+                var ar = load64(re + pa);
+                var ai = load64(im + pa);
+                store64(re + pa, f64_add(ar, tr));
+                store64(im + pa, f64_add(ai, ti));
+                store64(re + pb, f64_sub(ar, tr));
+                store64(im + pb, f64_sub(ai, ti));
+                k = k + 1;
+                tw = tw + tstep;
+            }
+            st = st + len;
+        }
+        len = len * 2;
+    }
+    return 0;
+}
+
+# ================================================================
 # MDCT / IMDCT — a verified TDAC-invertible pair (shared cosine basis)
 # ================================================================
 # Direct O(n*m) transform over a cached cosine basis, m = n/2:
@@ -289,9 +429,33 @@ fn _fft_forward(re, im, n) {
 # MDCT that preserves this exact convention is a perf follow-up.
 var _mdct_basis = 0;
 var _mdct_basis_n = 0;
+var _mdct_cache_n = 0;    # [4] transform sizes with a built basis
+var _mdct_cache_b = 0;    # [4] their bases
 
+# The cosine basis for an n-point transform, built once per size. It used to be
+# cached for ONE size, and AAC alternates 2048 (long) and 256 (short) blocks, so
+# every block switch rebuilt the long basis: two million cosines and 16 MB that
+# alloc() never returns. A transient-rich minute of AAC allocated eight times its
+# output and decoded far slower than real time.
 fn _mdct_ensure_basis(n) {
     if (_mdct_basis_n == n) { return 0; }
+    if (_mdct_cache_n == 0) {
+        _mdct_cache_n = alloc(4 * 8);
+        _mdct_cache_b = alloc(4 * 8);
+        memset(_mdct_cache_n, 0, 32);
+        memset(_mdct_cache_b, 0, 32);
+    }
+    var slot = 0 - 1;
+    var j = 0;
+    while (j < 4) {
+        if (load64(_mdct_cache_n + j * 8) == n) {
+            _mdct_basis = load64(_mdct_cache_b + j * 8);
+            _mdct_basis_n = n;
+            return 0;
+        }
+        if (slot < 0) { if (load64(_mdct_cache_n + j * 8) == 0) { slot = j; } }
+        j = j + 1;
+    }
     var m = n / 2;
     var shift = n / 4;
     var bb = alloc(m * n * 8);
@@ -305,6 +469,9 @@ fn _mdct_ensure_basis(n) {
         }
         k = k + 1;
     }
+    if (slot < 0) { slot = 3; }
+    store64(_mdct_cache_n + slot * 8, n);
+    store64(_mdct_cache_b + slot * 8, bb);
     _mdct_basis = bb;
     _mdct_basis_n = n;
     return 0;
@@ -315,6 +482,13 @@ fn fft_mdct(input, n, output) {
     if (n < 4) { return 0 - 1; }
     if (n % 4 != 0) { return 0 - 1; }
     if (n > 8192) { return 0 - 1; }
+    if (n % 8 == 0) { if (_fft_pow2(n / 4) == 1) { return _mdct_fast(input, n, output); } }
+    return _mdct_direct(input, n, output);
+}
+
+# The O(n^2) transform over the cached basis: the definition, kept for sizes the
+# fast path does not take and as the reference the tests hold it to.
+fn _mdct_direct(input, n, output) {
     _mdct_ensure_basis(n);
     var m = n / 2;
     var b = _mdct_basis;
@@ -328,6 +502,175 @@ fn fft_mdct(input, n, output) {
             i = i + 1;
         }
         store64(output + k * 8, acc);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# ---- fast MDCT / IMDCT ----
+# The same transforms through an n/4-point complex FFT: pre-twiddle, FFT,
+# post-twiddle, the standard factorisation (as in ffmpeg's mdct_template.c, whose
+# rotation tables are -cos and -sin of 2*pi*(i + 1/8)/n). Against the definition,
+# the MDCT comes out exactly and the IMDCT scaled by -M/2, which the 2/M
+# normalisation absorbs as -2/M. O(n log n) in place of O(n^2): a long AAC block
+# was two million multiply-adds per channel.
+var _mdct_tw_n = 0;
+var _mdct_tc = 0;
+var _mdct_ts = 0;
+var _mdct_tw_slots_n = 0;    # [4]
+var _mdct_tw_slots_t = 0;    # [4]
+var _mdct_zr = 0;            # FFT scratch, n/4 values each
+var _mdct_zi = 0;
+var _mdct_zcap = 0;
+
+fn _mdct_tw(n) {
+    if (n == _mdct_tw_n) { return 0; }
+    if (_mdct_tw_slots_n == 0) {
+        _mdct_tw_slots_n = alloc(32);
+        _mdct_tw_slots_t = alloc(32);
+        memset(_mdct_tw_slots_n, 0, 32);
+        memset(_mdct_tw_slots_t, 0, 32);
+    }
+    var n4 = n / 4;
+    var t = 0;
+    var free = 0 - 1;
+    var j = 0;
+    while (j < 4) {
+        if (load64(_mdct_tw_slots_n + j * 8) == n) { t = load64(_mdct_tw_slots_t + j * 8); }
+        if (free < 0) { if (load64(_mdct_tw_slots_n + j * 8) == 0) { free = j; } }
+        j = j + 1;
+    }
+    if (t == 0) {
+        t = alloc(n4 * 2 * 8);
+        var eighth = f64_div(F64_ONE, f64_from(8));
+        var i = 0;
+        while (i < n4) {
+            var a = f64_div(f64_mul(_fft_two_pi(), f64_add(f64_from(i), eighth)), f64_from(n));
+            store64(t + i * 8, f64_neg(f64_cos(a)));
+            store64(t + (n4 + i) * 8, f64_neg(f64_sin(a)));
+            i = i + 1;
+        }
+        if (free < 0) { free = 3; }
+        store64(_mdct_tw_slots_n + free * 8, n);
+        store64(_mdct_tw_slots_t + free * 8, t);
+    }
+    if (_mdct_zcap < n4) {
+        _mdct_zr = alloc(n4 * 8);
+        _mdct_zi = alloc(n4 * 8);
+        _mdct_zcap = n4;
+    }
+    _mdct_tw_n = n;
+    _mdct_tc = t;
+    _mdct_ts = t + n4 * 8;
+    return 0;
+}
+
+fn _mdct_fast(x, n, out) {
+    _mdct_tw(n);
+    var n2 = n / 2;
+    var n4 = n / 4;
+    var n8 = n / 8;
+    var n3 = 3 * n4;
+    var tc = _mdct_tc;
+    var ts = _mdct_ts;
+    var zr = _mdct_zr;
+    var zi = _mdct_zi;
+    var i = 0;
+    while (i < n8) {
+        var re = f64_sub(f64_neg(load64(x + (2 * i + n3) * 8)), load64(x + (n3 - 1 - 2 * i) * 8));
+        var im = f64_add(f64_neg(load64(x + (n4 + 2 * i) * 8)), load64(x + (n4 - 1 - 2 * i) * 8));
+        var c = f64_neg(load64(tc + i * 8));
+        var s = load64(ts + i * 8);
+        store64(zr + i * 8, f64_sub(f64_mul(re, c), f64_mul(im, s)));
+        store64(zi + i * 8, f64_add(f64_mul(re, s), f64_mul(im, c)));
+        re = f64_sub(load64(x + 2 * i * 8), load64(x + (n2 - 1 - 2 * i) * 8));
+        im = f64_sub(f64_neg(load64(x + (n2 + 2 * i) * 8)), load64(x + (n - 1 - 2 * i) * 8));
+        c = f64_neg(load64(tc + (n8 + i) * 8));
+        s = load64(ts + (n8 + i) * 8);
+        store64(zr + (n8 + i) * 8, f64_sub(f64_mul(re, c), f64_mul(im, s)));
+        store64(zi + (n8 + i) * 8, f64_add(f64_mul(re, s), f64_mul(im, c)));
+        i = i + 1;
+    }
+    _fft2(zr, zi, n4, 0 - 1);
+    i = 0;
+    while (i < n8) {
+        var a = n8 - i - 1;
+        var b = n8 + i;
+        var ar = load64(zr + a * 8);
+        var ai = load64(zi + a * 8);
+        var nsa = f64_neg(load64(ts + a * 8));
+        var nca = f64_neg(load64(tc + a * 8));
+        var br = load64(zr + b * 8);
+        var bi = load64(zi + b * 8);
+        var nsb = f64_neg(load64(ts + b * 8));
+        var ncb = f64_neg(load64(tc + b * 8));
+        # (i1, r0) = (ar, ai) * (-ts[a], -tc[a]);  (i0, r1) = (br, bi) * (-ts[b], -tc[b])
+        store64(zi + b * 8, f64_sub(f64_mul(ar, nsa), f64_mul(ai, nca)));
+        store64(zr + a * 8, f64_add(f64_mul(ar, nca), f64_mul(ai, nsa)));
+        store64(zi + a * 8, f64_sub(f64_mul(br, nsb), f64_mul(bi, ncb)));
+        store64(zr + b * 8, f64_add(f64_mul(br, ncb), f64_mul(bi, nsb)));
+        i = i + 1;
+    }
+    var k = 0;
+    while (k < n4) {
+        store64(out + 2 * k * 8, load64(zr + k * 8));
+        store64(out + (2 * k + 1) * 8, load64(zi + k * 8));
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn _imdct_fast(X, n, out) {
+    _mdct_tw(n);
+    var n2 = n / 2;
+    var n4 = n / 4;
+    var n8 = n / 8;
+    var tc = _mdct_tc;
+    var ts = _mdct_ts;
+    var zr = _mdct_zr;
+    var zi = _mdct_zi;
+    var k = 0;
+    while (k < n4) {
+        var re = load64(X + (n2 - 1 - 2 * k) * 8);
+        var im = load64(X + 2 * k * 8);
+        var c = load64(tc + k * 8);
+        var s = load64(ts + k * 8);
+        store64(zr + k * 8, f64_sub(f64_mul(re, c), f64_mul(im, s)));
+        store64(zi + k * 8, f64_add(f64_mul(re, s), f64_mul(im, c)));
+        k = k + 1;
+    }
+    _fft2(zr, zi, n4, 1);
+    k = 0;
+    while (k < n8) {
+        var a = n8 - k - 1;
+        var b = n8 + k;
+        var ar = load64(zr + a * 8);
+        var ai = load64(zi + a * 8);
+        var br = load64(zr + b * 8);
+        var bi = load64(zi + b * 8);
+        var sa = load64(ts + a * 8);
+        var ca = load64(tc + a * 8);
+        var sb = load64(ts + b * 8);
+        var cb = load64(tc + b * 8);
+        # (r0, i1) = (ai, ar) * (ts[a], tc[a]);  (r1, i0) = (bi, br) * (ts[b], tc[b])
+        store64(zr + a * 8, f64_sub(f64_mul(ai, sa), f64_mul(ar, ca)));
+        store64(zi + b * 8, f64_add(f64_mul(ai, ca), f64_mul(ar, sa)));
+        store64(zr + b * 8, f64_sub(f64_mul(bi, sb), f64_mul(br, cb)));
+        store64(zi + a * 8, f64_add(f64_mul(bi, cb), f64_mul(br, sb)));
+        k = k + 1;
+    }
+    # The middle half, scaled by -2/M; the outer quarters follow by symmetry.
+    var sc = f64_neg(f64_div(F64_TWO, f64_from(n2)));
+    k = 0;
+    while (k < n4) {
+        store64(out + (n4 + 2 * k) * 8, f64_mul(load64(zr + k * 8), sc));
+        store64(out + (n4 + 2 * k + 1) * 8, f64_mul(load64(zi + k * 8), sc));
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n4) {
+        store64(out + k * 8, f64_neg(load64(out + (n2 - k - 1) * 8)));
+        store64(out + (n - k - 1) * 8, load64(out + (n2 + k) * 8));
         k = k + 1;
     }
     return 0;
@@ -348,6 +691,11 @@ fn fft_imdct(input, n, output) {
     if (n < 4) { return 0 - 1; }
     if (n % 4 != 0) { return 0 - 1; }
     if (n > 8192) { return 0 - 1; }
+    if (n % 8 == 0) { if (_fft_pow2(n / 4) == 1) { return _imdct_fast(input, n, output); } }
+    return _imdct_direct(input, n, output);
+}
+
+fn _imdct_direct(input, n, output) {
     _mdct_ensure_basis(n);
     var m = n / 2;
     var b = _mdct_basis;
@@ -608,7 +956,80 @@ fn test_fft_mdct_roundtrip() {
     return 0;
 }
 
+# The FFT-based MDCT and IMDCT against their definitions (the direct transforms)
+# on pseudo-random input at every size AAC and the tests use; and the power-of-two
+# FFT against the naive DFT.
+fn test_fft_fast_matches_direct() {
+    test_group("fft: fast mdct/imdct and pow2 fft match the definitions");
+    var seed = 12345;
+    var sizes = alloc(5 * 8);
+    store64(sizes, 8); store64(sizes + 8, 16); store64(sizes + 16, 64);
+    store64(sizes + 24, 256); store64(sizes + 32, 2048);
+    var si = 0;
+    while (si < 5) {
+        var n = load64(sizes + si * 8);
+        var x = alloc(n * 8);
+        var a = alloc(n * 8);
+        var b = alloc(n * 8);
+        var i = 0;
+        while (i < n) {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            store64(x + i * 8, f64_sub(f64_div(f64_from(seed), f64_from(1073741824)), F64_ONE));
+            i = i + 1;
+        }
+        _mdct_fast(x, n, a);
+        _mdct_direct(x, n, b);
+        var worst = F64_ZERO;
+        i = 0;
+        while (i < n / 2) {
+            var d = f64_abs(f64_sub(load64(a + i * 8), load64(b + i * 8)));
+            if (f64_gt(d, worst) == 1) { worst = d; }
+            i = i + 1;
+        }
+        assert(f64_lt(worst, f64_div(F64_ONE, f64_from(1000000000))) == 1, "fast mdct = direct mdct");
+        _imdct_fast(x, n, a);
+        _imdct_direct(x, n, b);
+        worst = F64_ZERO;
+        i = 0;
+        while (i < n) {
+            var d2 = f64_abs(f64_sub(load64(a + i * 8), load64(b + i * 8)));
+            if (f64_gt(d2, worst) == 1) { worst = d2; }
+            i = i + 1;
+        }
+        assert(f64_lt(worst, f64_div(F64_ONE, f64_from(1000000000))) == 1, "fast imdct = direct imdct");
+        si = si + 1;
+    }
+
+    # pow2 FFT (n = 64) against the naive DFT
+    var n2 = 64;
+    var re = alloc(n2 * 8); var im = alloc(n2 * 8);
+    var re2 = alloc(n2 * 8); var im2 = alloc(n2 * 8);
+    var j = 0;
+    while (j < n2) {
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+        store64(re + j * 8, f64_from(seed % 1000));
+        store64(im + j * 8, f64_from((seed / 1000) % 1000));
+        store64(re2 + j * 8, load64(re + j * 8));
+        store64(im2 + j * 8, load64(im + j * 8));
+        j = j + 1;
+    }
+    _fft2(re, im, n2, 0 - 1);
+    _dft_naive(re2, im2, n2);
+    var w2 = F64_ZERO;
+    j = 0;
+    while (j < n2) {
+        var e1 = f64_abs(f64_sub(load64(re + j * 8), load64(re2 + j * 8)));
+        var e2 = f64_abs(f64_sub(load64(im + j * 8), load64(im2 + j * 8)));
+        if (f64_gt(e1, w2) == 1) { w2 = e1; }
+        if (f64_gt(e2, w2) == 1) { w2 = e2; }
+        j = j + 1;
+    }
+    assert(f64_lt(w2, f64_div(F64_ONE, f64_from(1000000))) == 1, "pow2 fft = naive dft");
+    return 0;
+}
+
 fn test_fft_all() {
+    test_fft_fast_matches_direct();
     fft_init();
     test_fft_impulse();
     test_fft_size_6();

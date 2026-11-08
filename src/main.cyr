@@ -1,7 +1,8 @@
 # shravan — test harness entry point.
 # The library lives in src/shravan.cyr (bundled into dist/shravan.cyr via
 # `cyrius distlib`); this file includes it plus the codec modules and runs the
-# core suite. Consumers use dist/shravan.cyr, not this file.
+# whole suite: core codecs, interop fixtures, Opus decode, the CELT encoder and
+# the SILK golden vectors. Consumers use dist/shravan.cyr, not this file.
 include "src/shravan.cyr"
 include "src/flac.cyr"
 include "src/ogg.cyr"
@@ -22,6 +23,8 @@ include "src/opus_test_helpers.cyr"
 include "src/opus_rfc_tests.cyr"
 include "src/interop_fixtures.cyr"
 include "src/interop_tests.cyr"
+include "src/opus_encoder_tests.cyr"
+include "src/silk_tests.cyr"
 
 # ================================================================
 # Tests
@@ -693,7 +696,7 @@ fn test_opus_packet_framing() {
     assert(load64(lens) == 10, "code 1 first half");
     assert(load64(lens + 8) == 10, "code 1 second half");
     assert(is_err(_opus_split_frames(buf, 22, offs, lens, 48)) == 1,
-           "code 1 rejects an odd remainder");
+      "code 1 rejects an odd remainder");
 
     # --- code 2: explicit first length ---
     store8(buf, (31 << 3) | 2);
@@ -704,7 +707,7 @@ fn test_opus_packet_framing() {
     assert(load64(lens + 8) == 13, "code 2 second frame takes the rest");
     store8(buf + 1, 200);
     assert(is_err(_opus_split_frames(buf, 21, offs, lens, 48)) == 1,
-           "code 2 rejects a first length past the packet end");
+      "code 2 rejects a first length past the packet end");
 
     # --- code 2: two-byte length field (>= 252) ---
     store8(buf, (31 << 3) | 2);
@@ -721,7 +724,7 @@ fn test_opus_packet_framing() {
     assert(load64(lens) == 10, "code 3 CBR divides the remainder evenly");
     assert(load64(offs) == 2, "code 3 CBR first frame starts past TOC + count byte");
     assert(is_err(_opus_split_frames(buf, 41, offs, lens, 48)) == 1,
-           "code 3 CBR rejects a remainder that does not divide");
+      "code 3 CBR rejects a remainder that does not divide");
 
     # --- code 3 with padding: 255 means 254 bytes and another length byte ---
     store8(buf, (18 << 3) | 3);
@@ -746,17 +749,17 @@ fn test_opus_packet_framing() {
     store8(buf, (3 << 3) | 3);        # config 3 = 60ms per frame
     store8(buf + 1, 3);               # 3 x 60ms = 180ms > the 120ms packet cap
     assert(is_err(_opus_split_frames(buf, 40, offs, lens, 48)) == 1,
-           "a packet longer than 120 ms is rejected");
+      "a packet longer than 120 ms is rejected");
     store8(buf, (18 << 3) | 3);
     store8(buf + 1, 0);               # zero frames
     assert(is_err(_opus_split_frames(buf, 40, offs, lens, 48)) == 1,
-           "a zero frame count is rejected");
+      "a zero frame count is rejected");
     store8(buf + 1, 0x40 | 2);
     store8(buf + 2, 255); store8(buf + 3, 255);   # padding far beyond the packet
     assert(is_err(_opus_split_frames(buf, 20, offs, lens, 48)) == 1,
-           "padding past the end of the packet is rejected");
+      "padding past the end of the packet is rejected");
     assert(is_err(_opus_split_frames(buf, 0, offs, lens, 48)) == 1,
-           "an empty packet is rejected");
+      "an empty packet is rejected");
     return 0;
 }
 
@@ -2099,13 +2102,13 @@ fn test_aac_window_shapes() {
         }
         # within 1e-6
         assert(f64_lt(worst, f64_div(F64_ONE, f64_from(1000000))) == 1,
-               "window satisfies Princen-Bradley");
+          "window satisfies Princen-Bradley");
         # Monotonically rising and bounded in [0, 1]
         assert(f64_lt(load64(tbl), f64_div(F64_ONE, f64_from(10))) == 1,
-               "window starts near zero");
+          "window starts near zero");
         assert(f64_gt(load64(tbl + (AAC_FRAME_SIZE - 1) * 8),
-                      f64_div(f64_from(9), f64_from(10))) == 1,
-               "window ends near one");
+            f64_div(f64_from(9), f64_from(10))) == 1,
+          "window ends near one");
         shape = shape + 1;
     }
     # The two shapes must actually differ, or window_shape would be moot.
@@ -2113,7 +2116,7 @@ fn test_aac_window_shapes() {
     var kbd  = _aac_window_tbl(0, 1);
     var diff = f64_abs(f64_sub(load64(sine + 100 * 8), load64(kbd + 100 * 8)));
     assert(f64_gt(diff, f64_div(F64_ONE, f64_from(1000))) == 1,
-           "KBD and sine windows are distinct");
+      "KBD and sine windows are distinct");
     return 0;
 }
 
@@ -2250,7 +2253,7 @@ fn test_aac_stereo_tools() {
     # within 1% — the fill normalises exactly, so this is a tight bound
     var relerr = f64_abs(f64_div(f64_sub(rms, want), want));
     assert(f64_lt(relerr, f64_div(F64_ONE, f64_from(100))) == 1,
-           "PNS band energy is 2^(nrg/4)/2 per coefficient");
+      "PNS band energy is 2^(nrg/4)/2 per coefficient");
     assert(f64_gt(f64_abs(load64(sp)), F64_ZERO) == 1, "PNS band is not silent");
     assert_eq(f64_to(load64(sp + 40 * 8)), 0, "PNS touches only its band");
     return 0;
@@ -2269,7 +2272,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.9.2 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.9.3 — audio codecs for AGNOS (Cyrius)\n", 51);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2407,6 +2410,8 @@ test_serde_mp3_frame_info();
 test_serde_opus_head();
 test_serde_audio_metadata();
 test_serde_codec_markers();
+test_opus_encoder_all();
+test_silk_all();
 
 print_summary();
 

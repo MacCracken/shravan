@@ -1,7 +1,6 @@
 # ================================================================
 # silk_tests.cyr — SILK decode golden-vector conformance tests (the large
-# libopus-generated NLSF/resampler vectors). Split out of opus_rfc_tests.cyr
-# so no single build overflows the code buffer. Built via src/main_silk.cyr.
+# libopus-generated NLSF/resampler vectors). Run by src/main.cyr.
 # NOT part of the [lib] distlib bundle. Requires src/opus_test_helpers.cyr.
 # ================================================================
 
@@ -10495,7 +10494,7 @@ fn test_opus_silk_stereo_rfc() {
     store8(pl + 144, 228); store8(pl + 145, 48); store8(pl + 146, 238); store8(pl + 147, 192);
     var s0 = silk_decoder_init(16, 4); var s1 = silk_decoder_init(16, 4);
     var rL = silk_resampler_init(16); var rR = silk_resampler_init(16);
-    var sst = alloc(6 * 8); var zz = 0; while (zz < 6) { store64(sst + zz * 8, 0); zz = zz + 1; }
+    var sst = silk_stereo_state_new();
     var ec = ec_dec_new(pl, 148);
     var oL = alloc(960 * 8); var oR = alloc(960 * 8);
     silk_decode_stereo(s0, s1, rL, rR, sst, ec, 16, oL, oR);
