@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
-is one entry point**, `src/main.cyr`, running the whole 12,960-assertion suite
+is one entry point**, `src/main.cyr`, running the whole 12,972-assertion suite
 (core codecs, Opus decode, the CELT encoder, SILK golden vectors, the real-file
 interop fixtures). It was split into three until 2.9.3 for a ~3.15 MB code buffer
 that has been a growable 64 MiB region since Cyrius 6.4.49. `cyrius distlib`
@@ -42,6 +42,9 @@ lib/             -- vendored Cyrius stdlib snapshot ONLY (cyrius lib sync)
 build/           -- compiled binaries (gitignored)
 scripts/         -- test-all.sh, bench-history.sh, version-bump.sh,
                     check-write-lengths.py (CI guard: syscall write byte counts),
+                    check-collisions.sh (CI guard: dist/shravan.cyr compiled beside its
+                    deps, the pinned stdlib and abaco's newest tag; bundles share one
+                    namespace, so a shared fn name is replaced for both),
                     gen-interop-fixtures.py (regenerates src/interop_fixtures.cyr),
                     interop.sh + interop.py + interop/ (cli.cyr, opusref.c,
                     build-libopus.sh): the reference sweep against ffmpeg/flac/
@@ -68,7 +71,7 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run the suite (12,960 assertions)
+./scripts/test-all.sh                       # build + run the suite (12,972 assertions)
 cyrius build src/main.cyr build/shravan    # the same by hand (Cyrius 6.7.18)
 ./build/shravan
 ./scripts/interop.sh                        # reference sweep: ffmpeg, flac, mpg123, libopus (needs libopus-dev)
@@ -80,6 +83,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 ./fuzz/run.sh 90000                         # hostile-input gate: >= 90K calls per harness + cold starts
 ./fuzz/run.sh 90000 --poison                # the same under the allocator poison mode (redzones)
 ./scripts/check-write-lengths.py            # verify syscall write byte counts (--fix to repair)
+./scripts/check-collisions.sh               # bundle namespace vs deps, stdlib, abaco (fetches abaco's newest tag)
 ```
 
 ## Modules
@@ -125,7 +129,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh`, verify all 12,960 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh`, verify all 12,972 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

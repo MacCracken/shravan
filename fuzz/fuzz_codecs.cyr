@@ -31,7 +31,6 @@ var F64_RCP_32768  = 0;
 var F64_RCP_8388608 = 0;
 var F64_RCP_2147483648 = 0;
 var F64_2_NEG_149  = 0;
-var F64_255        = 0;
 
 fn shravan_init_constants() {
     F64_ZERO = f64_from(0);
@@ -39,7 +38,6 @@ fn shravan_init_constants() {
     F64_NEG_HALF = f64_neg(F64_HALF);
     F64_NEG_ONE = f64_neg(F64_ONE);
     F64_128 = f64_from(128);
-    F64_255 = f64_from(255);
     F64_32768 = f64_from(32768);
     F64_32767 = f64_from(32767);
     F64_8388608 = f64_from(8388608);

@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.9.3.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.9.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -99,6 +99,7 @@ hostile input, no known correctness bugs.
 **Backlog:** items that need the major bump or wait on the gate.
 - Remove the `detect_format` wrapper. `shravan_detect_format` replaced it in 2.9.2 and no consumer calls
   it, but it is public API, and removing it is what clears the last duplicate-function warning.
+  `scripts/check-collisions.sh` allows it by name until then.
 
 ## Post-3.0
 

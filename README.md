@@ -14,7 +14,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (12,960 assertions)
+# Build + run the test suite (12,972 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)

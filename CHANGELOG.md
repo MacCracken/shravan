@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.4] - 2026-11-16
+
+**Namespace hygiene.** One issue, filed from dhvani: shravan's private `_fft_pow2` had abaco 2.8.0's
+name and arity, so whichever bundle a consumer included second replaced the other's for every caller in
+both. The roadmap scheduled nothing else for 2.9.4. shravan had no check for this class of bug, so this
+release adds one, and on its first run it found a second clash, with the stdlib's mabda. No codec
+output changes. 12,972 assertions (was 12,960).
+
+### Fixed
+
+- **`_fft_pow2` renamed `_shr_fft_pow2`**
+  (`docs/development/issues/2026-11-08-fft-pow2-clashes-with-abaco-2-8-0.md`). The two differed at
+  `n = 1`: abaco counts 1 as a power of two and shravan does not. With abaco included first, the order
+  dhvani uses, shravan's copy won, and abaco's `fft_twiddles(t, 1)` and `fft(.., 1, t, 1)` returned
+  Err. abaco is the ecosystem's math library and keeps the name. Measured with the issue's repro: both
+  calls now return Ok beside shravan, as with abaco alone, in either include order, and shravan's
+  `fft_compute` at size 1 still returns 0 with the value unchanged. A private helper, so no API change.
+- **`F64_255` deleted.** The pinned stdlib's mabda (4.2.0) declares `const F64_255 = 255.0`, so
+  shravan's `var F64_255` stopped every unit that included `lib/mabda.cyr` before shravan from
+  compiling (`'F64_255' is already declared as a top-level const`). shravan never read it. phylax
+  deleted its copy for the same reason at 1.3.0. It was a public global, but no consumer reads it
+  (tarang, jalwa, shruti, dhvani and nidhi checked).
+
+### Added
+
+- **`scripts/check-collisions.sh`** and a CI step. It compiles `dist/shravan.cyr` last, the order that
+  did the harm, after (1) its own deps: the declared stdlib, sankoch and bayan-json, (2) every module of
+  the pinned toolchain's stdlib snapshot (81 at 6.7.18), and (3) abaco at its newest release tag,
+  fetched from GitHub. It fails on any duplicate or redeclaration located in shravan's bundle. cycc
+  merges same-name globals that have the same value without a word, and they are harmless, so the check
+  does not see them. The one accepted collision is the `detect_format` wrapper, which is public API
+  until 3.0 (roadmap backlog); neither sankoch nor any consumer calls `detect_format`. Other bundles,
+  as files or `REPO[@TAG]`, can be named on the command line. On the 2.9.3 bundle it fails on both
+  clashes above, and on 2.9.4's it passes, as it does against abaco 2.7.0.
+- **`test_fft_size_1`**: the helper's contract (`_shr_fft_pow2(1) == 0`, so size 1 takes the mixed-radix
+  path) and the size-1 transform in both directions. Given abaco's semantics (`n < 1`), the suite fails
+  exactly that assertion; the size-1 values still agree, so both paths give the same answer.
+
+### Verified
+
+- 12,972 assertions, 0 failing. `./fuzz/run.sh 90000`: 998,846 calls (fuzz_codecs 810,000,
+  fuzz_decode 98,846, fuzz_opus 90,000) and 2,200 cold starts, 0 crashes. The same gate with `--poison`:
+  the same counts, 0 redzone violations. `scripts/check-collisions.sh`: no collisions (deps, 81 stdlib
+  modules, abaco 2.8.0). `cyrius distlib` regenerates `dist/shravan.cyr` and `--check` passes, with the
+  same single platform warning as 2.9.3 (`is_err` on x86_64-windows). `cyrius vet`: 0 untrusted,
+  0 missing. Write lengths correct; every changed source file canonically formatted.
+- The issue's repro, built against the 2.9.4 bundle, prints 0 and 0 (it printed 1 and 1 against 2.9.3's).
+- `src/bench.cyr`, 2.9.3 against 2.9.4 in one session, alternating, pinned to one core, best of three.
+  Nothing moved beyond noise (other work was loading the machine), as expected of a rename and a
+  deleted global:
+
+| Benchmark | 2.9.3 | 2.9.4 | Change |
+|---|---|---|---|
+| wav_decode_1sec_i16 | 180.9 µs | 180.5 µs | −0.2% |
+| wav_encode_1sec_i16 | 871.7 µs | 862.5 µs | −1.1% |
+| wav_stream_1sec_i16 | 514.9 µs | 490.0 µs | −4.8% |
+| pcm_i16_to_f64_4096 | 17.4 µs | 17.0 µs | −2.3% |
+| pcm_i24_packed_4096 | 19.9 µs | 19.6 µs | −1.5% |
+| pcm_u8_to_f64_4096 | 11.8 µs | 11.7 µs | −0.2% |
+| pcm_f32_to_f64_4096 | 43.2 µs | 42.8 µs | −0.9% |
+| fft_forward_1024 | 101.5 µs | 99.5 µs | −1.9% |
+| mdct_forward_2048 | 58.9 µs | 57.2 µs | −2.9% |
+| imdct_inverse_2048 | 58.2 µs | 57.5 µs | −1.4% |
+| flac_encode_1sec_i16 | 11.68 ms | 11.54 ms | −1.3% |
+| flac_decode_1sec_i16 | 3.53 ms | 3.50 ms | −0.7% |
+| flac_stream_1sec_i16 | 4.09 ms | 4.11 ms | +0.5% |
+| aac_encode_1sec_stereo | 53.53 ms | 54.15 ms | +1.2% |
+| aac_decode_1sec_stereo | 24.09 ms | 24.11 ms | +0.1% |
+| opus_celt_decode_20ms | 2.26 ms | 2.31 ms | +2.0% |
+
+  `bench-history.csv` gains the rows stamped `2026-11-16T22:52:17Z`, the same pinned build run once.
+  They were recorded before commit, so they carry 2.9.3's hash (cd577bb).
+
 ## [2.9.3] - 2026-11-07
 
 **The P(-1) sweep.** No new codecs. The 2.9.2 comparison rig became `scripts/interop.sh`, a CI job that

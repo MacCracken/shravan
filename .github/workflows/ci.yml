@@ -57,7 +57,7 @@ jobs:
         # 0 failed and at least MIN_ASSERTIONS run. Raise the floor when tests
         # are added; lowering it is a decision, not a fix.
         run: |
-          MIN_ASSERTIONS=12960
+          MIN_ASSERTIONS=12972
           LINE=$(grep '^shravan tests: ' /tmp/test-output.txt) \
             || { echo "No result line"; cat /tmp/test-output.txt; exit 1; }
           echo "$LINE"
@@ -76,6 +76,14 @@ jobs:
       - name: Vet dependencies
         # Audit the include-dependency graph (0 untrusted / 0 missing).
         run: cyrius vet src/main.cyr
+
+      - name: Symbol-collision check
+        # Bundles share one namespace: a fn another bundle also defines is
+        # replaced for every caller in both (abaco 2.8.0's `_fft_pow2`, 2.9.4),
+        # and a name the stdlib declares `const` does not compile (mabda's
+        # `F64_255`). Compiles dist/shravan.cyr after its own deps, the whole
+        # pinned stdlib snapshot and abaco's newest release tag.
+        run: ./scripts/check-collisions.sh
 
       - name: Write-length check
         # Every syscall write literal must declare its true UTF-8 byte length.

@@ -36,6 +36,8 @@ shravan/
     bench.cyr       -- benchmarks (clock_gettime timing), built on the library itself
   scripts/interop.sh, interop.py, interop/ -- reference sweep (CI job): interop-cli drives
                        shravan's decoders and encoders, opusref.c drives libopus
+  scripts/check-collisions.sh -- compiles dist/shravan.cyr beside its deps, the pinned stdlib
+                       snapshot and abaco's newest tag; fails on a shared name (CI step)
   fuzz/             -- fuzz_codecs (stubbed lib), fuzz_decode, fuzz_opus; run.sh (seeded
                        batches, cold starts, --poison / --bounds builds)
   dist/
