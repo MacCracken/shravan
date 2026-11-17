@@ -105,6 +105,7 @@ fn _fx_lossy(name, b64, kind, rate, channels, count, step, ref_csv) {
     assert_eq(fmtinfo_channels(fi), channels, name);
     var samples = decode_result_samples(r);
     assert(vec_len(samples) >= count, name);
+    if (vec_len(samples) < count) { return 0; }
     var scale = f64_from(32768);
     var pos = alloc(8);
     var i = 0;
@@ -118,6 +119,93 @@ fn _fx_lossy(name, b64, kind, rate, channels, count, step, ref_csv) {
         i = i + step;
     }
     assert_eq(off, 0, name);
+    return 0;
+}
+
+# A decode result against a reference, to the exact length: since 2.10.2 the
+# references are ffmpeg's gapless decodes, and the length is what gapless is about.
+fn _fx_check(name, r, rate, channels, count, step, ref_csv) {
+    assert(res_ok(r) == 1, name);
+    if (is_err(r) == 1) { return 0; }
+    var fi = decode_result_info(r);
+    assert_eq(fmtinfo_sample_rate(fi), rate, name);
+    assert_eq(fmtinfo_channels(fi), channels, name);
+    var samples = decode_result_samples(r);
+    assert_eq(vec_len(samples), count, name);
+    assert_eq(fmtinfo_total_samples(fi) * channels, count, name);
+    if (vec_len(samples) < count) { return 0; }
+    var scale = f64_from(32768);
+    var pos = alloc(8);
+    var off = 0;
+    var i = 0;
+    while (i < count) {
+        var want = _fx_next_int(ref_csv, pos);
+        var got = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
+        var d = got - want;
+        if (d < 0) { d = 0 - d; }
+        if (d > 2) { off = off + 1; }
+        i = i + step;
+    }
+    assert_eq(off, 0, name);
+    return 0;
+}
+
+fn _fx_gapless(name, b64, rate, channels, count, step, ref_csv) {
+    return _fx_check(name, _fx_decode(b64, _FX_KIND_CODEC), rate, channels, count, step, ref_csv);
+}
+
+# Gapless decoding against ffmpeg, as a player plays a file: MP4 sample durations,
+# edit lists, iTunSMPB and default track; MP3 LAME delay and padding.
+fn test_interop_gapless() {
+    syscall(1, 1, "test: interop gapless (MP4 edits, iTunSMPB, tracks; MP3 LAME tag)\n", 66);
+    _fx_gapless("mp4 iTunSMPB, whole-frame sample table", _FX_GLSMPB_B64, 44100, 1,
+      _FX_GLSMPB_COUNT, _FX_GLSMPB_STEP, _FX_GLSMPB_REF);
+    _fx_gapless("mp4 iTunSMPB beside an edit list", _FX_GLSMPBELST_B64, 44100, 1,
+      _FX_GLSMPBELST_COUNT, _FX_GLSMPBELST_STEP, _FX_GLSMPBELST_REF);
+    _fx_gapless("mp4 leading empty edit: no silence, the edit's audio whole", _FX_GLEMPTY_B64, 44100, 1,
+      _FX_GLEMPTY_COUNT, _FX_GLEMPTY_STEP, _FX_GLEMPTY_REF);
+    _fx_gapless("mp4 two edits, two stretches of media", _FX_GLTWO_B64, 44100, 1,
+      _FX_GLTWO_COUNT, _FX_GLTWO_STEP, _FX_GLTWO_REF);
+    _fx_gapless("mp4 without an edit list: the sample table's short last frame", _FX_GLNOEDIT_B64, 44100, 1,
+      _FX_GLNOEDIT_COUNT, _FX_GLNOEDIT_STEP, _FX_GLNOEDIT_REF);
+    _fx_gapless("mp4 default track: the enabled one, not the first nor the widest", _FX_GLMULTI_B64, 44100, 1,
+      _FX_GLMULTI_COUNT, _FX_GLMULTI_STEP, _FX_GLMULTI_REF);
+    _fx_gapless("aac 96 kHz in MP4, to the edit list's length", _FX_AAC96_B64, 96000, 2,
+      _FX_AAC96_COUNT, _FX_AAC96_STEP, _FX_AAC96_REF);
+    _fx_gapless("mp3 LAME Info frame (Lavc), delay and padding", _FX_MP3INFO_B64, 44100, 2,
+      _FX_MP3INFO_COUNT, _FX_MP3INFO_STEP, _FX_MP3INFO_REF);
+    _fx_gapless("mp3 MPEG-2 mono VBR (LAME Xing, tag at 9)", _FX_GLMP3LSF_B64, 22050, 1,
+      _FX_GLMP3LSF_COUNT, _FX_GLMP3LSF_STEP, _FX_GLMP3LSF_REF);
+    _fx_gapless("mp3 MPEG-2 stereo (Lavc Info, tag at 17)", _FX_GLMP3LSF2_B64, 24000, 2,
+      _FX_GLMP3LSF2_COUNT, _FX_GLMP3LSF2_STEP, _FX_GLMP3LSF2_REF);
+    _fx_gapless("mp3 CRC-protected frames, tag before the CRC's place", _FX_GLMP3CRC_B64, 44100, 2,
+      _FX_GLMP3CRC_COUNT, _FX_GLMP3CRC_STEP, _FX_GLMP3CRC_REF);
+
+    # The track API on the two-track file.
+    var buf = alloc(strlen(_FX_GLMULTI_B64) + 16);
+    var n = _mp3_b64_decode(_FX_GLMULTI_B64, buf);
+    assert_eq(mp4_track_count(buf, n), 2, "mp4 two audio tracks");
+    assert_eq(mp4_default_track(buf, n), 1, "mp4 default track is the enabled one");
+    _fx_check("mp4 the disabled track by index (-map 0:a:0)", mp4_decode_track(buf, n, 0), 44100, 2,
+      _FX_GLMULTI1_COUNT, _FX_GLMULTI_STEP, _FX_GLMULTI1_REF);
+    var ti = mp4_track_info(buf, n, 0);
+    assert(res_ok(ti) == 1, "mp4 track info");
+    if (res_ok(ti) == 1) {
+        assert_eq(fmtinfo_format(ti), FMT_AAC, "mp4 track info: AAC");
+        assert_eq(fmtinfo_channels(ti), 2, "mp4 track info: stereo");
+        assert_eq(fmtinfo_total_samples(ti) * 2, _FX_GLMULTI1_COUNT, "mp4 track info: the decode's length");
+    }
+    assert(is_err(mp4_decode_track(buf, n, 2)) == 1, "mp4 no third track");
+
+    # Off, every frame whole, as before 2.10.2: one more frame (1152 x 2) than the
+    # gapless decode at least, and the LAME priming in front.
+    var prev = shravan_set_gapless(0);
+    var raw = _fx_decode(_FX_MP3INFO_B64, _FX_KIND_CODEC);
+    shravan_set_gapless(prev);
+    assert(res_ok(raw) == 1, "gapless off decodes");
+    if (res_ok(raw) == 1) {
+        assert(vec_len(decode_result_samples(raw)) > _FX_MP3INFO_COUNT + 2304, "gapless off keeps delay and padding");
+    }
     return 0;
 }
 
@@ -989,6 +1077,7 @@ fn test_interop_all() {
     test_interop_alac();
     test_interop_aac_tables();
     test_interop_aac();
+    test_interop_gapless();
     test_interop_mp3();
     test_interop_mp4_boxes();
     test_interop_opus();

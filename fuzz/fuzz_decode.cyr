@@ -660,6 +660,13 @@ fn _fz_real(b64, kind, every, max_len) {
             if (kind == 4) { flac_decode_range(real_buf, n, _fz_u(20000), _fz_u(20000)); }
             if (kind == 5) { tag_read_id3v2(real_buf, n); }
             if (kind == 6) { _fz_stream(real_buf, n); }
+            if (kind == 7) {
+                # the MP4 track API: count, default, info and decode by index
+                mp4_track_count(real_buf, n);
+                mp4_default_track(real_buf, n);
+                mp4_track_info(real_buf, n, _fz_u(4));
+                mp4_decode_track(real_buf, n, _fz_u(4));
+            }
             calls = calls + 1;
         }
         i = i + 1;
@@ -698,6 +705,15 @@ total = total + _fz_real(_FX_ISOL2JS_B64, 0, 8, 0);
 total = total + _fz_real(_FX_ISOLSFIS_B64, 0, 8, 0);
 total = total + _fz_real(_FX_ISOFREE_B64, 0, 8, 0);
 total = total + _fz_real(_FX_MP3INFO_B64, 0, 8, 0);
+# Gapless (2.10.2): edit lists (empty, two edits), iTunSMPB, two tracks, and LAME
+# tags at each offset, so mutations reach the elst, stts, udta and tag parsers.
+total = total + _fz_real(_FX_GLSMPB_B64, 0, 8, 0);
+total = total + _fz_real(_FX_GLSMPBELST_B64, 0, 8, 0);
+total = total + _fz_real(_FX_GLEMPTY_B64, 0, 8, 0);
+total = total + _fz_real(_FX_GLTWO_B64, 0, 8, 0);
+total = total + _fz_real(_FX_GLMULTI_B64, 7, 8, 0);
+total = total + _fz_real(_FX_GLMP3LSF_B64, 2, 8, 0);
+total = total + _fz_real(_FX_GLMP3CRC_B64, 2, 8, 0);
 total = total + _fz_real(_FX_OGGGAIN_B64, 0, 8, 0);
 syscall(1, 1, "ok\n", 3);
 

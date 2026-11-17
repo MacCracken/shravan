@@ -5,6 +5,111 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.2] - 2026-11-16
+
+**Gapless MP4 and MP3, and MP4 track selection.** An AAC file now decodes to its source's length: the
+encoder's priming and the last frame's padding are trimmed, as ffmpeg and every player trims them. For
+MP4 that comes from the sample table, the edit list or iTunes' `iTunSMPB`; for MP3, from the LAME tag. An
+MP4 with several audio tracks decodes the one ffmpeg plays, and every track can be reached by index.
+Everything is matched against ffmpeg to the sample and to its length. 13,200 assertions (was 13,119).
+
+### Added
+
+- **Gapless decoding**, on by default. `shravan_set_gapless(on)` returns the previous setting;
+  `shravan_gapless()` reads it.
+  - **MP4.** A track's decode is first cut to its media length, the sum of its `stts` durations; the last
+    frame is usually shorter than a codec frame. Then one of two rules applies:
+    - **`iTunSMPB`**, on an AAC track that is the moov's last (where iTunes writes it and ffmpeg reads
+      it). The priming is skipped and the remainder dropped. It wins over an edit list, as in ffmpeg.
+    - **Otherwise the edit list.** Each edit contributes its media range, in order and to the sample.
+      Empty edits (media time −1) and dwell edits (media rate 0) contribute nothing. A leading empty edit
+      delays the start, which a PCM decode cannot express, and ffmpeg fills no silence for it either.
+
+    The edits' total is held to the one-shot ceiling (`ERR_TOO_LARGE`), so an edit list repeating its
+    media cannot multiply the output.
+  - **MP3.** The LAME/Xing tag, when its encoder string starts `LAME`, `Lavf` or `Lavc` (as ffmpeg
+    reads it, in `libavformat/mp3dec.c`). Its delay plus 529 samples (the decoder's own lag) are dropped
+    from the start, and everything from frames × spf − padding + 529 on, where frames is the tag's
+    count. A file well past the size its tag records is a concatenation, so its end is kept, as ffmpeg
+    keeps it.
+- **MP4 track selection:**
+  - `mp4_track_count(data, len)`.
+  - `mp4_track_info(data, len, i)`: a FormatInfo with `FMT_AAC` or `FMT_ALAC`, rate, channels, bit
+    depth and the gapless length, without decoding.
+  - `mp4_decode_track` and `mp4_demux_track`.
+  - `mp4_default_track`: ffmpeg's default audio stream (enabled tracks first, then the most channels,
+    then the first) among the tracks shravan decodes. `mp4_decode`, `mp4_demux` and `codec_open` take it.
+- `scripts/interop/cli.cyr`: `tracks <in>`, `track <in> <i> <out>`, and `raw <in> <out>` (gapless off).
+- Benchmarks: `mp4_decode_1sec_stereo` and `mp3_decode_lame_stereo`.
+
+### Fixed
+
+- **MP3: a CRC-protected LAME file decoded its tag frame as audio.** LAME writes the Info tag right after
+  the side information even when the header announces a CRC (`lame -p`). shravan looked 2 bytes further
+  on, where the CRC would push it, missed the tag, and decoded the frame as 1152 samples of audio in front
+  of the stream. It now looks where LAME writes and ffmpeg reads, then after the CRC.
+- **`_fx_lossy`** (interop tests) indexed past the end of a short decode after its length check failed,
+  and aborted the suite. It now returns.
+
+### Changed
+
+- **MP4 and MP3 decodes are shorter**, by what is not audio:
+  - an AAC m4a by its priming (1024 samples from ffmpeg's encoder, 2112 from Apple's) and its last
+    frame's padding;
+  - an MP3 with a LAME tag by its delay plus 529 and its padding.
+
+  `shravan_set_gapless(0)` gives 2.10.1's output.
+- **A multi-track MP4 decodes ffmpeg's default track**, not the first audio track. A file whose first
+  audio track shravan cannot decode (HE-AAC, AC-3, AAC past two channels) now decodes the next one it
+  can.
+- The MP4 demux struct carries its track (`MP4_DX_TRACK`; `MP4_DX_SIZE` is 64).
+- `scripts/interop.py` and `scripts/gen-interop-fixtures.py` take ffmpeg's default decode as the
+  reference: no `-ignore_editlist`, no `-flags2 +skip_manual`. MP4 AAC is now checked to the exact
+  length; before, it passed as "at least as long".
+
+### Verified
+
+- **Against ffmpeg 9.0.2, to the sample and to its length.**
+  - Fixtures, each proven by reverting its piece in a scratch copy and watching only its test fail
+    (gapless off fails 38 assertions):
+    - `iTunSMPB` with whole-frame sample tables and Apple's 2112 priming, alone and beside an edit list;
+    - an m4a without an edit list, where the sample table trims the end;
+    - two audio tracks, where the enabled one is neither the first nor the one with more channels, and
+      the other track decoded by index;
+    - MPEG-2 mono VBR from the `lame` CLI (tag at 9 bytes), MPEG-2 stereo from libmp3lame (17), and
+      CRC-protected MPEG-1 (32);
+    - the existing AAC 96 kHz m4a and LAME Info fixtures, now at gapless length.
+  - Two cases where ffmpeg is not the reference, with references built from ffmpeg's decode of the
+    same media:
+    - A **leading empty edit.** ffmpeg 9 plays 478 samples of the last frame's padding there; its end
+      trim leaves out the empty edit's offset.
+    - **Two edits.** ffmpeg trims later edits only to the frame. The reference is its decode without the
+      edit list, cut by the ISO rule.
+- **`scripts/interop.py`**:
+  - The 81 MP3 cases (9 rates × mono, stereo, joint × VBR, 32k, 128k) and the 22 AAC m4a cases are now
+    checked at ffmpeg's gapless length.
+  - A new `gapless` group: AAC and ALAC files with three audio tracks in six enabled/disabled layouts,
+    the default track and each track by index, 48 cases.
+  - These groups: 260 of 260. The whole sweep: 969 of 969 against a default libopus build (was 921).
+- **Fuzzing**: the new fixtures are seeds of `fuzz/fuzz_decode.cyr`, so mutations reach the `elst`,
+  `stts`, `udta` and tag parsers, and a new mode drives the track API (count, default, info, decode by
+  index). `./fuzz/run.sh 90000` and `--poison`: 94,760 and 90,000 calls and 2,200 cold starts, clean;
+  48 further poison seeds of `fuzz_decode`, clean.
+- The AAC decoder's differences from ffmpeg on ffmpeg's own m4a output (up to 7.5 LSB) are PNS noise,
+  random by definition. With PNS off the same files match to 0.002 LSB.
+
+### Performance
+
+One session, pinned to one core, best of three, the same benchmark code built against 2.10.1 and 2.10.2:
+
+| Benchmark | 2.10.1 | 2.10.2 | Change |
+|---|---|---|---|
+| `mp4_decode_1sec_stereo` | 18.1 ms | 17.7 ms | −2.4% |
+| `mp3_decode_lame_stereo` (0.3 s) | 20.3 ms | 20.6 ms | +1.1% |
+
+Both are within the run's noise: code neither release touched moved by up to ±3.3%. The track walk and
+the trim cost nothing measurable; a single-range trim moves the vec's data pointer and copies nothing.
+
 ## [2.10.1] - 2026-11-16
 
 **The AAC encoder, rebuilt.** 2.10.0's encoder coded long windows only, with TNS switched off, PNS and

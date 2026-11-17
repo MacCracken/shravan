@@ -22,6 +22,7 @@ include "src/resample.cyr"
 include "src/dither.cyr"
 include "src/simd.cyr"
 include "src/stream.cyr"
+include "src/interop_fixtures.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -527,6 +528,54 @@ fn bench_flac_stream_1sec() {
 }
 
 # ================================================================
+# Benchmark: mp4_decode_1sec_stereo / mp3_decode_lame_stereo
+# ================================================================
+# MP4 is the AAC decode behind the demux, the track walk and the gapless trim
+# (2.10.2): shravan's own 1 s of AAC, each access unit taken out of its ADTS frame
+# and put in an MP4. MP3 is a LAME-tagged file from libmp3lame (the MP3INFO
+# fixture, 0.3 s of 44.1 kHz stereo), decoded and trimmed by its tag.
+
+fn bench_mp4_decode_1sec() {
+    var samples = _bench_aac_signal();
+    var buf = alloc(1048576);
+    var asize = aac_encode(samples, 44100, 2, 128000, buf);
+    var aus = alloc(64 * 8);
+    var sizes = alloc(64 * 8);
+    var n = 0;
+    var pos = 0;
+    while (pos + 7 <= asize && n < 64) {
+        var flen = ((load8(buf + pos + 3) & 3) << 11) | (load8(buf + pos + 4) << 3) | (load8(buf + pos + 5) >> 5);
+        store64(aus + n * 8, buf + pos + 7);
+        store64(sizes + n * 8, flen - 7);
+        n = n + 1;
+        pos = pos + flen;
+    }
+    var mp4 = alloc(asize + 8192);
+    var mlen = _mp4_test_build(2, 44100, aus, sizes, n, mp4);
+    mp4_decode(mp4, mlen);
+
+    var iters = 3;
+    bench("mp4_decode_1sec_stereo", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { mp4_decode(mp4, mlen); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+fn bench_mp3_decode_lame() {
+    var buf = alloc(strlen(_FX_MP3INFO_B64) + 16);
+    var n = _mp3_b64_decode(_FX_MP3INFO_B64, buf);
+    mp3_decode_pcm(buf, n);
+
+    var iters = 5;
+    bench("mp3_decode_lame_stereo", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { mp3_decode_pcm(buf, n); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Entry point
 # ================================================================
 
@@ -535,7 +584,7 @@ fn bench_flac_stream_1sec() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.10.1 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.10.2 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -557,6 +606,8 @@ var flac_st_ns  = bench_flac_stream_1sec();
 var aac_enc_ns  = bench_aac_encode_1sec();
 var aac_dec_ns  = bench_aac_decode_1sec();
 var opus_dec_ns = bench_opus_celt_decode();
+var mp4_dec_ns  = bench_mp4_decode_1sec();
+var mp3_dec_ns  = bench_mp3_decode_lame();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);

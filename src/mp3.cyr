@@ -249,18 +249,125 @@ fn _mp3_is_info_frame(data, pos, fs) {
     var si = 17;
     if (mpeg1 == 1) { si = 32; if (mono == 1) { si = 17; } }
     else { if (mono == 1) { si = 9; } }
+    # Right after the side information. LAME writes it there even in a frame whose
+    # header announces a CRC (lame -p), and that is where ffmpeg looks; until 2.10.2
+    # shravan looked 2 bytes on, missed the tag and decoded the frame as 1152 samples
+    # of audio. After the CRC is tried as well.
     var off = pos + 4 + si;
-    if ((b1 & 1) == 0) { off = off + 2; }
-    if (off + 4 <= pos + fs) {
-        var t0 = load8(data + off); var t1 = load8(data + off + 1);
-        var t2 = load8(data + off + 2); var t3 = load8(data + off + 3);
-        if ((t0 == 0x58) & (t1 == 0x69) & (t2 == 0x6E) & (t3 == 0x67)) { return 1; }   # Xing
-        if ((t0 == 0x49) & (t1 == 0x6E) & (t2 == 0x66) & (t3 == 0x6F)) { return 1; }   # Info
+    var tries = 1;
+    if ((b1 & 1) == 0) { tries = 2; }
+    var k = 0;
+    while (k < tries) {
+        var o = off + k * 2;
+        if (o + 4 <= pos + fs) {
+            var t0 = load8(data + o); var t1 = load8(data + o + 1);
+            var t2 = load8(data + o + 2); var t3 = load8(data + o + 3);
+            if ((t0 == 0x58) & (t1 == 0x69) & (t2 == 0x6E) & (t3 == 0x67)) { return 1; }   # Xing
+            if ((t0 == 0x49) & (t1 == 0x6E) & (t2 == 0x66) & (t3 == 0x6F)) { return 1; }   # Info
+        }
+        k = k + 1;
     }
     if (pos + 36 + 4 <= pos + fs) {
         if ((load8(data + pos + 36) == 0x56) & (load8(data + pos + 37) == 0x42) & (load8(data + pos + 38) == 0x52) & (load8(data + pos + 39) == 0x49)) { return 1; }  # VBRI
     }
     return 0;
+}
+
+# Gapless playback from a LAME/Xing tag, as ffmpeg reads it (libavformat/mp3dec.c).
+# The tag sits where the side information would, at an offset ffmpeg takes from
+# the version and channel mode alone, and from the encoder string's "LAME",
+# "Lavf" or "Lavc" on it carries the encoder's delay and padding in 12 bits each.
+# The decoder's own delay is 529 samples (the 528-sample synthesis lag plus one),
+# so of the frames' samples, [delay + 529, frames * spf - padding + 529) is the
+# audio, frames being the tag's count (not counting the tag's frame). Without a
+# count only the start is trimmed; samples past frames * spf (a longer file than
+# the tag says) are kept, as ffmpeg keeps them. -1 when there is no such tag.
+var _mp3_gl_start = 0 - 1;
+var _mp3_gl_first = 0 - 1;    # first discarded sample at the end, or -1
+var _mp3_gl_last = 0 - 1;     # one past the last discarded
+
+fn _mp3_lame_gapless(data, len, pos, fs, info) {
+    _mp3_gl_start = 0 - 1;
+    _mp3_gl_first = 0 - 1;
+    _mp3_gl_last = 0 - 1;
+    var end = pos + fs;
+    if (end > len) { end = len; }
+    var b1 = load8(data + pos + 1);
+    var lsf = 1;
+    if (((b1 >> 3) & 3) == 3) { lsf = 0; }
+    var mono = 0;
+    if (((load8(data + pos + 3) >> 6) & 3) == 3) { mono = 1; }
+    var off = 32;
+    if (lsf == 0 && mono == 1) { off = 17; }
+    if (lsf == 1 && mono == 0) { off = 17; }
+    if (lsf == 1 && mono == 1) { off = 9; }
+    var x = pos + 4 + off;
+    if (x + 8 > end) { return 0; }
+    var tag = read_u32_be(data, x);
+    if (tag != 0x58696E67 && tag != 0x496E666F) { return 0; }   # "Xing", "Info"
+    var flags = read_u32_be(data, x + 4);
+    var q = x + 8;
+    var frames = 0;
+    var bytes = 0;
+    if ((flags & 1) != 0) {
+        if (q + 4 > end) { return 0; }
+        frames = read_u32_be(data, q);
+        q = q + 4;
+    }
+    if ((flags & 2) != 0) {
+        if (q + 4 > end) { return 0; }
+        bytes = read_u32_be(data, q);
+        q = q + 4;
+    }
+    if ((flags & 4) != 0) { q = q + 100; }
+    if ((flags & 8) != 0) { q = q + 4; }
+    # version string (9), revision, lowpass, peak (4), two gains (2 + 2), flags,
+    # bitrate: the delay and padding follow, 21 bytes in
+    if (q + 24 > end) { return 0; }
+    var enc = read_u32_be(data, q);
+    if (enc != 0x4C414D45 && enc != 0x4C617666 && enc != 0x4C617663) { return 0; }   # LAME Lavf Lavc
+    var v = (load8(data + q + 21) << 16) | (load8(data + q + 22) << 8) | load8(data + q + 23);
+    var delay = v >> 12;
+    var padding = v & 4095;
+    # A file well past the size the tag records is a concatenation: its frame count
+    # is not the file's, so ffmpeg drops it and trims only the start.
+    if (bytes > 0) {
+        var fsz = len - (pos + 4);
+        if (fsz > bytes && fsz - bytes > bytes / 16) { frames = 0; }
+    }
+    var spf = mp3_frame_samples_per_frame(info);
+    _mp3_gl_start = delay + 529;
+    if (frames > 0) {
+        _mp3_gl_first = frames * spf - padding + 529;
+        _mp3_gl_last = frames * spf;
+    }
+    return 1;
+}
+
+# The samples a LAME/Xing tag marks as audio, out of `samples` (out_ch channels).
+fn _mp3_apply_gapless(samples, out_ch) {
+    if (_shravan_gapless == 0 || _mp3_gl_start < 0) { return samples; }
+    var frames = vec_len(samples) / out_ch;
+    var a = _mp3_gl_start;
+    var b = frames;
+    if (_mp3_gl_first >= 0 && _mp3_gl_first < b) { b = _mp3_gl_first; }
+    if (b < a) { b = a; }
+    var tail = 0;
+    if (_mp3_gl_last >= 0 && frames > _mp3_gl_last && _mp3_gl_first < _mp3_gl_last) { tail = frames - _mp3_gl_last; }
+    if (tail == 0) {
+        _vec_keep_frames(samples, out_ch, a, b - a);
+        return samples;
+    }
+    # samples past the tag's count stay, after the trimmed range
+    var keep = b - a;
+    if (a > frames) { keep = 0; }
+    var out = _vec_new_cap((keep + tail) * out_ch);
+    if (is_err(out) == 1) { return out; }
+    var i = 0;
+    while (i < keep * out_ch) { vec_push(out, vec_get(samples, a * out_ch + i)); i = i + 1; }
+    i = 0;
+    while (i < tail * out_ch) { vec_push(out, vec_get(samples, _mp3_gl_last * out_ch + i)); i = i + 1; }
+    return out;
 }
 
 fn mp3_parse_frame_header(data, off) {
@@ -426,7 +533,8 @@ fn mp3_scan_frames(data, len) {
 }
 
 # ================================================================
-# mp3_decode — returns FormatInfo with empty samples
+# mp3_decode — the PCM decode; a FormatInfo with no samples only for a stream
+# with no decodable frame at all
 # ================================================================
 
 fn mp3_decode(data, len) {
@@ -2296,6 +2404,9 @@ fn mp3_decode_pcm(data, len) {
         if (is_err(samples) == 1) { return samples; }
     }
     var mono_tmp = vec_new();
+    _mp3_gl_start = 0 - 1;
+    _mp3_gl_first = 0 - 1;
+    _mp3_gl_last = 0 - 1;
     while ((pos + 4 <= len) && (stop == 0)) {
         var advanced = 0;
         if (load8(data + pos) == 0xFF) {
@@ -2322,6 +2433,7 @@ fn mp3_decode_pcm(data, len) {
                                 if (first_l3 == 1) {
                                     first_l3 = 0;
                                     skip_info = _mp3_is_info_frame(data, pos, fs);
+                                    if (skip_info == 1) { _mp3_lame_gapless(data, len, pos, fs, info); }
                                 }
                                 if (skip_info == 0) {
                                     if (_mp3_decode_frame(data, pos, info, dst) == 1) { got = 1; }
@@ -2350,6 +2462,8 @@ fn mp3_decode_pcm(data, len) {
         if ((advanced == 0) && (stop == 0)) { pos = pos + 1; }
     }
     if (got == 0) { return err(ERR_INVALID_HEADER); }
+    samples = _mp3_apply_gapless(samples, out_ch);
+    if (is_err(samples) == 1) { return samples; }
     var total = vec_len(samples) / out_ch;
     var dur = f64_div(f64_from(total), f64_from(sr));
     var finfo = fmtinfo_new(FMT_MP3, sr, out_ch, 16, dur, total);

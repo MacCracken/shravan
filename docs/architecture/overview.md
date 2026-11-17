@@ -58,9 +58,10 @@ Raw bytes --> codec_open()    --> decode_result (FormatInfo + samples vec)
                +-- wav_decode()   --> parse RIFF/fmt/data --> PCM to f64
                +-- flac_decode()  --> parse STREAMINFO/frames --> subframes --> f64
                +-- aiff_decode()  --> parse FORM/COMM/SSND --> PCM to f64
-               +-- mp4_decode()   --> demux --> AAC: aac_decode, ALAC: alac_decode_frames --> f64
+               +-- mp4_decode()   --> default track --> demux --> AAC: aac_decode, ALAC: alac_decode_frames
+                                  --> gapless: stts durations, edit list or iTunSMPB --> f64
                +-- ogg_decode()   --> extract packets --> opus_decode_from_packets()
-               +-- mp3_decode()   --> frame scan --> Layer I/II/III decode --> f64 PCM
+               +-- mp3_decode()   --> frame scan --> Layer I/II/III decode --> LAME tag delay/padding --> f64 PCM
                +-- aac_decode()   --> ADTS frames --> ICS/spectral/IMDCT --> f64
                +-- codec_open()   --> also handles FMT_ALAC, FMT_OPUS
                    (every one-shot decode refuses past shravan_set_max_samples: ERR_TOO_LARGE)

@@ -60,10 +60,11 @@ def ffmpeg_make(out, lavfi, *codec_args):
     run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", lavfi, *codec_args, out)
 
 
-def reference_f64(path, *extra):
-    """Decode with ffmpeg, keeping the file's own priming so frames line up."""
-    keep = ("-ignore_editlist", "1") if path.endswith((".m4a", ".mov")) else ()
-    p = run("ffmpeg", "-v", "error", *keep, *extra, "-i", path,
+def reference_f64(path, *extra, post=()):
+    """Decode with ffmpeg as a player does: MP4 edit lists, sample durations and
+    iTunSMPB, and MP3 LAME delay and padding, all applied (shravan decodes gapless
+    since 2.10.2). `extra` goes before the input, `post` (a -map) after it."""
+    p = run("ffmpeg", "-v", "error", *extra, "-i", path, *post,
             "-f", "f64le", "-acodec", "pcm_f64le", "-")
     a = array.array("d")
     a.frombytes(p.stdout[: len(p.stdout) // 8 * 8])
@@ -566,6 +567,189 @@ def minimp3_vectors(tmp):
     return os.path.join(dst, "vectors")
 
 
+# ---- MP4 rewriting at the box level, for the gapless fixtures ----
+# moov must follow mdat (ffmpeg's default), so sizes can change without moving
+# any chunk offset.
+_MX_CONT = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"udta", b"dinf"}
+
+
+def _mx_parse(d, s, e):
+    out, p = [], s
+    while p + 8 <= e:
+        size, t = struct.unpack(">I4s", d[p:p + 8])
+        hdr = 8
+        if size == 1:
+            size = struct.unpack(">Q", d[p + 8:p + 16])[0]
+            hdr = 16
+        if size == 0:
+            size = e - p
+        out.append([t, _mx_parse(d, p + hdr, p + size) if t in _MX_CONT else d[p + hdr:p + size]])
+        p += size
+    return out
+
+
+def _mx_build(boxes):
+    out = b""
+    for t, b in boxes:
+        payload = _mx_build(b) if isinstance(b, list) else b
+        out += struct.pack(">I4s", 8 + len(payload), t) + payload
+    return out
+
+
+def _mx_find(boxes, path):
+    head, _, rest = path.partition("/")
+    hits = [b for b in boxes if b[0] == head.encode()]
+    return hits if not rest else [x for h in hits for x in _mx_find(h[1], rest)]
+
+
+def _mx_load(path):
+    d = open(path, "rb").read()
+    boxes = _mx_parse(d, 0, len(d))
+    names = [b[0] for b in boxes]
+    require(names.index(b"mdat") < names.index(b"moov"), "moov after mdat")
+    return boxes
+
+
+def _mx_set_elst(trak, entries):
+    """entries: (segment duration, media time, rate), version 0."""
+    body = b"\0\0\0\0" + struct.pack(">I", len(entries)) + b"".join(
+        struct.pack(">Iii", d, t, int(r * 65536)) for d, t, r in entries)
+    edts = [b for b in trak[1] if b[0] == b"edts"]
+    if edts:
+        edts[0][1] = [[b"elst", body]]
+    else:
+        trak[1].insert([b[0] for b in trak[1]].index(b"mdia"), [b"edts", [[b"elst", body]]])
+
+
+def _mx_whole_frames(trak, spf=1024):
+    """stts and mdhd as iTunes writes them, every frame a whole spf. Returns frames."""
+    stbl = _mx_find([trak], "trak/mdia/minf/stbl")[0][1]
+    frames = struct.unpack(">I", [b for b in stbl if b[0] == b"stsz"][0][1][8:12])[0]
+    for b in stbl:
+        if b[0] == b"stts":
+            b[1] = b"\0\0\0\0" + struct.pack(">III", 1, frames, spf)
+    mdhd = _mx_find([trak], "trak/mdia/mdhd")[0]
+    body = bytearray(mdhd[1])
+    require(body[0] == 0, "mdhd version 0")
+    struct.pack_into(">I", body, 16, frames * spf)
+    mdhd[1] = bytes(body)
+    return frames
+
+
+def _mx_add_itunsmpb(boxes, priming, remainder, samples):
+    """iTunes' gapless tag, into the ilst ffmpeg writes in moov/udta/meta."""
+    text = (" %08X %08X %08X %016X" % (0, priming, remainder, samples) + " %08X" * 8 % ((0,) * 8)).encode()
+    item = (_mfull(b"mean", b"com.apple.iTunes") + _mfull(b"name", b"iTunSMPB")
+            + _mbox(b"data", struct.pack(">II", 1, 0) + text))
+    item = _mbox(b"----", item)
+    for u in _mx_find(boxes, "moov/udta"):
+        for mb in u[1]:
+            if mb[0] == b"meta":
+                sub = _mx_parse(mb[1], 4, len(mb[1]))
+                for sb in sub:
+                    if sb[0] == b"ilst":
+                        sb[1] = sb[1] + item
+                        mb[1] = mb[1][:4] + _mx_build(sub)
+                        return
+    require(False, "an ilst to put iTunSMPB in")
+
+
+def gapless_fixtures(p):
+    """Gapless decoding (2.10.2): what ffmpeg plays, sample for sample and to its
+    length. MP4 edit lists, sample durations, iTunSMPB and track selection; MP3
+    LAME delay and padding at the tag offsets each version and mode uses."""
+    text = ""
+    n = 22050
+    ffmpeg_make(p("gl.m4a"), "sine=f=440:d=0.5:sample_rate=44100", "-c:a", "aac", "-aac_pns", "0",
+                "-b:a", "64k")
+    base = reference_f64(p("gl.m4a"))
+    require(len(base) == n, "ffmpeg's edit list gives back the input's length")
+
+    # iTunes files: whole-frame sample tables, the gapless facts in iTunSMPB, with
+    # Apple's 2112 samples of priming (more than ffmpeg's encoder writes, so the
+    # first 1088 of the clip go as well). Alone, and beside an edit list that agrees.
+    for name, elst in (("GLSMPB", False), ("GLSMPBELST", True)):
+        b = _mx_load(p("gl.m4a"))
+        trak = _mx_find(b, "moov/trak")[0]
+        frames = _mx_whole_frames(trak)
+        orig = n - 1088
+        if elst:
+            _mx_set_elst(trak, [(orig, 2112, 1.0)])
+        else:
+            trak[1] = [x for x in trak[1] if x[0] != b"edts"]
+        _mx_add_itunsmpb(b, 2112, frames * 1024 - 2112 - orig, orig)
+        open(p(name + ".m4a"), "wb").write(_mx_build(b))
+        require(len(reference_f64(p(name + ".m4a"))) == orig, name + ": ffmpeg applies iTunSMPB")
+        text += lossy_fixture(name, p(name + ".m4a"), 7)
+
+    # A leading empty edit (media time -1) delays the start. ffmpeg 9 fills no
+    # silence for it (nor does shravan) but then misplaces the end trim and plays
+    # 478 samples of the last frame's padding, so the reference is ffmpeg's decode
+    # of the same media under the one normal edit: the audio, whole, to the sample.
+    b = _mx_load(p("gl.m4a"))
+    _mx_set_elst(_mx_find(b, "moov/trak")[0], [(11025, -1, 1.0), (n, 1024, 1.0)])
+    open(p("glempty.m4a"), "wb").write(_mx_build(b))
+    text += b64_literal("_FX_GLEMPTY_B64", open(p("glempty.m4a"), "rb").read())
+    text += "var _FX_GLEMPTY_COUNT = %d;\n" % len(base)
+    text += "var _FX_GLEMPTY_STEP = 7;\n"
+    text += 'var _FX_GLEMPTY_REF = "%s";\n' % ",".join(str(int(round(base[i] * 32768))) for i in range(0, len(base), 7))
+
+    # Two edits, two stretches of the media in order. ffmpeg trims only the first
+    # edit's start to the sample (later ones to the frame), so the reference is the
+    # media timeline, ffmpeg's decode without the edit list, cut by the ISO rule.
+    raw = reference_f64(p("gl.m4a"), "-ignore_editlist", "1")
+    b = _mx_load(p("gl.m4a"))
+    _mx_set_elst(_mx_find(b, "moov/trak")[0], [(4410, 1024, 1.0), (3000, 1024 + 11025, 1.0)])
+    open(p("gltwo.m4a"), "wb").write(_mx_build(b))
+    two = list(raw[1024:1024 + 4410]) + list(raw[1024 + 11025:1024 + 11025 + 3000])
+    text += b64_literal("_FX_GLTWO_B64", open(p("gltwo.m4a"), "rb").read())
+    text += "var _FX_GLTWO_COUNT = %d;\n" % len(two)
+    text += "var _FX_GLTWO_STEP = 5;\n"
+    text += 'var _FX_GLTWO_REF = "%s";\n' % ",".join(str(int(round(two[i] * 32768))) for i in range(0, len(two), 5))
+
+    # Without an edit list the sample table alone trims the end: its last frame
+    # is short. No start trim (ffmpeg plays the priming).
+    ffmpeg_make(p("glnoedit.m4a"), "sine=f=440:d=0.5:sample_rate=44100", "-c:a", "aac", "-aac_pns", "0",
+                "-b:a", "64k", "-use_editlist", "0")
+    require(not _mx_find(_mx_load(p("glnoedit.m4a")), "moov/trak/edts"), "no edit list")
+    require(len(reference_f64(p("glnoedit.m4a"))) == n + 1024, "stts trims the last frame")
+    text += lossy_fixture("GLNOEDIT", p("glnoedit.m4a"), 7)
+
+    # Two audio tracks: stereo (disabled) first, mono 440 Hz (enabled) second.
+    # ffmpeg plays the enabled one, though it is neither the first nor the one with
+    # more channels; -map 0:a:0 the other.
+    run("ffmpeg", "-v", "error", "-y",
+        "-f", "lavfi", "-i", "aevalsrc=0.3*sin(2*PI*660*t)|0.2*sin(2*PI*990*t):s=44100:d=0.4",
+        "-f", "lavfi", "-i", "sine=f=440:d=0.5:sample_rate=44100",
+        "-map", "0:a", "-map", "1:a", "-c:a", "aac", "-aac_pns", "0", "-b:a", "64k",
+        "-disposition:a:0", "0", "-disposition:a:1", "default", p("glmulti.m4a"))
+    flags = [b[1][3] for b in _mx_find(_mx_load(p("glmulti.m4a")), "moov/trak/tkhd")]
+    require(flags[0] & 1 == 0 and flags[1] & 1 == 1, "multi-track: second enabled, first not")
+    text += lossy_fixture("GLMULTI", p("glmulti.m4a"), 7)
+    t1 = reference_f64(p("glmulti.m4a"), post=("-map", "0:a:0"))
+    text += "var _FX_GLMULTI1_COUNT = %d;\n" % len(t1)
+    text += 'var _FX_GLMULTI1_REF = "%s";\n' % ",".join(str(int(round(t1[i] * 32768))) for i in range(0, len(t1), 7))
+
+    # MP3: the tag sits 9, 17 or 32 bytes past the header by version and mode.
+    # MPEG-2 mono VBR from the lame CLI (a "Xing" tag), MPEG-2 stereo from ffmpeg's
+    # libmp3lame ("Lavc"), and a CRC-protected MPEG-1 file, whose tag LAME still
+    # writes right after the side information (shravan looked past the CRC until
+    # 2.10.2 and decoded the tag's frame as audio).
+    ffmpeg_make(p("gl22.wav"), TONE_NOISE % (22050, "0.4"), "-ac", "1", "-c:a", "pcm_s16le")
+    run("lame", "--quiet", "-V", "4", p("gl22.wav"), p("gl22.mp3"))
+    text += lossy_fixture("GLMP3LSF", p("gl22.mp3"), 11)
+    ffmpeg_make(p("gl24.mp3"), TONE_NOISE % (24000, "0.4"), "-c:a", "libmp3lame", "-b:a", "48k")
+    text += lossy_fixture("GLMP3LSF2", p("gl24.mp3"), 13)
+    ffmpeg_make(p("glcrc.wav"), TONE_NOISE % (44100, "0.3"), "-c:a", "pcm_s16le")
+    run("lame", "--quiet", "-p", "-b", "128", p("glcrc.wav"), p("glcrc.mp3"))
+    require(open(p("glcrc.mp3"), "rb").read()[1] & 1 == 0, "CRC-protected frames")
+    text += lossy_fixture("GLMP3CRC", p("glcrc.mp3"), 17)
+    for name in ("gl22.mp3", "gl24.mp3", "glcrc.mp3"):
+        full = reference_f64(p(name), "-flags2", "+skip_manual")
+        require(len(full) > len(reference_f64(p(name))), name + ": ffmpeg trims it")
+    return text
+
+
 def lossy_fixture(name, path, step, skip_frames=0, extra=()):
     """Lossy: compare every step-th sample as a 16-bit value, allowing for rounding.
 
@@ -987,11 +1171,11 @@ def main():
         parts.append(iso_excerpt(vec, "ISOFREE", "l3-he_free", 0, 8, 0, 17))
 
         # A LAME file as written by default, with its Info frame: an index, not
-        # audio. Judged against ffmpeg without gapless trimming (skip_manual), which
-        # is what shravan does until encoder delay and padding are applied.
+        # audio, carrying the encoder's delay and padding, which ffmpeg trims.
         ffmpeg_make(p("info.mp3"), TONE_NOISE % (44100, "0.3"), "-c:a", "libmp3lame", "-b:a", "64k")
         require(b"Info" in open(p("info.mp3"), "rb").read()[:4096], "LAME Info frame")
-        parts.append(lossy_fixture("MP3INFO", p("info.mp3"), 37, extra=("-flags2", "+skip_manual")))
+        parts.append(lossy_fixture("MP3INFO", p("info.mp3"), 37))
+        parts.append(gapless_fixtures(p))
 
         # Ogg Opus with a non-zero header output gain, which RFC 7845 says a decoder
         # MUST apply. ffmpeg applies it; shravan ignored it before 2.9.3.

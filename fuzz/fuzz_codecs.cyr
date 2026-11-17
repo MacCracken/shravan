@@ -99,6 +99,20 @@ fn _pcm_quant(x, scale, lo, hi) {
     return v;
 }
 fn _vec_new_cap(n) { var v = alloc(24); var data = alloc(n * 8); store64(v, data); store64(v + 8, 0); store64(v + 16, n); return v; }
+# Gapless decoding (src/shravan.cyr), which mp3.cyr consults since 2.10.2.
+var _shravan_gapless = 1;
+fn _vec_keep_frames(v, ch, start, n) {
+    if (ch < 1) { return 0; }
+    var frames = vec_len(v) / ch;
+    if (start < 0) { start = 0; }
+    if (start > frames) { start = frames; }
+    if (n < 0) { n = 0; }
+    if (n > frames - start) { n = frames - start; }
+    store64(v, load64(v) + start * ch * 8);
+    store64(v + 16, load64(v + 16) - start * ch);
+    store64(v + 8, n * ch);
+    return n;
+}
 # FormatInfo / decode_result accessors (mirror src/main.cyr) — referenced by the included codec modules
 fn fmtinfo_format(fi)       { return load64(fi); }
 fn fmtinfo_sample_rate(fi)  { return load64(fi + 8); }

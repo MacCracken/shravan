@@ -57,8 +57,8 @@ def f64(path):
     return a
 
 
-def ff_decode(src, dst, *pre):
-    run("ffmpeg", "-v", "error", "-y", *pre, "-i", src, "-f", "f64le", "-c:a", "pcm_f64le", dst)
+def ff_decode(src, dst, *pre, post=()):
+    run("ffmpeg", "-v", "error", "-y", *pre, "-i", src, *post, "-f", "f64le", "-c:a", "pcm_f64le", dst)
     return f64(dst)
 
 
@@ -210,7 +210,7 @@ class Sweep:
                             "-c:a", "alac", "-sample_fmt", fmt, src, check=False)
                     if p.returncode != 0:
                         continue
-                    ref = ff_decode(src, self.p("ref.f64"), "-ignore_editlist", "1")
+                    ref = ff_decode(src, self.p("ref.f64"))
                     self.decode_vs("alac", f"{rate} {ch}ch {bits}b", src, ref, True,
                                    ref_scale=float(1 << (bits - 1)))
 
@@ -227,9 +227,9 @@ class Sweep:
                             "-ac", str(ch), *args, src, check=False)
                     if p.returncode != 0:
                         continue
-                    # No gapless trimming: shravan skips the Info frame but keeps the
-                    # encoder delay and padding (gapless is scheduled for 2.10.2).
-                    ref = ff_decode(src, self.p("ref.f64"), "-flags2", "+skip_manual")
+                    # Gapless (2.10.2): the LAME tag's delay and padding trimmed, as
+                    # ffmpeg plays it, to the sample.
+                    ref = ff_decode(src, self.p("ref.f64"))
                     js = {None: "mono", "0": "stereo", "1": "joint"}[mode]
                     self.decode_vs("mp3", f"{rate} {js} {br}", src, ref, False)
         # Layer II from twolame (incl. joint stereo with intensity), against mpg123.
@@ -262,23 +262,57 @@ class Sweep:
                             *args, src, check=False)
                     if p.returncode != 0:
                         continue
-                    pre = ("-ignore_editlist", "1") if container == "m4a" else ()
                     name = f"{rate} {ch}ch {container}"
                     if ch > 2:
                         # Multichannel AAC is refused until it is implemented (roadmap).
                         got, info = shravan_decode(src, self.p("got.f64"))
                         self.record("aac", name + " refused", got is None, f"{info}")
                         continue
-                    ref = ff_decode(src, self.p("ref.f64"), *pre)
-                    if container == "m4a":
-                        # ffmpeg trims the last frame to the sample table's duration;
-                        # shravan's end trim comes with edit lists (2.10.2). Values only.
-                        got, info = shravan_decode(src, self.p("got.f64"))
-                        e = maxerr(ref, got) if got is not None else 1e9
-                        ok = got is not None and len(got) >= len(ref) and e <= 2.0
-                        self.record("aac", name, ok, f"n={len(got) if got else 0}/{len(ref)} maxerr={e:.3f}")
-                        continue
+                    # m4a: the edit list's priming and end trim applied (2.10.2).
+                    ref = ff_decode(src, self.p("ref.f64"))
                     self.decode_vs("aac", name, src, ref, False)
+
+    def gapless(self):
+        # MP4 track selection: ffmpeg's default audio stream (enabled tracks first,
+        # then the most channels, then the first) and every track by index. AAC and
+        # ALAC, each to the sample and to ffmpeg's length.
+        srcs = [("sine=f=440:d=0.3:sample_rate=44100", 1),
+                ("aevalsrc=0.3*sin(2*PI*660*t)|0.2*sin(2*PI*990*t):s=44100:d=0.25", 2),
+                ("sine=f=550:d=0.2:sample_rate=44100", 1)]
+        layouts = [(1, 1, 1), (0, 1, 1), (1, 0, 1), (0, 0, 1), (0, 0, 0), (1, 1, 0)]
+        for codec in ("aac", "alac"):
+            for lay in layouts:
+                src = self.p("t.m4a")
+                args = []
+                for f, _ in srcs:
+                    args += ["-f", "lavfi", "-i", f]
+                for i in range(len(srcs)):
+                    args += ["-map", f"{i}:a"]
+                for i, en in enumerate(lay):
+                    args += [f"-disposition:a:{i}", "default" if en else "0"]
+                cargs = ["-c:a", "aac", "-aac_pns", "0", "-b:a", "64k"] if codec == "aac" else ["-c:a", "alac"]
+                run("ffmpeg", "-v", "error", "-y", *args, *cargs, src)
+                name = f"{codec} tracks enabled={''.join(map(str, lay))}"
+                p = run(CLI, "tracks", src, check=False)
+                fields = p.stdout.decode().split()
+                if p.returncode != 0 or len(fields) < 2:
+                    self.record("gapless", name, False, "shravan error")
+                    continue
+                ref = ff_decode(src, self.p("ref.f64"))
+                got, info = shravan_decode(src, self.p("got.f64"))
+                lossless = codec == "alac"
+                e = maxerr(ref, got) if got is not None else 1e9
+                ok = (fields[0] == "3" and got is not None and len(got) == len(ref)
+                      and (e == 0 if lossless else e <= 2.0))
+                self.record("gapless", name + " default", ok,
+                            f"default={fields[1]} n={len(got) if got else 0}/{len(ref)} maxerr={e:.3f}")
+                for i in range(len(srcs)):
+                    ref = ff_decode(src, self.p("ref.f64"), post=("-map", f"0:a:{i}"))
+                    q = run(CLI, "track", src, str(i), self.p("got.f64"), check=False)
+                    got = f64(self.p("got.f64")) if q.returncode == 0 else None
+                    e = maxerr(ref, got) if got is not None else 1e9
+                    ok = got is not None and len(got) == len(ref) and (e == 0 if lossless else e <= 2.0)
+                    self.record("gapless", f"{name} track {i}", ok, f"n={len(got) if got else 0}/{len(ref)} maxerr={e:.3f}")
 
     def opus(self):
         # libopus built with deep PLC (DRED or OSCE) skips the SILK PLC glue fade at
@@ -534,10 +568,10 @@ class Sweep:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,opus,encoders")
+    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "opus", "encoders"]
+    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders"]
     if args.only:
         groups = [g for g in groups if g in args.only.split(",")]
     for tool in (CLI, OPUSREF):

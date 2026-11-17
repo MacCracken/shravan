@@ -25,6 +25,19 @@ var MP4_ESDS = 0x65736473;   # "esds"
 var MP4_WAVE = 0x77617665;   # "wave"
 var MP4_SOUN = 0x736F756E;   # "soun"
 var MP4_MDAT = 0x6D646174;   # "mdat"
+var MP4_MVHD = 0x6D766864;   # "mvhd"
+var MP4_TKHD = 0x746B6864;   # "tkhd"
+var MP4_MDHD = 0x6D646864;   # "mdhd"
+var MP4_EDTS = 0x65647473;   # "edts"
+var MP4_ELST = 0x656C7374;   # "elst"
+var MP4_STTS = 0x73747473;   # "stts"
+var MP4_UDTA = 0x75647461;   # "udta"
+var MP4_META = 0x6D657461;   # "meta"
+var MP4_ILST = 0x696C7374;   # "ilst"
+var MP4_FREE4 = 0x2D2D2D2D;  # "----", an iTunes free-form item
+var MP4_MEAN = 0x6D65616E;   # "mean"
+var MP4_NAME = 0x6E616D65;   # "name"
+var MP4_DATA = 0x64617461;   # "data"
 
 # demux result struct (40 bytes)
 var MP4_DX_CHANNELS = 0;
@@ -34,7 +47,22 @@ var MP4_DX_OFFSETS = 24;   # ptr to sample_count u64 file offsets
 var MP4_DX_SIZES = 32;     # ptr to sample_count u64 sizes
 var MP4_DX_CODEC = 40;     # MP4_CODEC_*
 var MP4_DX_COOKIE = 48;    # ALAC only: ptr to the 24-byte ALACSpecificConfig
-var MP4_DX_SIZE = 56;
+var MP4_DX_TRACK = 56;     # the track record (MP4_TK_*) it came from
+var MP4_DX_SIZE = 64;
+
+# Track record, one per audio ('soun') trak, in file order.
+var MP4_TK_STBL = 0;       # stbl payload start
+var MP4_TK_STBL_END = 8;
+var MP4_TK_ENABLED = 16;   # tkhd's track_enabled flag
+var MP4_TK_TS = 24;        # mdhd timescale
+var MP4_TK_DUR = 32;       # mdhd duration, in that timescale
+var MP4_TK_ELST = 40;      # elst payload start, or -1
+var MP4_TK_ELST_END = 48;
+var MP4_TK_LAST = 56;      # 1 when it is the moov's last trak (iTunSMPB describes it)
+var MP4_TK_MOVIE_TS = 64;  # mvhd timescale (edit durations are in it)
+var MP4_TK_MOOV = 72;      # moov payload start and end (for udta)
+var MP4_TK_MOOV_END = 80;
+var MP4_TK_SIZE = 88;
 
 var MP4_CODEC_AAC = 1;
 var MP4_CODEC_ALAC = 2;
@@ -454,22 +482,192 @@ fn mp4_build_sample_table(data, len, stbl, stbl_end, dx) {
     return 0;
 }
 
-# Demux an MP4/M4A buffer: fills a freshly allocated demux struct (channels, rate,
-# sample count, per-sample offsets + sizes). Returns the struct ptr, or err().
-fn mp4_demux(data, len) {
+# ---------------------------------------------------------------- tracks
+
+# One box at pos within [pos, end): writes its type, payload start and end to
+# out[0..2]. Returns 1, or 0 when malformed (no room, no advance).
+fn _mp4_box(data, pos, end, out) {
+    if (pos + 8 > end) { return 0; }
+    var size = read_u32_be(data, pos);
+    var hdr = 8;
+    var box_end = pos + size;
+    if (size == 1) {
+        if (pos + 16 > end) { return 0; }
+        box_end = pos + ((read_u32_be(data, pos + 8) << 32) | read_u32_be(data, pos + 12));
+        hdr = 16;
+    }
+    if (size == 0) { box_end = end; }
+    if (box_end > end) { box_end = end; }
+    if (box_end < pos + hdr) { return 0; }
+    store64(out, read_u32_be(data, pos + 4));
+    store64(out + 8, pos + hdr);
+    store64(out + 16, box_end);
+    return 1;
+}
+
+# The audio tracks of an MP4 buffer: a vec of track records, or err().
+fn _mp4_tracks(data, len) {
     if (mp4_detect(data, len) == 0) { return err(ERR_INVALID_HEADER); }
-    var stbl_end = alloc(8);
-    var stbl = mp4_find_audio_stbl(data, len, stbl_end);
-    if (stbl < 0) { return err(ERR_UNSUPPORTED_FMT); }
+    var e = alloc(8);
+    var moov = mp4_find(data, 0, len, MP4_MOOV, e);
+    if (moov < 0) { return err(ERR_INVALID_HEADER); }
+    var mend = load64(e);
+    var tracks = vec_new();
+    var movie_ts = 0;
+    var mvhd = mp4_find(data, moov, mend, MP4_MVHD, e);
+    if (mvhd >= 0) {
+        # version 0: creation(4) modification(4) timescale(4); version 1: 8, 8, 4
+        if (load8(data + mvhd) == 1) {
+            if (mvhd + 24 <= load64(e)) { movie_ts = read_u32_be(data, mvhd + 20); }
+        } else {
+            if (mvhd + 16 <= load64(e)) { movie_ts = read_u32_be(data, mvhd + 12); }
+        }
+    }
+    var bx = alloc(24);
+    var last_trak = 0 - 1;
+    var last_rec = 0 - 1;
+    var pos = moov;
+    while (pos + 8 <= mend) {
+        if (_mp4_box(data, pos, mend, bx) == 0) { return err(ERR_INVALID_HEADER); }
+        var btype = load64(bx);
+        var bp = load64(bx + 8);
+        var bend = load64(bx + 16);
+        if (btype == MP4_TRAK) {
+            last_trak = pos;
+            last_rec = 0 - 1;
+            var mdia = mp4_find(data, bp, bend, MP4_MDIA, e);
+            if (mdia >= 0) {
+                var mdend = load64(e);
+                var is_audio = 0;
+                var hdlr = mp4_find(data, mdia, mdend, MP4_HDLR, e);
+                if (hdlr >= 0 && hdlr + 12 <= load64(e)) {
+                    if (read_u32_be(data, hdlr + 8) == MP4_SOUN) { is_audio = 1; }
+                }
+                var stbl = 0 - 1;
+                var stbl_end = 0;
+                if (is_audio == 1) {
+                    var minf = mp4_find(data, mdia, mdend, MP4_MINF, e);
+                    if (minf >= 0) {
+                        stbl = mp4_find(data, minf, load64(e), MP4_STBL, e);
+                        stbl_end = load64(e);
+                    }
+                }
+                if (stbl >= 0) {
+                    var tk = alloc(MP4_TK_SIZE);
+                    memset(tk, 0, MP4_TK_SIZE);
+                    store64(tk + MP4_TK_STBL, stbl);
+                    store64(tk + MP4_TK_STBL_END, stbl_end);
+                    store64(tk + MP4_TK_ELST, 0 - 1);
+                    store64(tk + MP4_TK_MOVIE_TS, movie_ts);
+                    store64(tk + MP4_TK_MOOV, moov);
+                    store64(tk + MP4_TK_MOOV_END, mend);
+                    # tkhd: version(1) flags(3), track_enabled = flags & 1
+                    var tkhd = mp4_find(data, bp, bend, MP4_TKHD, e);
+                    if (tkhd >= 0 && tkhd + 4 <= load64(e)) {
+                        store64(tk + MP4_TK_ENABLED, load8(data + tkhd + 3) & 1);
+                    }
+                    var mdhd = mp4_find(data, mdia, mdend, MP4_MDHD, e);
+                    if (mdhd >= 0) {
+                        if (load8(data + mdhd) == 1) {
+                            if (mdhd + 32 <= load64(e)) {
+                                store64(tk + MP4_TK_TS, read_u32_be(data, mdhd + 20));
+                                store64(tk + MP4_TK_DUR, (read_u32_be(data, mdhd + 24) << 32) | read_u32_be(data, mdhd + 28));
+                            }
+                        } else {
+                            if (mdhd + 20 <= load64(e)) {
+                                store64(tk + MP4_TK_TS, read_u32_be(data, mdhd + 12));
+                                store64(tk + MP4_TK_DUR, read_u32_be(data, mdhd + 16));
+                            }
+                        }
+                    }
+                    var edts = mp4_find(data, bp, bend, MP4_EDTS, e);
+                    if (edts >= 0) {
+                        var elst = mp4_find(data, edts, load64(e), MP4_ELST, e);
+                        if (elst >= 0) {
+                            store64(tk + MP4_TK_ELST, elst);
+                            store64(tk + MP4_TK_ELST_END, load64(e));
+                        }
+                    }
+                    vec_push(tracks, tk);
+                    last_rec = tk;
+                }
+            }
+        }
+        pos = bend;
+    }
+    if (last_rec != 0 - 1) { store64(last_rec + MP4_TK_LAST, 1); }
+    return tracks;
+}
+
+# Number of audio tracks in an MP4 buffer, or err().
+fn mp4_track_count(data, len) {
+    var t = _mp4_tracks(data, len);
+    if (is_err(t) == 1) { return t; }
+    return vec_len(t);
+}
+
+# Codec, rate and channels of track `index` into out (as mp4_audio_info), and 0
+# when shravan decodes it: AAC-LC at up to two channels and a rate with an ADTS
+# index, or ALAC. Otherwise MP4_UNSUPPORTED or MP4_MALFORMED.
+fn _mp4_track_audio(data, tk, out) {
+    var rc = mp4_audio_info(data, load64(tk + MP4_TK_STBL), load64(tk + MP4_TK_STBL_END), out);
+    if (rc != 0) { return rc; }
+    if (load64(out + 16) == MP4_CODEC_AAC) {
+        if (load64(out) < 1) { return MP4_MALFORMED; }
+        if (load64(out) > 2) { return MP4_UNSUPPORTED; }
+        if (_aac_sr_index_exact(load64(out + 8)) < 0) { return MP4_UNSUPPORTED; }
+    }
+    return 0;
+}
+
+# The track a player should take, as ffmpeg chooses its default audio stream:
+# enabled tracks before disabled ones, then the most channels, then the first.
+# Tracks shravan cannot decode are passed over. Returns the index, or err().
+fn mp4_default_track(data, len) {
+    var t = _mp4_tracks(data, len);
+    if (is_err(t) == 1) { return t; }
+    if (vec_len(t) == 0) { return err(ERR_UNSUPPORTED_FMT); }
+    var info = alloc(32);
+    var best = 0 - 1;
+    var best_score = 0 - 1;
+    var malformed = 0;
+    var i = 0;
+    while (i < vec_len(t)) {
+        var tk = vec_get(t, i);
+        var rc = _mp4_track_audio(data, tk, info);
+        if (rc == 0) {
+            var score = load64(info) + 5000000 * load64(tk + MP4_TK_ENABLED);
+            if (score > best_score) { best_score = score; best = i; }
+        }
+        if (rc == MP4_MALFORMED) { malformed = 1; }
+        i = i + 1;
+    }
+    if (best < 0) {
+        if (malformed == 1) { return err(ERR_INVALID_HEADER); }
+        return err(ERR_UNSUPPORTED_FMT);
+    }
+    return best;
+}
+
+# Demux track `index` (see mp4_track_count): a freshly allocated demux struct
+# (channels, rate, sample count, per-sample offsets + sizes), or err().
+fn mp4_demux_track(data, len, index) {
+    var t = _mp4_tracks(data, len);
+    if (is_err(t) == 1) { return t; }
+    if (index < 0 || index >= vec_len(t)) { return err(ERR_UNSUPPORTED_FMT); }
+    var tk = vec_get(t, index);
+    var stbl = load64(tk + MP4_TK_STBL);
+    var stbl_end = load64(tk + MP4_TK_STBL_END);
     var dx = alloc(MP4_DX_SIZE);
     var info = alloc(32);
-    var rc = mp4_audio_info(data, stbl, load64(stbl_end), info);
+    var rc = mp4_audio_info(data, stbl, stbl_end, info);
     if (rc == MP4_UNSUPPORTED) { return err(ERR_UNSUPPORTED_FMT); }
     if (rc < 0) { return err(ERR_INVALID_HEADER); }
     store64(dx + MP4_DX_CHANNELS, load64(info));
     store64(dx + MP4_DX_RATE, load64(info + 8));
     store64(dx + MP4_DX_CODEC, load64(info + 16));
     store64(dx + MP4_DX_COOKIE, load64(info + 24));
+    store64(dx + MP4_DX_TRACK, tk);
     # The sample table is allocated before anything decodes, so its size is bounded
     # by the output it implies: count * samples-per-frame * channels must fit the
     # one-shot ceiling (1024 for AAC; the cookie's frameLength for ALAC).
@@ -481,25 +679,290 @@ fn mp4_demux(data, len) {
     var ch = load64(info);
     if (ch < 1) { ch = 1; }
     _mp4_max_count = _shravan_max_samples / (spf * ch);
-    var bt = mp4_build_sample_table(data, len, stbl, load64(stbl_end), dx);
+    var bt = mp4_build_sample_table(data, len, stbl, stbl_end, dx);
     if (bt == 0 - 2) { return err(ERR_TOO_LARGE); }
     if (bt < 0) { return err(ERR_INVALID_HEADER); }
     return dx;
 }
 
-# Decode an MP4/M4A buffer to PCM. ALAC frames go straight to the decoder. For AAC,
-# extract each access unit, prepend an ADTS header (from the track's rate and
-# channels), and hand the ADTS stream to aac_decode.
-fn mp4_decode(data, len) {
-    var dx = mp4_demux(data, len);
+# Demux the default track (mp4_default_track).
+fn mp4_demux(data, len) {
+    var idx = mp4_default_track(data, len);
+    if (is_err(idx) == 1) { return idx; }
+    return mp4_demux_track(data, len, idx);
+}
+
+# ---------------------------------------------------------------- gapless
+
+# a * b / c to the nearest, for the non-negative times and rates of a sample
+# table; saturating rather than overflowing on hostile values.
+fn _mp4_rescale(a, b, c) {
+    if (c <= 0 || a <= 0 || b <= 0) { return 0; }
+    if (a > 1099511627776 || b > 1099511627776) { return (a / c) * b; }
+    if (a > 4611686018427387903 / b) { return (a / c) * b; }
+    return (a * b + c / 2) / c;
+}
+
+# The sum of the track's stts durations (its media length, in the media
+# timescale), or -1 without a usable stts.
+fn _mp4_stts_total(data, tk) {
+    var e = alloc(8);
+    var stts = mp4_find(data, load64(tk + MP4_TK_STBL), load64(tk + MP4_TK_STBL_END), MP4_STTS, e);
+    if (stts < 0) { return 0 - 1; }
+    var end = load64(e);
+    if (stts + 8 > end) { return 0 - 1; }
+    var n = read_u32_be(data, stts + 4);
+    if (n > (end - stts - 8) / 8) { n = (end - stts - 8) / 8; }
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var cnt = read_u32_be(data, stts + 8 + i * 8);
+        var dlt = read_u32_be(data, stts + 12 + i * 8);
+        total = total + cnt * dlt;
+        if (total > 4611686018427387903) { return 0 - 1; }
+        i = i + 1;
+    }
+    return total;
+}
+
+# Hex digits of the iTunSMPB text from *pp, skipping spaces; advances *pp past
+# them. -1 without a digit.
+fn _mp4_hex_token(data, pp, end) {
+    var p = load64(pp);
+    while (p < end && load8(data + p) == 32) { p = p + 1; }
+    var v = 0;
+    var digits = 0;
+    var going = 1;
+    while (going == 1 && p < end) {
+        var c = load8(data + p);
+        var d = 0 - 1;
+        if (c >= 48 && c <= 57) { d = c - 48; }
+        if (c >= 65 && c <= 70) { d = c - 55; }
+        if (c >= 97 && c <= 102) { d = c - 87; }
+        if (d < 0) { going = 0; }
+        else {
+            if (digits < 15) { v = v * 16 + d; }
+            digits = digits + 1;
+            p = p + 1;
+        }
+    }
+    store64(pp, p);
+    if (digits == 0) { return 0 - 1; }
+    return v;
+}
+
+# iTunes' gapless tag: moov/udta/meta/ilst/----, mean "com.apple.iTunes", name
+# "iTunSMPB", text " 00000000 PPPPPPPP RRRRRRRR SSSSSSSSSSSSSSSS ...": priming,
+# remainder (the last frame's padding) and the original length. Writes them to
+# out[0..2] and returns 1, or 0 without one. Every udta of the moov is searched.
+fn _mp4_itunsmpb(data, moov, mend, out) {
+    var bx = alloc(24);
+    var pos = moov;
+    while (pos + 8 <= mend) {
+        if (_mp4_box(data, pos, mend, bx) == 0) { return 0; }
+        if (load64(bx) == MP4_UDTA) {
+            if (_mp4_itunsmpb_udta(data, load64(bx + 8), load64(bx + 16), out) == 1) { return 1; }
+        }
+        pos = load64(bx + 16);
+    }
+    return 0;
+}
+
+fn _mp4_itunsmpb_udta(data, udta, uend, out) {
+    var e = alloc(8);
+    var meta = mp4_find(data, udta, uend, MP4_META, e);
+    if (meta < 0) { return 0; }
+    var meta_end = load64(e);
+    # a FullBox in ISO files; QuickTime's has no version and flags
+    var mp = meta + 4;
+    if (meta + 8 <= meta_end && read_u32_be(data, meta + 4) == MP4_HDLR) { mp = meta; }
+    var ilst = mp4_find(data, mp, meta_end, MP4_ILST, e);
+    if (ilst < 0) { return 0; }
+    var iend = load64(e);
+    var bx = alloc(24);
+    var pos = ilst;
+    while (pos + 8 <= iend) {
+        if (_mp4_box(data, pos, iend, bx) == 0) { return 0; }
+        if (load64(bx) == MP4_FREE4) {
+            var ip = load64(bx + 8);
+            var ie = load64(bx + 16);
+            var name = mp4_find(data, ip, ie, MP4_NAME, e);
+            var name_end = load64(e);
+            # name: version+flags(4), then "iTunSMPB"
+            if (name >= 0 && name_end - name == 12) {
+                if (read_u32_be(data, name + 4) == 0x6954756E && read_u32_be(data, name + 8) == 0x534D5042) {
+                    var dat = mp4_find(data, ip, ie, MP4_DATA, e);
+                    if (dat < 0) { return 0; }
+                    # data: type(4) locale(4), then the text
+                    var pp = alloc(8);
+                    store64(pp, dat + 8);
+                    var dend = load64(e);
+                    _mp4_hex_token(data, pp, dend);
+                    var pri = _mp4_hex_token(data, pp, dend);
+                    var rem = _mp4_hex_token(data, pp, dend);
+                    var smp = _mp4_hex_token(data, pp, dend);
+                    if (pri < 0 || rem < 0 || smp < 0) { return 0; }
+                    store64(out, pri);
+                    store64(out + 8, rem);
+                    store64(out + 16, smp);
+                    return 1;
+                }
+            }
+        }
+        pos = load64(bx + 16);
+    }
+    return 0;
+}
+
+# The frame ranges of a decoded track that are its audio, as ffmpeg plays it, into
+# rs (start, count pairs). Returns how many.
+#   1. Every sample up to the sample table's duration (the last frame is usually
+#      shorter than a codec frame).
+#   2. iTunSMPB, on an AAC track that is the moov's last (where iTunes puts it, and
+#      where ffmpeg reads it): skip the priming, drop the remainder. It wins over
+#      an edit list, as in ffmpeg.
+#   3. Otherwise the edit list: each edit's media range, in order. A leading empty
+#      edit (media time -1) delays the start, which a PCM decode has no way to
+#      say, and ffmpeg does not fill with silence either; any empty or dwell
+#      (media rate 0) edit contributes nothing.
+fn _mp4_gapless_ranges(data, tk, codec, rate, frames, rs, max_rs) {
+    var ts = load64(tk + MP4_TK_TS);
+    if (ts <= 0) { ts = rate; }
+    var media = frames;
+    var st = _mp4_stts_total(data, tk);
+    if (st >= 0) {
+        var m = _mp4_rescale(st, rate, ts);
+        if (m < media) { media = m; }
+    }
+    var sm = alloc(24);
+    if (codec == MP4_CODEC_AAC && load64(tk + MP4_TK_LAST) == 1
+      && _mp4_itunsmpb(data, load64(tk + MP4_TK_MOOV), load64(tk + MP4_TK_MOOV_END), sm) == 1) {
+        var a = 0;
+        var pri = _mp4_rescale(load64(sm), rate, ts);
+        if (load64(sm) > 0 && load64(sm) < 16384) { a = pri; }
+        var b = media;
+        var dur = _mp4_rescale(load64(tk + MP4_TK_DUR), rate, ts);
+        var rem = _mp4_rescale(load64(sm + 8), rate, ts);
+        var smp = _mp4_rescale(load64(sm + 16), rate, ts);
+        if (load64(sm + 8) > 0 && dur > rem && dur > smp && dur - rem < b) { b = dur - rem; }
+        if (b < a) { b = a; }
+        store64(rs, a);
+        store64(rs + 8, b - a);
+        return 1;
+    }
+    var el = load64(tk + MP4_TK_ELST);
+    if (el < 0) {
+        store64(rs, 0);
+        store64(rs + 8, media);
+        return 1;
+    }
+    var eend = load64(tk + MP4_TK_ELST_END);
+    if (el + 8 > eend) {
+        store64(rs, 0);
+        store64(rs + 8, media);
+        return 1;
+    }
+    var ver = load8(data + el);
+    var n = read_u32_be(data, el + 4);
+    var esz = 12;
+    if (ver == 1) { esz = 20; }
+    if (n > (eend - el - 8) / esz) { n = (eend - el - 8) / esz; }
+    if (n == 0) {
+        store64(rs, 0);
+        store64(rs + 8, media);
+        return 1;
+    }
+    var mts = load64(tk + MP4_TK_MOVIE_TS);
+    if (mts <= 0) { mts = ts; }
+    var nr = 0;
+    var i = 0;
+    while (i < n && nr < max_rs) {
+        var q = el + 8 + i * esz;
+        var dur2 = 0;
+        var mt = 0;
+        var rate_q = 0;
+        if (ver == 1) {
+            dur2 = (read_u32_be(data, q) << 32) | read_u32_be(data, q + 4);
+            mt = (read_u32_be(data, q + 8) << 32) | read_u32_be(data, q + 12);
+            rate_q = read_u32_be(data, q + 16);
+        } else {
+            dur2 = read_u32_be(data, q);
+            mt = read_u32_be(data, q + 4);
+            if (mt >= 2147483648) { mt = mt - 4294967296; }
+            rate_q = read_u32_be(data, q + 8);
+        }
+        if (mt >= 0 && dur2 > 0 && (rate_q >> 16) != 0) {
+            var s0 = _mp4_rescale(mt, rate, ts);
+            var d0 = _mp4_rescale(dur2, rate, mts);
+            if (s0 < media) {
+                if (d0 > media - s0) { d0 = media - s0; }
+                store64(rs + nr * 16, s0);
+                store64(rs + nr * 16 + 8, d0);
+                nr = nr + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return nr;
+}
+
+# Trim a decoded track to its gapless ranges (shravan_set_gapless).
+fn _mp4_apply_gapless(data, tk, codec, dr) {
+    if (_shravan_gapless == 0 || is_err(dr) == 1) { return dr; }
+    var fi = decode_result_info(dr);
+    var v = decode_result_samples(dr);
+    var ch = fmtinfo_channels(fi);
+    if (ch < 1) { return dr; }
+    var frames = vec_len(v) / ch;
+    var max_rs = 64;
+    var rs = alloc(max_rs * 16);
+    var nr = _mp4_gapless_ranges(data, tk, codec, fmtinfo_sample_rate(fi), frames, rs, max_rs);
+    if (nr == 1) {
+        _vec_keep_frames(v, ch, load64(rs), load64(rs + 8));
+    } else {
+        # Edits may repeat the media: their sum is bounded by the one-shot ceiling,
+        # not by the decode (64 edits over the whole track would be 64 copies).
+        var total = 0;
+        var i = 0;
+        while (i < nr) {
+            total = total + load64(rs + i * 16 + 8);
+            if (total * ch > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
+            i = i + 1;
+        }
+        var out = _vec_new_cap(total * ch);
+        if (is_err(out) == 1) { return out; }
+        i = 0;
+        while (i < nr) {
+            var a = load64(rs + i * 16) * ch;
+            var cnt = load64(rs + i * 16 + 8) * ch;
+            var k = 0;
+            while (k < cnt) { vec_push(out, vec_get(v, a + k)); k = k + 1; }
+            i = i + 1;
+        }
+        store64(dr + 8, out);
+    }
+    _dr_refresh_total(dr);
+    return dr;
+}
+
+# ---------------------------------------------------------------- decode
+
+# Decode track `index` to PCM, gapless (shravan_set_gapless). ALAC frames go
+# straight to the decoder. For AAC, extract each access unit, prepend an ADTS
+# header (from the track's rate and channels), and hand the stream to aac_decode.
+fn mp4_decode_track(data, len, index) {
+    var dx = mp4_demux_track(data, len, index);
     if (is_err(dx) == 1) { return dx; }
+    var tk = load64(dx + MP4_DX_TRACK);
+    var codec = load64(dx + MP4_DX_CODEC);
     var channels = load64(dx + MP4_DX_CHANNELS);
     var rate = load64(dx + MP4_DX_RATE);
     var count = load64(dx + MP4_DX_COUNT);
     var offsets = load64(dx + MP4_DX_OFFSETS);
     var sizes = load64(dx + MP4_DX_SIZES);
-    if (load64(dx + MP4_DX_CODEC) == MP4_CODEC_ALAC) {
-        return alac_decode_frames(load64(dx + MP4_DX_COOKIE), data, len, offsets, sizes, count);
+    if (codec == MP4_CODEC_ALAC) {
+        var ar = alac_decode_frames(load64(dx + MP4_DX_COOKIE), data, len, offsets, sizes, count);
+        return _mp4_apply_gapless(data, tk, codec, ar);
     }
     # The bridge writes an ADTS header per AU, which carries a 3-bit channel
     # configuration, a 13-bit frame length and a 4-bit rate index. Channel config 7
@@ -546,7 +1009,54 @@ fn mp4_decode(data, len) {
         pos = pos + sz;
         i = i + 1;
     }
-    return aac_decode(adts, pos);
+    return _mp4_apply_gapless(data, tk, codec, aac_decode(adts, pos));
+}
+
+# Decode the default track (mp4_default_track) to PCM.
+fn mp4_decode(data, len) {
+    var idx = mp4_default_track(data, len);
+    if (is_err(idx) == 1) { return idx; }
+    return mp4_decode_track(data, len, idx);
+}
+
+# What decoding track `index` gives without decoding it: a FormatInfo whose
+# format is FMT_AAC or FMT_ALAC, with the track's rate and channels, and its
+# length (and duration) from the sample table and edit list. err() for a track
+# shravan cannot decode (ERR_UNSUPPORTED_FMT) or a malformed one.
+fn mp4_track_info(data, len, index) {
+    var t = _mp4_tracks(data, len);
+    if (is_err(t) == 1) { return t; }
+    if (index < 0 || index >= vec_len(t)) { return err(ERR_UNSUPPORTED_FMT); }
+    var tk = vec_get(t, index);
+    var info = alloc(32);
+    var rc = _mp4_track_audio(data, tk, info);
+    if (rc == MP4_UNSUPPORTED) { return err(ERR_UNSUPPORTED_FMT); }
+    if (rc < 0) { return err(ERR_INVALID_HEADER); }
+    var codec = load64(info + 16);
+    var rate = load64(info + 8);
+    var ch = load64(info);
+    var fmt = FMT_AAC;
+    var bits = 16;
+    if (codec == MP4_CODEC_ALAC) {
+        fmt = FMT_ALAC;
+        bits = load8(load64(info + 24) + 5);
+    }
+    var ts = load64(tk + MP4_TK_TS);
+    if (ts <= 0) { ts = rate; }
+    var media = _mp4_stts_total(data, tk);
+    if (media < 0) { media = 0; }
+    var frames = _mp4_rescale(media, rate, ts);
+    var total = frames;
+    if (_shravan_gapless == 1) {
+        var rs = alloc(64 * 16);
+        var nr = _mp4_gapless_ranges(data, tk, codec, rate, frames, rs, 64);
+        total = 0;
+        var i = 0;
+        while (i < nr) { total = total + load64(rs + i * 16 + 8); i = i + 1; }
+    }
+    var dur = 0;
+    if (rate > 0) { dur = f64_div(f64_from(total), f64_from(rate)); }
+    return fmtinfo_new(fmt, rate, ch, bits, dur, total);
 }
 
 # ================================================================

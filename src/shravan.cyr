@@ -138,6 +138,49 @@ fn shravan_set_max_samples(n) {
 
 fn shravan_max_samples() { return _shravan_max_samples; }
 
+# Gapless decoding: drop what the container or the encoder marks as not part of
+# the audio, as ffmpeg does by default. For MP4 that is the sample table's
+# durations, the edit list and iTunes' iTunSMPB (the encoder's priming and the
+# last frame's padding); for MP3, the delay and padding in a LAME/Xing tag. On by
+# default since 2.10.2. Off, MP4 and MP3 decode every frame whole, as before.
+var _shravan_gapless = 1;
+
+fn shravan_set_gapless(on) {
+    var prev = _shravan_gapless;
+    _shravan_gapless = 0;
+    if (on != 0) { _shravan_gapless = 1; }
+    return prev;
+}
+
+fn shravan_gapless() { return _shravan_gapless; }
+
+# Keep frames [start, start + n) of a vec of interleaved samples, `ch` to a frame,
+# clamped to what it holds. In place: the data pointer moves, nothing is copied.
+fn _vec_keep_frames(v, ch, start, n) {
+    if (ch < 1) { return 0; }
+    var frames = vec_len(v) / ch;
+    if (start < 0) { start = 0; }
+    if (start > frames) { start = frames; }
+    if (n < 0) { n = 0; }
+    if (n > frames - start) { n = frames - start; }
+    store64(v, load64(v) + start * ch * 8);
+    store64(v + 16, load64(v + 16) - start * ch);
+    store64(v + 8, n * ch);
+    return n;
+}
+
+# A decode result's sample count and duration, after its samples were trimmed.
+fn _dr_refresh_total(dr) {
+    var fi = decode_result_info(dr);
+    var ch = fmtinfo_channels(fi);
+    if (ch < 1) { return 0; }
+    var total = vec_len(decode_result_samples(dr)) / ch;
+    store64(fi + 40, total);
+    var rate = fmtinfo_sample_rate(fi);
+    if (rate > 0) { store64(fi + 32, f64_div(f64_from(total), f64_from(rate))); }
+    return total;
+}
+
 # ================================================================
 # Format module
 # ================================================================

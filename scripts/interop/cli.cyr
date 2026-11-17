@@ -18,6 +18,10 @@
 #   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
 #   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
 #   id3     <in>                                   ID3v2 title
+#   tracks  <in.mp4>                               print the audio track count and the
+#                                                  default track (mp4_default_track)
+#   track   <in.mp4> <index> <out.f64>             mp4_decode_track; prints as decode
+#   raw     <in> <out.f64>                         codec_open with gapless off
 #   mem     <in>                                   codec_open, then print the sample
 #                                                  count and bytes allocated (bump
 #                                                  allocator high water)
@@ -96,7 +100,7 @@ fn _cli_fail(r) {
 }
 
 fn _cli_usage() {
-    syscall(1, 2, "usage: interop-cli <decode|stream|encode|opusdec|celtenc|verify|id3|mem> ...\n", 77);
+    syscall(1, 2, "usage: interop-cli <decode|stream|encode|opusdec|celtenc|verify|id3|mem|tracks|track|raw> ...\n", 94);
     syscall(60, 2);
     return 0;
 }
@@ -143,6 +147,44 @@ fn _cli_decode() {
     _cli_nl();
     _cli_write_vec(argv(3), sm);
     return 0;
+}
+
+fn _cli_print_result(r, path) {
+    if (is_err(r) == 1) { _cli_fail(r); }
+    var fi = decode_result_info(r);
+    var sm = decode_result_samples(r);
+    _cli_int(fmtinfo_sample_rate(fi));
+    _cli_int(fmtinfo_channels(fi));
+    _cli_int(fmtinfo_bit_depth(fi));
+    _cli_int(fmtinfo_format(fi));
+    _cli_int(vec_len(sm));
+    _cli_nl();
+    _cli_write_vec(path, sm);
+    return 0;
+}
+
+fn _cli_tracks() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    var n = mp4_track_count(d, load64(lenp));
+    if (is_err(n) == 1) { _cli_fail(n); }
+    _cli_int(n);
+    _cli_int(mp4_default_track(d, load64(lenp)));
+    _cli_nl();
+    return 0;
+}
+
+fn _cli_track() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    return _cli_print_result(mp4_decode_track(d, load64(lenp), atoi(argv(3))), argv(4));
+}
+
+fn _cli_raw() {
+    var lenp = alloc(8);
+    var d = _cli_load(argv(2), lenp);
+    shravan_set_gapless(0);
+    return _cli_print_result(codec_open(d, load64(lenp)), argv(3));
 }
 
 fn _cli_stream() {
@@ -361,5 +403,8 @@ if (streq(cmd, "celtenc") == 1) { known = 1; _cli_celtenc(); }
 if (streq(cmd, "verify") == 1) { known = 1; _cli_verify(); }
 if (streq(cmd, "id3") == 1) { known = 1; _cli_id3(); }
 if (streq(cmd, "mem") == 1) { known = 1; _cli_mem(); }
+if (streq(cmd, "tracks") == 1) { known = 1; _cli_tracks(); }
+if (streq(cmd, "track") == 1) { known = 1; _cli_track(); }
+if (streq(cmd, "raw") == 1) { known = 1; _cli_raw(); }
 if (known == 0) { _cli_usage(); }
 syscall(60, 0);
