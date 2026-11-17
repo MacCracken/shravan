@@ -16,6 +16,12 @@
 #   opusdec <in.pk> <channels> <out.f64>           raw Opus packets, each prefixed by
 #                                                  a u32le length; no pre-skip
 #   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
+#   silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw [cap]]
+#                                                  mono SILK at the internal rate:
+#                                                  Opus packets (silk_encode_opus), or
+#                                                  with raw the bare SILK payloads
+#                                                  (silk_encode, into cap bytes,
+#                                                  default 1275); u32le length each
 #   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
 #   id3     <in>                                   ID3v2 title
 #   tracks  <in.mp4>                               print the audio track count and the
@@ -37,6 +43,7 @@ include "src/tag.cyr"
 include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
+include "src/silk_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -100,7 +107,7 @@ fn _cli_fail(r) {
 }
 
 fn _cli_usage() {
-    syscall(1, 2, "usage: interop-cli <decode|stream|encode|opusdec|celtenc|verify|id3|mem|tracks|track|raw> ...\n", 94);
+    syscall(1, 2, "usage: interop-cli <decode|stream|encode|opusdec|celtenc|silkenc|verify|id3|mem|tracks|track|raw> ...\n", 102);
     syscall(60, 2);
     return 0;
 }
@@ -351,6 +358,34 @@ fn _cli_celtenc() {
     return 0;
 }
 
+fn _cli_silkenc() {
+    var v = _cli_read_vec(argv(2));
+    var e = silk_encoder_new(atoi(argv(3)), atoi(argv(6)), atoi(argv(4)), atoi(argv(5)), atoi(argv(7)));
+    if (is_err(e) == 1) { _cli_fail(e); }
+    var raw = 0;
+    var cap = 1275;
+    if (argc() > 9) { if (streq(argv(9), "raw") == 1) { raw = 1; } }
+    if (argc() > 10) { cap = atoi(argv(10)); }
+    var n = silk_encoder_samples(e);
+    var packets = vec_len(v) / n;
+    var pcm = alloc(n * 8);
+    var out = alloc(packets * 1281 + 8);
+    var op = 0;
+    for (var p = 0; p < packets; p = p + 1) {
+        for (var i = 0; i < n; i = i + 1) { store64(pcm + i * 8, vec_get(v, p * n + i)); }
+        var r = 0;
+        if (raw == 1) { r = silk_encode(e, pcm, out + op + 4, cap); }
+        else { r = silk_encode_opus(e, pcm, out + op + 4, 1276); }
+        if (is_err(r) == 1) { _cli_fail(r); }
+        write_u32_le(out, op, r);
+        op = op + 4 + r;
+    }
+    _cli_write(argv(8), out, op);
+    _cli_int(packets);
+    _cli_nl();
+    return 0;
+}
+
 fn _cli_verify() {
     var lenp = alloc(8);
     var d = _cli_load(argv(2), lenp);
@@ -400,6 +435,7 @@ if (streq(cmd, "stream") == 1) { known = 1; _cli_stream(); }
 if (streq(cmd, "encode") == 1) { known = 1; _cli_encode(); }
 if (streq(cmd, "opusdec") == 1) { known = 1; _cli_opusdec(); }
 if (streq(cmd, "celtenc") == 1) { known = 1; _cli_celtenc(); }
+if (streq(cmd, "silkenc") == 1) { known = 1; _cli_silkenc(); }
 if (streq(cmd, "verify") == 1) { known = 1; _cli_verify(); }
 if (streq(cmd, "id3") == 1) { known = 1; _cli_id3(); }
 if (streq(cmd, "mem") == 1) { known = 1; _cli_mem(); }

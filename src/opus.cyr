@@ -622,7 +622,12 @@ fn ec_tell_frac(ec) {
 #   EC_CODE_SHIFT=23, EC_UINT_BITS=8, EC_WINDOW_SIZE=32. val/rng are uint32 (& EC_U32).
 
 fn ec_enc_new(buf, size) {
-    var ec = alloc(96);
+    return ec_enc_init(alloc(96), buf, size);
+}
+
+# ec_enc_init: start an encoder in a caller's 96-byte struct (one an encoder
+# keeps, so coding a packet allocates nothing).
+fn ec_enc_init(ec, buf, size) {
     memset(ec, 0, 96);
     store64(ec + 0, buf);            # buf
     store64(ec + 8, size);           # storage
@@ -806,6 +811,40 @@ fn ec_enc_done(ec) {
             }
         }
     }
+    return 0;
+}
+
+# ec_enc_patch_initial_bits (entenc.c): overwrite the first nbits (<= 8) of the
+# stream with val, wherever they are now: in the first written byte, in the byte
+# still waiting on a carry (rem), or in val's top bits if no byte has been
+# renormalised out yet. With fewer than nbits encoded the error flag is set.
+# SILK reserves its VAD and LBRR flags this way and fills them in after the
+# packet's frames are coded.
+fn ec_enc_patch_initial_bits(ec, val, nbits) {
+    var shift = 8 - nbits;
+    var mask = ((1 << nbits) - 1) << shift;
+    if (load64(ec + 48) > 0) {
+        var b = load64(ec + 0);
+        store8(b, (load8(b) & (255 - mask)) | ((val << shift) & 255));
+        return 0;
+    }
+    if (load64(ec + 80) >= 0) {
+        store64(ec + 80, (load64(ec + 80) & (0 - 1 - mask)) | (val << shift));
+        return 0;
+    }
+    if (load64(ec + 56) <= (0x80000000 >> nbits)) {
+        var v = load64(ec + 64) & (EC_U32 - (mask << 23));
+        store64(ec + 64, (v | (val << (23 + shift))) & EC_U32);
+        return 0;
+    }
+    store64(ec + 88, 0 - 1);
+    return 0;
+}
+
+# ec_enc copy: the coder's state (not its buffer), as libopus copies the struct.
+fn ec_enc_copy(dst, src) {
+    var i = 0;
+    while (i < 12) { store64(dst + i * 8, load64(src + i * 8)); i = i + 1; }
     return 0;
 }
 

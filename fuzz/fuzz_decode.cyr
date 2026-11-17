@@ -42,6 +42,7 @@ include "src/tag.cyr"
 include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
+include "src/silk_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -463,6 +464,156 @@ while (fi < ae_iters) {
         fmt_int(ae_shape);
         syscall(1, 1, "\n", 1);
         syscall(60, 88);
+    }
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: SILK encoder. Random internal rates and packet lengths (valid and
+# not), bit rates, complexities, CBR, buffers from none to plenty, over hostile
+# f64 input (NaN, infinities, values past full scale, silence, constants, square
+# waves, noise). Bad parameters must be refused, and only those; a payload must
+# fit its buffer or be refused, with nothing written past it; an Opus packet
+# must fit (a buffer of 1 byte holds the TOC alone), carry the configured TOC
+# and, under CBR, be the configured size; and
+# shravan's Opus decoder must take the packets, giving their length of audio. A
+# violation exits 89.
+# ================================================================
+syscall(1, 1, "  silk_encode... ", 17);
+var se_pcm = alloc(960 * 8);
+var se_buf = alloc(1400);
+var se_head = alloc(19);
+memset(se_head, 0, 19);
+memcpy(se_head, "OpusHead", 8);
+store8(se_head + 8, 1);
+store8(se_head + 9, 1);
+write_u32_le(se_head, 12, 48000);
+var se_tags = alloc(16);
+memset(se_tags, 0, 16);
+memcpy(se_tags, "OpusTags", 8);
+var se_iters = iters / 8;
+if (se_iters < 1) { se_iters = 1; }
+fi = 0;
+while (fi < se_iters) {
+    var se_rate = 16000;
+    var rs = _fz_u(6);
+    if (rs == 1) { se_rate = 8000; }
+    if (rs == 2) { se_rate = 12000; }
+    if (rs == 3) { se_rate = 48000; }
+    if (rs == 4) { se_rate = _fz_u(20000); }
+    var se_ms = 20;
+    var mss = _fz_u(6);
+    if (mss == 1) { se_ms = 10; }
+    if (mss == 2) { se_ms = 40; }
+    if (mss == 3) { se_ms = 60; }
+    if (mss == 4) { se_ms = _fz_u(100); }
+    var se_br = _fz_u(40000) + 1;
+    var bs = _fz_u(8);
+    if (bs == 0) { se_br = _fz_u(3000) + 1; }
+    if (bs == 1) { se_br = 0 - _fz_u(1000); }
+    if (bs == 2) { se_br = _fz_u(2000000); }
+    var se_cx = _fz_u(2);
+    if (_fz_u(6) == 0) { se_cx = _fz_u(12) - 1; }
+    var se_cbr = _fz_u(2);
+    var se_valid = 1;
+    if (se_rate != 8000 && se_rate != 12000 && se_rate != 16000) { se_valid = 0; }
+    if (se_ms != 10 && se_ms != 20 && se_ms != 40 && se_ms != 60) { se_valid = 0; }
+    if (se_br < 1 || se_br > 1000000) { se_valid = 0; }
+    if (se_cx < 0 || se_cx > 1) { se_valid = 0; }
+    var se_e = silk_encoder_new(se_rate, se_ms, se_br, se_cx, se_cbr);
+    var se_bad = 0;
+    if ((is_err(se_e) == 1) != (se_valid == 0)) { se_bad = 1; }
+    if (se_bad == 0 && se_valid == 1) {
+        var se_n = silk_encoder_samples(se_e);
+        var se_pk = vec_new();
+        vec_push(se_pk, str_from_buf(se_head, 19));
+        vec_push(se_pk, str_from_buf(se_tags, 16));
+        var se_opus = 0;
+        var se_shape = _fz_u(7);
+        var se_w = f64_div(F64_ONE, f64_from(_fz_u(60) + 2));
+        var se_np = _fz_u(6) + 1;
+        var p = 0;
+        while (se_bad == 0 && p < se_np) {
+            var k = 0;
+            while (k < se_n) {
+                var x = f64_div(f64_from(_fz_u(2000001) - 1000000), f64_from(1000000));
+                if (se_shape == 1) { x = f64_sin(f64_mul(se_w, f64_from(p * se_n + k))); }
+                if (se_shape == 2) { x = f64_div(F64_ONE, f64_from(3)); }
+                if (se_shape == 3) { x = F64_ONE; if (((p * se_n + k) & 16) == 16) { x = f64_neg(F64_ONE); } }
+                if (se_shape == 4) { x = F64_ZERO; }
+                if (se_shape == 5) { x = f64_div(f64_from(_fz_u(201) - 100), f64_from(3200)); }
+                var sp = _fz_u(100);
+                if (sp == 0) { x = 0x7FF8000000000000; }
+                if (sp == 1) { x = 0x7FF0000000000000; }
+                if (sp == 2) { x = 0 - 0x10000000000000; }
+                if (sp == 3) { x = f64_from(1000000); }
+                if (se_shape == 6) { x = 0x7FF8000000000000; }
+                store64(se_pcm + k * 8, x);
+                k = k + 1;
+            }
+            var se_cap = 1276;
+            if (_fz_u(3) == 0) { se_cap = _fz_u(48); }
+            var q = 0;
+            while (q < 64) { store8(se_buf + se_cap + q, 0xA5); q = q + 1; }
+            if (_fz_u(3) == 0) {
+                var r = silk_encode(se_e, se_pcm, se_buf, se_cap);
+                if (is_err(r) == 0 && (r < 1 || r > se_cap || r > 1275)) { se_bad = 2; }
+                if (is_err(r) == 1 && r != err(ERR_ENCODE)) { se_bad = 3; }
+            } else {
+                var o = silk_encode_opus(se_e, se_pcm, se_buf, se_cap);
+                if (se_cap < 1) {
+                    if (o != err(ERR_ENCODE)) { se_bad = 4; }
+                } else {
+                    if (o < 1 || o > se_cap || o > 1276) { se_bad = 5; }
+                    if (se_bad == 0) {
+                        if (se_cbr == 1) {
+                            var se_cb = (se_br * 6 / (6000 / se_ms) + 4) / 8;
+                            if (se_cb > se_cap) { se_cb = se_cap; }
+                            if (se_cb > 1276) { se_cb = 1276; }
+                            if (se_cb < 1) { se_cb = 1; }
+                            if (o != se_cb) { se_bad = 6; }
+                        }
+                        if ((load8(se_buf) & 0xFC) != (load8(se_buf) & 0xF8)) { se_bad = 7; }
+                        vec_push(se_pk, str_from_buf(se_buf, o));
+                        se_opus = se_opus + 1;
+                    }
+                }
+            }
+            q = 0;
+            while (q < 64) { if (load8(se_buf + se_cap + q) != 0xA5) { se_bad = 8; } q = q + 1; }
+            p = p + 1;
+        }
+        if (se_bad == 0 && se_opus > 0) {
+            var se_r = opus_decode_from_packets(se_pk, 0, 0);
+            if (is_err(se_r) == 1) { se_bad = 9; }
+            else {
+                var se_d = decode_result_samples(se_r);
+                if (vec_len(se_d) != se_opus * se_ms * 48) { se_bad = 10; }
+                var q2 = 0;
+                while (se_bad == 0 && q2 < vec_len(se_d)) {
+                    var v = vec_get(se_d, q2);
+                    if (f64_eq(v, v) == 0) { se_bad = 11; }
+                    q2 = q2 + 1;
+                }
+            }
+        }
+    }
+    if (se_bad != 0) {
+        syscall(1, 1, "silk encode failed: ", 20);
+        fmt_int(se_bad);
+        syscall(1, 1, " rate ", 6);
+        fmt_int(se_rate);
+        syscall(1, 1, " ms ", 4);
+        fmt_int(se_ms);
+        syscall(1, 1, " br ", 4);
+        fmt_int(se_br);
+        syscall(1, 1, " cx ", 4);
+        fmt_int(se_cx);
+        syscall(1, 1, " cbr ", 5);
+        fmt_int(se_cbr);
+        syscall(1, 1, "\n", 1);
+        syscall(60, 89);
     }
     fi = fi + 1; total = total + 2;
 }

@@ -44,8 +44,14 @@
  *       Print the library version, its decoder size and whether it is a deep-PLC
  *       build (deep_plc 1), whose wideband SILK concealment differs by design.
  *
- *   opusref dec <in.pk> <channels> <out.f64>
- *       Decode packets with libopus (used to judge shravan's encoder).
+ *   opusref dec <in.pk> <channels> <out.f64> [rate]
+ *       Decode packets with libopus (used to judge shravan's encoder), at 48 kHz
+ *       or the given rate (8000, 12000, 16000, 24000).
+ *
+ *   opusref silk <in.f64> <rate> <bitrate> <ms> <cbr> <out.pk>
+ *       libopus's encoder on a mono input at a SILK internal rate (8000, 12000,
+ *       16000), forced to SILK only at that bandwidth, complexity 1: the
+ *       yardstick for shravan's SILK encoder. Packets as gen writes them.
  *
  * opus_decode_float, not opus_decode: the int16 path runs opus_pcm_soft_clip,
  * a limiter that is not part of the codec and pulls loud output down by up to 20%.
@@ -241,9 +247,9 @@ static int parse_opt(struct opts *o, const char *a) {
     return 0;
 }
 
-static int dec_file(const char *pk_path, int channels, const char *out_path) {
+static int dec_file(const char *pk_path, int channels, const char *out_path, int rate) {
     int err;
-    OpusDecoder *dec = opus_decoder_create(48000, channels, &err);
+    OpusDecoder *dec = opus_decoder_create(rate, channels, &err);
     FILE *fp = fopen(pk_path, "rb"), *fo = fopen(out_path, "wb");
     if (!dec || !fp || !fo) return fprintf(stderr, "open failed\n"), 2;
     float *out = malloc(sizeof(float) * MAX_FRAME * channels);
@@ -265,6 +271,40 @@ static int dec_file(const char *pk_path, int channels, const char *out_path) {
     return 0;
 }
 
+static int silk_file(const char *in_path, int rate, int bitrate, int ms, int cbr, const char *pk_path) {
+    int err;
+    OpusEncoder *enc = opus_encoder_create(rate, 1, OPUS_APPLICATION_AUDIO, &err);
+    FILE *fi = fopen(in_path, "rb"), *fp = fopen(pk_path, "wb");
+    if (!enc || !fi || !fp) return fprintf(stderr, "open failed\n"), 2;
+    opus_encoder_ctl(enc, FORCE_MODE_REQUEST, MODE_SILK_ONLY);
+    opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(rate == 8000 ? OPUS_BANDWIDTH_NARROWBAND
+                                             : rate == 12000 ? OPUS_BANDWIDTH_MEDIUMBAND
+                                                             : OPUS_BANDWIDTH_WIDEBAND));
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(1));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(!cbr));
+    int n = rate * ms / 1000, packets = 0;
+    float *pcm = malloc(sizeof(float) * n);
+    unsigned char pkt[MAX_PACKET];
+    for (;;) {
+        int i;
+        for (i = 0; i < n; i++) {
+            double d;
+            if (fread(&d, 8, 1, fi) != 1) break;
+            pcm[i] = (float)d;
+        }
+        if (i < n) break;
+        int len = opus_encode_float(enc, pcm, n, pkt, MAX_PACKET);
+        if (len < 1) return fprintf(stderr, "encode failed: %d\n", len), 2;
+        put_u32(fp, len);
+        fwrite(pkt, 1, len, fp);
+        packets++;
+    }
+    fclose(fp);
+    printf("packets: %d\n", packets);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 7 && !strcmp(argv[1], "gen")) {
         struct opts o;
@@ -273,8 +313,10 @@ int main(int argc, char **argv) {
             if (!parse_opt(&o, argv[i])) return fprintf(stderr, "bad option: %s\n", argv[i]), 2;
         return gen(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), argv[5], argv[6], &o);
     }
-    if (argc == 5 && !strcmp(argv[1], "dec"))
-        return dec_file(argv[2], atoi(argv[3]), argv[4]);
+    if ((argc == 5 || argc == 6) && !strcmp(argv[1], "dec"))
+        return dec_file(argv[2], atoi(argv[3]), argv[4], argc == 6 ? atoi(argv[5]) : 48000);
+    if (argc == 8 && !strcmp(argv[1], "silk"))
+        return silk_file(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), argv[7]);
     if (argc == 2 && !strcmp(argv[1], "caps")) {
         /* A deep-PLC build (DRED or OSCE) carries LPCNet state in every decoder:
            about 155 KB a mono decoder against 18 KB for a default build. Its SILK

@@ -728,12 +728,59 @@ class Sweep:
             self.record("encode", f"celt {ch}ch -> libopus", c > 0.9 and lag == 0, f"corr={c:.4f} lag={lag}")
 
 
+    def silk(self):
+        """shravan's SILK encoder (silk_encode_opus, complexity 1) beside libopus's
+        own (opus_encode at the internal rate, forced to SILK at that bandwidth,
+        complexity 1), libopus decoding both: every rate and packet duration, VBR
+        and CBR, on pink noise and on the sweep's tones. Each must follow the input
+        at libopus's lag, correlate at least 0.8 and within 0.03 of libopus's,
+        and spend libopus's bits: within 10% under VBR, the same packet size
+        under CBR. libopus's Opus layer high-passes its input at 3 Hz (dc_reject),
+        which costs it correlation on pink noise; on unvoiced input shravan's
+        payloads are silk_Encode's byte for byte (src/silk_tests.cyr)."""
+        def sizes(path):
+            d = open(path, "rb").read()
+            out, p = [], 0
+            while p + 4 <= len(d):
+                n = struct.unpack_from("<I", d, p)[0]
+                out.append(n)
+                p += 4 + n
+            return out
+        for src in ("pink", "tones"):
+            for fs in (8000, 12000, 16000):
+                br = {8000: 12000, 12000: 16000, 16000: 20000}[fs]
+                for ms in (10, 20, 40, 60):
+                    for cbr in (0, 1):
+                        lav = (f"anoisesrc=color=pink:r={fs}:a=0.25:d=1.5:seed=7" if src == "pink"
+                               else signal(fs, 1, 1.5))
+                        run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", lav, "-ac", "1",
+                            "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+                        x = f64(self.p("s.f64"))
+                        res = {}
+                        for who in ("shravan", "libopus"):
+                            pk, back = self.p(who + ".pk"), self.p(who + ".dec")
+                            if who == "shravan":
+                                run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), str(cbr), pk)
+                            else:
+                                run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), str(cbr), pk)
+                            run(OPUSREF, "dec", pk, "1", back, str(fs))
+                            lag0 = 13 * fs // 2000                     # 6.5 ms
+                            c, lag = best_lag_corr(x, f64(back), 1, lag0 + 3, fs // 10, lag0 - 3)
+                            sz = sizes(pk)
+                            res[who] = (c, lag, sum(sz) * 8 / (len(sz) * ms / 1000), set(sz))
+                        (c, lag, rate, sz), (lc, llag, lrate, lsz) = res["shravan"], res["libopus"]
+                        ok = lag == llag and c >= 0.8 and c >= lc - 0.03
+                        ok = ok and (sz == lsz and len(sz) == 1 if cbr else abs(rate / lrate - 1) <= 0.10)
+                        self.record("encode", f"silk {src} {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                                    f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) {rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders")
+    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders,silk")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders"]
+    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders", "silk"]
     if args.only:
         groups = [g for g in groups if g in args.only.split(",")]
     for tool in (CLI, OPUSREF):

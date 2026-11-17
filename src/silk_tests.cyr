@@ -11027,6 +11027,974 @@ fn test_silk_encode_bitstream_roundtrip() {
     return 0;
 }
 
+# ---------------------------------------------------------------- SILK encoder vs libopus
+# src/silk_enc_vectors.cyr holds libopus's own stage inputs and outputs for 30
+# frames (scripts/gen-silk-vectors.py: WB, MB and NB, 10 and 20 ms, complexity
+# 1 and 5, both unvoiced signal types, every NLSF interpolation index). Each
+# shravan stage gets libopus's inputs. Its float stages run in f64 where libopus
+# runs in single precision, so they agree to float precision; the fixed-point
+# stages, and everything they feed, agree exactly.
+
+# Frame k of a vector: frames are ';'-separated segments, each its values as
+# little-endian 32-bit words in base64 (scripts/gen-silk-vectors.py). Ints come
+# back sign-extended; returns the count.
+var _skv_s = 0;
+var _skv_k = 0;
+var _skv_p = 0;
+var _skv_seg = 0;
+var _skv_raw = 0;
+fn _skv_load(s, k, out) {
+    if (_skv_seg == 0) { _skv_seg = alloc(65536); _skv_raw = alloc(65536); }
+    var p = 0;
+    var seg = 0;
+    if (s == _skv_s && k >= _skv_k) { p = _skv_p; seg = _skv_k; }
+    while (seg < k) {
+        if (load8(s + p) == 59) { seg = seg + 1; }
+        p = p + 1;
+    }
+    _skv_s = s;
+    _skv_k = k;
+    _skv_p = p;
+    var n = 0;
+    var c = load8(s + p + n);
+    while (c != 0 && c != 59 && n < 65535) {
+        store8(_skv_seg + n, c);
+        n = n + 1;
+        c = load8(s + p + n);
+    }
+    store8(_skv_seg + n, 0);
+    var nb = _mp3_b64_decode(_skv_seg, _skv_raw);
+    var i = 0;
+    while (i < nb / 4) {
+        var b = _skv_raw + i * 4;
+        var w = load8(b) | (load8(b + 1) << 8) | (load8(b + 2) << 16) | (load8(b + 3) << 24);
+        store64(out + i * 8, silk_sx32(w));
+        i = i + 1;
+    }
+    return nb / 4;
+}
+
+# The same, f32 bit patterns widened to f64.
+fn _skv_loadf(s, k, out) {
+    var n = _skv_load(s, k, out);
+    var i = 0;
+    while (i < n) { store64(out + i * 8, f32_to(load64(out + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    return n;
+}
+
+# 1 when |a - b| <= tol * max(1, |b|).
+fn _skv_close(a, b, tol) {
+    var m = f64_abs(b);
+    if (f64_lt(m, F64_ONE) == 1) { m = F64_ONE; }
+    if (f64_le(f64_abs(f64_sub(a, b)), f64_mul(tol, m)) == 1) { return 1; }
+    return 0;
+}
+
+fn _skv_state(hdr) {
+    var st = silk_enc_state_new(load64(hdr + 56), load64(hdr + 8));
+    store64(st + _SKE_FIRST, load64(hdr + 32));
+    store64(st + _SKE_USE_INTERP, load64(hdr + 40));
+    store64(st + _SKE_SURVIVORS, load64(hdr + 48));
+    store64(st + _SKE_SPEECH_Q8, load64(hdr + 64));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, load64(hdr));
+    return st;
+}
+
+fn test_silk_enc_lpc_vs_libopus() {
+    syscall(1, 1, "=== silk encode: LPC analysis vs libopus ===\n", 45);
+    var tol = f64_div(F64_ONE, f64_from(1000000));          # 1e-6: libopus works in floats
+    var hdr = alloc(16 * 8);
+    var pre = alloc(512 * 8);
+    var x = alloc(512 * 8);
+    var ba = alloc(64 * 8);
+    var v = alloc(64 * 8);
+    var w = alloc(64 * 8);
+    var prev = alloc(32 * 8);
+    var A = alloc(32 * 8);
+    var nl = alloc(32 * 8);
+    var q0 = alloc(32 * 8);
+    var q1 = alloc(32 * 8);
+    var one4096 = f64_div(F64_ONE, f64_from(4096));
+    var f = 0;
+    while (f < _SKV_N) {
+        _skv_load(_SKV_HDR, f, hdr);
+        var nb = load64(hdr + 8);
+        var sl = load64(hdr + 16);
+        var ord = load64(hdr + 24);
+        var interp = load64(hdr + 72);
+        var nburg = load64(hdr + 80);
+        var sfl = sl + ord;
+        _skv_loadf(_SKV_PRE, f, pre);
+        _skv_loadf(_SKV_MININV, f, v);
+        var mig = load64(v);
+        _skv_loadf(_SKV_BA, f, ba);
+        _skv_loadf(_SKV_BNRG, f, w);
+        # Burg: the whole frame, and with interpolation searched its last 10 ms
+        var b = 0;
+        while (b < nburg) {
+            var xin = pre;
+            var nbb = nb;
+            if (b == 1) { xin = pre + 2 * sfl * 8; nbb = 2; }
+            var e = silk_burg_modified_flp(A, xin, mig, sfl, nbb, ord);
+            var ok = _skv_close(e, load64(w + b * 8), tol);
+            var k = 0;
+            while (k < ord) {
+                ok = ok & _skv_close(load64(A + k * 8), load64(ba + (b * ord + k) * 8), tol);
+                k = k + 1;
+            }
+            assert(ok == 1, "burg: coefficients and residual energy as libopus's");
+            b = b + 1;
+        }
+        # A2NLSF on libopus's own coefficients (the half frame's when interpolated)
+        var ab = ba;
+        if (interp < 4) { ab = ba + ord * 8; }
+        silk_a2nlsf_flp(nl, ab, ord);
+        _skv_load(_SKV_NLSFU, f, v);
+        var same = 1;
+        var k2 = 0;
+        while (k2 < ord) { if (load64(nl + k2 * 8) != load64(v + k2 * 8)) { same = 0; } k2 = k2 + 1; }
+        assert(same == 1, "A2NLSF: libopus's NLSFs exactly");
+        # find_LPC: NLSFs within one step (Burg's f64 against float can round
+        # one coefficient across a step), the interpolation index exactly
+        var st = _skv_state(hdr);
+        _skv_load(_SKV_PREV, f, prev);
+        var i = 0;
+        while (i < ord) { store64(st + _SKE_PREV_NLSF + i * 8, load64(prev + i * 8)); i = i + 1; }
+        silk_find_lpc_flp(st, nl, pre, mig);
+        var near = 1;
+        k2 = 0;
+        while (k2 < ord) {
+            var d = load64(nl + k2 * 8) - load64(v + k2 * 8);
+            if (d > 1 || d < 0 - 1) { near = 0; }
+            k2 = k2 + 1;
+        }
+        assert(near == 1, "find_LPC: NLSFs within one step of libopus's");
+        assert_eq(_ske_idx(st, _SKI_NLSF_INTERP), interp, "find_LPC: libopus's interpolation index");
+        # process_NLSFs on libopus's NLSFs: quantised NLSFs, indices and filters exactly
+        _ske_set_idx(st, _SKI_NLSF_INTERP, interp);
+        _skv_load(_SKV_NLSFU, f, nl);
+        silk_process_nlsfs(st, q0, q1, nl, prev);
+        _skv_load(_SKV_NLSFQ, f, v);
+        same = 1;
+        k2 = 0;
+        while (k2 < ord) { if (load64(nl + k2 * 8) != load64(v + k2 * 8)) { same = 0; } k2 = k2 + 1; }
+        assert(same == 1, "process_NLSFs: libopus's quantised NLSFs");
+        _skv_load(_SKV_NLSFIDX, f, v);
+        same = 1;
+        k2 = 0;
+        while (k2 <= ord) { if (_ske_idx(st, _SKI_NLSF + k2) != load64(v + k2 * 8)) { same = 0; } k2 = k2 + 1; }
+        assert(same == 1, "process_NLSFs: libopus's NLSF indices");
+        _skv_loadf(_SKV_PRED0, f, v);
+        _skv_loadf(_SKV_PRED1, f, w);
+        same = 1;
+        k2 = 0;
+        while (k2 < ord) {
+            if (f64_mul(f64_from(load64(q0 + k2 * 8)), one4096) != load64(v + k2 * 8)) { same = 0; }
+            if (f64_mul(f64_from(load64(q1 + k2 * 8)), one4096) != load64(w + k2 * 8)) { same = 0; }
+            k2 = k2 + 1;
+        }
+        assert(same == 1, "process_NLSFs: libopus's prediction filters");
+        # residual energies through libopus's filters
+        var ctrl = silk_enc_ctrl_new();
+        _skv_loadf(_SKV_GAINS, f, ctrl + _SKC_GAINS);
+        _skv_loadf(_SKV_PRED0, f, ctrl + _SKC_PRED0);
+        _skv_loadf(_SKV_PRED1, f, ctrl + _SKC_PRED1);
+        var nrgs = alloc(4 * 8);
+        silk_residual_energy_flp(nrgs, pre, ctrl + _SKC_PRED0, ctrl + _SKC_PRED1, ctrl + _SKC_GAINS, sl, nb, ord);
+        _skv_loadf(_SKV_RESNRG, f, w);
+        var okr = 1;
+        k2 = 0;
+        while (k2 < nb) { okr = okr & _skv_close(load64(nrgs + k2 * 8), load64(w + k2 * 8), tol); k2 = k2 + 1; }
+        assert(okr == 1, "residual_energy: libopus's subframe energies");
+        # the whole unvoiced find_pred_coefs from the frame's input
+        var st2 = _skv_state(hdr);
+        i = 0;
+        while (i < ord) { store64(st2 + _SKE_PREV_NLSF + i * 8, load64(prev + i * 8)); i = i + 1; }
+        var c2 = silk_enc_ctrl_new();
+        _skv_loadf(_SKV_GAINS, f, c2 + _SKC_GAINS);
+        _skv_loadf(_SKV_CQ, f, v);
+        store64(c2 + _SKC_CODING_QUALITY, load64(v));
+        _skv_loadf(_SKV_X, f, x);
+        var m2 = silk_find_pred_coefs_flp(st2, c2, x + ord * 8);
+        assert(_skv_close(m2, mig, tol) == 1, "find_pred_coefs: libopus's prediction gain limit");
+        assert_eq(_ske_idx(st2, _SKI_NLSF_INTERP), interp, "find_pred_coefs: libopus's interpolation index");
+        _skv_load(_SKV_NLSFIDX, f, v);
+        same = 1;
+        k2 = 0;
+        while (k2 <= ord) { if (_ske_idx(st2, _SKI_NLSF + k2) != load64(v + k2 * 8)) { same = 0; } k2 = k2 + 1; }
+        assert(same == 1, "find_pred_coefs: libopus's NLSF indices");
+        _skv_loadf(_SKV_RESNRG, f, w);
+        okr = 1;
+        k2 = 0;
+        while (k2 < nb) { okr = okr & _skv_close(load64(c2 + _SKC_RESNRG + k2 * 8), load64(w + k2 * 8), tol); k2 = k2 + 1; }
+        assert(okr == 1, "find_pred_coefs: libopus's residual energies");
+        f = f + 1;
+    }
+    return 0;
+}
+
+# Largest |a - b| over n values, relative to max(1, max |b|).
+fn _skv_peakerr(a, b, n) {
+    var m = F64_ONE;
+    var i = 0;
+    while (i < n) { var t = f64_abs(load64(b + i * 8)); if (f64_gt(t, m) == 1) { m = t; } i = i + 1; }
+    var w = F64_ZERO;
+    i = 0;
+    while (i < n) {
+        var e = f64_abs(f64_sub(load64(a + i * 8), load64(b + i * 8)));
+        if (f64_gt(e, w) == 1) { w = e; }
+        i = i + 1;
+    }
+    return f64_div(w, m);
+}
+
+# The VAD, fixed point, frame after frame from a fresh encoder as libopus ran it:
+# speech activity, tilt, band qualities and the signal type exactly.
+fn test_silk_enc_vad_vs_libopus() {
+    syscall(1, 1, "=== silk encode: VAD vs libopus ===\n", 36);
+    var seq = alloc(16 * 8);
+    _skv_load(_SKA_SEQ, 0, seq);
+    var x = alloc(1024 * 8);
+    var o = alloc(16 * 8);
+    var g = 0;
+    var q = 0;
+    while (q < _SKA_NSEQ) {
+        var n = load64(seq + q * 24);
+        var fs = load64(seq + q * 24 + 8);
+        var fl = load64(seq + q * 24 + 16);
+        var nb = 4;
+        if (fl == 10 * fs) { nb = 2; }
+        var st = silk_enc_state_new(fs, nb);
+        var i = 0;
+        while (i < n) {
+            _skv_load(_SKA_IN, g, x);
+            store64(st + _SKE_NFRAMES_ENC, 0);
+            silk_encode_do_vad(st, x, 0 - 1);
+            _skv_load(_SKA_OUT, g, o);
+            var ok = 1;
+            if (load64(st + _SKE_SPEECH_Q8) != load64(o)) { ok = 0; }
+            if (load64(st + _SKE_TILT_Q15) != load64(o + 8)) { ok = 0; }
+            var b = 0;
+            while (b < 4) { if (load64(st + _SKE_QUALITY + b * 8) != load64(o + (2 + b) * 8)) { ok = 0; } b = b + 1; }
+            if (_ske_idx(st, _SKI_SIGNAL_TYPE) != load64(o + 48)) { ok = 0; }
+            assert(ok == 1, "VAD: libopus's activity, tilt, band qualities and signal type");
+            g = g + 1;
+            i = i + 1;
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
+# The pitch analysis front end, noise shaping and gain processing, each on
+# libopus's inputs. libopus computes the windows, correlations and filters in
+# single precision, which the high prediction gain of a formanted vowel
+# amplifies (measured: residual 4.5e-5 of its peak, shaping filters 1.5e-3,
+# gains 9.5e-4); every decision (quantiser offset, gain indices) is exact.
+fn test_silk_enc_shape_vs_libopus() {
+    syscall(1, 1, "=== silk encode: noise shaping and gains vs libopus ===\n", 56);
+    var t_pitch = f64_div(F64_ONE, f64_from(1000));
+    var t_shape = f64_div(f64_from(3), f64_from(1000));
+    var t_fine = f64_div(F64_ONE, f64_from(100000));
+    var t_lam = f64_div(F64_ONE, f64_from(1000000));
+    var h = alloc(64 * 8);
+    var a = alloc(1024 * 8);
+    var b = alloc(1024 * 8);
+    var c = alloc(1024 * 8);
+    var v = alloc(256 * 8);
+    var f = 0;
+    while (f < _SKS_N) {
+        # the pitch analysis front end
+        _skv_load(_SKS_FPL_HDR, f, h);
+        var lm = load64(h + 16);
+        var st = silk_enc_state_new(load64(h + 56), load64(h + 64));
+        store64(st + _SKE_LA_PITCH, load64(h)); store64(st + _SKE_FRAME_LEN, load64(h + 8));
+        store64(st + _SKE_LTP_MEM, lm); store64(st + _SKE_PITCH_WIN, load64(h + 24));
+        store64(st + _SKE_PITCH_ORDER, load64(h + 32));
+        var n = _skv_loadf(_SKS_FPL_X, f, a);
+        var ctrl = silk_enc_ctrl_new();
+        silk_find_pitch_lags_flp(st, ctrl, c, a + lm * 8);
+        _skv_loadf(_SKS_FPL_OUT, f, b);
+        assert(_skv_close(load64(ctrl + _SKC_PRED_GAIN), load64(b), t_pitch) == 1, "pitch front end: libopus's prediction gain");
+        assert(f64_le(_skv_peakerr(c, b + 8, n), t_pitch) == 1, "pitch front end: libopus's LPC residual");
+        # noise shaping analysis
+        _skv_load(_SKS_NSA_HDR, f, h);
+        var nb = load64(h + 40);
+        var la = load64(h + 72);
+        var so = load64(h + 64);
+        var s2 = silk_enc_state_new(load64(h + 32), nb);
+        store64(s2 + _SKE_SNR_Q7, load64(h)); store64(s2 + _SKE_SPEECH_Q8, load64(h + 8));
+        store64(s2 + _SKE_USE_CBR, load64(h + 16)); _ske_set_idx(s2, _SKI_SIGNAL_TYPE, load64(h + 24));
+        store64(s2 + _SKE_SUBFR_LEN, load64(h + 48)); store64(s2 + _SKE_SHAPE_WIN, load64(h + 56));
+        store64(s2 + _SKE_SHAPE_ORDER, so); store64(s2 + _SKE_LA_SHAPE, la); store64(s2 + _SKE_WARPING_Q16, load64(h + 80));
+        var k = 0;
+        while (k < 4) { store64(s2 + _SKE_QUALITY + k * 8, load64(h + (11 + k) * 8)); k = k + 1; }
+        var c2 = silk_enc_ctrl_new();
+        k = 0;
+        while (k < nb) { store64(c2 + _SKC_PITCHL + k * 8, load64(h + (15 + k) * 8)); k = k + 1; }
+        _skv_loadf(_SKS_NSA_IN, f, v);
+        store64(c2 + _SKC_PRED_GAIN, load64(v)); store64(s2 + _SKE_LTP_CORR, load64(v + 8));
+        store64(s2 + _SKE_HARM_SMTH, load64(v + 16)); store64(s2 + _SKE_TILT_SMTH, load64(v + 24));
+        _skv_loadf(_SKS_NSA_X, f, a);
+        _skv_loadf(_SKS_NSA_RES, f, c);
+        silk_noise_shape_analysis_flp(s2, c2, c, a + la * 8);
+        _skv_load(_SKS_NSA_QOFF, f, v);
+        assert_eq(_ske_idx(s2, _SKI_QUANT_OFFSET), load64(v), "noise shaping: libopus's quantiser offset");
+        _skv_loadf(_SKS_NSA_OUT, f, v);
+        var ok = _skv_close(load64(c2 + _SKC_INPUT_QUALITY), load64(v), t_fine);
+        ok = ok & _skv_close(load64(c2 + _SKC_CODING_QUALITY), load64(v + 8), t_fine);
+        ok = ok & _skv_close(load64(s2 + _SKE_HARM_SMTH), load64(v + 16), t_fine);
+        ok = ok & _skv_close(load64(s2 + _SKE_TILT_SMTH), load64(v + 24), t_fine);
+        var og = 0;
+        k = 0;
+        while (k < nb) {
+            og = og | (1 - _skv_close(load64(c2 + _SKC_GAINS + k * 8), load64(v + (4 + k) * 8), t_shape));
+            ok = ok & _skv_close(load64(c2 + _SKC_LF_MA + k * 8), load64(v + (4 + nb + k) * 8), t_fine);
+            ok = ok & _skv_close(load64(c2 + _SKC_LF_AR + k * 8), load64(v + (4 + 2 * nb + k) * 8), t_fine);
+            ok = ok & _skv_close(load64(c2 + _SKC_TILT + k * 8), load64(v + (4 + 3 * nb + k) * 8), t_fine);
+            ok = ok & _skv_close(load64(c2 + _SKC_HARM + k * 8), load64(v + (4 + 4 * nb + k) * 8), t_fine);
+            k = k + 1;
+        }
+        assert(ok == 1, "noise shaping: libopus's qualities, low-frequency shaping, tilt and harmonic shaping");
+        assert(og == 0, "noise shaping: libopus's subframe gains");
+        _skv_loadf(_SKS_NSA_AR, f, b);
+        var oa = 1;
+        k = 0;
+        while (k < nb) {
+            if (f64_gt(_skv_peakerr(c2 + _SKC_AR + k * 24 * 8, b + k * 24 * 8, so), t_shape) == 1) { oa = 0; }
+            k = k + 1;
+        }
+        assert(oa == 1, "noise shaping: libopus's shaping filters");
+        # gain processing
+        _skv_load(_SKS_PG_HDR, f, h);
+        var nb3 = load64(h + 8);
+        var s3 = silk_enc_state_new(16, nb3);
+        _ske_set_idx(s3, _SKI_SIGNAL_TYPE, load64(h)); store64(s3 + _SKE_SUBFR_LEN, load64(h + 16));
+        store64(s3 + _SKE_SNR_Q7, load64(h + 24)); store64(s3 + _SKE_LAST_GAIN, load64(h + 32));
+        store64(s3 + _SKE_TILT_Q15, load64(h + 48)); store64(s3 + _SKE_NSTATES, load64(h + 56));
+        store64(s3 + _SKE_SPEECH_Q8, load64(h + 64)); _ske_set_idx(s3, _SKI_QUANT_OFFSET, load64(h + 72));
+        var c3 = silk_enc_ctrl_new();
+        _skv_loadf(_SKS_PG_IN, f, v);
+        store64(c3 + _SKC_LTPRED_GAIN, load64(v)); store64(c3 + _SKC_INPUT_QUALITY, load64(v + 8));
+        store64(c3 + _SKC_CODING_QUALITY, load64(v + 16));
+        k = 0;
+        while (k < nb3) {
+            store64(c3 + _SKC_GAINS + k * 8, load64(v + (3 + k) * 8));
+            store64(c3 + _SKC_RESNRG + k * 8, load64(v + (3 + nb3 + k) * 8));
+            k = k + 1;
+        }
+        silk_process_gains_flp(s3, c3, load64(h + 40));
+        _skv_load(_SKS_PG_IOUT, f, v);
+        var oi = 1;
+        var ou = 1;
+        k = 0;
+        while (k < nb3) {
+            if (_ske_idx(s3, _SKI_GAINS + k) != load64(v + k * 8)) { oi = 0; }
+            var want = load64(v + (nb3 + 1 + k) * 8);
+            var d = load64(c3 + _SKC_GAINS_UNQ + k * 8) - want;
+            if (d < 0) { d = 0 - d; }
+            if (d > 2 + want / 1000000) { ou = 0; }
+            k = k + 1;
+        }
+        if (load64(s3 + _SKE_LAST_GAIN) != load64(v + nb3 * 8)) { oi = 0; }
+        if (load64(c3 + _SKC_LAST_GAIN_PREV) != load64(v + (2 * nb3 + 1) * 8)) { oi = 0; }
+        if (_ske_idx(s3, _SKI_QUANT_OFFSET) != load64(v + (2 * nb3 + 2) * 8)) { oi = 0; }
+        assert(oi == 1, "process gains: libopus's gain indices, last index and quantiser offset");
+        assert(ou == 1, "process gains: libopus's unquantised Q16 gains, to float rounding");
+        _skv_loadf(_SKS_PG_FOUT, f, v);
+        var oq = 1;
+        k = 0;
+        while (k < nb3) { if (load64(c3 + _SKC_GAINS + k * 8) != load64(v + k * 8)) { oq = 0; } k = k + 1; }
+        assert(oq == 1, "process gains: libopus's quantised gains exactly");
+        assert(_skv_close(load64(c3 + _SKC_LAMBDA), load64(v + nb3 * 8), t_lam) == 1, "process gains: libopus's Lambda");
+        f = f + 1;
+    }
+    # The unquantised Q16 gains truncate, as libopus's (opus_int32) cast does: a
+    # gain of 1.00001 is 65536.66 in Q16.
+    var s4 = silk_enc_state_new(16, 4);
+    store64(s4 + _SKE_SNR_Q7, 2560);
+    var c4 = silk_enc_ctrl_new();
+    f = 0;
+    while (f < 4) {
+        store64(c4 + _SKC_GAINS + f * 8, f64_add(F64_ONE, f64_div(F64_ONE, f64_from(100000))));
+        store64(c4 + _SKC_RESNRG + f * 8, F64_ZERO);
+        f = f + 1;
+    }
+    silk_process_gains_flp(s4, c4, 0);
+    assert_eq(load64(c4 + _SKC_GAINS_UNQ), 65536, "process gains: Q16 gains truncate, as libopus's cast");
+    return 0;
+}
+
+# One silk_NSQ call from a vector: the state's sizes and indices from its header,
+# its parameters into place, then the quantiser. Returns Lambda_Q10.
+fn _skq_run(hs, xs, ps, as, k, st, nsq, pulses) {
+    var h = alloc(16 * 8);
+    _skv_load(hs, k, h);
+    var nb = load64(h + 24);
+    var so = load64(h + 32);
+    store64(st + _SKE_SHAPE_ORDER, so);
+    _ske_set_idx(st, _SKI_SEED, load64(h + 48));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, load64(h + 56));
+    _ske_set_idx(st, _SKI_QUANT_OFFSET, load64(h + 64));
+    _ske_set_idx(st, _SKI_NLSF_INTERP, load64(h + 72));
+    var x = alloc(320 * 8);
+    _skv_load(xs, k, x);
+    var par = alloc(128 * 8);
+    _skv_load(ps, k, par);
+    var arc = alloc(96 * 8);
+    _skv_load(as, k, arc);
+    var ar = alloc(96 * 8);
+    var i = 0;
+    while (i < 96) { store64(ar + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < nb) {
+        var j = 0;
+        while (j < so) { store64(ar + (i * 24 + j) * 8, load64(arc + (i * so + j) * 8)); j = j + 1; }
+        i = i + 1;
+    }
+    var o = 32 + nb * 5;                     # pred[32], ltp[nb*5], then harm, tilt, lf, gains, pitchL
+    silk_nsq(st, nsq, x, pulses, par, par + 32 * 8, ar, par + o * 8, par + (o + nb) * 8, par + (o + 2 * nb) * 8,
+      par + (o + 3 * nb) * 8, par + (o + 4 * nb) * 8, load64(h + 80), load64(h + 88));
+    return load64(h + 80);
+}
+
+fn _skq_hash(hw, at) {
+    return ((load64(hw + (at + 1) * 8) & 0xFFFFFFFF) << 32) | (load64(hw + at * 8) & 0xFFFFFFFF);
+}
+
+# The noise shaping quantiser, fixed point: libopus's pulses, and its whole
+# state (by hash) after every call.
+fn test_silk_enc_nsq_vs_libopus() {
+    syscall(1, 1, "=== silk encode: noise shaping quantiser vs libopus ===\n", 56);
+    var seq = alloc(8 * 8);
+    _skv_load(_SKQ_SEQ, 0, seq);
+    var h = alloc(16 * 8);
+    var hw = alloc(8 * 8);
+    var pulses = alloc(320 * 8);
+    var want = alloc(320 * 8);
+    # sequences from a fresh encoder, one call a frame
+    var g = 0;
+    var q = 0;
+    while (q < _SKQ_NSEQ) {
+        _skv_load(_SKQ_HDR, g, h);
+        var fl = load64(h + 8);
+        var nb = load64(h + 24);
+        var st = silk_enc_state_new(fl / (5 * nb), nb);
+        var nsq = load64(st + _SKE_NSQ);
+        _skv_load(_SKQ_HASH, g, hw);
+        assert(_sk_nsq_hash(nsq) == _skq_hash(hw, 0), "NSQ: a fresh state is libopus's");
+        var i = 0;
+        while (i < load64(seq + q * 8)) {
+            _skq_run(_SKQ_HDR, _SKQ_X16, _SKQ_PAR, _SKQ_AR, g, st, nsq, pulses);
+            _skv_load(_SKQ_PULSES, g, want);
+            var same = 1;
+            var j = 0;
+            while (j < fl) { if (load64(pulses + j * 8) != load64(want + j * 8)) { same = 0; } j = j + 1; }
+            assert(same == 1, "NSQ: libopus's pulses");
+            _skv_load(_SKQ_HASH, g, hw);
+            assert(_sk_nsq_hash(nsq) == _skq_hash(hw, 2), "NSQ: libopus's state after the frame");
+            g = g + 1;
+            i = i + 1;
+        }
+        q = q + 1;
+    }
+    # the aggressive rate/distortion branch, each call from its recorded state
+    var stv = alloc(1408 * 8);
+    var k = 0;
+    while (k < _SKR_N) {
+        _skv_load(_SKR_HDR, k, h);
+        var fl2 = load64(h + 8);
+        var nb2 = load64(h + 24);
+        var st2 = silk_enc_state_new(fl2 / (5 * nb2), nb2);
+        var n2 = load64(st2 + _SKE_NSQ);
+        _skv_load(_SKR_STATE, k, stv);
+        var m = 0;
+        while (m < 640) { store64(n2 + _SKN_XQ + m * 8, load64(stv + m * 8)); m = m + 1; }
+        m = 0;
+        while (m < 640) { store64(n2 + _SKN_SLTP_SHP + m * 8, load64(stv + (640 + m) * 8)); m = m + 1; }
+        m = 0;
+        while (m < 96) { store64(n2 + _SKN_SLPC + m * 8, load64(stv + (1280 + m) * 8)); m = m + 1; }
+        m = 0;
+        while (m < 24) { store64(n2 + _SKN_SAR2 + m * 8, load64(stv + (1376 + m) * 8)); m = m + 1; }
+        m = 0;
+        while (m < 8) { store64(n2 + _SKN_SLF_AR + m * 8, load64(stv + (1400 + m) * 8)); m = m + 1; }
+        _skv_load(_SKR_HASH, k, hw);
+        assert(_sk_nsq_hash(n2) == _skq_hash(hw, 0), "NSQ: the recorded state loads as libopus's");
+        var lam = _skq_run(_SKR_HDR, _SKR_X16, _SKR_PAR, _SKR_AR, k, st2, n2, pulses);
+        assert(lam > 2048, "NSQ: the call is in the aggressive branch (Lambda_Q10 > 2048)");
+        _skv_load(_SKR_PULSES, k, want);
+        var same2 = 1;
+        m = 0;
+        while (m < fl2) { if (load64(pulses + m * 8) != load64(want + m * 8)) { same2 = 0; } m = m + 1; }
+        assert(same2 == 1, "NSQ: libopus's pulses at Lambda over 2");
+        assert(_sk_nsq_hash(n2) == _skq_hash(hw, 2), "NSQ: libopus's state after it");
+        k = k + 1;
+    }
+    # the float -> fixed conversion, against what libopus handed the quantiser
+    var v = alloc(256 * 8);
+    var arf = alloc(96 * 8);
+    var xf = alloc(320 * 8);
+    var par = alloc(128 * 8);
+    var arq = alloc(96 * 8);
+    var x16 = alloc(320 * 8);
+    var prm = alloc(_SKP_SIZE);
+    var f = 0;
+    while (f < _SKW_N) {
+        _skv_load(_SKW_HDR, f, h);
+        var nb3 = load64(h);
+        var so = load64(h + 8);
+        var po = load64(h + 16);
+        var fl3 = load64(h + 24);
+        var st3 = silk_enc_state_new(fl3 / (5 * nb3), nb3);
+        store64(st3 + _SKE_SHAPE_ORDER, so);
+        _ske_set_idx(st3, _SKI_SIGNAL_TYPE, load64(h + 32));
+        _ske_set_idx(st3, _SKI_LTP_SCALE, load64(h + 40));
+        var c = silk_enc_ctrl_new();
+        _skv_loadf(_SKW_AR, f, arf);
+        var i3 = 0;
+        while (i3 < nb3) {
+            var j3 = 0;
+            while (j3 < so) { store64(c + _SKC_AR + (i3 * 24 + j3) * 8, load64(arf + (i3 * so + j3) * 8)); j3 = j3 + 1; }
+            i3 = i3 + 1;
+        }
+        _skv_loadf(_SKW_IN, f, v);
+        i3 = 0;
+        while (i3 < nb3) {
+            store64(c + _SKC_LF_AR + i3 * 8, load64(v + i3 * 8));
+            store64(c + _SKC_LF_MA + i3 * 8, load64(v + (nb3 + i3) * 8));
+            store64(c + _SKC_TILT + i3 * 8, load64(v + (2 * nb3 + i3) * 8));
+            store64(c + _SKC_HARM + i3 * 8, load64(v + (3 * nb3 + i3) * 8));
+            i3 = i3 + 1;
+        }
+        store64(c + _SKC_LAMBDA, load64(v + 4 * nb3 * 8));
+        var o3 = 4 * nb3 + 1;
+        i3 = 0;
+        while (i3 < nb3 * 5) { store64(c + _SKC_LTPCOEF + i3 * 8, load64(v + (o3 + i3) * 8)); i3 = i3 + 1; }
+        o3 = o3 + nb3 * 5;
+        i3 = 0;
+        while (i3 < po) {
+            store64(c + _SKC_PRED0 + i3 * 8, load64(v + (o3 + i3) * 8));
+            store64(c + _SKC_PRED1 + i3 * 8, load64(v + (o3 + po + i3) * 8));
+            i3 = i3 + 1;
+        }
+        o3 = o3 + 2 * po;
+        i3 = 0;
+        while (i3 < nb3) { store64(c + _SKC_GAINS + i3 * 8, load64(v + (o3 + i3) * 8)); i3 = i3 + 1; }
+        _skv_loadf(_SKW_X, f, xf);
+        _sk_nsq_convert(st3, c, xf, prm);
+        _skv_load(_SKW_HDRQ, f, v);
+        var ok = 1;
+        if (load64(prm + _SKP_LAMBDA) != load64(v + 80)) { ok = 0; }
+        if (load64(prm + _SKP_LTP_SCALE) != load64(v + 88)) { ok = 0; }
+        _skv_load(_SKW_PAR, f, par);
+        i3 = 0;
+        while (i3 < po) {
+            if (load64(prm + _SKP_PRED + i3 * 8) != load64(par + i3 * 8)) { ok = 0; }
+            if (load64(prm + _SKP_PRED + (16 + i3) * 8) != load64(par + (16 + i3) * 8)) { ok = 0; }
+            i3 = i3 + 1;
+        }
+        i3 = 0;
+        while (i3 < nb3 * 5) { if (load64(prm + _SKP_LTP + i3 * 8) != load64(par + (32 + i3) * 8)) { ok = 0; } i3 = i3 + 1; }
+        var p0 = 32 + nb3 * 5;
+        i3 = 0;
+        while (i3 < nb3) {
+            if (load64(prm + _SKP_HARM + i3 * 8) != load64(par + (p0 + i3) * 8)) { ok = 0; }
+            if (load64(prm + _SKP_TILT + i3 * 8) != load64(par + (p0 + nb3 + i3) * 8)) { ok = 0; }
+            if (load64(prm + _SKP_LF + i3 * 8) != load64(par + (p0 + 2 * nb3 + i3) * 8)) { ok = 0; }
+            if (load64(prm + _SKP_GAINS + i3 * 8) != load64(par + (p0 + 3 * nb3 + i3) * 8)) { ok = 0; }
+            i3 = i3 + 1;
+        }
+        _skv_load(_SKW_ARQ, f, arq);
+        i3 = 0;
+        while (i3 < nb3) {
+            var j4 = 0;
+            while (j4 < so) { if (load64(prm + _SKP_AR + (i3 * 24 + j4) * 8) != load64(arq + (i3 * so + j4) * 8)) { ok = 0; } j4 = j4 + 1; }
+            i3 = i3 + 1;
+        }
+        _skv_load(_SKW_X16, f, x16);
+        i3 = 0;
+        while (i3 < fl3) { if (load64(prm + _SKP_X16 + i3 * 8) != load64(x16 + i3 * 8)) { ok = 0; } i3 = i3 + 1; }
+        assert(ok == 1, "NSQ wrapper: libopus's fixed-point parameters, exactly");
+        f = f + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------- 2.11.3: the encoder
+
+# gen-silk-vectors.py's int_signal, sample for sample, into x (n words): a
+# 32-bit LCG, four draws summed. Kind 0 through a two-pole resonator under a
+# 1.3 Hz triangle envelope, 2 the same with every other quarter second silent,
+# 4 through a sharp resonance; white loud (1), at -6 dB (5) and -18 dB (3).
+# Returns its FNV-1a hash.
+fn _skk_signal(kind, fs, n, seed, x) {
+    var s = seed & 0xFFFFFFFF;
+    var y1 = 0;
+    var y2 = 0;
+    var P = fs * 10 / 13;
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) {
+        var w = 0;
+        var d = 0;
+        while (d < 4) {
+            s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+            w = w + (s >> 16) - 32768;
+            d = d + 1;
+        }
+        var v = 0;
+        if (kind == 1) { v = sar(w * 5, 4); }
+        if (kind == 3) { v = sar(w * 5, 7); }
+        if (kind == 5) { v = sar(w * 5, 5); }
+        if (kind == 4) {
+            var yr = w + sar(31130 * y1 - 16056 * y2, 14);
+            y2 = y1;
+            y1 = yr;
+            v = sar(yr, 6);
+        }
+        if (kind == 0 || kind == 2) {
+            var y = w + sar(19661 * y1 - 8192 * y2, 14);
+            y2 = y1;
+            y1 = y;
+            var ph = i % P;
+            var tri = ph;
+            if (ph >= P / 2) { tri = P - ph; }
+            v = sar(y * (19661 + 45875 * 2 * tri / P), 20);
+            if (kind == 2 && i % (fs / 2) >= fs / 4) { v = 0; }
+        }
+        if (v < 0 - 32768) { v = 0 - 32768; }
+        if (v > 32767) { v = 32767; }
+        store64(x + i * 8, v);
+        h = (h ^ (v & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+# The k-th ';'-separated base64 segment of s, decoded into out. Returns its bytes.
+fn _skk_bytes(s, k, out) {
+    var p = 0;
+    var seg = 0;
+    while (seg < k) {
+        if (load8(s + p) == 59) { seg = seg + 1; }
+        p = p + 1;
+    }
+    var n = 0;
+    while (load8(s + p + n) != 0 && load8(s + p + n) != 59) { n = n + 1; }
+    var t = alloc(n + 1);
+    memcpy(t, s + p, n);
+    store8(t + n, 0);
+    return _mp3_b64_decode(t, out);
+}
+
+# One packet's input: samples p * spp on of x (int16 words), as f64 in -1..1.
+fn _skk_pcm(x, p, spp, pcm) {
+    var i = 0;
+    while (i < spp) {
+        store64(pcm + i * 8, f64_div(f64_from(load64(x + (p * spp + i) * 8)), f64_from(32768)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The whole encoder (silk_encode: frames, rate loop, packet layer) against
+# libopus's silk_Encode, byte for byte, on inputs built here: every bandwidth,
+# packet length (10 to 60 ms) and complexity shravan has, VBR (in a small
+# buffer too) and CBR, voice-inactive frames, and every branch of the rate loop
+# (gains bracketed and interpolated, Lambda raised and floored, gains locked,
+# damage control, the shares of a multi-frame budget, the 5 kbit/s floor).
+fn test_silk_enc_packets_vs_libopus() {
+    syscall(1, 1, "=== silk encode: whole packets vs libopus ===\n", 46);
+    var h = alloc(16 * 8);
+    var x = alloc(19200 * 8);
+    var pcm = alloc(960 * 8);
+    var buf = alloc(1280);
+    var ref = alloc(65536);
+    var c = 0;
+    while (c < _SKK_N) {
+        _skv_load(_SKK_HDR, c, h);
+        var fs = load64(h + 16);
+        var n = load64(h + 56);
+        var npk = load64(h + 64);
+        var want = (load64(h + 72) & 0xFFFFFFFF) | ((load64(h + 80) & 0xFFFFFFFF) << 32);
+        assert(_skk_signal(load64(h), fs, n, load64(h + 8), x) == want, "silk encode: the suite's input is the generator's");
+        var e = silk_encoder_new(fs, load64(h + 24), load64(h + 40), load64(h + 32), load64(h + 48));
+        var spp = silk_encoder_samples(e);
+        _skk_bytes(_SKK_PK, c, ref);
+        var rp = 0;
+        var same = 0;
+        var p = 0;
+        while (p < npk) {
+            _skk_pcm(x, p, spp, pcm);
+            var len = silk_encode(e, pcm, buf, load64(h + 88));
+            var wl = read_u32_le(ref, rp);
+            var ok = 0;
+            if (len == wl) {
+                ok = 1;
+                var i = 0;
+                while (i < wl) { if (load8(buf + i) != load8(ref + rp + 4 + i)) { ok = 0; } i = i + 1; }
+            }
+            same = same + ok;
+            rp = rp + 4 + wl;
+            p = p + 1;
+        }
+        assert_eq(same, npk, "silk encode: libopus's packets, byte for byte");
+        c = c + 1;
+    }
+    return 0;
+}
+
+# Correlation of x (int16 words, n) with the 48 kHz decode y, every f-th sample
+# of y from lag48 on, past 200 samples of start-up.
+fn _skk_corr(x, n, y, f, lag48) {
+    var sab = F64_ZERO;
+    var saa = F64_ZERO;
+    var sbb = F64_ZERO;
+    var ny = vec_len(y);
+    var i = 200;
+    while (i < n - 200 && i * f + lag48 < ny) {
+        var a = f64_from(load64(x + i * 8));
+        var b = vec_get(y, i * f + lag48);
+        sab = f64_add(sab, f64_mul(a, b));
+        saa = f64_add(saa, f64_mul(a, a));
+        sbb = f64_add(sbb, f64_mul(b, b));
+        i = i + 1;
+    }
+    if (f64_gt(saa, F64_ZERO) == 0 || f64_gt(sbb, F64_ZERO) == 0) { return F64_ZERO; }
+    return f64_div(sab, f64_sqrt(f64_mul(saa, sbb)));
+}
+
+# silk_encode_opus: the TOC of each bandwidth and duration, VBR packets without
+# trailing zero bytes, CBR packets exactly (bits + 4) / 8 bytes (code 3 padding
+# when the payload is shorter), and shravan's Opus decoder (exact against
+# libopus's) turning them back into audio that follows the input, 6.5 ms late.
+fn test_silk_enc_opus_packets() {
+    syscall(1, 1, "=== silk encode: Opus packets ===\n", 34);
+    var x = alloc(16000 * 8);
+    var pcm = alloc(960 * 8);
+    var buf = alloc(1280);
+    var cfg = alloc(16 * 8);
+    # rate, ms, bit rate, CBR
+    store64(cfg + 0, 16000); store64(cfg + 8, 20); store64(cfg + 16, 20000); store64(cfg + 24, 0);
+    store64(cfg + 32, 8000); store64(cfg + 40, 60); store64(cfg + 48, 12000); store64(cfg + 56, 1);
+    store64(cfg + 64, 12000); store64(cfg + 72, 10); store64(cfg + 80, 16000); store64(cfg + 88, 1);
+    store64(cfg + 96, 16000); store64(cfg + 104, 40); store64(cfg + 112, 24000); store64(cfg + 120, 0);
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, 1);
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var c = 0;
+    while (c < 4) {
+        var fs = load64(cfg + c * 32);
+        var ms = load64(cfg + c * 32 + 8);
+        var br = load64(cfg + c * 32 + 16);
+        var cbr = load64(cfg + c * 32 + 24);
+        _skk_signal(0, fs, fs, 1, x);
+        var e = silk_encoder_new(fs, ms, br, 1, cbr);
+        var spp = silk_encoder_samples(e);
+        var toc_cfg = 8;
+        if (fs == 8000) { toc_cfg = 0; }
+        if (fs == 12000) { toc_cfg = 4; }
+        if (ms == 20) { toc_cfg = toc_cfg + 1; }
+        if (ms == 40) { toc_cfg = toc_cfg + 2; }
+        if (ms == 60) { toc_cfg = toc_cfg + 3; }
+        var cb = (br * 6 / (6000 / ms) + 4) / 8;
+        var pk = vec_new();
+        vec_push(pk, str_from_buf(head, 19));
+        vec_push(pk, str_from_buf(tags, 16));
+        var tocs = 1;
+        var sizes = 1;
+        var padded = 0;
+        var p = 0;
+        while ((p + 1) * spp <= fs) {
+            _skk_pcm(x, p, spp, pcm);
+            var len = silk_encode_opus(e, pcm, buf, 1276);
+            if (len < 2) { sizes = 0; len = 2; }
+            if ((load8(buf) >> 3) != toc_cfg || (load8(buf) & 4) != 0) { tocs = 0; }
+            if (cbr == 1) {
+                if (len != cb) { sizes = 0; }
+                if ((load8(buf) & 3) == 3) {
+                    padded = padded + 1;
+                    if ((load8(buf + 1) & 63) != 1) { sizes = 0; }
+                } else {
+                    if ((load8(buf) & 3) != 0) { sizes = 0; }
+                }
+            } else {
+                if ((load8(buf) & 3) != 0) { sizes = 0; }
+                if (len > 3 && load8(buf + len - 1) == 0) { sizes = 0; }
+            }
+            vec_push(pk, str_from_buf(buf, len));
+            p = p + 1;
+        }
+        assert(tocs == 1, "silk encode: the TOC of the bandwidth and duration, mono");
+        assert(sizes == 1, "silk encode: VBR packets end on a nonzero byte, CBR ones are their size");
+        if (cbr == 1) { assert(padded > 0, "silk encode: a short CBR payload is padded (code 3)"); }
+        var r = opus_decode_from_packets(pk, 0, 0);
+        assert(is_err(r) == 0, "silk encode: shravan's Opus decoder takes the packets");
+        if (is_err(r) == 0) {
+            var y = decode_result_samples(r);
+            assert_eq(vec_len(y), p * spp * (48000 / fs), "silk encode: the decode is the packets' length");
+            var best = F64_ZERO;
+            var lag = 300;
+            while (lag <= 330) {
+                var cc = _skk_corr(x, fs, y, 48000 / fs, lag);
+                if (f64_gt(cc, best) == 1) { best = cc; }
+                lag = lag + 1;
+            }
+            assert(f64_gt(best, f64_div(f64_from(3), f64_from(4))) == 1, "silk encode: the decode follows the input (correlation over 0.75)");
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# Hostile input and parameters: NaN, infinities, full-scale square waves and
+# denormals through both entry points give packets that fit and decode; bad
+# rates, durations, complexities and buffers are refused.
+fn test_silk_enc_hostile() {
+    syscall(1, 1, "=== silk encode: hostile input ===\n", 35);
+    assert_eq(silk_encoder_new(44100, 20, 20000, 1, 0), err(ERR_INVALID_RATE), "silk encode: 44.1 kHz is not an internal rate");
+    assert_eq(silk_encoder_new(16000, 30, 20000, 1, 0), err(ERR_ENCODE), "silk encode: no 30 ms packets");
+    assert_eq(silk_encoder_new(16000, 20, 0, 1, 0), err(ERR_ENCODE), "silk encode: a bit rate of 0");
+    assert_eq(silk_encoder_new(16000, 20, 20000, 2, 0), err(ERR_UNSUPPORTED_FMT), "silk encode: complexity 2 needs silk_NSQ_del_dec");
+    var pcm = alloc(960 * 8);
+    var buf = alloc(1280);
+    var nan = f64_div(F64_ZERO, F64_ZERO);
+    var inf = f64_div(F64_ONE, F64_ZERO);
+    var tiny = f64_div(F64_ONE, f64_pow(F64_TWO, f64_from(1060)));
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, 1);
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var cbr = 0;
+    while (cbr < 2) {
+        var e = silk_encoder_new(16000, 20, 6000, 1, cbr);
+        var pk = vec_new();
+        vec_push(pk, str_from_buf(head, 19));
+        vec_push(pk, str_from_buf(tags, 16));
+        var fits = 1;
+        var kind = 0;
+        while (kind < 6) {
+            var i = 0;
+            while (i < 320) {
+                var v = F64_ZERO;
+                if (kind == 0) { v = nan; }
+                if (kind == 1) { v = inf; if ((i & 1) == 1) { v = f64_neg(inf); } }
+                if (kind == 2) { v = F64_ONE; if ((i & 8) == 8) { v = f64_neg(F64_ONE); } }
+                if (kind == 3) { v = tiny; }
+                if (kind == 4) { v = f64_from(1000000); if ((i & 1) == 1) { v = f64_from(0 - 1000000); } }
+                if (kind == 5) { v = F64_ZERO; }
+                store64(pcm + i * 8, v);
+                i = i + 1;
+            }
+            var r = silk_encode(e, pcm, buf, 1275);
+            if (r < 1 || r > 1275) { fits = 0; }
+            var o = silk_encode_opus(e, pcm, buf, 1276);
+            if (o < 2 || o > 1276) { fits = 0; }
+            if (o >= 2) { vec_push(pk, str_from_buf(buf, o)); }
+            kind = kind + 1;
+        }
+        assert(fits == 1, "silk encode: NaN, infinities, full scale and denormals give packets that fit");
+        assert(is_err(opus_decode_from_packets(pk, 0, 0)) == 0, "silk encode: and shravan decodes them");
+        assert_eq(silk_encode(e, pcm, buf, 0), err(ERR_ENCODE), "silk encode: no room at all");
+        assert_eq(silk_encode_opus(e, pcm, buf, 0), err(ERR_ENCODE), "silk encode: no room for an Opus packet");
+        assert_eq(silk_encode_opus(e, pcm, buf, 2), 1 + cbr, "silk encode: 2 bytes hold the TOC alone (padded under CBR)");
+        cbr = cbr + 1;
+    }
+    # No room for a frame: libopus sends the TOC alone, which decoders conceal.
+    # Under 1.2 kbit/s at 20 ms (VBR: one byte), under 2.4 kbit/s at 60 ms (CBR:
+    # padded to its 15 bytes); shravan decodes them as lost frames.
+    var pl = 0;
+    while (pl < 2) {
+        var eplc = silk_encoder_new(16000, 20 + 40 * pl, 1000 + 1000 * pl, 1, pl);
+        var pkl = vec_new();
+        vec_push(pkl, str_from_buf(head, 19));
+        vec_push(pkl, str_from_buf(tags, 16));
+        var plc_ok = 1;
+        var t = 0;
+        while (t < 4) {
+            var j2 = 0;
+            while (j2 < 960) { store64(pcm + j2 * 8, f64_div(f64_from((j2 * 13) % 64 - 32), f64_from(64))); j2 = j2 + 1; }
+            var lp = silk_encode_opus(eplc, pcm, buf, 1276);
+            if (pl == 0 && (lp != 1 || load8(buf) != 9 << 3)) { plc_ok = 0; }
+            if (pl == 1) {
+                if (lp != 15 || load8(buf) != ((11 << 3) | 3) || load8(buf + 1) != (1 | 64) || load8(buf + 2) != 12) { plc_ok = 0; }
+                var z = 3;
+                while (z < 15) { if (load8(buf + z) != 0) { plc_ok = 0; } z = z + 1; }
+            }
+            if (lp >= 1) { vec_push(pkl, str_from_buf(buf, lp)); }
+            t = t + 1;
+        }
+        assert(plc_ok == 1, "silk encode: too few bits for a frame give libopus's TOC-only packet");
+        var rl = opus_decode_from_packets(pkl, 0, 0);
+        assert(is_err(rl) == 0, "silk encode: and shravan decodes them");
+        if (is_err(rl) == 0) {
+            assert_eq(vec_len(decode_result_samples(rl)), 4 * (20 + 40 * pl) * 48, "silk encode: as lost frames of the packets' length");
+        }
+        pl = pl + 1;
+    }
+    # NaN lands where libopus's comparisons send it, on -32768; infinities and
+    # out-of-range values clamp as full scale does: packet for packet the same
+    var pa = alloc(320 * 8);
+    var pb = alloc(320 * 8);
+    var oa = alloc(1280);
+    var ob = alloc(1280);
+    var same = 1;
+    var m = 0;
+    while (m < 4) {
+        var ea = silk_encoder_new(16000, 20, 20000, 1, 0);
+        var eb = silk_encoder_new(16000, 20, 20000, 1, 0);
+        var q = 0;
+        while (q < 3) {
+            var k2 = 0;
+            while (k2 < 320) {
+                var ramp = f64_div(f64_from(((k2 * 37 + q * 101) % 200) - 100), f64_from(400));
+                store64(pa + k2 * 8, ramp);
+                store64(pb + k2 * 8, ramp);
+                if (k2 % 3 == 0) {
+                    if (m == 0) { store64(pa + k2 * 8, nan); store64(pb + k2 * 8, f64_neg(F64_ONE)); }
+                    if (m == 1) { store64(pa + k2 * 8, inf); store64(pb + k2 * 8, F64_ONE); }
+                    if (m == 2) { store64(pa + k2 * 8, f64_neg(inf)); store64(pb + k2 * 8, f64_neg(F64_ONE)); }
+                    if (m == 3) { store64(pa + k2 * 8, f64_from(0 - 1000000000)); store64(pb + k2 * 8, f64_neg(F64_ONE)); }
+                }
+                k2 = k2 + 1;
+            }
+            var la = silk_encode(ea, pa, oa, 1275);
+            var lb = silk_encode(eb, pb, ob, 1275);
+            if (la != lb) { same = 0; }
+            k2 = 0;
+            while (k2 < la && la == lb) { if (load8(oa + k2) != load8(ob + k2)) { same = 0; } k2 = k2 + 1; }
+            q = q + 1;
+        }
+        m = m + 1;
+    }
+    assert(same == 1, "silk encode: NaN codes as -1, infinities and overloads as full scale");
+    # a payload that cannot fit its buffer is an error, not an overrun
+    var e2 = silk_encoder_new(16000, 20, 1000000, 1, 0);
+    var big = 1;
+    var j = 0;
+    while (j < 320) {
+        store64(pcm + j * 8, f64_from(1 - 2 * ((j * 7919) % 2)));
+        j = j + 1;
+    }
+    store64(buf + 8, 0x5A5A5A5A5A5A5A5A);
+    var r2 = silk_encode(e2, pcm, buf, 8);
+    if (r2 > 8) { big = 0; }
+    assert(big == 1, "silk encode: a payload never exceeds its buffer");
+    assert_eq(load64(buf + 8), 0x5A5A5A5A5A5A5A5A, "silk encode: nothing written past the buffer");
+    return 0;
+}
+
 fn test_silk_all() {
     fft_init();
     if (_celt_band_edges == 0) { _opus_init_bands(); }
@@ -11038,5 +12006,12 @@ fn test_silk_all() {
     test_opus_silk10_rfc();
     test_silk_encode_quantisation();
     test_silk_encode_bitstream_roundtrip();
+    test_silk_enc_lpc_vs_libopus();
+    test_silk_enc_vad_vs_libopus();
+    test_silk_enc_shape_vs_libopus();
+    test_silk_enc_nsq_vs_libopus();
+    test_silk_enc_packets_vs_libopus();
+    test_silk_enc_opus_packets();
+    test_silk_enc_hostile();
     return 0;
 }

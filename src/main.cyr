@@ -12,6 +12,7 @@ include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/opus_legacy.cyr"
 include "src/silk.cyr"
+include "src/silk_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -22,6 +23,7 @@ include "src/serde.cyr"
 include "src/opus_test_helpers.cyr"
 include "src/opus_rfc_tests.cyr"
 include "src/interop_fixtures.cyr"
+include "src/silk_enc_vectors.cyr"
 include "src/interop_tests.cyr"
 include "src/opus_encoder_tests.cyr"
 include "src/silk_tests.cyr"
@@ -2349,7 +2351,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.10.4 — audio codecs for AGNOS (Cyrius)\n", 52);
+syscall(1, 1, "shravan v2.11.3 — audio codecs for AGNOS (Cyrius)\n", 52);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

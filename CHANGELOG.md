@@ -5,6 +5,400 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.3] - 2026-11-17
+
+**SILK encode, part 4: shravan encodes SILK.** The last of the four 2.11 steps adds the frame encoder
+with its rate loop, the packet layer, and a public API. On every frame libopus codes unvoiced, shravan's
+packets are libopus's byte for byte. libopus decodes them to audio that follows the input, at the same
+6.5 ms delay as its own encoder. Frames libopus would code voiced are coded unvoiced until pitch
+analysis arrives (2.12). 14,187 assertions (was 14,110).
+
+### Added
+
+- **`silk_encode_frame_flp`** in `src/silk_enc.cyr` (libopus `silk_encode_frame_FLP`).
+  - The new samples go 5 ms ahead of the frame being coded (the encoder's lookahead), with libopus's
+    single-precision anti-denormal signal.
+  - Then the stages in order: the pitch analysis residual, noise shaping, the prediction filters, the
+    gains.
+  - Then the rate loop, over a gain multiplier: quantise and code the frame. If it misses the budget,
+    or, under CBR, falls more than 5 bits short of it, scale the gains ×3/2 or ×4/5. Once there is a
+    frame on each side, interpolate between them, held to the middle half of the bracket.
+  - Each subframe's gain locks once more gain stops reducing its pulses. After two misses Lambda rises
+    ×1.5 (to at least 1.5) and the dither goes.
+  - After six tries the best frame under the budget comes back, its bytes included. Failing that,
+    damage control: the last frame's gains and no pulses.
+  - Snapshots of the range coder, the quantiser state, the seed and the index predictors make every
+    retry start where the frame did.
+- **The packet** (`_silk_encode_packet`; libopus `silk_Encode`, mono, its input at the internal rate):
+  - FLOAT2INT16: the sample as a float, ×32768, clamped, NaN to −32768 as libopus's comparisons leave
+    it, rounded half to even;
+  - the equal-rate resampler's delay (10, 7 or 6 samples) and the mono buffer's one-sample shift;
+  - the VAD, and the VAD and LBRR flags reserved in the first bits, then patched in;
+  - each frame's bit target: its share of the packet, less a fiftieth of a second's worth of the
+    reservoir's excess and of the packet's overshoot so far, held between 5 kbit/s and the bit rate;
+  - a multi-frame packet's budget split 3/5 or 2/5 and 3/4 over its frames, CBR on the last only;
+  - frames after the first coded conditionally, and the reservoir carried to the next packet.
+- **Public API**:
+  - `silk_encoder_new(fs_hz, packet_ms, bitrate, complexity, cbr)` takes 8, 12 or 16 kHz (the input rate
+    and the coded bandwidth), 10, 20, 40 or 60 ms packets, 1 bit/s to 1 Mbit/s, and complexity 0 or 1.
+    Errors: `ERR_INVALID_RATE`, `ERR_ENCODE`, and `ERR_UNSUPPORTED_FMT` for complexity 2 and up, which
+    selects libopus's `silk_NSQ_del_dec`.
+  - `silk_encoder_samples`: the samples one packet takes.
+  - `silk_encode`: one packet's bare SILK payload, in a buffer that also caps a VBR packet. Nothing is
+    written past it.
+  - `silk_encode_opus` builds one Opus packet as libopus's encoder does for SILK only:
+    - the TOC, configurations 0–11 by bandwidth and duration;
+    - the bit rate counting the whole packet, so the payload gets a byte a packet less;
+    - VBR: trailing zero bytes dropped;
+    - CBR: `(bits + 4) / 8` bytes, padded as `opus_packet_pad` does (code 3);
+    - libopus's "PLC" frames, which decoders conceal as lost:
+      - where there is no room for a frame, the TOC alone, and the encoder does not run. That is under
+        3 bytes, under 24 bits a frame, or, for 40 and 60 ms, under 300 bytes or 2.4 kbit/s a second.
+      - a payload that busts its budget, sent as a single zero byte.
+    - A buffer of 0 bytes is refused; one byte holds the TOC alone.
+  - Scratch comes from the Opus arena, reset per packet, so a long encode allocates nothing per packet.
+- `src/opus.cyr`: `ec_enc_init` (an encoder in a caller's struct), `ec_enc_patch_initial_bits` and
+  `ec_enc_copy`. `src/silk_enc.cyr`: `silk_gains_id`.
+- **Tools**:
+  - Interop CLI `silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw [cap]]`.
+  - `opusref dec` takes an output rate. `opusref silk` is libopus's own encoder forced to SILK at an
+    internal rate, complexity 1: the yardstick.
+  - `silkref` takes a VBR packet cap.
+  - `scripts/gen-silk-vectors.py` writes libopus's whole packets for 16 configurations. Their inputs are
+    integer-only (`int_signal`), so the suite builds the same samples itself, and a hash checks that it
+    does. When `build/interop-cli` exists, the generator checks shravan's packets against them.
+- Fuzz target `silk_encode` in `fuzz/fuzz_decode.cyr` (exit 89):
+  - random parameters, valid and not, and buffers from none to plenty;
+  - hostile input: NaN, infinities, overloads, silence, constants, square waves;
+  - every payload and packet bounded, with nothing written past its buffer;
+  - CBR sizes exact, and shravan's decoder taking the stream.
+- Interop sweep group `silk`.
+- Benchmarks `silk_encode_1sec_wb_vbr20k` and `silk_encode_1sec_wb_cbr12k`.
+
+### Verified
+
+- **`test_silk_enc_packets_vs_libopus`**: 655 packets in 16 configurations, byte for byte libopus's
+  `silk_Encode`. They cover:
+  - narrow-, medium- and wideband, at 10, 20, 40 and 60 ms;
+  - complexity 0 and 1;
+  - VBR, also in 40- and 90-byte buffers, and CBR from 1.2 to 12 kbit/s;
+  - voice-inactive frames;
+  - every branch of the rate loop: bracketing and interpolation, Lambda raised and floored, gains locked,
+    damage control, restoring the best frame, the shares of a multi-frame budget, the 5 kbit/s floor,
+    the VBR margin.
+- **Beyond the suite**, on 2 to 4 s of noise at every rate, duration, complexity and mode, packets matched
+  libopus's everywhere except:
+  - frames libopus coded voiced, and a few frames after each, while the quantiser state re-converged;
+  - about one frame in 500, where a shaping coefficient rounds the other way in shravan's doubles than in
+    libopus's floats (a ±1 in `AR_Q13`), and occasionally a pulse follows. Traced to the coefficient,
+    with the state in and every other input equal.
+  - On a very sharp resonance (25 dB of prediction gain) Burg is ill-conditioned. libopus rounds its
+    gain-scaled input to float, and its NLSFs part from shravan's within a few frames.
+- **`test_silk_enc_opus_packets`**: the TOC of each bandwidth and duration; VBR packets end on a nonzero
+  byte; CBR packets are exactly their size, code-3 padded when short. shravan's Opus decoder (exact
+  against libopus's) turns them back into audio correlating with the input at 6.5 ms.
+- **`test_silk_enc_hostile`**:
+  - Bad rates, durations, bit rates, complexities and buffers are refused. A 2-byte buffer holds the TOC
+    alone.
+  - Below 1.2 kbit/s at 20 ms, and below 2.4 kbit/s at 60 ms under CBR, every packet is libopus's
+    TOC-only frame (padded to its size under CBR), which shravan decodes as lost frames of the packets'
+    length. Against libopus's own encoder the thresholds agree exactly: TOC-only at 2,399 bit/s and a
+    frame at 2,400, at 10 and 40 ms, with the same CBR sizes. libopus's TOC names its initial hybrid
+    mode when it has not yet coded a packet; shravan's names the SILK configuration.
+  - NaN, infinities, full-scale square waves and denormals give packets that fit and decode.
+  - NaN codes as −1.0 does, and infinities and overloads as full scale do, packet for packet.
+  - A payload never passes its buffer.
+- **The roadmap's gate, libopus decoding shravan's packets**, on real speech (the Opus test vectors) at
+  12 and 24 kbit/s, 8 and 16 kHz, correlating with the input:
+
+  | | shravan | libopus's own encoder |
+  |-|---------|-----------------------|
+  | 8 kHz | 0.926–0.993 | 0.947–0.997 |
+  | 16 kHz | 0.850–0.979 | 0.915–0.991 |
+
+  Both run at the same rates and the same delay. The gap is the voiced path (LTP), 2.12.
+- **Interop sweep** (`scripts/interop.py --only silk`), 48 cases: pink noise and the sweep's tones, at
+  every rate and duration, VBR and CBR, judged against libopus's own encoder on the same input. Every case
+  has libopus's delay, correlation at least 0.8 and no lower than libopus's by more than 0.03, its bit
+  rate within 10% under VBR, and its exact packet size under CBR.
+  - Pink noise: shravan 0.82–0.92, libopus 0.74–0.85. libopus's Opus layer high-passes its input at
+    3 Hz (`dc_reject`), and pink noise is mostly low frequencies. On it, shravan's payloads are bare
+    `silk_Encode`'s, byte for byte.
+  - Tones: shravan 0.957–0.990, libopus 0.877–0.976.
+- **Mutations**: 43 tried, 40 caught, by 1 to 20 failures each:
+  - the packet layer: the input delay, the mono shift, the reservoir, the overshoot term, the budget
+    shares, the flags' reservation and patch, conditional coding, CBR on the last frame only, the
+    5 kbit/s floor, the seed counter, the input buffer's history;
+  - the rate loop: every branch above, the restore and its bytes, the interpolation clamp, both
+    multipliers, the gain index reset, the first-frame flag;
+  - the Opus packet: the TOC, trailing zeros, CBR padding, the PLC frame, each condition of the TOC-only
+    rule, and its CBR padding;
+  - FLOAT2INT16's NaN.
+
+  Three were equivalent:
+  - the anti-denormal signal, dropped or added in double: it changes no output, since the analysis's
+    own regularisation swamps 1e-6;
+  - the first slot of the mono buffer's two carried samples, which only stereo reads.
+- **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included. A hunt over 24
+  further poisoned seeds was clean too. That hunt's first run found `silk_encode_opus` refusing a
+  286 bit/s CBR packet that libopus sends TOC-only, which led to the rule above.
+- **Memory**: 3,000 packets allocate nothing past the first hundred: VBR, CBR, and 60 ms narrowband.
+
+### Performance
+
+| Benchmark | Per second of audio | Real-time multiple |
+|-----------|---------------------|--------------------|
+| `silk_encode_1sec_wb_vbr20k` (wideband, 20 ms packets, 20 kbit/s VBR) | 27.7 ms | ~36× |
+| `silk_encode_1sec_wb_cbr12k` (the same at 12 kbit/s CBR, where the rate loop quantises each frame several times) | 64.8 ms | ~15× |
+
+The existing benchmarks moved by −1.0% to +2.3% against a 2.11.2 build. Both builds ran in one session,
+pinned to one core, six rounds each, comparing medians. No existing code path changed beyond the range
+encoder's constructor.
+
+### Not yet
+
+- Voiced frames: pitch analysis and LTP (2.12).
+- `silk_encode_opus` is a SILK-only packet at an internal rate. libopus's `opus_encode` around it also
+  resamples from the API rate, high-passes the input, can add in-band FEC (LBRR) and DTX, codes stereo,
+  and decides mode and bandwidth. That is the Opus encoder layer of 2.12.
+- Complexity 2 and up (`silk_NSQ_del_dec`) is refused.
+
+## [2.11.2] - 2026-11-17
+
+**SILK encode, part 3: the noise shaping quantiser.** The third of the four 2.11 steps: `silk_NSQ`, which
+turns the frame's input, prediction filters, shaping filters and gains into the excitation pulses the
+bitstream carries. It is fixed point, with 32-bit wrapping where libopus wraps, and it matches libopus
+bit for bit: every pulse, and the quantiser's whole state after every frame, voiced frames included.
+The float-to-fixed conversion in front of it matches exactly too. The frame encoder that calls it is
+2.11.3. 14,110 assertions (was 13,942).
+
+### Added
+
+- **`silk_nsq`** in `src/silk_enc.cyr` (libopus `silk_NSQ_c`).
+  - Per subframe:
+    - the input over its gain (Q10);
+    - for voiced frames, the LTP history re-whitened through the new prediction filter;
+    - every filter state rescaled when the gain changes.
+  - Per sample (`_sk_nsq_quantizer`):
+    - the short-term prediction, plus long-term for voiced frames;
+    - the noise shaping feedback: shaping filter, tilt, low-frequency and harmonic shaping;
+    - the residual against two candidate levels by rate and distortion (Lambda), with the dither sign of
+      a pseudo-random seed. Above Lambda 2 the candidates are biased down by about Lambda/2, libopus's
+      aggressive branch.
+    - the decoder's reconstruction tracked, so every prediction stays in step with it.
+  - The state (`silk_nsq_new`, `_SKN_`): quantised output, shaping and synthesis histories, dither
+    seed, previous gain. `_sk_nsq_hash` hashes it as the reference dump does.
+- **`silk_nsq_wrapper_flp`** (libopus `silk_NSQ_wrapper_FLP`). `_sk_nsq_convert` converts the frame's f64
+  values to the quantiser's fixed point by `lrintf`: Q13 shaping filters, packed Q14 low-frequency
+  shaping, Q14 tilt and harmonic shaping, Q12 prediction filters, Q14 LTP taps, Q16 gains, Q10 Lambda,
+  the LTP scale, and the int16 input. Then it runs `silk_nsq`.
+- **References**:
+  - `scripts/silkref/patch.py` records each `silk_NSQ_c` call's parameters and state hash (and its full
+    input state), and the wrapper's float inputs.
+  - `scripts/silkref/nsqprobe.c` calls libopus's quantiser directly, on large residuals at Lambda above 2.
+    The aggressive branch only changes the result when residuals are big, and no encoder run produces
+    those: CBR overload raises Lambda by inflating the gains, which shrinks the residuals.
+  - `scripts/gen-silk-vectors.py` writes:
+    - two sequences from a fresh encoder (16 wideband and 40 narrowband frames of the vowel);
+    - ten calls with Lambda above 2, each with its recorded input state: six from a starved 3 kbit/s CBR
+      run, four from the probe;
+    - 14 frames of the conversion.
+- Benchmark `silk_nsq_20ms_wb`.
+
+### Verified
+
+- **`test_silk_enc_nsq_vs_libopus`**:
+  - A fresh state is libopus's.
+  - Over the 56 sequence frames (voiced, unvoiced and inactive), and over all 180 frames of three runs
+    before they were chosen: every pulse is libopus's, and so is the whole state after every frame.
+  - The ten aggressive calls: their recorded states load as libopus's, and give libopus's pulses and
+    state.
+  - The conversion gives libopus's fixed-point parameters exactly.
+- **Mutations.** Fourteen were caught, by 2 to 115 failures each:
+  - the level adjustment, the dither sign and the dither generator's increment;
+  - the LTP prediction's rounding and the re-whitening start (one sample late);
+  - the shaping state's rescale and the harmonic taps' packing;
+  - the output's rounding and the low-frequency packing;
+  - the aggressive branch: its threshold, the branch dropped, a bias off by 1.5 levels, and the sign of
+    its zero region.
+
+  Three were equivalent and changed nothing:
+  - Re-whitening one sample *early*: the filtered history is only read from the filter order past its
+    start.
+  - Moving the aggressive bias by up to a level (−500 for −512, or none): the two candidate levels bracket
+    the rate-distortion minimum, at r − Lambda/2, for any bias within a level of Lambda/2 − 512.
+- **Unreachable in libopus.** The quantiser's branch for an interpolated first-half filter: libopus runs
+  `silk_NSQ` only at complexity 0–1, where interpolation is off, and so does shravan.
+
+### Performance
+
+`silk_nsq_20ms_wb`, a voiced 20 ms wideband frame: 385 µs. The existing benchmarks moved within ±3.9%
+(one session, pinned, median of three); no existing code path changed.
+
+## [2.11.1] - 2026-11-17
+
+**SILK encode, part 2: the VAD, noise shaping and gains.** The second of the four 2.11 steps. It
+measures what the gain and shaping decisions need, and makes them:
+- the VAD's speech activity, spectral tilt and band qualities;
+- the LPC residual the pitch analysis starts from, and its prediction gain;
+- each subframe's noise shaping filter and gain, with the low-frequency shaping, tilt and harmonic
+  shaping;
+- the quantised gains, quantiser offset and rate/distortion weight.
+
+The VAD and every decision (quantiser offsets, gain indices) match libopus exactly. The float stages
+match it to within libopus's own single-precision error. As in 2.11.0, nothing calls these from a public
+API until the frame encoder (2.11.3). 13,942 assertions (was 13,697).
+
+### Added
+
+- In `src/silk_enc.cyr`:
+  - **The encoder's parameters.** `silk_enc_setup_complexity` is libopus's complexity table 0–10: analysis
+    orders, shaping lookahead, delayed-decision states, NLSF survivors, interpolation, warping.
+    `silk_control_snr` gives the target SNR for a bit rate, from libopus's per-bandwidth tables. The
+    state carries the pitch, LTP and shaping lengths of `silk_setup_fs`.
+  - **The VAD**, fixed point, exact (`silk_vad_new`, `silk_vad_get_sa_q8`, `silk_encode_do_vad`):
+    - three halving filter banks (`silk_ana_filt_bank_1`) into four bands, the lowest high-passed;
+    - band energies against noise levels that track faster for the first 20 s;
+    - from those, the speech activity, tilt and band qualities (`silk_sigm_q15`);
+    - the frame's signal type (no voice activity under 5%) and VAD flag.
+  - **The pitch analysis front end**, `silk_find_pitch_lags_flp`: a sine-windowed LPC analysis, its
+    prediction gain, and the buffer's residual. The voicing decision after it is pitch estimation (2.12),
+    so until then a frame with voice activity is unvoiced.
+  - **`silk_noise_shape_analysis_flp`**, all of it:
+    - coding quality from the SNR;
+    - the quantiser offset from the residual's energy fluctuation;
+    - per subframe, a windowed LPC analysis (warped at complexity 4 and up, with `warped_gain` and the
+      monic conversion), bandwidth-expanded and limited;
+    - the low-frequency shaping and tilt;
+    - harmonic shaping for voiced frames;
+    - smoothing over subframes.
+  - **`silk_process_gains_flp`**:
+    - the voiced gain reduction and the soft limit against the residual energy;
+    - Q16 by truncation, as libopus's cast;
+    - `silk_gains_quant`, then the voiced quantiser offset and Lambda.
+  - The float helpers they use: Schur, step-up, autocorrelation (plain and warped), the sine window, the
+    bandwidth expander, `silk_sigmoid` and `silk_log2`.
+- **`scripts/gen-silk-vectors.py`** and `scripts/silkref/patch.py` record the new stages too.
+  - A synthetic sung vowel (a vibrato pulse train through three formants, in syllables) gives voiced,
+    unvoiced and inactive frames.
+  - A 40 ms run gives conditionally coded frames.
+  - The vectors are base64-packed 32-bit words, half the size of decimal text: the test harness has 2 MB
+    for all its string data.
+  - The generator refuses to write unless the sets cover what they test: active and inactive VAD
+    frames; every signal type; the warped analysis; independent and conditional gains; 10 and 20 ms;
+    narrow and wide band.
+- Benchmarks `silk_vad_20ms_wb` and `silk_noise_shape_20ms_wb`.
+
+### Verified
+
+- **`test_silk_enc_vad_vs_libopus`**: 64 frames in two sequences from a fresh encoder (wideband 20 ms,
+  narrowband 10 ms of the vowel). Activity, tilt, band qualities and signal type are exact in every
+  frame. Before choosing them, all 300 frames of three runs were exact.
+- **`test_silk_enc_shape_vs_libopus`**, 18 frames (every signal type, warped, conditional, 10 and
+  20 ms, NB and WB):
+  - exact: the quantiser offsets, gain indices, carried gain index and the quantised gains;
+  - within float error: the qualities, low-frequency shaping, tilt and harmonic shaping (1e-5);
+  - the pitch residual and prediction gain (1e-3);
+  - the shaping filters and gains (3e-3);
+  - the unquantised Q16 gains (2 + 1e-6 of the value), and Lambda (1e-6).
+- **Where the float error comes from.** libopus computes the windows, correlations and filters in single
+  precision. A formanted vowel's high prediction gain amplifies that most: the shaping filters differ by
+  up to 1.5e-3 of their peak on the wideband vowel, against 3e-6 on noise. Rounding just shravan's sine
+  window and autocorrelation to float cuts every one of these gaps by 2.5 to 4 times, which is what
+  libopus's precision explains and a porting error would not.
+- **Ten mutations, each caught** (1 to 64 failures):
+  - the VAD's tilt weight, noise-tracking floor and filter-bank coefficient sign;
+  - the pitch analysis's bandwidth expansion;
+  - the shaping white-noise fraction and the quantiser offset threshold;
+  - the voiced low-frequency shaping;
+  - the warped gain's sign;
+  - Q16 gains rounded instead of truncated (caught by a direct check: the tolerance could not);
+  - Lambda's quantiser-offset weight.
+
+### Performance
+
+`silk_vad_20ms_wb` 34 µs and `silk_noise_shape_20ms_wb` 45 µs per 20 ms wideband frame;
+`silk_lpc_analysis_20ms_wb` 244 µs (228 µs in 2.11.0: the benchmark now also builds the VAD state and
+complexity parameters each iteration). The existing benchmarks: all 24 within ±3% (one session, pinned,
+median of three); no existing code path changed.
+
+## [2.11.0] - 2026-11-17
+
+**SILK encode, part 1: the LPC analysis.** The first of the four 2.11 steps toward a SILK encoder that
+encodes audio. It finds each frame's prediction filter (Burg's method over the gain-normalised input),
+searches whether the frame's first half should interpolate from the previous frame's NLSFs, quantises
+the NLSFs, and measures the residual energies the gain stage will need. Each piece is checked on
+libopus's own inputs, recorded from an instrumented libopus encoder. The fixed-point stages match libopus
+exactly; the float ones run in f64 where libopus runs in single precision, and match it to float
+precision. Nothing calls them from a public API yet: the frame encoder is 2.11.3. 13,697 assertions (was
+13,324).
+
+### Added
+
+- **`src/silk_enc.cyr`**, a new `[lib]` module: libopus's float SILK encoder (`silk/float/*_FLP.c` over
+  the fixed-point `silk/*.c`) ported to f64.
+  - `silk_burg_modified_flp`: the prediction filter of stacked subframes, with the prediction gain held
+    to a limit; double precision, as libopus computes it.
+  - `silk_find_lpc_flp`: Burg over the frame. With interpolation on (complexity 2 and up, 20 ms, not
+    the first frame), it also tries interpolation indices 3 down to 0 for the first half and keeps the
+    lowest residual energy.
+  - `silk_a2nlsf_flp` and `silk_nlsf2a_flp`, over the fixed-point `silk_a2nlsf` and `silk_nlsf2a`.
+  - `silk_interpolate`.
+  - `silk_process_nlsfs`, fixed point, exact:
+    - the NLSF weights from their spacing, the interpolated first half's added;
+    - the rate weight `NLSF_mu` falling with speech activity, ×1.5 for 10 ms frames;
+    - quantisation through the existing `silk_nlsf_encode`;
+    - the Q12 filters for each half.
+  - `silk_residual_energy_flp`; and `silk_find_pred_coefs_flp` for unvoiced frames, the stage that runs
+    all of the above. Voiced frames need the LTP analysis, which comes with pitch analysis in 2.12.
+  - The encoder state and control structs (`silk_enc_state_new`, `silk_enc_ctrl_new`); the side
+    information sits in `silk_encode_indices_ec`'s layout.
+  - `_sk_lrint`, libopus's `lrintf` (to nearest, ties to even), at every float→fixed boundary.
+- **`scripts/gen-silk-vectors.py`** and `scripts/silkref/`, the reference:
+  - `patch.py` instruments a libopus v1.6.1 tree with `silkdump.h`'s record writers at the encoder's stage
+    boundaries, each edit anchored on libopus's source and failing loudly if it moved;
+  - `silkref.c` runs `silk_Encode` (mono, at the internal rate, VAD deciding) over a 16-bit stream.
+
+  The generator builds both, encodes deterministic coloured noise under a moving envelope (WB, MB and
+  NB; 10 and 20 ms; complexity 1 and 5), and writes `src/silk_enc_vectors.cyr`: 30 frames chosen by rule
+  (the first, each signal type, each interpolation index, the last), floats as their f32 bit patterns.
+  It refuses to write unless the frames cover both unvoiced signal types, every interpolation index,
+  10 and 20 ms frames, all three internal rates and a first frame.
+- Benchmark `silk_lpc_analysis_20ms_wb`.
+
+### Verified
+
+- **`test_silk_enc_lpc_vs_libopus`**, the 30 frames (373 assertions), each stage fed libopus's inputs:
+
+  | Stage | Against libopus |
+  |---|---|
+  | Burg: coefficients and residual energy, every call | within 1e-6 (measured: 9.2e-8, 5.2e-8) |
+  | A2NLSF on libopus's own coefficients | exact |
+  | `find_LPC`: NLSFs / interpolation index | within one step / exact |
+  | `process_NLSFs`: quantised NLSFs, indices, filters | exact |
+  | residual energies | within 1e-6 (measured: 2.1e-7) |
+  | the whole `find_pred_coefs` from the raw input: indices / energies | exact / within 1e-6 |
+
+  Over all 200 frames of the two wideband runs, before the 30 were chosen:
+  - `process_NLSFs` was exact in 200 and A2NLSF in 186 of 186.
+  - `find_LPC` was exact in 199. In the 200th, one NLSF is a step off (13602 against 13603): Burg's f64
+    coefficient rounds across a step that libopus's float one does not.
+  - The whole `find_pred_coefs` gave libopus's indices in all 200.
+- **Seven mutations, each caught** (5 to 70 failures):
+  - Burg's conditioning constant;
+  - `lrintf` truncating;
+  - the interpolation search keeping the worse candidate;
+  - the 10 ms `NLSF_mu`;
+  - the interpolated weights;
+  - the first half's residual through the second half's filter;
+  - the first frame's gain limit.
+
+### Performance
+
+`silk_lpc_analysis_20ms_wb`, the unvoiced prediction stage on a 20 ms wideband frame with interpolation
+searched: 228 µs. Against 2.10.4 (one session, pinned, median of three), the existing benchmarks moved by
+at most ±2.7%; no existing code path changed.
+
 ## [2.10.4] - 2026-11-16
 
 **The CELT decoder is 15 times faster.** Both CELT MDCTs ran their N/4-point transform as a direct DFT,

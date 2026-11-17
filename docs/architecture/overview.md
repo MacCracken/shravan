@@ -20,7 +20,14 @@ shravan/
                        bit-exact vs libopus; multistream, RFC 7845 families 0/1/2/255;
                        the CELT MDCTs over a 15 x 2^a FFT) +
                        RFC-6716 CELT encode (mono 20 ms, interop-verified); OpusHead/OpusTags parsing
-    silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
+    silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo);
+                       the encoder's quantisers and bitstream writers
+    silk_enc.cyr    -- SILK encoder (2.11.x): VAD, pitch-analysis residual, noise shaping,
+                       gains, LPC analysis (Burg, NLSF interpolation search and
+                       quantisation), the noise shaping quantiser (NSQ), the frame
+                       and its rate loop, the packet, silk_encoder_new / silk_encode /
+                       silk_encode_opus; checked stage by stage against libopus, and
+                       whole packets byte for byte (every frame unvoiced until 2.12)
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows;
                        decode: any channel layout, configurations or a PCE, in ffmpeg's order;

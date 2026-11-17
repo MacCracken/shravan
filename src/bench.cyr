@@ -16,6 +16,7 @@ include "src/tag.cyr"
 include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
+include "src/silk_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -23,6 +24,7 @@ include "src/dither.cyr"
 include "src/simd.cyr"
 include "src/stream.cyr"
 include "src/interop_fixtures.cyr"
+include "src/silk_enc_vectors.cyr"
 
 # ================================================================
 # Timing helpers — clock_gettime(CLOCK_MONOTONIC)
@@ -425,6 +427,243 @@ fn bench_opus_celt_encode() {
     return bench_report(t1 - t0, iters);
 }
 
+# SILK encoder LPC analysis (2.11.0): the unvoiced find_pred_coefs (Burg, NLSF
+# interpolation search, NLSF quantisation, residual energies) on a 20 ms
+# wideband frame of the reference vectors, at complexity 5 (frame 6: interpolation on).
+fn _bench_skv_frame(k, hdr, x, gains, cq, prev) {
+    _bench_skv_ints(_SKV_HDR, k, hdr);
+    _bench_skv_ints(_SKV_X, k, x);
+    _bench_skv_ints(_SKV_GAINS, k, gains);
+    _bench_skv_ints(_SKV_CQ, k, cq);
+    _bench_skv_ints(_SKV_PREV, k, prev);
+    return 0;
+}
+
+# Frame k of a vector field (src/silk_enc_vectors.cyr: ';'-separated base64 of
+# little-endian 32-bit words) into i64 words, ints sign-extended.
+fn _bench_skv_ints(s, k, out) {
+    var seg = alloc(65536);
+    var raw = alloc(65536);
+    var p = 0;
+    var sg = 0;
+    while (sg < k) { if (load8(s + p) == 59) { sg = sg + 1; } p = p + 1; }
+    var n = 0;
+    var c = load8(s + p);
+    while (c != 0 && c != 59) { store8(seg + n, c); n = n + 1; c = load8(s + p + n); }
+    store8(seg + n, 0);
+    var nb = _mp3_b64_decode(seg, raw);
+    var i = 0;
+    while (i < nb / 4) {
+        var b = raw + i * 4;
+        store64(out + i * 8, silk_sx32(load8(b) | (load8(b + 1) << 8) | (load8(b + 2) << 16) | (load8(b + 3) << 24)));
+        i = i + 1;
+    }
+    return nb / 4;
+}
+
+fn bench_silk_lpc_analysis() {
+    var hdr = alloc(16 * 8);
+    var x = alloc(512 * 8);
+    var gains = alloc(8 * 8);
+    var cq = alloc(8);
+    var prev = alloc(32 * 8);
+    # the first complexity-5 wideband frame that interpolates
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKV_N && found < 0) {
+        _bench_skv_ints(_SKV_HDR, k, hdr);
+        if (load64(hdr + 56) == 16 && load64(hdr + 8) == 4 && load64(hdr + 72) < 4) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_frame(found, hdr, x, gains, cq, prev);
+    var n = 4 * 80 + 16;
+    var i = 0;
+    while (i < n) { store64(x + i * 8, f32_to(load64(x + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    i = 0;
+    while (i < 4) { store64(gains + i * 8, f32_to(load64(gains + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    var iters = 50;
+    bench("silk_lpc_analysis_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        var st = silk_enc_state_new(16, 4);
+        store64(st + _SKE_USE_INTERP, 1);
+        store64(st + _SKE_FIRST, 0);
+        store64(st + _SKE_SURVIVORS, load64(hdr + 48));
+        store64(st + _SKE_SPEECH_Q8, load64(hdr + 64));
+        var j = 0;
+        while (j < 16) { store64(st + _SKE_PREV_NLSF + j * 8, load64(prev + j * 8)); j = j + 1; }
+        var c = silk_enc_ctrl_new();
+        j = 0;
+        while (j < 4) { store64(c + _SKC_GAINS + j * 8, load64(gains + j * 8)); j = j + 1; }
+        store64(c + _SKC_CODING_QUALITY, f32_to(load64(cq) & 0xFFFFFFFF));
+        _opus_frame_begin();
+        silk_find_pred_coefs_flp(st, c, x + 16 * 8);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# 2.11.1: the VAD on a 20 ms wideband frame, and noise shaping analysis (16th
+# order filters over 4 windowed subframes) on one, from the reference vectors.
+fn bench_silk_vad() {
+    var seq = alloc(16 * 8);
+    _bench_skv_ints(_SKA_SEQ, 0, seq);
+    var x = alloc(1024 * 8);
+    _bench_skv_ints(_SKA_IN, 5, x);
+    var st = silk_enc_state_new(load64(seq + 8), 4);
+    var iters = 200;
+    bench("silk_vad_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        store64(st + _SKE_NFRAMES_ENC, 0);
+        _opus_frame_begin();
+        silk_encode_do_vad(st, x, 0 - 1);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+fn bench_silk_noise_shape() {
+    var h = alloc(64 * 8);
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKS_N && found < 0) {
+        _bench_skv_ints(_SKS_NSA_HDR, k, h);
+        if (load64(h + 32) == 16 && load64(h + 40) == 4) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_ints(_SKS_NSA_HDR, found, h);
+    var x = alloc(1024 * 8);
+    var r = alloc(1024 * 8);
+    var v = alloc(64 * 8);
+    var nx = _bench_skv_ints(_SKS_NSA_X, found, x);
+    var nr = _bench_skv_ints(_SKS_NSA_RES, found, r);
+    _bench_skv_ints(_SKS_NSA_IN, found, v);
+    var i = 0;
+    while (i < nx) { store64(x + i * 8, f32_to(load64(x + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    i = 0;
+    while (i < nr) { store64(r + i * 8, f32_to(load64(r + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    var st = silk_enc_state_new(16, 4);
+    store64(st + _SKE_SNR_Q7, load64(h)); store64(st + _SKE_SPEECH_Q8, load64(h + 8));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, load64(h + 24));
+    store64(st + _SKE_SHAPE_WIN, load64(h + 56)); store64(st + _SKE_SHAPE_ORDER, load64(h + 64));
+    store64(st + _SKE_LA_SHAPE, load64(h + 72)); store64(st + _SKE_WARPING_Q16, load64(h + 80));
+    i = 0;
+    while (i < 4) { store64(st + _SKE_QUALITY + i * 8, load64(h + (11 + i) * 8)); i = i + 1; }
+    var la = load64(h + 72);
+    var c = silk_enc_ctrl_new();
+    store64(c + _SKC_PRED_GAIN, f32_to(load64(v) & 0xFFFFFFFF));
+    var iters = 100;
+    bench("silk_noise_shape_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        _opus_frame_begin();
+        silk_noise_shape_analysis_flp(st, c, r, x + la * 8);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# 2.11.2: the noise shaping quantiser on a voiced 20 ms wideband frame (LTP,
+# re-whitening) from the reference vectors.
+fn bench_silk_nsq() {
+    var h = alloc(16 * 8);
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKQ_N && found < 0) {
+        _bench_skv_ints(_SKQ_HDR, k, h);
+        if (load64(h + 8) == 320 && load64(h + 56) == 2) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_ints(_SKQ_HDR, found, h);
+    var nb = load64(h + 24);
+    var so = load64(h + 32);
+    var st = silk_enc_state_new(16, nb);
+    store64(st + _SKE_SHAPE_ORDER, so);
+    _ske_set_idx(st, _SKI_SEED, load64(h + 48));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, 2);
+    _ske_set_idx(st, _SKI_QUANT_OFFSET, load64(h + 64));
+    _ske_set_idx(st, _SKI_NLSF_INTERP, load64(h + 72));
+    var x = alloc(320 * 8);
+    var par = alloc(128 * 8);
+    var arc = alloc(96 * 8);
+    var ar = alloc(96 * 8);
+    _bench_skv_ints(_SKQ_X16, found, x);
+    _bench_skv_ints(_SKQ_PAR, found, par);
+    _bench_skv_ints(_SKQ_AR, found, arc);
+    var i = 0;
+    while (i < 96) { store64(ar + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < nb) {
+        var j = 0;
+        while (j < so) { store64(ar + (i * 24 + j) * 8, load64(arc + (i * so + j) * 8)); j = j + 1; }
+        i = i + 1;
+    }
+    var pulses = alloc(320 * 8);
+    var nsq = load64(st + _SKE_NSQ);
+    var o = 32 + nb * 5;
+    var iters = 100;
+    bench("silk_nsq_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        _opus_frame_begin();
+        silk_nsq(st, nsq, x, pulses, par, par + 32 * 8, ar, par + o * 8, par + (o + nb) * 8, par + (o + 2 * nb) * 8,
+          par + (o + 3 * nb) * 8, par + (o + 4 * nb) * 8, load64(h + 80), load64(h + 88));
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
+# Benchmark: the SILK encoder, a second of audio a run (2.11.3)
+# ================================================================
+# The suite's coloured-noise input (src/silk_tests.cyr _skk_signal, kind 0):
+# unvoiced to libopus, so these are the packets libopus's silk_Encode writes.
+fn _bench_silk_input(fs, n, x) {
+    var s = 1;
+    var y1 = 0;
+    var y2 = 0;
+    var P = fs * 10 / 13;
+    for (var i = 0; i < n; i = i + 1) {
+        var w = 0;
+        for (var d = 0; d < 4; d = d + 1) {
+            s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+            w = w + (s >> 16) - 32768;
+        }
+        var y = w + sar(19661 * y1 - 8192 * y2, 14);
+        y2 = y1;
+        y1 = y;
+        var ph = i % P;
+        var tri = ph;
+        if (ph >= P / 2) { tri = P - ph; }
+        var v = sar(y * (19661 + 45875 * 2 * tri / P), 20);
+        if (v < 0 - 32768) { v = 0 - 32768; }
+        if (v > 32767) { v = 32767; }
+        store64(x + i * 8, f64_div(f64_from(v), f64_from(32768)));
+    }
+    return 0;
+}
+
+# name: the bench; a second of wideband at 20 ms packets, VBR or CBR.
+fn bench_silk_encode(name, br, cbr, iters) {
+    var x = alloc(16000 * 8);
+    _bench_silk_input(16000, 16000, x);
+    var buf = alloc(1280);
+    var e = silk_encoder_new(16000, 20, br, 1, cbr);
+    for (var p = 0; p < 50; p = p + 1) { silk_encode(e, x + p * 320 * 8, buf, 1275); }
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        for (var q = 0; q < 50; q = q + 1) { silk_encode(e, x + q * 320 * 8, buf, 1275); }
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: fft_1024
 # ================================================================
@@ -643,7 +882,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.10.4 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.11.3 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -666,6 +905,12 @@ var aac_enc_ns  = bench_aac_encode_1sec();
 var aac_dec_ns  = bench_aac_decode_1sec();
 var opus_dec_ns = bench_opus_celt_decode();
 var opus_enc_ns = bench_opus_celt_encode();
+var silk_lpc_ns = bench_silk_lpc_analysis();
+var silk_vad_ns = bench_silk_vad();
+var silk_nsa_ns = bench_silk_noise_shape();
+var silk_nsq_ns = bench_silk_nsq();
+var silk_enc_ns = bench_silk_encode("silk_encode_1sec_wb_vbr20k", 20000, 0, 10);
+var silk_cbr_ns = bench_silk_encode("silk_encode_1sec_wb_cbr12k", 12000, 1, 5);
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

@@ -31,6 +31,7 @@ modules = [
     "src/fft.cyr",
     "src/opus.cyr",
     "src/silk.cyr",
+    "src/silk_enc.cyr",
     "src/aac.cyr",
     "src/mp4.cyr",
     "src/resample.cyr",
