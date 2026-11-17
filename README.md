@@ -14,7 +14,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (13,116 assertions)
+# Build + run the test suite (13,119 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -98,8 +98,8 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 | WAV decode, 1 s mono 16-bit | 173 µs | ~5800× |
 | FLAC decode, 1 s mono 16-bit | 3.30 ms | ~300× |
 | FLAC encode, 1 s mono 16-bit (level 5) | 5.72 ms | ~175× |
-| AAC decode, 1 s stereo, 128 kbit/s | 17.9 ms | ~55× |
-| AAC encode, 1 s stereo, 128 kbit/s | 54 ms | ~18× |
+| AAC decode, 1 s stereo, 128 kbit/s | 17.2 ms | ~58× |
+| AAC encode, 1 s stereo, 128 kbit/s | 52 ms | ~19× |
 | Opus CELT decode, one 20 ms frame | 2.19 ms | ~9× |
 | MDCT, 2048 points | 56 µs | |
 

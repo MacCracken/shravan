@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 intensity thresholds set as 44.1 kHz bin numbers, and no working rate control: every request from 32 to
 192 kbit/s came out at about 570 kbit/s on real recordings. It is now a 3GPP TS 26.403 encoder, with
 block switching, TNS and a rate loop, at all 13 AAC rates. On 5.5 minutes of real recordings its NMR is
-lower than ffmpeg's native encoder from 64 kbit/s up, while spending 3–4% fewer bits. It has less
-pre-echo than ffmpeg in 11 of 12 transient cases, and ffmpeg and faad decode it at every rate. The
-decoder's PNS bands were n/4 too loud, and that is fixed too. 13,116 assertions (was 13,063).
+lower than ffmpeg's native encoder from 64 kbit/s up, while spending 3–4% fewer bits. From 96 kbit/s up it
+loses at most 0.1% of bands (ffmpeg 0.0%). It has less pre-echo than ffmpeg in all 12 transient
+cases, and ffmpeg and faad decode it at every rate. The decoder's PNS bands were n/4 too loud, and that
+is fixed too. 13,119 assertions (was 13,063).
 
 ### Added — the AAC encoder
 
@@ -62,6 +63,15 @@ decoder's PNS bands were n/4 too loud, and that is fixed too. 13,116 assertions 
   - At 32 kbit/s a channel it would save 0.6% to 0.2% for 2.9 dB, so it stops there.
 - **Intensity stereo** at most 48 kbit/s a channel, above 6 kHz (8 kHz at 48), where left and right
   correlate past 0.9.
+- **The threshold in quiet, lowered with the rate.** As calibrated (full scale plays at 96 dB SPL) it
+  dropped quiet high-band content that ffmpeg codes, and a quiet passage gets turned up. Bark bands lost
+  by 10 dB or more came to 1.1% at 48 kbit/s a channel, 1.2% at 64 and 8.6% at 96, all of 16–18 kHz
+  there; ffmpeg loses 0.0%. ffmpeg's own floor is negligible: its psy model uses a dB difference as a
+  linear energy. From 48 kbit/s a channel the threshold sits 30 dB lower, ramping from 0 at 32. That
+  gives 0.1%, 0.0% and 0.0%, for 2.8–5.5 dB of NMR, which stays 1–2 dB under ffmpeg's. 20 dB still lost
+  7.8% at 96 kbit/s a channel. A level-adaptive threshold, which lowers it only in quiet frames, did
+  worse for the same NMR. At 32 and below, lowering it cost 1.3 dB and saved nothing: holes there come
+  from the rate.
 - **Bandwidth** from ffmpeg's `AAC_CUTOFF_FROM_BITRATE` at the nominal rate. ffmpeg's twoloop feeds it
   1.15 times the rate; measured here, that cost 0.4–0.5 dB of NMR and up to 3 dB of pre-echo at 16–32
   kbit/s a channel, and changed nothing from 48 up.
@@ -105,25 +115,26 @@ decoder's PNS bands were n/4 too loud, and that is fixed too. 13,116 assertions 
 | 32k | −4.57 dB · 75.2% · 32.1 | −4.72 · 72.0% · 34.2 | −5.10 · 74.8% · 34.3 |
 | 48k | −5.99 · 59.0% · 48.1 | −6.46 · 49.9% · 51.1 | −7.85 · 36.1% · 51.0 |
 | 64k | −9.88 · 26.1% · 64.1 | −7.35 · 44.6% · 67.8 | −8.76 · 24.8% · 66.9 |
-| 96k | −15.16 · 3.6% · 96.1 | −10.38 · 23.9% · 99.6 | −11.33 · 9.4% · 99.0 |
-| 128k | −19.65 · 1.1% · 128.1 | −14.08 · 9.1% · 132.6 | −14.92 · 2.3% · 132.1 |
-| 192k | −27.58 · 0.2% · 192.1 | −20.19 · 1.0% · 198.2 | −21.00 · 0.4% · 197.4 |
+| 96k | −12.33 · 6.8% · 96.1 | −10.38 · 23.9% · 99.6 | −11.33 · 9.4% · 99.0 |
+| 128k | −16.00 · 2.4% · 128.1 | −14.08 · 9.1% · 132.6 | −14.92 · 2.3% · 132.1 |
+| 192k | −22.08 · 0.4% · 192.1 | −20.19 · 1.0% · 198.2 | −21.00 · 0.4% · 197.4 |
 
   NMR scores substituted noise as error, so the PNS rates (32 and 48) favour encoders that substitute
-  less. The model penalises ffmpeg's PNS the same way. 2.10.0 measured −20.84 dB at 572 kbit/s for every
-  rate asked.
-- **Bands lost by 10 dB or more** (below the cutoff, above 4 kHz): 0.9%, 0.6%, 1.1% and 1.2% at 48, 64,
-  96 and 128 kbit/s; ffmpeg 2.0%, 0.4%, 0.0% and 0.0%. Above 64 kbit/s shravan drops bands its model
-  calls masked, and ffmpeg codes them.
+  less. The model penalises ffmpeg's PNS the same way. Its threshold in quiet is the one the encoder
+  lowered from 96 kbit/s, so the bands that brings back score as spent bits: that cost 2.8–5.5 dB
+  (−15.16, −19.65 and −27.58 before). 2.10.0 measured −20.84 dB at 572 kbit/s for every rate asked.
+- **Bands lost by 10 dB or more** (below the cutoff, above 4 kHz): 0.9%, 0.6%, 0.1%, 0.0% and 0.0% at 48,
+  64, 96, 128 and 192 kbit/s. ffmpeg loses 2.0%, 0.4%, 0.0%, 0.0% and 0.0% (0.0% with PNS off too, from
+  96 up).
 - **Pre-echo** on synthetic castanets, drums and glockenspiel: coding error in the 21 ms before each
   attack, over the attack's energy. Lower is better; ffmpeg ran with PNS and intensity off:
 
 | | castanets | drums | glockenspiel |
 |---|---|---|---|
-| 64k mono | −31.1 dB (ffmpeg −29.0) | −38.6 (−34.2) | −35.6 (−26.9) |
-| 128k mono | −37.4 (−37.7) | −42.8 (−42.7) | −41.6 (−39.4) |
+| 64k mono | −31.4 dB (ffmpeg −29.0) | −38.6 (−34.2) | −35.1 (−26.9) |
+| 128k mono | −37.8 (−37.7) | −43.9 (−42.7) | −39.9 (−39.4) |
 | 64k stereo | −32.4 (−25.9) | −35.3 (−32.8) | −30.1 (−20.9) |
-| 128k stereo | −33.4 (−29.8) | −37.5 (−35.0) | −37.0 (−29.2) |
+| 128k stereo | −33.8 (−29.8) | −37.7 (−35.0) | −36.1 (−29.2) |
 
   TNS accounts for 2–4 dB of that. 2.10.0 measured −15 to −17 dB on castanets and −22 to −24 dB on drums,
   at its 570 kbit/s.
@@ -139,8 +150,13 @@ decoder's PNS bands were n/4 too loud, and that is fixed too. 13,116 assertions 
 
   The chirp is held under 6.3 kHz, inside both encoders' bandwidth. `scripts/interop.sh` passes 921 of
   921 against a default libopus build (was 841).
-- **In the suite** (13,116 assertions):
+- **In the suite** (13,119 assertions):
   - The PNS energy fixture.
+  - A −75 dBFS tone at 14.5 kHz over steeply low-passed noise, at 64 kbit/s mono, must decode within
+    3 dB. The calibrated threshold drops it, to −13.1 dB.
+  - At the same bit rate, correlated stereo must decode closer to its input than decorrelated (47.7
+    against 46.2 dB SNR; with M/S off both are 40.3). The test used to compare stream sizes, which says
+    nothing once both streams spend the rate.
   - Rate: at most the bit rate and one reservoir, and within 10% of it.
   - Block switching on clicks (band-limited, so their energy is inside the bandwidth): correlation over
     0.993, where long windows only reach 0.987 and ffmpeg 0.9996.
@@ -167,8 +183,8 @@ One session, pinned to one core, best of three, against 2.10.0 built from its ta
 
 | Benchmark | 2.10.0 | 2.10.1 | Change |
 |---|---|---|---|
-| `aac_encode_1sec_stereo` | 51.5 ms | 54.2 ms | +5.2% |
-| `aac_decode_1sec_stereo` | 23.2 ms | 17.9 ms | −22.9% |
+| `aac_encode_1sec_stereo` | 51.3 ms | 52.3 ms | +2.0% |
+| `aac_decode_1sec_stereo` | 23.0 ms | 17.2 ms | −25.2% |
 
 - **Encode** does far more per frame: tonality, block switching, TNS and a rate loop. It stays close to
   2.10.0 through three changes:
@@ -178,7 +194,7 @@ One session, pinned to one core, best of three, against 2.10.0 built from its ta
   - The rate search starts from the previous frame's scale, with a per-frame cache: 6.0 quantisations
     of a frame on average, down from 8.8.
 - **Decode** is unchanged code. It reads a 128 kbit/s stream now, not 2.10.0's 570 kbit/s one.
-- Every other benchmark is within ±2%.
+- Every other benchmark is within ±1.5%.
 
 ## [2.10.0] - 2026-11-16
 

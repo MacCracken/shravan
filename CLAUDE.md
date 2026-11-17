@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
-is one entry point**, `src/main.cyr`, running the whole 13,116-assertion suite
+is one entry point**, `src/main.cyr`, running the whole 13,119-assertion suite
 (core codecs, Opus decode, the CELT encoder, SILK golden vectors, the real-file
 interop fixtures). It was split into three until 2.9.3 for a ~3.15 MB code buffer
 that has been a growable 64 MiB region since Cyrius 6.4.49. `cyrius distlib`
@@ -72,7 +72,7 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run the suite (13,116 assertions)
+./scripts/test-all.sh                       # build + run the suite (13,119 assertions)
 cyrius build src/main.cyr build/shravan    # the same by hand (Cyrius 6.7.18)
 ./build/shravan
 ./scripts/interop.sh                        # reference sweep: ffmpeg, flac, mpg123, libopus (needs libopus-dev)
@@ -130,7 +130,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,116 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,119 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
