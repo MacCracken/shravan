@@ -638,6 +638,46 @@ def adts_first_frames(path, wanted):
     return frames, independent
 
 
+def adts_band_types(path):
+    """Count noise (codebook 13) and spectral (1-11) bands over the SCE frames of a
+    mono ADTS stream: section_data() of each frame's first element."""
+    data = open(path, "rb").read()
+    pos = noise = coded = 0
+    while pos + 7 <= len(data):
+        length = ((data[pos + 3] & 3) << 11) | (data[pos + 4] << 3) | (data[pos + 5] >> 5)
+        bit = [(pos + 7) * 8]
+
+        def get(n):
+            v = 0
+            for _ in range(n):
+                v = (v << 1) | ((data[bit[0] >> 3] >> (7 - (bit[0] & 7))) & 1)
+                bit[0] += 1
+            return v
+        if get(3) == 0:                                 # SCE
+            get(4 + 8 + 1)                              # tag, global_gain, reserved
+            seq = get(2)
+            get(1)
+            if seq == 2:
+                max_sfb, groups, sbits, esc = get(4), 1 + bin(get(7)).count("1"), 3, 7
+            else:
+                max_sfb, groups, sbits, esc = get(6), 1, 5, 31
+                get(1)                                  # predictor_data_present
+            for _ in range(groups):
+                k = 0
+                while k < max_sfb:
+                    cb, n = get(4), 0
+                    while True:
+                        inc = get(sbits)
+                        n += inc
+                        if inc != esc:
+                            break
+                    noise += n if cb == 13 else 0
+                    coded += n if 1 <= cb <= 11 else 0
+                    k += n
+        pos += length
+    return noise, coded
+
+
 def main():
     parts = [
         "# interop_fixtures.cyr -- real encoder output with reference decodes.\n",
@@ -779,6 +819,24 @@ def main():
         ffmpeg_make(p("aac96.m4a"), STEREO_TRANSIENT % (96000, 96000, 96000, "0.08"),
                     "-c:a", "aac", "-b:a", "128k", "-aac_pns", "0")
         parts.append(lossy_fixture("AAC96", p("aac96.m4a"), 61))
+
+        # AAC with perceptual noise substitution. The noise is random, so no sample
+        # can match a reference, but each decoder scales a noise band to exactly its
+        # transmitted energy and the filterbank is orthogonal: the decode's total
+        # energy is fixed. Silence at both ends keeps the first and last frames
+        # (whose halves fall outside the decode) empty. Until 2.10.1 shravan's PNS
+        # bands were n/4 too loud, and this energy read 13% high.
+        ffmpeg_make(p("aacpns.aac"), "aevalsrc=0.3*random(0)*between(t\\,0.25\\,1.25):s=48000:d=1.5",
+                    "-c:a", "aac", "-b:a", "32k", "-f", "adts")
+        noise, coded = adts_band_types(p("aacpns.aac"))
+        require(noise >= 100 and coded > 0, "AAC PNS bands (codebook 13)")
+        ref = reference_f64(p("aacpns.aac"))
+        require(max(abs(v) for v in ref[:4096]) == 0 and max(abs(v) for v in ref[-4096:]) == 0,
+                "AAC PNS stream silent at both ends")
+        text = b64_literal("_FX_AACPNS_B64", open(p("aacpns.aac"), "rb").read())
+        text += "var _FX_AACPNS_COUNT = %d;\n" % len(ref)
+        text += "var _FX_AACPNS_ENERGY_X1E6 = %d;\n" % round(sum(v * v for v in ref) * 1e6)
+        parts.append(text)
         parts.append(mp4_audit_fixtures(p))
 
         # MP3 at 8 kHz: short blocks with the 72-line region boundary. And at 44.1:

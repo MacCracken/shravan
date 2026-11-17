@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
-is one entry point**, `src/main.cyr`, running the whole 13,063-assertion suite
+is one entry point**, `src/main.cyr`, running the whole 13,116-assertion suite
 (core codecs, Opus decode, the CELT encoder, SILK golden vectors, the real-file
 interop fixtures). It was split into three until 2.9.3 for a ~3.15 MB code buffer
 that has been a growable 64 MiB region since Cyrius 6.4.49. `cyrius distlib`
@@ -72,7 +72,7 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run the suite (13,063 assertions)
+./scripts/test-all.sh                       # build + run the suite (13,116 assertions)
 cyrius build src/main.cyr build/shravan    # the same by hand (Cyrius 6.7.18)
 ./build/shravan
 ./scripts/interop.sh                        # reference sweep: ffmpeg, flac, mpg123, libopus (needs libopus-dev)
@@ -106,7 +106,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
 | silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
 | opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by the test harnesses but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
-| aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE (more than two channels refused until 2.10.3), all 13 sample rates (`_aac_select_swb`), long/short windows, sine+KBD, full TNS, PNS, intensity, per-band M/S, ISO codebooks 1--11, independent windows. Exact vs ffmpeg apart from PNS noise. Encode: ISO-ordered `individual_channel_stream()`, per-band M/S + PNS + intensity (ffmpeg decodes shravan's output) |
+| aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE (more than two channels refused until 2.10.3), all 13 sample rates (`_aac_select_swb`), long/short windows, sine+KBD, full TNS, PNS, intensity, per-band M/S, ISO codebooks 1--11, independent windows. Exact vs ffmpeg; PNS bands at exactly the transmitted energy (decode energy within 1e-5 of ffmpeg's). Encode: 3GPP TS 26.403 psychoacoustics (spreading, ATH, pre-echo control, tonality-adjusted SMR), block switching (LONG_START / EIGHT_SHORT / LONG_STOP, groups by energy), TNS with thresholds in the filtered domain, a rate loop over the threshold scale with exact bit counts and a reservoir that starts full, M/S by perceptual entropy, PNS (at most 24 kbit/s a channel) and intensity (at most 48). ffmpeg and faad decode it at every rate, and `scripts/interop.py` holds it within 0.02 of ffmpeg's own encoder |
 | mp4 | src/mp4.cyr | MP4/M4A and QuickTime demux: box tree, sample table, 64-bit sizes and offsets, sample entry v0/v1/v2, esds/AudioSpecificConfig. AAC → aac_decode, ALAC → alac_decode_frames, HE-AAC reported unsupported |
 | resample | src/resample.cyr | Windowed sinc interpolation (Draft/Good/Best quality) |
 | dither | src/dither.cyr | Dithering for sample depth reduction |
@@ -130,7 +130,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,063 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,116 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

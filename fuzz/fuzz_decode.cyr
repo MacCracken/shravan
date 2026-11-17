@@ -358,6 +358,117 @@ while (fi < fe_iters) {
 syscall(1, 1, "ok\n", 3);
 
 # ================================================================
+# Target: AAC encoder. Random rates (valid and not), channel counts, bit rates
+# and lengths over hostile f64 input (NaN, infinities, values past full scale,
+# constants, silence, clicks that switch windows). Invalid parameters must be
+# refused; otherwise the stream must fit aac_encode_bound, hold one ADTS frame
+# per 1024 samples plus the priming frame, keep each frame within AAC-LC's 6144
+# bits a channel, and decode in shravan to that many finite samples. A violation
+# exits 88.
+# ================================================================
+syscall(1, 1, "  aac_encode... ", 16);
+var ae_rates = alloc(13 * 8);
+store64(ae_rates, 96000); store64(ae_rates + 8, 88200); store64(ae_rates + 16, 64000);
+store64(ae_rates + 24, 48000); store64(ae_rates + 32, 44100); store64(ae_rates + 40, 32000);
+store64(ae_rates + 48, 24000); store64(ae_rates + 56, 22050); store64(ae_rates + 64, 16000);
+store64(ae_rates + 72, 12000); store64(ae_rates + 80, 11025); store64(ae_rates + 88, 8000);
+store64(ae_rates + 96, 7350);
+var ae_max = 6000;
+var ae_out = alloc(aac_encode_bound(ae_max, 2));
+var ae_iters = iters / 4;
+if (ae_iters < 1) { ae_iters = 1; }
+fi = 0;
+while (fi < ae_iters) {
+    var ae_n = _fz_u(ae_max);
+    var ae_ch = _fz_u(2) + 1;
+    if (_fz_u(50) == 0) { ae_ch = _fz_u(2) * 3; }          # 0 or 3: refused
+    var ae_rate = load64(ae_rates + _fz_u(13) * 8);
+    if (_fz_u(50) == 0) { ae_rate = _fz_u(200000); }
+    var ae_br = _fz_u(600000) + 1;
+    if (_fz_u(50) == 0) { ae_br = 0 - _fz_u(2); }
+    var ae_ok = 0;
+    var ri = 0;
+    while (ri < 13) { if (load64(ae_rates + ri * 8) == ae_rate) { ae_ok = 1; } ri = ri + 1; }
+    if (ae_ch < 1 || ae_ch > 2 || ae_br <= 0) { ae_ok = 0; }
+    var ae_shape = _fz_u(5);
+    var ae_amp = f64_div(f64_from(_fz_u(2001)), f64_from(1000));
+    var ae_w = f64_div(F64_ONE, f64_from(_fz_u(200) + 2));
+    var ae_v = vec_new();
+    var k2 = 0;
+    while (k2 < ae_n * ae_ch) {
+        var x2 = f64_mul(ae_amp, f64_div(f64_from(_fz_u(2000001) - 1000000), f64_from(1000000)));
+        if (ae_shape == 1) { x2 = f64_mul(ae_amp, f64_sin(f64_mul(ae_w, f64_from(k2 / ae_ch)))); }
+        if (ae_shape == 2) { x2 = f64_div(ae_amp, f64_from(3)); }
+        if (ae_shape == 3) { x2 = 0; }
+        if (ae_shape == 4) {
+            x2 = 0;
+            if ((k2 / ae_ch) % 3000 < 8) { x2 = f64_mul(ae_amp, f64_div(f64_from(_fz_u(2001) - 1000), f64_from(1000))); }
+        }
+        var sp2 = _fz_u(200);
+        if (sp2 == 0) { x2 = 0x7FF8000000000000; }
+        if (sp2 == 1) { x2 = 0x7FF0000000000000; }
+        if (sp2 == 2) { x2 = 0 - 0x10000000000000; }
+        if (sp2 == 3) { x2 = f64_from(1000000); }
+        if (sp2 == 4) { x2 = f64_from(0 - 1000000); }
+        vec_push(ae_v, x2);
+        k2 = k2 + 1;
+    }
+    var ae_len = aac_encode(ae_v, ae_rate, ae_ch, ae_br, ae_out);
+    var ae_bad = 0;
+    if (ae_ok == 0) {
+        if (is_err(ae_len) == 0) { ae_bad = 1; }
+    } else {
+        if (is_err(ae_len) == 1) { ae_bad = 2; }
+        if (ae_bad == 0 && ae_len > aac_encode_bound(ae_n, ae_ch)) { ae_bad = 3; }
+        var ae_frames = 0;
+        var ae_pos = 0;
+        while (ae_bad == 0 && ae_pos + 7 <= ae_len) {
+            if (load8(ae_out + ae_pos) != 0xFF || (load8(ae_out + ae_pos + 1) & 0xF0) != 0xF0) { ae_bad = 4; }
+            var flen = ((load8(ae_out + ae_pos + 3) & 3) << 11) | (load8(ae_out + ae_pos + 4) << 3) | (load8(ae_out + ae_pos + 5) >> 5);
+            if (flen < 8 || (flen - 7) * 8 > 6144 * ae_ch) { ae_bad = 5; }
+            ae_pos = ae_pos + flen;
+            ae_frames = ae_frames + 1;
+        }
+        if (ae_bad == 0 && ae_pos != ae_len) { ae_bad = 6; }
+        if (ae_bad == 0 && ae_frames != (ae_n + 1023) / 1024 + 1) { ae_bad = 7; }
+        if (ae_bad == 0) {
+            var ae_r = aac_decode(ae_out, ae_len);
+            if (is_err(ae_r) == 1) {
+                ae_bad = 8;
+            } else {
+                var ae_d = decode_result_samples(ae_r);
+                if (vec_len(ae_d) != ae_frames * 1024 * ae_ch) { ae_bad = 9; }
+                var q2 = 0;
+                var four = f64_from(4);
+                while (ae_bad == 0 && q2 < vec_len(ae_d)) {
+                    var y2 = vec_get(ae_d, q2);
+                    if (((y2 >> 52) & 0x7FF) == 0x7FF || f64_gt(f64_abs(y2), four) == 1) { ae_bad = 10; }
+                    q2 = q2 + 1;
+                }
+            }
+        }
+    }
+    if (ae_bad != 0) {
+        syscall(1, 1, "aac encode check failed: ", 25);
+        fmt_int(ae_bad);
+        syscall(1, 1, " rate ", 6);
+        fmt_int(ae_rate);
+        syscall(1, 1, " ch ", 4);
+        fmt_int(ae_ch);
+        syscall(1, 1, " br ", 4);
+        fmt_int(ae_br);
+        syscall(1, 1, " n ", 3);
+        fmt_int(ae_n);
+        syscall(1, 1, " shape ", 7);
+        fmt_int(ae_shape);
+        syscall(1, 1, "\n", 1);
+        syscall(60, 88);
+    }
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
 # Target: ALAC (roadmap says the decoder is unreachable via dispatch —
 # fuzz it directly so it is hardened before it is wired up)
 # ================================================================

@@ -21,7 +21,7 @@ shravan/
                        OpusHead/OpusTags parsing
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
-    aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, M/S, short windows)
+    aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows; encoder psy + rate loop)
     mp4.cyr         -- MP4/M4A/QuickTime demux (box tree, sample table, esds, AAC -> aac_decode, ALAC -> alac_decode_frames)
     resample.cyr    -- Windowed sinc resampler (Draft/Good/Best)
     dither.cyr      -- TPDF + noise-shaped dithering
@@ -73,7 +73,12 @@ f64 samples --> flac_encode_level() --> FLAC bitstream, levels 0-8 as `flac -0..
                partitioned Rice, stereo decorrelation, wasted bits, seek table, CRC, MD5)
 f64 samples --> aiff_encode()  --> AIFF bytes (big-endian)
 f64 samples --> opus_encode()  --> Ogg/Opus bitstream (CELT mode)
-f64 samples --> aac_encode()   --> ADTS/AAC-LC bitstream
+f64 samples --> aac_encode()   --> ADTS/AAC-LC bitstream: per frame, attack detection (one frame
+               ahead) picks LONG / LONG_START / EIGHT_SHORT / LONG_STOP; MDCT; 3GPP TS 26.403
+               thresholds (spreading, ATH, pre-echo control, tonality from a 2048-point FFT);
+               TNS; PNS and intensity at low rates; M/S by perceptual entropy; a threshold-scale
+               search with exact bit counts against the 3GPP bit demand and a reservoir;
+               1024 samples of priming, so a decode is the input delayed by one frame
 f64 samples --> resample()     --> f64 samples at new rate
 f64 samples --> dither_tpdf()  --> f64 samples with dither noise
 

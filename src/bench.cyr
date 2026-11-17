@@ -535,7 +535,7 @@ fn bench_flac_stream_1sec() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.10.0 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.10.1 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();

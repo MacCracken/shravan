@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.10.0.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.10.1.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -11,7 +11,7 @@
 | FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | levels 0–8 as `flac -0` to `-8`: LPC to order 12, partitioned Rice, stereo decorrelation, wasted bits, seek table | `flac`: 79 decode sweep cases exact (to 32-bit, 8 channels, 16384-sample blocks). Encode: within 0.06% of `flac -L`'s size at every level on 5.5 minutes of real recordings; libFLAC (`flac -t`, `flac -d`) and ffmpeg decode 1,125 hostile cases exactly (4–32 bits, 1–8 channels, 1 Hz–1 MHz) |
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
-| AAC-LC | mono and stereo, all 13 rates, TNS, short blocks, M/S, intensity, PNS | long blocks, M/S, intensity, PNS | ffmpeg both ways. Decode exact apart from PNS noise |
+| AAC-LC | mono and stereo, all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact; PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS) |
 | Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; mapping family 0 | CELT mono and stereo | libopus (a default build): exact, wideband SILK and hybrid concealment included; CELT concealment within 3 LSB (its float32 against shravan's f64) |
 | MP4 | AAC and ALAC, first audio track | none | ffmpeg, including QuickTime v1/v2 |
 
@@ -35,15 +35,10 @@ Open until a reference file or decoder exists for each.
   ffmpeg's ALAC and `flac`'s fixed-size output are verified.
 - **ID3v2 grouped frames** are read per the spec; neither ffmpeg nor mutagen reads them at all.
 
-The remaining distance to **3.0.0** is (1) the AAC encoder's quality work, (2) the rest of the Opus
-encoder, (3) the multichannel paths below. The FLAC encoder is real since 2.10.0.
+The remaining distance to **3.0.0** is (1) the rest of the Opus encoder, (2) the multichannel paths
+below. The FLAC encoder is real since 2.10.0, the AAC encoder since 2.10.1.
 
 ## v2.10.x — the rest of the suite, matured
-
-### v2.10.1 — AAC encoder
-`feat(aac)`: re-enable TNS (prediction-gain gated, within `TNS_MAX_BANDS`), short windows, ATH floor and
-tonality-adjusted SMR, optional rate/distortion scale-factor loop. Check quality per rate: the psy model
-and the M/S, PNS and intensity thresholds assume 44.1 kHz band positions.
 
 ### v2.10.2 — MP4 and gapless
 `feat(mp4)`: multi-track selection, edit lists (`elst` priming and end trim, so AAC comes out at the

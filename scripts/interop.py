@@ -22,9 +22,11 @@ import array
 import math
 import os
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
+import wave
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "build", "interop-cli")
@@ -32,13 +34,14 @@ OPUSREF = os.path.join(ROOT, "build", "opusref")
 
 # Bursts at different times per channel, a sweep and noise: transients force short
 # blocks and independent windows, noise keeps every band busy.
-def signal(rate, ch, dur, amp=0.4):
+def signal(rate, ch, dur, amp=0.4, sweep=None):
+    """sweep: the chirp's rise per second (default rate / 5)."""
     chans = []
     for c in range(ch):
         f = 220 * (c + 2)
         chans.append(
             f"{amp}*sin(2*PI*{f}*t)*(0.6+0.4*exp(-20*mod(t+{0.03 * c:.2f}\\,0.17)))"
-            f"+0.08*sin(2*PI*(300+{rate // 5}*mod(t\\,1))*t)+0.04*random({c})")
+            f"+0.08*sin(2*PI*(300+{rate // 5 if sweep is None else sweep}*mod(t\\,1))*t)+0.04*random({c})")
     return "aevalsrc=" + "|".join(chans) + f":s={rate}:d={dur}"
 
 
@@ -86,11 +89,12 @@ def corr(a, b):
     return sab / math.sqrt(saa * sbb) if saa > 0 and sbb > 0 else 0.0
 
 
-def best_lag_corr(ref, got, ch, maxlag=4096, warm=2048):
-    """Correlation of got against ref at the lag (in frames, either direction) that
-    maximises it, past the first and last `warm` frames (codec start-up)."""
+def best_lag_corr(ref, got, ch, maxlag=4096, warm=2048, minlag=None):
+    """Correlation of got against ref at the lag (in frames, either direction, or
+    minlag..maxlag) that maximises it, past the first and last `warm` frames (codec
+    start-up)."""
     best = (0.0, 0)
-    for lag in range(-maxlag, maxlag + 1):
+    for lag in range(-maxlag if minlag is None else minlag, maxlag + 1):
         a, b = (ref, got[lag * ch:]) if lag >= 0 else (ref[-lag * ch:], got)
         n = min(len(a), len(b)) - warm * ch
         if n <= warm * ch:
@@ -444,23 +448,78 @@ class Sweep:
                 want = ff_decode(self.p("ref32.wav"), self.p("ref32.f64"))
             e = maxerr(want, back, 1.0)
             self.record("encode", kind, len(back) == len(want) and e == 0, f"maxerr={e:.3g}")
-        # AAC: what ffmpeg makes of shravan's stream.
-        for rate in (22050, 44100, 48000):
+        # AAC: what ffmpeg and faad make of shravan's stream, at every band
+        # layout and from low to high rates (the chirp, 300 + 2 sweep t Hz, held
+        # under 6.3 kHz, inside both encoders' bandwidth at 32 kbit/s a channel, so
+        # the comparison is of coding, not of where each draws the cutoff; at least
+        # 12000 samples, past the correlation's warm-up). The stream must decode to the input at
+        # exactly the encoder's 1024 samples of priming, within 0.02 of the
+        # correlation ffmpeg's own encoder reaches on the same input at the same
+        # rate; spend at most the rate asked (2% and 1 kbit/s for the reservoir on
+        # a short clip); and keep every frame within AAC-LC's 6144 bits a channel.
+        faad = shutil.which("faad")
+        for rate in (8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 96000):
             for ch in (1, 2):
-                run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(rate, ch, 0.6, 0.3),
+                dur = max(0.5, 12000 / rate)
+                run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    signal(rate, ch, dur, 0.3, min(rate // 5, int(3000 / dur))),
                     "-f", "f64le", "-c:a", "pcm_f64le", self.p("x.f64"))
                 x = f64(self.p("x.f64"))
-                p = run(CLI, "encode", self.p("x.f64"), "aac", str(rate), str(ch), str(64000 * ch),
-                        self.p("enc.aac"), check=False)
-                if p.returncode != 0:
-                    self.record("encode", f"aac {rate} {ch}ch", False, "shravan error")
-                    continue
-                back = ff_decode(self.p("enc.aac"), self.p("back.f64"))
-                # Interop, not quality: ffmpeg must decode the stream to the input.
-                # (ffmpeg's own encoder reaches 0.995+ here; the gap is the AAC
-                # encoder work scheduled for 2.10.1.)
-                c, lag = best_lag_corr(x, back, ch, 1100)
-                self.record("encode", f"aac {rate} {ch}ch -> ffmpeg", c > 0.9, f"corr={c:.4f} lag={lag}")
+                run("ffmpeg", "-v", "error", "-y", "-f", "f64le", "-ar", str(rate), "-ac", str(ch),
+                    "-i", self.p("x.f64"), "-c:a", "pcm_s16le", self.p("x.wav"))
+                for br_ch in (32000, 64000, 128000):
+                    if br_ch > rate * 6:
+                        continue
+                    br = br_ch * ch
+                    name = f"aac {rate} {ch}ch {br // 1000}k"
+                    p = run(CLI, "encode", self.p("x.f64"), "aac", str(rate), str(ch), str(br),
+                            self.p("enc.aac"), check=False)
+                    if p.returncode != 0:
+                        self.record("encode", name, False, "shravan error")
+                        continue
+                    data = open(self.p("enc.aac"), "rb").read()
+                    sizes, pos = [], 0
+                    while pos + 7 <= len(data) and data[pos] == 0xFF and data[pos + 1] & 0xF0 == 0xF0:
+                        sizes.append(((data[pos + 3] & 3) << 11) | (data[pos + 4] << 3) | (data[pos + 5] >> 5))
+                        pos += sizes[-1]
+                    # over the coded frames (priming and flush), less the one
+                    # reservoir a constant-rate stream may start with
+                    coded = len(sizes) * 1024 / rate
+                    kbps = (len(data) * 8 - 6144 * ch) / coded / 1000
+                    frames_ok = pos == len(data) and max(sizes) - 7 <= 768 * ch
+                    back = ff_decode(self.p("enc.aac"), self.p("back.f64"))
+                    c, lag = best_lag_corr(x, back, ch, 1034, 2048, 1014)
+                    fe = run("ffmpeg", "-v", "error", "-y", "-i", self.p("x.wav"), "-c:a", "aac",
+                             "-b:a", str(br), "-f", "adts", self.p("ff.aac"), check=False)
+                    cf, ffk = 0.0, 0.0
+                    if fe.returncode == 0:
+                        cf, _ = best_lag_corr(x, ff_decode(self.p("ff.aac"), self.p("ffb.f64")), ch, 1034, 2048, 1014)
+                        ffk = (os.path.getsize(self.p("ff.aac")) * 8 - 6144 * ch) / coded / 1000
+                    # ffmpeg's bar holds where it spends no more than 10% over
+                    # shravan (it overshoots most at the lowest rates per sample).
+                    bar = c >= cf - 0.02 or ffk > 1.1 * kbps
+                    ok = lag == 1024 and c > 0.9 and bar and frames_ok and kbps <= br / 1000
+                    detail = (f"corr={c:.4f} (ffmpeg's encoder {cf:.4f} at {ffk:.1f}) lag={lag} {kbps:.1f} kbit/s "
+                              f"largest frame {(max(sizes) - 7) * 8} bits")
+                    if faad:
+                        fa = run(faad, "-q", "-o", self.p("faad.wav"), self.p("enc.aac"), check=False)
+                        fok = fa.returncode == 0
+                        if fok:
+                            with wave.open(self.p("faad.wav")) as w:
+                                frate, fn = w.getframerate(), w.getnframes()
+                            if frate == rate:
+                                cfa, _ = best_lag_corr(x, ff_decode(self.p("faad.wav"), self.p("faad.f64")), ch, 1034, 2048, 1014)
+                                fok = cfa > c - 0.002
+                                detail += f" faad corr={cfa:.4f}"
+                            else:
+                                # Below 32 kHz faad assumes implicit SBR and plays
+                                # the stream at twice the rate: every frame, doubled.
+                                fok = frate == 2 * rate and fn == 2048 * len(sizes)
+                                detail += f" faad at {frate} Hz, {fn} frames"
+                        else:
+                            detail += " faad FAILED"
+                        ok = ok and fok
+                    self.record("encode", name, ok, detail)
         # CELT: what libopus makes of shravan's frames.
         for ch in (1, 2):
             run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(48000, ch, 0.5, 0.3),

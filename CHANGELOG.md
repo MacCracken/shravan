@@ -5,6 +5,181 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.1] - 2026-11-16
+
+**The AAC encoder, rebuilt.** 2.10.0's encoder coded long windows only, with TNS switched off, PNS and
+intensity thresholds set as 44.1 kHz bin numbers, and no working rate control: every request from 32 to
+192 kbit/s came out at about 570 kbit/s on real recordings. It is now a 3GPP TS 26.403 encoder, with
+block switching, TNS and a rate loop, at all 13 AAC rates. On 5.5 minutes of real recordings its NMR is
+lower than ffmpeg's native encoder from 64 kbit/s up, while spending 3–4% fewer bits. It has less
+pre-echo than ffmpeg in 11 of 12 transient cases, and ffmpeg and faad decode it at every rate. The
+decoder's PNS bands were n/4 too loud, and that is fixed too. 13,116 assertions (was 13,063).
+
+### Added — the AAC encoder
+
+- **Psychoacoustics** after TS 26.403, as ffmpeg's `aacpsy.c` implements it:
+  - a −29 dB threshold spread at 15 dB a Bark upward and 30 downward;
+  - the threshold in quiet, capped at 40 dB SPL (uncapped, its f⁴ term removes everything above about
+    19 kHz at any level);
+  - pre-echo control;
+  - perceptual entropy;
+  - the bit demand curve.
+- **Tonality-adjusted SMR**, in long windows. Each band's signal-to-mask offset runs from 29 dB for a
+  tone to 12 dB for noise. Tonality comes from Johnston's spectral flatness on a Hann-windowed
+  2048-point FFT, computed as one 1024-point complex FFT; the MDCT's flatness is unreliable in narrow
+  bands.
+- **Block switching.** An attack detector compares first-difference energy over 128-sample blocks, one
+  frame ahead. The window sequence runs `LONG_START` → `EIGHT_SHORT` → `LONG_STOP`, with windows exactly
+  mirroring the decoder's synthesis. Short windows are grouped by energy: a new group starts at the attack
+  and wherever the energy changes by more than 6 dB.
+- **TNS**:
+  - from 1275 Hz (2750 in short windows) to `TNS_MAX_BANDS`;
+  - order 12 (7 short), gated at a prediction gain over 2;
+  - 4-bit coefficients, compressed where they fit.
+
+  The quantiser works on the filtered spectrum, and the decoder's synthesis filter raises that noise
+  again by about the prediction gain. So the energies and thresholds of filtered bands move into the
+  filtered domain (T′ = T·E′/E), and the rate loop's reduction rule still runs on the psychoacoustic
+  values.
+- **Rate control.**
+  - A search over one threshold scale with TS 26.403's reduction rule, (thr^¼ + r)⁴, and hole
+    avoidance, which floors protected bands at −1 dB of their energy and removes the protection band by
+    band from the top only past 48 steps.
+  - Each step is the exact bit count of the whole frame: scalefactors, sections chosen by dynamic
+    programming over the codebooks, and Huffman codewords.
+  - A bit reservoir of 6144 bits a channel that **starts full**, as in ffmpeg and FDK. A constant-rate
+    decoder buffers that much before its first frame. Starting empty, the bit demand spends 30–70% of the
+    average until it has refilled, and the first 30 frames of a 32 kbit/s stream came out nearly empty.
+  - The search starts from the previous frame's scale.
+- **Scalefactors**: the coarsest one whose noise fits the band's allowance, by bracketing and bisection.
+  Every value stays within 8191, and every scalefactor within 60 of the previous coded band's.
+- **M/S** per band, where mid and side cost less perceptual entropy than left and right, with both held
+  to half the stricter channel's threshold.
+- **PNS** at most 24 kbit/s a channel: noise-like bands (tonality under 0.3) above 4 kHz, in long and
+  `LONG_STOP` frames without TNS.
+  - At 24 kbit/s a channel it cuts bands lost by 10 dB or more from 3.3% to 0.9% (ffmpeg 2.0%), for
+    1.3 dB of NMR; ffmpeg's PNS costs 1.4.
+  - At 32 kbit/s a channel it would save 0.6% to 0.2% for 2.9 dB, so it stops there.
+- **Intensity stereo** at most 48 kbit/s a channel, above 6 kHz (8 kHz at 48), where left and right
+  correlate past 0.9.
+- **Bandwidth** from ffmpeg's `AAC_CUTOFF_FROM_BITRATE` at the nominal rate. ffmpeg's twoloop feeds it
+  1.15 times the rate; measured here, that cost 0.4–0.5 dB of NMR and up to 3 dB of pre-echo at 16–32
+  kbit/s a channel, and changed nothing from 48 up.
+- **`aac_encode_bound(frames, channels)`**: the most `aac_encode` writes, every frame at AAC-LC's 6144
+  bits a channel.
+
+### Fixed
+
+- **AAC decoder: PNS bands were n/4 too loud**, +6 dB in a 16-line band and +9 in a 32-line one. ISO
+  14496-3 4.6.13.3 sets a noise band's total energy to 2^(nrg/2). shravan set its RMS per line instead,
+  which agrees only at 4 lines, the width its calibration had used. The interop fixtures had exempted
+  PNS ("its noise is random"), which hid it. A new fixture checks the energy: an ffmpeg PNS stream
+  framed by silence decodes to a fixed total energy, because the filterbank is orthogonal and every
+  decoder normalises each noise band exactly. shravan now matches ffmpeg to 4e-8; the old level read 13%
+  high.
+- **AAC encoder: the bit rate was ignored** (see above). The new encoder spends 96.1 kbit/s for 96 and
+  128.1 for 128. It may run ahead of the rate by one reservoir, never more.
+- **AAC encoder: intensity before TNS.** Decoders apply intensity stereo before TNS, so an intensity
+  band the left channel's TNS covered copied the left's filtered spectrum. Neither channel may filter an
+  intensity band now. Before, only the right channel was checked.
+- **AAC encoder input**: NaN is silence, and infinities and values past full scale are full scale. They
+  used to reach the transform.
+
+### Changed
+
+- **`aac_encode` writes a priming frame and a flush frame**, as other encoders do. A decode is the input
+  delayed by 1024 samples and ends one frame later. Streams from 2.10.0 decode as before.
+- Removed internal 2.9.x encoder code: `_aac_psy_*`, `_tns_analyze_apply`, `_aac_write_ics_ext`,
+  `_aac_pns_should_use` and their constants.
+
+### Verified
+
+- **NMR against ffmpeg 7.1's native encoder** on 12 real recordings: the Opus RFC 8251 test vectors'
+  reference decodes, 48 kHz stereo, 5.5 minutes. The metric is noise-to-mask ratio after Brandenburg:
+  half-Bark bands, Schroeder spreading, a tonality-dependent offset and the threshold in quiet, the same
+  model for every encoder. "Disturbed" is the share of frames whose worst band exceeds +1.5 dB. Lower is
+  better for both. Each cell is NMR · disturbed · kbit/s actually spent:
+
+| Rate | shravan 2.10.1 | ffmpeg | ffmpeg, PNS and intensity off |
+|---|---|---|---|
+| 32k | −4.57 dB · 75.2% · 32.1 | −4.72 · 72.0% · 34.2 | −5.10 · 74.8% · 34.3 |
+| 48k | −5.99 · 59.0% · 48.1 | −6.46 · 49.9% · 51.1 | −7.85 · 36.1% · 51.0 |
+| 64k | −9.88 · 26.1% · 64.1 | −7.35 · 44.6% · 67.8 | −8.76 · 24.8% · 66.9 |
+| 96k | −15.16 · 3.6% · 96.1 | −10.38 · 23.9% · 99.6 | −11.33 · 9.4% · 99.0 |
+| 128k | −19.65 · 1.1% · 128.1 | −14.08 · 9.1% · 132.6 | −14.92 · 2.3% · 132.1 |
+| 192k | −27.58 · 0.2% · 192.1 | −20.19 · 1.0% · 198.2 | −21.00 · 0.4% · 197.4 |
+
+  NMR scores substituted noise as error, so the PNS rates (32 and 48) favour encoders that substitute
+  less. The model penalises ffmpeg's PNS the same way. 2.10.0 measured −20.84 dB at 572 kbit/s for every
+  rate asked.
+- **Bands lost by 10 dB or more** (below the cutoff, above 4 kHz): 0.9%, 0.6%, 1.1% and 1.2% at 48, 64,
+  96 and 128 kbit/s; ffmpeg 2.0%, 0.4%, 0.0% and 0.0%. Above 64 kbit/s shravan drops bands its model
+  calls masked, and ffmpeg codes them.
+- **Pre-echo** on synthetic castanets, drums and glockenspiel: coding error in the 21 ms before each
+  attack, over the attack's energy. Lower is better; ffmpeg ran with PNS and intensity off:
+
+| | castanets | drums | glockenspiel |
+|---|---|---|---|
+| 64k mono | −31.1 dB (ffmpeg −29.0) | −38.6 (−34.2) | −35.6 (−26.9) |
+| 128k mono | −37.4 (−37.7) | −42.8 (−42.7) | −41.6 (−39.4) |
+| 64k stereo | −32.4 (−25.9) | −35.3 (−32.8) | −30.1 (−20.9) |
+| 128k stereo | −33.4 (−29.8) | −37.5 (−35.0) | −37.0 (−29.2) |
+
+  TNS accounts for 2–4 dB of that. 2.10.0 measured −15 to −17 dB on castanets and −22 to −24 dB on drums,
+  at its 570 kbit/s.
+- **`scripts/interop.py`**: the AAC encoder cases grow from 6 to 52. They cover 10 rates (8 to 96 kHz),
+  mono and stereo, at 32, 64 and 128 kbit/s a channel. Each case must:
+  - decode in ffmpeg at exactly the 1024-sample priming;
+  - come within 0.02 of the correlation ffmpeg's encoder reaches on the same input, where ffmpeg spends
+    no more than 10% over;
+  - spend at most the rate asked, over the coded frames less one reservoir;
+  - keep every frame within 6144 bits a channel;
+  - decode in faad. Below 32 kHz faad assumes implicit SBR and plays the stream at twice the rate, so
+    there it must return exactly twice the frames.
+
+  The chirp is held under 6.3 kHz, inside both encoders' bandwidth. `scripts/interop.sh` passes 921 of
+  921 against a default libopus build (was 841).
+- **In the suite** (13,116 assertions):
+  - The PNS energy fixture.
+  - Rate: at most the bit rate and one reservoir, and within 10% of it.
+  - Block switching on clicks (band-limited, so their energy is inside the bandwidth): correlation over
+    0.993, where long windows only reach 0.987 and ffmpeg 0.9996.
+  - Full-band clicks at 32 kHz, which TNS filters: over 0.995. The thresholds as they were before the
+    filtered-domain fix reach 0.987.
+  - Each tool engages where it should and nowhere else: M/S on identical channels; PNS on noise at 24
+    kbit/s but not on a tone, and not at 32; intensity on correlated stereo but not on decorrelated.
+  - Hostile input.
+
+  Each fix was proven by reverting it in a scratch copy and watching its test fail.
+- **Fuzzing**: a new `aac_encode` target in `fuzz/fuzz_decode.cyr`.
+  - Input: random rates (valid and not), channel counts, bit rates and lengths, over NaN, infinities,
+    values past full scale, constants, silence and clicks.
+  - Invalid parameters must be refused.
+  - Every other stream must fit the bound, hold one frame per 1024 samples plus priming, stay within
+    6144 bits a channel and decode in shravan to finite samples.
+
+  `./fuzz/run.sh 90000` and `--poison` are clean: 92,100 and 90,000 calls and 2,200 cold starts. 48
+  further poison seeds of `fuzz_decode` are clean too (a new target re-rolls every later target's inputs).
+
+### Performance
+
+One session, pinned to one core, best of three, against 2.10.0 built from its tag's sources:
+
+| Benchmark | 2.10.0 | 2.10.1 | Change |
+|---|---|---|---|
+| `aac_encode_1sec_stereo` | 51.5 ms | 54.2 ms | +5.2% |
+| `aac_decode_1sec_stereo` | 23.2 ms | 17.9 ms | −22.9% |
+
+- **Encode** does far more per frame: tonality, block switching, TNS and a rate loop. It stays close to
+  2.10.0 through three changes:
+  - The tonality FFT is a 1024-point complex FFT of the real frame, not a 2048-point one, with its window
+    tabulated and one logarithm per four lines. Until then it took 46% of encode time.
+  - Short frames skip the tonality estimate.
+  - The rate search starts from the previous frame's scale, with a per-frame cache: 6.0 quantisations
+    of a frame on average, down from 8.8.
+- **Decode** is unchanged code. It reads a 128 kbit/s stream now, not 2.10.0's 570 kbit/s one.
+- Every other benchmark is within ±2%.
+
 ## [2.10.0] - 2026-11-16
 
 **A real FLAC encoder.** Until now shravan wrote fixed-prediction FLAC only, 28% larger than `flac`'s
