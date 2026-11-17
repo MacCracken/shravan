@@ -49,8 +49,8 @@ fn _opus_tmp(size) {
 }
 
 fn opus_head_new() {
-    var h = alloc(48);
-    memset(h, 0, 48);
+    var h = alloc(72);
+    memset(h, 0, 72);
     return h;
 }
 
@@ -60,6 +60,14 @@ fn opus_head_pre_skip(h)       { return load64(h + 16); }
 fn opus_head_sample_rate(h)    { return load64(h + 24); }
 fn opus_head_output_gain(h)    { return load64(h + 32); }
 fn opus_head_mapping(h)        { return load64(h + 40); }
+# The channel mapping (RFC 7845 5.1.1): how many elementary streams a packet
+# carries, how many of them are coupled (stereo), and for each output channel the
+# decoded channel it takes (coupled streams' channels first, two apiece, then the
+# uncoupled; 255 is silence). Family 0 has the implicit 1 stream, channels - 1
+# coupled, mapping 0 1.
+fn opus_head_streams(h)        { return load64(h + 48); }
+fn opus_head_coupled(h)        { return load64(h + 56); }
+fn opus_head_channel_map(h)    { return load64(h + 64); }   # channels bytes
 
 # ================================================================
 # OpusHead parsing
@@ -102,6 +110,39 @@ fn opus_parse_head(data, len) {
     store64(h + 24, input_sample_rate);
     store64(h + 32, output_gain);
     store64(h + 40, channel_mapping_family);
+    var map = alloc(channel_count);
+    if (channel_mapping_family == 0) {
+        # one stream, mono or stereo
+        if (channel_count > 2) { return err(ERR_INVALID_HEADER); }
+        store64(h + 48, 1);
+        store64(h + 56, channel_count - 1);
+        store8(map, 0);
+        if (channel_count == 2) { store8(map + 1, 1); }
+    } else {
+        # Family 1 (Vorbis layouts, 1-8 channels), 2 (ambisonics) and 255
+        # (undefined) share the table. Family 3 also needs a demixing matrix, and
+        # the others are reserved: a decoder SHOULD NOT play them (RFC 7845).
+        if (channel_mapping_family != 1 && channel_mapping_family != 2 && channel_mapping_family != 255) {
+            return err(ERR_UNSUPPORTED_FMT);
+        }
+        if (channel_mapping_family == 1 && channel_count > 8) { return err(ERR_INVALID_HEADER); }
+        if (len < 21 + channel_count) { return err(ERR_INVALID_HEADER); }
+        var nstreams = load8(data + 19);
+        var ncoupled = load8(data + 20);
+        # libopus: at least one stream, no more coupled than streams, and at most
+        # 255 decoded channels
+        if (nstreams < 1 || ncoupled > nstreams || nstreams + ncoupled > 255) { return err(ERR_INVALID_HEADER); }
+        var c = 0;
+        while (c < channel_count) {
+            var m = load8(data + 21 + c);
+            if (m != 255 && m >= nstreams + ncoupled) { return err(ERR_INVALID_HEADER); }
+            store8(map + c, m);
+            c = c + 1;
+        }
+        store64(h + 48, nstreams);
+        store64(h + 56, ncoupled);
+    }
+    store64(h + 64, map);
     return h;
 }
 
@@ -5699,6 +5740,415 @@ fn opus_decode_from_packets(packets_vec, ogg_data, ogg_len) {
     return r;
 }
 
+# ---------------------------------------------------------------- stream decoder
+
+# One elementary Opus stream: its CELT and SILK decoders and what the next packet
+# needs from the last (libopus's OpusDecoder). Mapping family 0 is one stream of
+# one or two channels; a multistream packet (RFC 7845 5.1.1) runs one per stream.
+var _OPUS_SD_CELT = 0;
+var _OPUS_SD_SILK = 8;
+var _OPUS_SD_CH = 16;
+var _OPUS_SD_PREV_MODE = 24;   # 0 none yet, 1 SILK-only, 2 hybrid, 3 CELT-only
+var _OPUS_SD_PREV_RED = 32;    # the previous frame ended in a SILK->CELT redundant frame
+var _OPUS_SD_LAST_END = 40;    # the CELT end band last set (from the last frame's bandwidth)
+var _OPUS_SD_LAST_DUR = 48;    # the last packet's duration and frame size: an empty
+var _OPUS_SD_LAST_FSAMP = 56;  # packet is a lost one, concealed that long in frame-size pieces
+var _OPUS_SD_SIZE = 64;
+
+# Scratch the stream decoders share (one decodes at a time).
+var _opus_sd_pcm = 0;          # one frame, up to 60 ms of two channels
+var _opus_sd_offs = 0;         # a packet's frames (up to 48)
+var _opus_sd_lens = 0;
+var _opus_sd_silk = 0;
+var _opus_sd_lost = 0;
+var _opus_sd_tbuf = 0;
+var _opus_sd_silence = 0;
+
+fn _opus_sd_new(channels) {
+    if (_opus_sd_pcm == 0) {
+        # One Opus FRAME is at most 60 ms = 2880 samples.
+        _opus_sd_pcm = alloc(2 * 2880 * 8);
+        # A packet holds up to 48 frames (RFC 6716 3.2.5).
+        _opus_sd_offs = alloc(48 * 8);
+        _opus_sd_lens = alloc(48 * 8);
+        _opus_sd_silk = alloc(2 * 2880 * 8);
+        _opus_sd_lost = alloc(2 * 2880 * 8);
+        _opus_sd_tbuf = alloc(2 * 240 * 8);
+        _opus_sd_silence = alloc(2);
+        store8(_opus_sd_silence, 0xFF);
+        store8(_opus_sd_silence + 1, 0xFF);
+    }
+    var sd = alloc(_OPUS_SD_SIZE);
+    store64(sd + _OPUS_SD_CELT, celt_dec_state_new());
+    store64(sd + _OPUS_SD_SILK, silk_dec_new());
+    store64(sd + _OPUS_SD_CH, channels);
+    store64(sd + _OPUS_SD_PREV_MODE, 0);
+    store64(sd + _OPUS_SD_PREV_RED, 0);
+    store64(sd + _OPUS_SD_LAST_END, 21);
+    store64(sd + _OPUS_SD_LAST_DUR, 960);
+    store64(sd + _OPUS_SD_LAST_FSAMP, 960);
+    return sd;
+}
+
+# Split a self-delimited packet (RFC 6716 Appendix B: every stream of a
+# multistream packet but the last) into frames, as opus_packet_parse_impl does
+# with self_delimited set: the last frame's size is coded too, after the others'
+# (for CBR, the one size every frame has). Writes the packet's length, padding
+# included, to *used. Returns the frame count, or err().
+fn _opus_split_frames_sd(data, plen, offs, lens, maxf, used) {
+    if (plen < 1) { return err(ERR_DECODE); }
+    var toc = load8(data);
+    var config = (toc >> 3) & 0x1F;
+    var code = toc & 3;
+    var fsz = _opus_frame_samples(config);
+    var pos = 1;
+    var rem = plen - 1;
+    var count = 1;
+    var cbr = 0;
+    var last_size = rem;
+    var pad = 0;
+    var tmp = _opus_tmp(8);
+    if (code == 1) {
+        count = 2;
+        cbr = 1;
+    }
+    if (code == 2) {
+        count = 2;
+        var u2 = _opus_parse_size(data, pos, pos + rem, tmp);
+        if (u2 < 0) { return err(ERR_DECODE); }
+        rem = rem - u2;
+        pos = pos + u2;
+        if (load64(tmp) > rem) { return err(ERR_DECODE); }
+        store64(lens, load64(tmp));
+        last_size = rem - load64(tmp);
+    }
+    if (code == 3) {
+        if (rem < 1) { return err(ERR_DECODE); }
+        var fc = load8(data + pos);
+        pos = pos + 1;
+        rem = rem - 1;
+        count = fc & 0x3F;
+        if (count < 1 || fsz * count > 5760) { return err(ERR_DECODE); }
+        if ((fc & 0x40) != 0) {
+            var more = 1;
+            while (more == 1) {
+                if (rem <= 0) { return err(ERR_DECODE); }
+                var pb = load8(data + pos);
+                pos = pos + 1;
+                rem = rem - 1;
+                var padd = pb;
+                more = 0;
+                if (pb == 255) { padd = 254; more = 1; }
+                rem = rem - padd;
+                pad = pad + padd;
+            }
+        }
+        if (rem < 0) { return err(ERR_DECODE); }
+        cbr = 1;
+        if ((fc & 0x80) != 0) {
+            cbr = 0;
+            last_size = rem;
+            var i = 0;
+            while (i < count - 1) {
+                if (i >= maxf) { return err(ERR_DECODE); }
+                var u = _opus_parse_size(data, pos, pos + rem, tmp);
+                if (u < 0) { return err(ERR_DECODE); }
+                rem = rem - u;
+                if (load64(tmp) > rem) { return err(ERR_DECODE); }
+                pos = pos + u;
+                store64(lens + i * 8, load64(tmp));
+                last_size = last_size - u - load64(tmp);
+                i = i + 1;
+            }
+            if (last_size < 0) { return err(ERR_DECODE); }
+        }
+    }
+    if (count > maxf) { return err(ERR_DECODE); }
+    if (code == 1 || code == 2) {
+        if (fsz * 2 > 5760) { return err(ERR_DECODE); }
+    }
+    # the extra size: the last frame's, or for CBR every frame's
+    var ul = _opus_parse_size(data, pos, pos + rem, tmp);
+    if (ul < 0) { return err(ERR_DECODE); }
+    rem = rem - ul;
+    var ls = load64(tmp);
+    if (ls > rem) { return err(ERR_DECODE); }
+    pos = pos + ul;
+    if (cbr == 1) {
+        if (ls * count > rem) { return err(ERR_DECODE); }
+        var k = 0;
+        while (k < count) { store64(lens + k * 8, ls); k = k + 1; }
+    } else {
+        if (ul + ls > last_size) { return err(ERR_DECODE); }
+        store64(lens + (count - 1) * 8, ls);
+    }
+    var at = pos;
+    var j = 0;
+    while (j < count) {
+        store64(offs + j * 8, at);
+        at = at + load64(lens + j * 8);
+        if (at > plen) { return err(ERR_DECODE); }
+        j = j + 1;
+    }
+    if (at + pad > plen) { return err(ERR_DECODE); }
+    store64(used, at + pad);
+    return count;
+}
+
+# Samples (per channel, 48 kHz) a packet of `nstreams` streams holds, from its
+# first stream's TOC and frame count; -1 when it cannot be parsed.
+fn _opus_packet_samples(data, len, nstreams) {
+    if (len < 1) { return 0 - 1; }
+    var pcfg = (load8(data) >> 3) & 0x1F;
+    var n = 0;
+    if (nstreams > 1) {
+        n = _opus_split_frames_sd(data, len, _opus_sd_offs, _opus_sd_lens, 48, _opus_tmp(8));
+    } else {
+        n = _opus_split_frames(data, len, _opus_sd_offs, _opus_sd_lens, 48);
+    }
+    if (res_ok(n) == 0) { return 0 - 1; }
+    return n * _opus_frame_samples(pcfg);
+}
+
+# Decode one packet of one stream into out (interleaved, the stream's channels)
+# and return its samples per channel. An empty packet is a lost one, concealed for
+# the last packet's duration. A self-delimited packet (all but a multistream
+# packet's last stream) is split as one, and its length goes to *used; one that
+# cannot be split returns err() and decodes nothing.
+fn _opus_sd_packet(sd, pkt_data, pkt_len, out, self_delim, used) {
+    var st = load64(sd + _OPUS_SD_CELT);
+    var sk = load64(sd + _OPUS_SD_SILK);
+    var channels = load64(sd + _OPUS_SD_CH);
+    var prev_mode = load64(sd + _OPUS_SD_PREV_MODE);
+    var prev_red = load64(sd + _OPUS_SD_PREV_RED);
+    var last_end = load64(sd + _OPUS_SD_LAST_END);
+    var last_dur = load64(sd + _OPUS_SD_LAST_DUR);
+    var last_fsamp = load64(sd + _OPUS_SD_LAST_FSAMP);
+    var pcm = _opus_sd_pcm;
+    var offs = _opus_sd_offs;
+    var lens = _opus_sd_lens;
+    var silk_out = _opus_sd_silk;
+    var lostbuf = _opus_sd_lost;
+    var tbuf = _opus_sd_tbuf;
+    var silence_frame = _opus_sd_silence;
+    var F64_32768 = f64_from(32768);
+    var wpos = 0;
+    if (pkt_len == 0) {
+        # A lost packet, as libopus is told of one (opus_decode with no data and
+        # the missing duration): conceal in the previous mode.
+        var lmode = prev_mode;
+        if (prev_red == 1) { lmode = 3; }
+        var remain = last_dur;
+        while (remain > 0) {
+            var chunk = remain;
+            if (chunk > last_fsamp) { chunk = last_fsamp; }
+            var got = _opus_plc_frame(st, sk, lmode, channels, last_end, chunk, lostbuf);
+            var li = 0;
+            while (li < got * channels) {
+                store64(out + (wpos * channels + li) * 8, load64(lostbuf + li * 8));
+                li = li + 1;
+            }
+            wpos = wpos + got;
+            remain = remain - got;
+            prev_mode = lmode;
+            prev_red = 0;
+        }
+        store64(sd + _OPUS_SD_PREV_MODE, prev_mode);
+        store64(sd + _OPUS_SD_PREV_RED, prev_red);
+        return wpos;
+    }
+    var toc = load8(pkt_data);
+    var config = (toc >> 3) & 0x1F;
+    var stbit = (toc >> 2) & 1;
+    # Duration comes from the config alone, for every one of the 32.
+    var fsamp = _opus_frame_samples(config);
+    var Cf = 1;
+    if (stbit != 0) { Cf = 2; }
+    # Split the packet into frames. Every frame in a packet shares the TOC,
+    # so config/stbit/fsamp are computed once, above.
+    var nfr = 0;
+    if (self_delim == 1) {
+        nfr = _opus_split_frames_sd(pkt_data, pkt_len, offs, lens, 48, used);
+        if (res_ok(nfr) == 0) { return nfr; }
+    } else {
+        nfr = _opus_split_frames(pkt_data, pkt_len, offs, lens, 48);
+        if (res_ok(nfr) == 0) { nfr = 1; store64(offs, 1); store64(lens, 0); }
+    }
+    last_dur = nfr * fsamp;
+    last_fsamp = fsamp;
+    var fr = 0;
+    while (fr < nfr) {
+        var pdata = pkt_data + load64(offs + fr * 8);
+        var plen = load64(lens + fr * 8);
+        var handled = 0;
+        var trans = 0;
+        # A frame of 0 or 1 bytes carries nothing: DTX, concealed in the
+        # previous mode (opus_decode_frame, len <= 1).
+        if (plen <= 1) {
+            var pmode = prev_mode;
+            if (prev_red == 1) { pmode = 3; }
+            _opus_plc_frame(st, sk, pmode, channels, last_end, fsamp, pcm);
+            prev_mode = pmode;
+            prev_red = 0;
+            handled = 1;
+        }
+        # CELT-only 10/20ms: configs 18/22/26/30 (LM=2, 10ms) + 19/23/27/31 (LM=3, 20ms).
+        # LM = config&3 (2 or 3); bandwidth = (config>>2)&3 → end band NB13/WB17/SWB19/FB21.
+        if ((handled == 0) & (config >= 16) & (config <= 31)) {
+            if (plen >= 1) {
+                var clm = config & 3;
+                var cbw = (config >> 2) & 3;
+                var ceb = 21;
+                if (cbw == 0) { ceb = 13; }
+                if (cbw == 1) { ceb = 17; }
+                if (cbw == 2) { ceb = 19; }
+                # A switch into CELT with no redundant frame to prime it: conceal
+                # 5 ms in the old mode to fade from, then discard the CELT state.
+                if ((prev_mode != 3) & (prev_mode > 0) & (prev_red == 0)) {
+                    var tl = fsamp;
+                    if (tl > 240) { tl = 240; }
+                    _opus_plc_frame(st, sk, prev_mode, channels, last_end, tl, tbuf);
+                    trans = 1;
+                    celt_dec_state_reset(st);
+                }
+                celt_decode_frame_ec_cc(st, ec_dec_new(pdata, plen), plen, Cf, channels, 0, ceb, 0, clm, pcm);
+                last_end = ceb;
+                if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
+                prev_mode = 3;
+                prev_red = 0;
+                handled = 1;
+            }
+        }
+        # SILK-only (configs 0-11) and hybrid (12-15), mono or stereo coded,
+        # into the stream's channel count. The order of the redundant CELT
+        # frame, the CELT reset and the main CELT decode follows
+        # opus_decode_frame: each one changes the CELT state the next uses.
+        if ((handled == 0) & (plen >= 1) & (config < 16)) {
+            var mode = 1;
+            var sfs = 16;
+            var nsub = 4;
+            var nsf = 1;
+            var bend = 17;       # CELT end band for this bandwidth: NB 13, MB/WB 17, SWB 19, FB 21
+            var hlm = 3;
+            if (config < 12) {
+                sfs = 8;
+                bend = 13;
+                if (config >= 4) { sfs = 12; bend = 17; }
+                if (config >= 8) { sfs = 16; }
+                if ((config & 3) == 0) { nsub = 2; }
+                if ((config & 3) == 2) { nsf = 2; }
+                if ((config & 3) == 3) { nsf = 3; }
+            } else {
+                mode = 2;
+                bend = 21;
+                if (config < 14) { bend = 19; }
+                if ((config & 1) == 0) { nsub = 2; hlm = 2; }
+            }
+            # From CELT-only back to a SILK mode, libopus restarts SILK.
+            if (prev_mode == 3) { silk_dec_reset(sk); }
+            var sec = ec_dec_new(pdata, plen);
+            silk_dec_packet(sk, sec, sfs, nsub, nsf, Cf, channels, silk_out);
+            var q = 0;
+            while (q < fsamp * channels) {
+                store64(pcm + q * 8, f64_div(f64_from(load64(silk_out + q * 8)), F64_32768));
+                q = q + 1;
+            }
+            # Redundancy: hybrid signals it with a flag and an explicit size;
+            # SILK-only implies it and it takes the rest of the frame.
+            var flen = plen;
+            var red = 0;
+            var cts = 0;
+            var rb = 0;
+            var need = 17;
+            if (mode == 2) { need = 37; }
+            if (ec_tell(sec) + need <= 8 * flen) {
+                red = 1;
+                if (mode == 2) { red = ec_dec_bit_logp(sec, 12); }
+                if (red != 0) {
+                    cts = ec_dec_bit_logp(sec, 1);
+                    if (mode == 2) { rb = ec_dec_uint(sec, 256) + 2; }
+                    else { rb = flen - ((ec_tell(sec) + 7) >> 3); }
+                    flen = flen - rb;
+                    # Sanity check; a valid packet never trips it (opus_decoder.c).
+                    if ((flen * 8 < ec_tell(sec)) | (flen < 0)) { flen = 0; rb = 0; red = 0; }
+                    else { store64(sec + 8, load64(sec + 8) - rb); }
+                }
+            }
+            # Out of CELT with no redundant frame: conceal 5 ms of CELT to fade from.
+            if ((prev_mode == 3) & (red == 0)) {
+                var tl2 = fsamp;
+                if (tl2 > 240) { tl2 = 240; }
+                _opus_plc_frame(st, sk, 3, channels, last_end, tl2, tbuf);
+                trans = 1;
+            }
+            last_end = bend;
+            var redbuf = 0;
+            if ((red == 1) & (cts == 1)) {
+                redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 1, bend, Cf, channels);
+            }
+            if (mode == 2) {
+                if ((prev_mode != 2) & (prev_mode > 0) & (prev_red == 0)) { celt_dec_state_reset(st); }
+                celt_decode_frame_ec_cc(st, sec, flen, Cf, channels, 17, bend, 1, hlm, pcm);
+            } else {
+                # Hybrid -> SILK: the CELT MDCT fades out by decoding a silence
+                # frame onto the first 2.5 ms.
+                var fade = 0;
+                if (prev_mode == 2) {
+                    fade = 1;
+                    if ((red == 1) & (cts == 1) & (prev_red == 1)) { fade = 0; }
+                }
+                if (fade == 1) {
+                    celt_decode_frame_ec_cc(st, ec_dec_new(silence_frame, 2), 2, Cf, channels, 0, bend, 1, 0, pcm);
+                }
+            }
+            if ((red == 1) & (cts == 0)) {
+                redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 0, bend, Cf, channels);
+            }
+            if ((red == 1) & (cts == 0)) { _opus_redundancy_mix(redbuf, 0, channels, pcm, fsamp); }
+            # A CELT->SILK redundant frame is ignored after a SILK-only frame:
+            # the CELT decoder it continues is stale (opus_decoder.c).
+            if ((red == 1) & (cts == 1)) {
+                if ((prev_mode != 1) | (prev_red == 1)) { _opus_redundancy_mix(redbuf, 1, channels, pcm, fsamp); }
+            }
+            if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
+            prev_mode = mode;
+            prev_red = 0;
+            if ((red == 1) & (cts == 0)) { prev_red = 1; }
+            handled = 1;
+        }
+        if (handled == 0) {
+            var zz = 0;
+            while (zz < channels * fsamp) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
+        }
+        var q2 = 0;
+        while (q2 < fsamp * channels) {
+            store64(out + (wpos * channels + q2) * 8, load64(pcm + q2 * 8));
+            q2 = q2 + 1;
+        }
+        wpos = wpos + fsamp;
+        fr = fr + 1;
+    }
+    store64(sd + _OPUS_SD_PREV_MODE, prev_mode);
+    store64(sd + _OPUS_SD_PREV_RED, prev_red);
+    store64(sd + _OPUS_SD_LAST_END, last_end);
+    store64(sd + _OPUS_SD_LAST_DUR, last_dur);
+    store64(sd + _OPUS_SD_LAST_FSAMP, last_fsamp);
+    return wpos;
+}
+
+# ffmpeg's order for a family-1 layout (libavcodec/vorbis_data.c,
+# ff_vorbis_channel_layout_offsets): output channel i takes Vorbis channel
+# offs[i], so 5.1 comes out FL FR FC LFE BL BR, as shravan's ALAC and AAC do.
+fn _opus_vorbis_slot(nch, i) {
+    var t = 0x76543210;
+    if (nch == 3) { t = 0x120; }
+    if (nch == 5) { t = 0x43120; }
+    if (nch == 6) { t = 0x435120; }
+    if (nch == 7) { t = 0x4356120; }
+    if (nch == 8) { t = 0x43657120; }
+    return (t >> (i * 4)) & 15;
+}
+
 fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
     if (vec_len(packets_vec) == 0) { return err(ERR_END_OF_STREAM); }
 
@@ -5728,10 +6178,10 @@ fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
 
     var channels = opus_head_channels(head);
     var pre_skip = opus_head_pre_skip(head);
-    # Mapping family 0 is one stream of 1 or 2 channels. Families 1 and 255 carry
-    # several streams per packet (RFC 7845 5.1.1), which this decoder does not
-    # demultiplex: decoding them as one stream returned garbage with success.
-    if ((opus_head_mapping(head) != 0) | (channels > 2)) { return err(ERR_UNSUPPORTED_FMT); }
+    var nstreams = opus_head_streams(head);
+    var ncoupled = opus_head_coupled(head);
+    var family = opus_head_mapping(head);
+    var cmap = opus_head_channel_map(head);
     if (_celt_band_edges == 0) { _opus_init_bands(); }
 
     var samples = vec_new();
@@ -5739,18 +6189,38 @@ fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
     var num_frames = npkts - 2;
     if (num_frames < 0) { num_frames = 0; }
 
-    # Decode audio with the real RFC-6716 CELT decoder (config 31, CELT-only fullband
-    # 20ms). SILK-only 20ms mono packets (config 1 NB / 9 WB) are decoded to 48kHz via
-    # the real RFC-6716 SILK decoder. Other configs (MB SILK, hybrid, multi-frame) emit
-    # silence for their frame so the timeline stays aligned. Pre-skip trimmed, capped to granule.
     if (num_frames > 0) {
-        var st = celt_dec_state_new();
-        # One Opus FRAME is at most 60 ms = 2880 samples (was sized for 960, which
-        # a 40/60 ms SILK frame would have overrun).
-        var pcm = alloc(2 * 2880 * 8);
-        # A packet holds up to 48 frames (RFC 6716 3.2.5).
-        var offs = alloc(48 * 8);
-        var lens = alloc(48 * 8);
+        # One decoder per elementary stream: the coupled ones stereo, the rest mono.
+        var sds = alloc(nstreams * 8);
+        var s = 0;
+        while (s < nstreams) {
+            var sch = 1;
+            if (s < ncoupled) { sch = 2; }
+            store64(sds + s * 8, _opus_sd_new(sch));
+            s = s + 1;
+        }
+        # Where each output channel comes from: a stream and its channel, or
+        # silence (mapping 255). Family 1 in ffmpeg's channel order.
+        var src_stream = alloc(channels * 8);
+        var src_comp = alloc(channels * 8);
+        var c = 0;
+        while (c < channels) {
+            var vc = c;
+            if (family == 1) { vc = _opus_vorbis_slot(channels, c); }
+            var m = load8(cmap + vc);
+            if (m == 255) {
+                store64(src_stream + c * 8, 0 - 1);
+            } else {
+                if (m < 2 * ncoupled) {
+                    store64(src_stream + c * 8, m / 2);
+                    store64(src_comp + c * 8, m % 2);
+                } else {
+                    store64(src_stream + c * 8, m - ncoupled);
+                    store64(src_comp + c * 8, 0);
+                }
+            }
+            c = c + 1;
+        }
         # Measure the stream before allocating: packet count times 960 was only
         # right when every packet held exactly one 20 ms frame. A code-3 packet of
         # 2.5 ms frames carries 48 of them, and a 60 ms frame is three times 960 --
@@ -5763,13 +6233,9 @@ fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
             var ppd = str_data(ppkt);
             var ppl = str_len(ppkt);
             if (ppl >= 1) {
-                var pcfg = (load8(ppd) >> 3) & 0x1F;
-                var pn = _opus_split_frames(ppd, ppl, offs, lens, 48);
-                if (res_ok(pn) == 1) {
-                    pdur = pn * _opus_frame_samples(pcfg);
-                } else {
-                    pdur = _opus_frame_samples(pcfg);   # unparseable: one frame of silence
-                }
+                var pn = _opus_packet_samples(ppd, ppl, nstreams);
+                if (pn > 0) { pdur = pn; }
+                else { pdur = _opus_frame_samples((load8(ppd) >> 3) & 0x1F); }   # unparseable: one frame
             }
             maxsamp = maxsamp + pdur;
             pf = pf + 1;
@@ -5779,242 +6245,78 @@ fn _opus_decode_packets_impl(packets_vec, ogg_data, ogg_len) {
         # so a crafted Ogg of tiny packets could ask for terabytes, and a failed
         # alloc() returns 0, which the decode then wrote through.
         if (maxsamp * channels > _shravan_max_samples) { return err(ERR_TOO_LARGE); }
-        # The result vector itself is the decode buffer: frames are written into its
-        # storage and the pre-skip is shifted out in place at the end, so the output
-        # exists once.
+        # The result vector itself is the decode buffer: packets are written into
+        # its storage and the pre-skip is shifted out in place at the end, so the
+        # output exists once.
         samples = _vec_new_cap(maxsamp * channels);
         if (is_err(samples) == 1) { return samples; }
         var allpcm = load64(samples);
         if (allpcm == 0) { return err(ERR_DECODE); }
-        # One SILK decoder for the whole stream (silk_dec_packet), and the mode and
-        # redundancy of the previous frame, which decide the resets at a switch.
-        var sk = silk_dec_new();
-        var silk_out = alloc(2 * 2880 * 8);
-        var prev_mode = 0;     # 0 none yet, 1 SILK-only, 2 hybrid, 3 CELT-only
-        var prev_red = 0;      # previous frame ended in a SILK->CELT redundant frame
-        var last_end = 21;     # the CELT end band last set (from the last frame's bandwidth)
-        var last_dur = 960;    # the last packet's duration, and its frame size: an empty
-        var last_fsamp = 960;  # packet is a lost one, concealed for that long in frame-size pieces
-        var lostbuf = alloc(2 * 2880 * 8);
-        var tbuf = alloc(2 * 240 * 8);
-        var silence_frame = alloc(2);
-        store8(silence_frame, 0xFF);
-        store8(silence_frame + 1, 0xFF);
-        var F64_32768 = f64_from(32768);
+        # One stream's packet: up to 120 ms of two channels.
+        var sbuf = alloc(5760 * 2 * 8);
+        var used = alloc(8);
         var wpos = 0;
         var f = 0;
         while (f < num_frames) {
-            _opus_frame_begin();
             var pkt = vec_get(packets_vec, f + 2);
             var pkt_data = str_data(pkt);
             var pkt_len = str_len(pkt);
-            if (pkt_len == 0) {
-                # A lost packet, as libopus is told of one (opus_decode with no data and
-                # the missing duration): conceal in the previous mode.
-                var lmode = prev_mode;
-                if (prev_red == 1) { lmode = 3; }
-                var remain = last_dur;
-                while (remain > 0) {
-                    var chunk = remain;
-                    if (chunk > last_fsamp) { chunk = last_fsamp; }
-                    var got = _opus_plc_frame(st, sk, lmode, channels, last_end, chunk, lostbuf);
-                    var li = 0;
-                    while (li < got) {
-                        if (wpos < maxsamp) {
-                            var lc = 0;
-                            while (lc < channels) {
-                                store64(allpcm + (wpos * channels + lc) * 8, load64(lostbuf + (li * channels + lc) * 8));
-                                lc = lc + 1;
-                            }
-                            wpos = wpos + 1;
-                        }
-                        li = li + 1;
-                    }
-                    remain = remain - got;
-                    prev_mode = lmode;
-                    prev_red = 0;
-                }
-            }
-            var config = 0;
-            var stbit = 0;
-            if (pkt_len >= 1) {
-                var toc = load8(pkt_data);
-                config = (toc >> 3) & 0x1F;
-                stbit = (toc >> 2) & 1;
-            }
-            # Duration comes from the config alone, for every one of the 32.
-            var fsamp = _opus_frame_samples(config);
-            var Cf = 1;
-            if (stbit != 0) { Cf = 2; }
-            # Split the packet into frames. Every frame in a packet shares the TOC,
-            # so config/stbit/fsamp are computed once, above.
-            var nfr = _opus_split_frames(pkt_data, pkt_len, offs, lens, 48);
-            if (res_ok(nfr) == 0) { nfr = 1; store64(offs, 1); store64(lens, 0); }
-            if (pkt_len == 0) { nfr = 0; }
-            if (pkt_len >= 1) {
-                last_dur = nfr * fsamp;
-                last_fsamp = fsamp;
-            }
-            var fr = 0;
-            while (fr < nfr) {
-                var pdata = pkt_data + load64(offs + fr * 8);
-                var plen = load64(lens + fr * 8);
-                var handled = 0;
-                var trans = 0;
-                # A frame of 0 or 1 bytes carries nothing: DTX, concealed in the
-                # previous mode (opus_decode_frame, len <= 1).
-                if (plen <= 1) {
-                    var pmode = prev_mode;
-                    if (prev_red == 1) { pmode = 3; }
-                    _opus_plc_frame(st, sk, pmode, channels, last_end, fsamp, pcm);
-                    prev_mode = pmode;
-                    prev_red = 0;
-                    handled = 1;
-                }
-                # CELT-only 10/20ms: configs 18/22/26/30 (LM=2, 10ms) + 19/23/27/31 (LM=3, 20ms).
-                # LM = config&3 (2 or 3); bandwidth = (config>>2)&3 → end band NB13/WB17/SWB19/FB21.
-                if ((handled == 0) & (config >= 16) & (config <= 31)) {
-                    if (plen >= 1) {
-                        var clm = config & 3;
-                        var cbw = (config >> 2) & 3;
-                        var ceb = 21;
-                        if (cbw == 0) { ceb = 13; }
-                        if (cbw == 1) { ceb = 17; }
-                        if (cbw == 2) { ceb = 19; }
-                        # A switch into CELT with no redundant frame to prime it: conceal
-                        # 5 ms in the old mode to fade from, then discard the CELT state.
-                        if ((prev_mode != 3) & (prev_mode > 0) & (prev_red == 0)) {
-                            var tl = fsamp;
-                            if (tl > 240) { tl = 240; }
-                            _opus_plc_frame(st, sk, prev_mode, channels, last_end, tl, tbuf);
-                            trans = 1;
-                            celt_dec_state_reset(st);
-                        }
-                        celt_decode_frame_ec_cc(st, ec_dec_new(pdata, plen), plen, Cf, channels, 0, ceb, 0, clm, pcm);
-                        last_end = ceb;
-                        if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
-                        prev_mode = 3;
-                        prev_red = 0;
-                        handled = 1;
-                    }
-                }
-                # SILK-only (configs 0-11) and hybrid (12-15), mono or stereo coded,
-                # into the stream's channel count. The order of the redundant CELT
-                # frame, the CELT reset and the main CELT decode follows
-                # opus_decode_frame: each one changes the CELT state the next uses.
-                if ((handled == 0) & (plen >= 1) & (config < 16)) {
-                    var mode = 1;
-                    var sfs = 16;
-                    var nsub = 4;
-                    var nsf = 1;
-                    var bend = 17;       # CELT end band for this bandwidth: NB 13, MB/WB 17, SWB 19, FB 21
-                    var hlm = 3;
-                    if (config < 12) {
-                        sfs = 8;
-                        bend = 13;
-                        if (config >= 4) { sfs = 12; bend = 17; }
-                        if (config >= 8) { sfs = 16; }
-                        if ((config & 3) == 0) { nsub = 2; }
-                        if ((config & 3) == 2) { nsf = 2; }
-                        if ((config & 3) == 3) { nsf = 3; }
+            var off = 0;
+            var n = 0 - 1;
+            var lost = 0;
+            if (pkt_len == 0) { lost = 1; }
+            s = 0;
+            while (s < nstreams) {
+                _opus_frame_begin();
+                var sd = load64(sds + s * 8);
+                var sdel = 0;
+                if (s < nstreams - 1) { sdel = 1; }
+                var got = 0;
+                if (lost == 1) {
+                    got = _opus_sd_packet(sd, pkt_data, 0, sbuf, 0, used);
+                } else {
+                    got = _opus_sd_packet(sd, pkt_data + off, pkt_len - off, sbuf, sdel, used);
+                    if (res_ok(got) == 0) {
+                        # A stream that cannot be split: the packet is invalid
+                        # (libopus refuses it); this and the remaining streams
+                        # conceal instead.
+                        lost = 1;
+                        got = _opus_sd_packet(sd, pkt_data, 0, sbuf, 0, used);
                     } else {
-                        mode = 2;
-                        bend = 21;
-                        if (config < 14) { bend = 19; }
-                        if ((config & 1) == 0) { nsub = 2; hlm = 2; }
+                        if (sdel == 1) { off = off + load64(used); }
                     }
-                    # From CELT-only back to a SILK mode, libopus restarts SILK.
-                    if (prev_mode == 3) { silk_dec_reset(sk); }
-                    var sec = ec_dec_new(pdata, plen);
-                    silk_dec_packet(sk, sec, sfs, nsub, nsf, Cf, channels, silk_out);
-                    var q = 0;
-                    while (q < fsamp * channels) {
-                        store64(pcm + q * 8, f64_div(f64_from(load64(silk_out + q * 8)), F64_32768));
-                        q = q + 1;
-                    }
-                    # Redundancy: hybrid signals it with a flag and an explicit size;
-                    # SILK-only implies it and it takes the rest of the frame.
-                    var flen = plen;
-                    var red = 0;
-                    var cts = 0;
-                    var rb = 0;
-                    var need = 17;
-                    if (mode == 2) { need = 37; }
-                    if (ec_tell(sec) + need <= 8 * flen) {
-                        red = 1;
-                        if (mode == 2) { red = ec_dec_bit_logp(sec, 12); }
-                        if (red != 0) {
-                            cts = ec_dec_bit_logp(sec, 1);
-                            if (mode == 2) { rb = ec_dec_uint(sec, 256) + 2; }
-                            else { rb = flen - ((ec_tell(sec) + 7) >> 3); }
-                            flen = flen - rb;
-                            # Sanity check; a valid packet never trips it (opus_decoder.c).
-                            if ((flen * 8 < ec_tell(sec)) | (flen < 0)) { flen = 0; rb = 0; red = 0; }
-                            else { store64(sec + 8, load64(sec + 8) - rb); }
-                        }
-                    }
-                    # Out of CELT with no redundant frame: conceal 5 ms of CELT to fade from.
-                    if ((prev_mode == 3) & (red == 0)) {
-                        var tl2 = fsamp;
-                        if (tl2 > 240) { tl2 = 240; }
-                        _opus_plc_frame(st, sk, 3, channels, last_end, tl2, tbuf);
-                        trans = 1;
-                    }
-                    last_end = bend;
-                    var redbuf = 0;
-                    if ((red == 1) & (cts == 1)) {
-                        redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 1, bend, Cf, channels);
-                    }
-                    if (mode == 2) {
-                        if ((prev_mode != 2) & (prev_mode > 0) & (prev_red == 0)) { celt_dec_state_reset(st); }
-                        celt_decode_frame_ec_cc(st, sec, flen, Cf, channels, 17, bend, 1, hlm, pcm);
-                    } else {
-                        # Hybrid -> SILK: the CELT MDCT fades out by decoding a silence
-                        # frame onto the first 2.5 ms.
-                        var fade = 0;
-                        if (prev_mode == 2) {
-                            fade = 1;
-                            if ((red == 1) & (cts == 1) & (prev_red == 1)) { fade = 0; }
-                        }
-                        if (fade == 1) {
-                            celt_decode_frame_ec_cc(st, ec_dec_new(silence_frame, 2), 2, Cf, channels, 0, bend, 1, 0, pcm);
-                        }
-                    }
-                    if ((red == 1) & (cts == 0)) {
-                        redbuf = _opus_redundancy_decode(st, pdata, flen, rb, 0, bend, Cf, channels);
-                    }
-                    if ((red == 1) & (cts == 0)) { _opus_redundancy_mix(redbuf, 0, channels, pcm, fsamp); }
-                    # A CELT->SILK redundant frame is ignored after a SILK-only frame:
-                    # the CELT decoder it continues is stale (opus_decoder.c).
-                    if ((red == 1) & (cts == 1)) {
-                        if ((prev_mode != 1) | (prev_red == 1)) { _opus_redundancy_mix(redbuf, 1, channels, pcm, fsamp); }
-                    }
-                    if (trans == 1) { _opus_apply_transition(tbuf, pcm, fsamp, channels); }
-                    prev_mode = mode;
-                    prev_red = 0;
-                    if ((red == 1) & (cts == 0)) { prev_red = 1; }
-                    handled = 1;
                 }
-                if (handled == 0) {
-                    var zz = 0;
-                    while (zz < channels * fsamp) { store64(pcm + zz * 8, F64_ZERO); zz = zz + 1; }
-                }
-                var i = 0;
-                while (i < fsamp) {
-                    if (wpos < maxsamp) {
-                        var cc = 0;
-                        while (cc < channels) {
-                            var v = F64_ZERO;
-                            if (cc < 2) { v = load64(pcm + (i * channels + cc) * 8); }
-                            store64(allpcm + (wpos * channels + cc) * 8, v);
-                            cc = cc + 1;
+                if (n < 0) { n = got; }
+                var sch2 = load64(sd + _OPUS_SD_CH);
+                var lim = got;
+                if (lim > n) { lim = n; }
+                if (wpos + lim > maxsamp) { lim = maxsamp - wpos; }
+                c = 0;
+                while (c < channels) {
+                    if (load64(src_stream + c * 8) == s) {
+                        var comp = load64(src_comp + c * 8);
+                        var i = 0;
+                        while (i < lim) {
+                            store64(allpcm + ((wpos + i) * channels + c) * 8, load64(sbuf + (i * sch2 + comp) * 8));
+                            i = i + 1;
                         }
-                        wpos = wpos + 1;
                     }
-                    i = i + 1;
+                    c = c + 1;
                 }
-                fr = fr + 1;
+                s = s + 1;
             }
+            if (n < 0) { n = 0; }
+            if (wpos + n > maxsamp) { n = maxsamp - wpos; }
+            # muted channels, and any a short stream left
+            c = 0;
+            while (c < channels) {
+                if (load64(src_stream + c * 8) < 0) {
+                    var z = 0;
+                    while (z < n) { store64(allpcm + ((wpos + z) * channels + c) * 8, F64_ZERO); z = z + 1; }
+                }
+                c = c + 1;
+            }
+            wpos = wpos + n;
             f = f + 1;
         }
         # Trim pre-skip and cap to the granule.

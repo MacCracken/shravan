@@ -48,7 +48,12 @@ var MP4_DX_SIZES = 32;     # ptr to sample_count u64 sizes
 var MP4_DX_CODEC = 40;     # MP4_CODEC_*
 var MP4_DX_COOKIE = 48;    # ALAC only: ptr to the 24-byte ALACSpecificConfig
 var MP4_DX_TRACK = 56;     # the track record (MP4_TK_*) it came from
-var MP4_DX_SIZE = 64;
+var MP4_DX_LAYOUT = 64;    # AAC only: the channel layout the AudioSpecificConfig gives, or 0
+var MP4_DX_SIZE = 72;
+
+# The AAC channel layout the last mp4_parse_esds read (0 for none): kept out of
+# the info buffer, whose 32 bytes callers allocate.
+var _mp4_esds_layout = 0;
 
 # Track record, one per audio ('soun') trak, in file order.
 var MP4_TK_STBL = 0;       # stbl payload start
@@ -213,8 +218,12 @@ fn _mp4_sf_rate(index) {
 # AudioSpecificConfig, whose object type, rate and channels replace what the
 # sample entry claims. Only AAC-LC decodes: HE-AAC would play at half rate with no
 # high band, so it is reported unsupported rather than as wrong audio.
-# Writes out[0]=channels and out[8]=rate; channel config 0 leaves out[0] alone.
+# Writes out[0]=channels and out[8]=rate, and the channel layout to
+# _mp4_esds_layout: from channel configuration 1-7 or 11-14, or for 0 the
+# program_config_element the GASpecificConfig carries. Without one (a reserved
+# configuration, or 0 and no PCE) out[0] is left alone and the layout is 0.
 fn mp4_parse_esds(data, p, end, out) {
+    _mp4_esds_layout = 0;
     var pp = alloc(8);
     p = p + 4;                                         # version + flags
     if (p >= end) { return MP4_MALFORMED; }
@@ -272,10 +281,30 @@ fn mp4_parse_esds(data, p, end, out) {
     }
     if (rate <= 0) { return MP4_MALFORMED; }
     var chan = _mp4_bits(data, p, bit, 4);
+    bit = bit + 4;
     store64(out + 8, rate);
-    if (chan >= 1) {
-        if (chan <= 6) { store64(out, chan); }
-        if (chan == 7) { store64(out, 8); }
+    # GASpecificConfig (ISO/IEC 14496-3 4.4.1): frameLengthFlag, dependsOnCoreCoder
+    # (and a 14-bit coreCoderDelay), extensionFlag, then for channel configuration
+    # 0 a program_config_element. A config cut short reads as the defaults.
+    var br = _br_new(data + p, asc_len);
+    store64(br + 16, bit);
+    var flf = _br_read(br, 1);
+    # 960-sample frames: the decoder's are 1024, so the audio would come out wrong.
+    if (flf == 1) { return MP4_UNSUPPORTED; }
+    var lay = 0;
+    if (chan == 0) {
+        var dcc = _br_read(br, 1);
+        if (dcc == 1) { _br_read(br, 14); }
+        if (res_ok(_br_read(br, 1)) == 1) {
+            var pce = _aac_parse_pce(br);
+            if (res_ok(pce) == 1) { lay = pce; }
+        }
+    } else {
+        lay = _aac_layout_config(chan);
+    }
+    if (lay != 0) {
+        _mp4_esds_layout = lay;
+        store64(out, _aac_layout_channels(lay));
     }
     return 0;
 }
@@ -305,6 +334,7 @@ fn mp4_audio_info(data, stbl, stbl_end, out) {
     var body = entry + 8;
     if (body + 28 > entry_end) { return MP4_MALFORMED; }
 
+    _mp4_esds_layout = 0;
     var version = read_u16_be(data, body + 8);
     var channels = read_u16_be(data, body + 16);
     var rate = read_u16_be(data, body + 24);
@@ -607,14 +637,13 @@ fn mp4_track_count(data, len) {
 }
 
 # Codec, rate and channels of track `index` into out (as mp4_audio_info), and 0
-# when shravan decodes it: AAC-LC at up to two channels and a rate with an ADTS
-# index, or ALAC. Otherwise MP4_UNSUPPORTED or MP4_MALFORMED.
+# when shravan decodes it: AAC-LC at a rate with an ADTS index, or ALAC.
+# Otherwise MP4_UNSUPPORTED or MP4_MALFORMED.
 fn _mp4_track_audio(data, tk, out) {
     var rc = mp4_audio_info(data, load64(tk + MP4_TK_STBL), load64(tk + MP4_TK_STBL_END), out);
     if (rc != 0) { return rc; }
     if (load64(out + 16) == MP4_CODEC_AAC) {
         if (load64(out) < 1) { return MP4_MALFORMED; }
-        if (load64(out) > 2) { return MP4_UNSUPPORTED; }
         if (_aac_sr_index_exact(load64(out + 8)) < 0) { return MP4_UNSUPPORTED; }
     }
     return 0;
@@ -668,6 +697,7 @@ fn mp4_demux_track(data, len, index) {
     store64(dx + MP4_DX_CODEC, load64(info + 16));
     store64(dx + MP4_DX_COOKIE, load64(info + 24));
     store64(dx + MP4_DX_TRACK, tk);
+    store64(dx + MP4_DX_LAYOUT, _mp4_esds_layout);
     # The sample table is allocated before anything decodes, so its size is bounded
     # by the output it implies: count * samples-per-frame * channels must fit the
     # one-shot ceiling (1024 for AAC; the cookie's frameLength for ALAC).
@@ -947,9 +977,8 @@ fn _mp4_apply_gapless(data, tk, codec, dr) {
 
 # ---------------------------------------------------------------- decode
 
-# Decode track `index` to PCM, gapless (shravan_set_gapless). ALAC frames go
-# straight to the decoder. For AAC, extract each access unit, prepend an ADTS
-# header (from the track's rate and channels), and hand the stream to aac_decode.
+# Decode track `index` to PCM, gapless (shravan_set_gapless). ALAC frames and
+# AAC access units (raw data blocks) go straight to their decoders.
 fn mp4_decode_track(data, len, index) {
     var dx = mp4_demux_track(data, len, index);
     if (is_err(dx) == 1) { return dx; }
@@ -964,52 +993,28 @@ fn mp4_decode_track(data, len, index) {
         var ar = alac_decode_frames(load64(dx + MP4_DX_COOKIE), data, len, offsets, sizes, count);
         return _mp4_apply_gapless(data, tk, codec, ar);
     }
-    # The bridge writes an ADTS header per AU, which carries a 3-bit channel
-    # configuration, a 13-bit frame length and a 4-bit rate index. Channel config 7
-    # (8 channels) came out as 0 and rates outside the table as 44.1 kHz; more than
-    # two channels is refused by the decoder anyway (until 2.10.3), and an AU over
-    # 8184 bytes cannot be AAC-LC at two channels.
-    if (channels > 2) { return err(ERR_UNSUPPORTED_FMT); }
     if (channels < 1) { return err(ERR_INVALID_CHANNELS); }
-    if (_aac_sr_index_exact(rate) < 0) { return err(ERR_UNSUPPORTED_FMT); }
-    # total ADTS stream size = sum(AU sizes) + 7 bytes header per AU
-    var total = 0;
+    var sri = _aac_sr_index_exact(rate);
+    if (sri < 0) { return err(ERR_UNSUPPORTED_FMT); }
+    # Each access unit must lie inside the input (untrusted offset and size):
+    # off > len, then sz > len - off, so off + sz cannot overflow.
     var i = 0;
-    while (i < count) {
-        var asz = load64(sizes + i * 8);
-        # SEC-030: bound the running total per iteration. Sample sizes come from
-        # stsz as unsigned 32-bit values (up to ~4.29e9) and `count` is bounded
-        # only by the file length, so the sum could in principle wrap past 2^63
-        # and land on a SMALL positive value — alloc() would then succeed at the
-        # wrapped size and the memcpy loop below would run off the end of it.
-        # Capping at 256 MB (the _ALLOC_MAX policy) makes the wrap unreachable.
-        if (asz < 0) { return err(ERR_DECODE); }
-        if (asz > 8184) { return err(ERR_DECODE); }
-        total = total + asz + 7;
-        if (total > 268435456) { return err(ERR_DECODE); }
-        i = i + 1;
-    }
-    if (total <= 0) { return err(ERR_DECODE); }
-    var adts = alloc(total);
-    if (adts == 0) { return err(ERR_DECODE); }
-    var pos = 0;
-    i = 0;
     while (i < count) {
         var sz = load64(sizes + i * 8);
         var off = load64(offsets + i * 8);
-        # Each access unit must lie fully inside the input buffer (untrusted
-        # offset/size). Use off>len then sz>len-off to avoid off+sz overflow.
-        if (off < 0) { return err(ERR_DECODE); }
-        if (sz < 0) { return err(ERR_DECODE); }
+        if (off < 0 || sz < 0) { return err(ERR_DECODE); }
         if (off > len) { return err(ERR_DECODE); }
         if (sz > len - off) { return err(ERR_DECODE); }
-        aac_build_adts_header(rate, channels, sz, adts + pos);
-        pos = pos + 7;
-        memcpy(adts + pos, data + off, sz);
-        pos = pos + sz;
         i = i + 1;
     }
-    return _mp4_apply_gapless(data, tk, codec, aac_decode(adts, pos));
+    # The layout: the AudioSpecificConfig's, else a PCE the first access unit
+    # starts with, else mono or stereo by the channel count.
+    var lay = load64(dx + MP4_DX_LAYOUT);
+    if (lay == 0 && count > 0) { lay = _aac_block_pce(data + load64(offsets), load64(sizes)); }
+    if (lay == 0 && channels <= 2) { lay = _aac_layout_config(channels); }
+    if (lay == 0) { return err(ERR_UNSUPPORTED_FMT); }
+    var r = _aac_decode_frames(data, offsets, sizes, 0, sri, count, lay, rate);
+    return _mp4_apply_gapless(data, tk, codec, r);
 }
 
 # Decode the default track (mp4_default_track) to PCM.

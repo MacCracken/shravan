@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.10.2.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.10.3.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -11,9 +11,9 @@
 | FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | levels 0–8 as `flac -0` to `-8`: LPC to order 12, partitioned Rice, stereo decorrelation, wasted bits, seek table | `flac`: 79 decode sweep cases exact (to 32-bit, 8 channels, 16384-sample blocks). Encode: within 0.06% of `flac -L`'s size at every level on 5.5 minutes of real recordings; libFLAC (`flac -t`, `flac -d`) and ffmpeg decode 1,125 hostile cases exactly (4–32 bits, 1–8 channels, 1 Hz–1 MHz) |
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
-| AAC-LC | mono and stereo, all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact; PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
-| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; mapping family 0 | CELT mono and stereo | libopus (a default build): exact, wideband SILK and hybrid concealment included; CELT concealment within 3 LSB (its float32 against shravan's f64) |
-| MP4 | AAC and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
+| AAC-LC | channel configurations 1–7 and 11–14 and any PCE layout (to 22.2), in ffmpeg's channel order; all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact, every layout its encoder writes (ADTS and MP4); PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
+| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64) |
+| MP4 | AAC (any channel layout, a PCE in the AudioSpecificConfig) and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
 for sample however the input is split, hold only one unfinished chunk or frame, and have no length
@@ -34,18 +34,13 @@ Open until a reference file or decoder exists for each.
 - **ALAC from Apple's encoder** and **FLAC with a variable block size**: no tool here produces them.
   ffmpeg's ALAC and `flac`'s fixed-size output are verified.
 - **ID3v2 grouped frames** are read per the spec; neither ffmpeg nor mutagen reads them at all.
+- **AAC coupling channel elements** are refused (`ERR_UNSUPPORTED_FMT`): no available encoder writes them.
+- **AAC 22.2 and channel configurations 11, 13 and 14**: ffmpeg's encoder writes none of them. Their
+  element placement and channel order are checked against ffmpeg's source (`ff_aac_get_che`,
+  `sniff_channel_order`), not against a file.
 
-The remaining distance to **3.0.0** is (1) the rest of the Opus encoder, (2) the multichannel paths
-below. The FLAC encoder is real since 2.10.0, the AAC encoder since 2.10.1.
-
-## v2.10.x — the rest of the suite, matured
-
-### v2.10.3 — multichannel
-- `feat(opus): multistream decode` (RFC 7845 channel mapping families 1 and 255: surround and
-  ambisonic layouts as coupled and uncoupled streams). Refused with `ERR_UNSUPPORTED_FMT` since 2.9.3,
-  where it used to decode garbage.
-- `feat(aac): more than two channels` (SCE + CPE + LFE elements, the PCE). Refused the same way since
-  2.9.3.
+The remaining distance to **3.0.0** is the rest of the Opus encoder. The FLAC encoder is real since
+2.10.0, the AAC encoder since 2.10.1, and multichannel AAC and Opus decode since 2.10.3.
 
 ## v2.11.x — SILK encode: the analysis front end · large
 

@@ -286,8 +286,9 @@ def mp4_audit_fixtures(p):
                          lambda o: struct.pack(">I", k) + struct.pack(">I", o) * k, au)
     text += b64_literal("_FX_MP4OVERLAP_B64", overlap)
 
-    # F4: an access unit too large for the ADTS header the bridge builds (13-bit
-    # length; AAC-LC at two channels never needs more than 1536 bytes).
+    # F4: an access unit too large for the ADTS header the bridge built (13-bit
+    # length; AAC-LC at two channels never needs more than 1536 bytes). Since
+    # 2.10.3 there is no bridge, and it decodes.
     big = 8190
     bigau = _mp4_build(entry, struct.pack(">II", 0, 1) + struct.pack(">I", big),
                        struct.pack(">IIII", 1, 1, 1, 1), lambda o: struct.pack(">II", 1, o),
@@ -295,7 +296,8 @@ def mp4_audit_fixtures(p):
     text += b64_literal("_FX_MP4BIGAU_B64", bigau)
 
     # F4: AudioSpecificConfig channel configuration 7 (eight channels), which the
-    # ADTS bridge wrote as configuration 0.
+    # ADTS bridge wrote as configuration 0. The stream is stereo, so since 2.10.3
+    # every block fails, as ffmpeg's do.
     d = bytearray(src)
     t, pos, size, hdr = _mp4_box(bytes(d), b"stsd")
     e = bytes(d).find(b"esds", pos)
@@ -656,6 +658,168 @@ def _mx_add_itunsmpb(boxes, priming, remainder, samples):
     require(False, "an ilst to put iTunSMPB in")
 
 
+def _ogg_packets(path):
+    """An Ogg file's packets, in order."""
+    d = open(path, "rb").read()
+    pos, out, cur = 0, [], b""
+    while pos + 27 <= len(d) and d[pos:pos + 4] == b"OggS":
+        nseg = d[pos + 26]
+        body = pos + 27 + nseg
+        for seg in d[pos + 27:pos + 27 + nseg]:
+            cur += d[body:body + seg]
+            body += seg
+            if seg < 255:
+                out.append(cur)
+                cur = b""
+        pos = body
+    return out
+
+
+def opus_multistream_fixtures(p):
+    """Ogg Opus with several streams a packet (RFC 7845 mapping families 1, 2 and
+    255; refused until 2.10.3). libopus's decode through ffmpeg, as float, is the
+    reference: its wrapper puts family 1 in ffmpeg's channel order (5.1 as FL FR FC
+    LFE BL BR), the order shravan's ALAC and AAC give. The wrapper reorders families
+    2 and 255 the same way, which RFC 7845 and ffmpeg's own decoder do not: there
+    its decode is put back in mapping order, and both have six channels, where the
+    reorder is not the identity it is for four. Between them the streams'
+    self-delimited packets (RFC 6716 Appendix B: every stream but the last carries
+    its last frame's size) use every framing code: one frame, two equal, two sized,
+    and several, CBR and VBR."""
+    text = ""
+    codes = set()
+
+    def sig(n, dur, bursts=False):
+        parts = []
+        for i in range(n):
+            e = "0.3*sin(2*PI*%d*t)*(0.6+0.4*exp(-15*mod(t+0.0%d\\,0.21)))" % (220 + 110 * i, i)
+            if bursts:
+                e += "+0.2*random(%d)*gt(mod(t\\,0.3)\\,0.15)" % i
+            else:
+                e += "+0.02*random(%d)" % i
+            parts.append(e)
+        return "aevalsrc=" + "|".join(parts) + ":s=48000:d=%s" % dur
+
+    for name, n, layout, fam, fd, vbr, br, dur, bursts in (
+            ("OPMS51", 6, "5.1", 1, 20, "on", 384000, "0.4", False),
+            ("OPMS71", 8, "7.1", 1, 60, "off", 512000, "0.4", False),
+            ("OPMS30", 3, "3.0", 1, 40, "on", 192000, "0.4", False),
+            ("OPMSC2", 6, "5.1", 1, 40, "on", 96000, "0.9", True),
+            ("OPMSC3", 6, "5.1", 1, 120, "on", 64000, "0.9", True),
+            ("OPMS255", 6, "5.1", 255, 20, "on", 256000, "0.4", False),
+            ("OPMSAMB", 6, "5.1", 2, 20, "on", 256000, "0.4", False)):
+        path = p(name.lower() + ".opus")
+        ffmpeg_make(path, sig(n, dur, bursts), "-af", "aformat=channel_layouts=" + layout,
+                    "-c:a", "libopus", "-b:a", str(br), "-frame_duration", str(fd), "-vbr", vbr,
+                    "-mapping_family", str(fam))
+        pk = _ogg_packets(path)
+        require(pk[0][18] == fam and pk[0][19] > 1, name + ": several streams")
+        for q in pk[2:]:
+            codes.add((q[0] & 3, bool(q[0] & 3 == 3 and q[1] & 0x80)))
+        text += lossy_fixture(name, path, 47, extra=("-c:a", "libopus", "-request_sample_fmt", "flt"),
+                              mapping_order=n if fam != 1 else 0)
+    require({(0, False), (1, False), (2, False), (3, False), (3, True)} <= codes,
+            "multistream framing codes 0, 1, 2, 3 CBR and 3 VBR")
+    return text
+
+
+def _adts_config(path):
+    """The first ADTS header's channel configuration, and whether its raw data
+    block starts with a program_config_element (element id 5)."""
+    d = open(path, "rb").read()
+    require(d[0] == 0xFF and d[1] & 0xF0 == 0xF0, path + ": ADTS")
+    cfg = ((d[2] & 1) << 2) | (d[3] >> 6)
+    hs = 7 if d[1] & 1 else 9
+    return cfg, d[hs] >> 5 == 5
+
+
+def _asc_of(path):
+    """The AudioSpecificConfig of an m4a's first esds (ISO/IEC 14496-1 7.2.6:
+    ES_Descriptor, DecoderConfigDescriptor, DecoderSpecificInfo): its object type
+    and channel configuration."""
+    d = open(path, "rb").read()
+    e = d.find(b"esds")
+    require(e > 0, path + ": esds")
+    q = e + 8                                   # past the type and version/flags
+
+    def desc(q, tag):
+        require(d[q] == tag, path + ": descriptor tag %d" % tag)
+        q += 1
+        n = 0
+        while True:
+            n = (n << 7) | (d[q] & 0x7F)
+            q += 1
+            if not d[q - 1] & 0x80:
+                return q, n
+
+    q, _ = desc(q, 3)
+    flags = d[q + 2]
+    q += 3 + (2 if flags & 0x80 else 0) + (2 if flags & 0x20 else 0)
+    if flags & 0x40:
+        q += 1 + d[q]
+    q, _ = desc(q, 4)
+    q, n = desc(q + 13, 5)
+    bits = int.from_bytes(d[q:q + 4], "big")
+    return bits >> 27, (bits >> 19) & 15
+
+
+def aac_multichannel_fixtures(p):
+    """AAC with more than two channels (refused until 2.10.3), from ffmpeg's
+    encoder, which writes 4.0, 5.0 and 5.1 as channel configurations 4 to 6 and
+    the other layouts as a program_config_element: in-band in ADTS, in the
+    AudioSpecificConfig in MP4 (7.1 there is configuration 12). Every channel
+    carries its own tone (the LFE a low one), so any channel out of place shows.
+    ffmpeg's decode, in its channel order, is the reference. PNS is off: ffmpeg's
+    encoder fills these tones' empty bands with noise, whose random sequence
+    shravan does not reproduce (its energy it does), and the comparison is
+    sample by sample."""
+    text = ""
+
+    def sig(layout, n, lfe):
+        parts = []
+        for i in range(n):
+            f = 55 + 10 * i if i in lfe else 330 + 165 * i
+            parts.append("0.25*sin(2*PI*%d*t)*(0.7+0.3*sin(2*PI*%d*t))" % (f, 3 + i))
+        return "aevalsrc=" + "|".join(parts) + ":s=48000:d=0.25"
+
+    for name, layout, n, lfe, fmt, want in (
+            ("AACMC40", "4.0", 4, (), "adts", (4, False)),
+            ("AACMC51", "5.1", 6, (3,), "adts", (6, False)),
+            ("AACMC71W", "7.1(wide)", 8, (3,), "adts", (0, True)),
+            ("AACMC71", "7.1", 8, (3,), "mp4", (12, None)),
+            ("AACMC61", "6.1", 7, (3,), "mp4", (0, None))):
+        path = p(name.lower() + (".aac" if fmt == "adts" else ".m4a"))
+        ffmpeg_make(path, sig(layout, n, lfe), "-af", "aformat=channel_layouts=" + layout,
+                    "-c:a", "aac", "-b:a", "%dk" % (40 * n), "-aac_pns", "0", "-f", fmt)
+        if fmt == "adts":
+            require(_adts_config(path) == want, name + ": ADTS configuration %r" % (want,))
+        else:
+            require(_asc_of(path) == (2, want[0]), name + ": AudioSpecificConfig %r" % (want[0],))
+        text += lossy_fixture(name, path, 53)
+
+    # A header whose channel configuration disagrees with the stream: ffmpeg takes
+    # a mono configuration over a CPE as stereo ("mono with CPE"), and a stereo
+    # one over an SCE as two SCEs, the second silent ("stereo with SCE").
+    def recfg(src, dst, cfg):
+        d = bytearray(open(src, "rb").read())
+        pos = 0
+        while pos + 7 <= len(d):
+            require(d[pos] == 0xFF and d[pos + 1] & 0xF0 == 0xF0, dst + ": ADTS")
+            length = ((d[pos + 3] & 3) << 11) | (d[pos + 4] << 3) | (d[pos + 5] >> 5)
+            d[pos + 2] = (d[pos + 2] & 0xFE) | (cfg >> 2)
+            d[pos + 3] = (d[pos + 3] & 0x3F) | ((cfg & 3) << 6)
+            pos += length
+        open(dst, "wb").write(bytes(d))
+
+    for name, n, cfg in (("AACCPEMONO", 2, 1), ("AACSCESTEREO", 1, 2)):
+        src = p(name.lower() + "-src.aac")
+        ffmpeg_make(src, sig(str(n), n, ()), "-c:a", "aac", "-b:a", "%dk" % (40 * n),
+                    "-aac_pns", "0", "-f", "adts")
+        recfg(src, p(name.lower() + ".aac"), cfg)
+        text += lossy_fixture(name, p(name.lower() + ".aac"), 53)
+    return text
+
+
 def gapless_fixtures(p):
     """Gapless decoding (2.10.2): what ffmpeg plays, sample for sample and to its
     length. MP4 edit lists, sample durations, iTunSMPB and track selection; MP3
@@ -752,13 +916,27 @@ def gapless_fixtures(p):
     return text
 
 
-def lossy_fixture(name, path, step, skip_frames=0, extra=()):
+# ffmpeg's ff_vorbis_channel_layout_offsets: Vorbis channel k is ffmpeg's offs[k].
+VORBIS_OFFSETS = {3: (0, 2, 1), 4: (0, 1, 2, 3), 5: (0, 2, 1, 3, 4), 6: (0, 2, 1, 5, 3, 4),
+                  7: (0, 2, 1, 6, 5, 3, 4), 8: (0, 2, 1, 7, 5, 6, 3, 4)}
+
+
+def lossy_fixture(name, path, step, skip_frames=0, extra=(), mapping_order=0):
     """Lossy: compare every step-th sample as a 16-bit value, allowing for rounding.
 
     ffmpeg's float decoders and shravan's f64 ones agree to about 1e-6, far inside
     the tolerance. Random decode damage lands on nearly every sampled point.
     """
     ref = reference_f64(path, *extra)
+    offs = VORBIS_OFFSETS.get(mapping_order)
+    if offs:
+        # the libopus wrapper's Vorbis-to-ffmpeg reorder undone (Opus families 2, 255)
+        ch = mapping_order
+        back = array.array("d", ref)
+        for i in range(len(ref) // ch):
+            for k in range(ch):
+                back[i * ch + offs[k]] = ref[i * ch + k]
+        ref = back
     picks = [int(round(ref[i] * 32768)) for i in range(0, len(ref), step)]
     text = b64_literal("_FX_%s_B64" % name, open(path, "rb").read())
     text += "var _FX_%s_COUNT = %d;\n" % (name, len(ref))
@@ -1192,6 +1370,8 @@ def main():
         data[22:26] = ogg_crc(bytes(data[:page_len])).to_bytes(4, "little")
         open(p("gain.opus"), "wb").write(data)
         parts.append(lossy_fixture("OGGGAIN", p("gain.opus"), 61))
+        parts.append(opus_multistream_fixtures(p))
+        parts.append(aac_multichannel_fixtures(p))
 
     with open(OUT, "w") as f:
         f.write("".join(parts))

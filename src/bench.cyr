@@ -575,6 +575,34 @@ fn bench_mp3_decode_lame() {
     return bench_report(t1 - t0, iters);
 }
 
+# 2.10.3: more than two channels. AAC 5.1 as ffmpeg's encoder writes it (ADTS,
+# channel configuration 6), and 5.1 Ogg Opus: four streams a packet, two coupled.
+fn bench_aac_decode_51() {
+    var buf = alloc(strlen(_FX_AACMC51_B64) + 16);
+    var n = _mp3_b64_decode(_FX_AACMC51_B64, buf);
+    aac_decode(buf, n);
+
+    var iters = 10;
+    bench("aac_decode_51_adts", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { aac_decode(buf, n); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+fn bench_opus_decode_51() {
+    var buf = alloc(strlen(_FX_OPMS51_B64) + 16);
+    var n = _mp3_b64_decode(_FX_OPMS51_B64, buf);
+    codec_open(buf, n);
+
+    var iters = 5;
+    bench("opus_decode_51_multistream", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) { codec_open(buf, n); }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Entry point
 # ================================================================
@@ -584,7 +612,7 @@ fn bench_mp3_decode_lame() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.10.2 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.10.3 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -608,6 +636,8 @@ var aac_dec_ns  = bench_aac_decode_1sec();
 var opus_dec_ns = bench_opus_celt_decode();
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
+var aac51_ns    = bench_aac_decode_51();
+var opus51_ns   = bench_opus_decode_51();
 
 syscall(1, 1, "\ndone.\n", 7);
 syscall(60, 0);

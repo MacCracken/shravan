@@ -45,6 +45,27 @@ def signal(rate, ch, dur, amp=0.4, sweep=None):
     return "aevalsrc=" + "|".join(chans) + f":s={rate}:d={dur}"
 
 
+# ffmpeg's ff_vorbis_channel_layout_offsets: Vorbis channel k is ffmpeg's offs[k].
+VORBIS_OFFSETS = {3: (0, 2, 1), 4: (0, 1, 2, 3), 5: (0, 2, 1, 3, 4), 6: (0, 2, 1, 5, 3, 4),
+                  7: (0, 2, 1, 6, 5, 3, 4), 8: (0, 2, 1, 7, 5, 6, 3, 4)}
+
+
+def libopus_mapping_order(ref, ch):
+    """ffmpeg's libopus wrapper reads every 3- to 8-channel stream as Vorbis order
+    and reorders it to ffmpeg's, whatever its mapping family; RFC 7845 and ffmpeg's
+    own Opus decoder (its default) reorder family 1 only, as shravan does. For
+    families 2 and 255 this puts the wrapper's decode back in mapping order: its
+    channel k is mapping-order channel offs[k]."""
+    offs = VORBIS_OFFSETS.get(ch)
+    if offs is None:
+        return ref
+    out = array.array("d", ref)
+    for i in range(len(ref) // ch):
+        for k in range(ch):
+            out[i * ch + offs[k]] = ref[i * ch + k]
+    return out
+
+
 def run(*args, check=True):
     return subprocess.run(args, capture_output=True, check=check)
 
@@ -348,11 +369,6 @@ class Sweep:
                     if p.returncode != 0:
                         continue
                     name = f"{rate} {ch}ch {container}"
-                    if ch > 2:
-                        # Multichannel AAC is refused until it is implemented (roadmap).
-                        got, info = shravan_decode(src, self.p("got.f64"))
-                        self.record("aac", name + " refused", got is None, f"{info}")
-                        continue
                     # m4a: the edit list's priming and end trim applied (2.10.2), as
                     # ISO 14496-12 cuts it (see mp4_iso_ref).
                     if container == "m4a":
@@ -360,6 +376,30 @@ class Sweep:
                     else:
                         ref = ff_decode(src, self.p("ref.f64"))
                     self.decode_vs("aac", name, src, ref, False)
+        # Every layout ffmpeg's encoder writes (decoded since 2.10.3), in ffmpeg's
+        # channel order: channel configurations 1 to 6 (and 12 in MP4), the rest as a
+        # program_config_element, in the stream for ADTS and in the
+        # AudioSpecificConfig for MP4. ffmpeg cannot write 7.1 as ADTS.
+        for layout, ch in (("2.1", 3), ("3.0", 3), ("quad", 4), ("4.0", 4), ("5.0", 5),
+                           ("5.1", 6), ("5.1(side)", 6), ("6.0", 6), ("hexagonal", 6),
+                           ("6.1", 7), ("7.1", 8), ("7.1(wide)", 8)):
+            for container in ("adts", "m4a"):
+                if layout == "7.1" and container == "adts":
+                    continue
+                src = self.p("a." + ("aac" if container == "adts" else "m4a"))
+                args = ["-af", f"aformat=channel_layouts={layout}", "-c:a", "aac", "-aac_pns", "0",
+                        "-b:a", f"{48 * ch}k"] + (["-f", "adts"] if container == "adts" else [])
+                p = run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(48000, ch, 0.5),
+                        *args, src, check=False)
+                name = f"48000 {layout} {container}"
+                if p.returncode != 0:
+                    self.record("aac", name, False, "ffmpeg cannot write it")
+                    continue
+                if container == "m4a":
+                    ref = mp4_iso_ref(src, self.p("ref.f64"), 0, ch)
+                else:
+                    ref = ff_decode(src, self.p("ref.f64"))
+                self.decode_vs("aac", name, src, ref, False)
 
     def gapless(self):
         # MP4 track selection: ffmpeg's default audio stream (enabled tracks first,
@@ -454,6 +494,37 @@ class Sweep:
                 "-c:a", "libopus", "-b:a", br, "-application", app, "-frame_duration", fd, src)
             ref = ff_decode(src, self.p("ref.f64"), "-c:a", "libopus")
             self.decode_vs("ogg", f"opus {ch}ch {br} {app} {fd}ms", src, ref, False)
+        # Multistream Ogg Opus (2.10.3): RFC 7845 family 1 in ffmpeg's channel order
+        # (its libopus wrapper reorders as shravan does), families 255 and 2 in
+        # mapping order (the wrapper's decode put back, libopus_mapping_order).
+        # Frame sizes over 20 ms give self-delimited packets with framing codes 1
+        # to 3.
+        for layout, ch, fam, br, fd, vbr in (("3.0", 3, 1, "160k", "20", "on"),
+                                             ("quad", 4, 1, "192k", "20", "on"),
+                                             ("5.0", 5, 1, "240k", "20", "on"),
+                                             ("5.1", 6, 1, "256k", "20", "on"),
+                                             ("6.1", 7, 1, "320k", "20", "on"),
+                                             ("7.1", 8, 1, "384k", "20", "on"),
+                                             ("5.1", 6, 1, "256k", "40", "off"),
+                                             ("5.1", 6, 1, "128k", "60", "on"),
+                                             ("7.1", 8, 1, "256k", "120", "on"),
+                                             ("quad", 4, 255, "192k", "20", "on"),
+                                             ("5.1", 6, 255, "256k", "40", "on"),
+                                             ("3.0", 3, 255, "126k", "20", "on"),
+                                             ("quad", 4, 2, "192k", "20", "on"),
+                                             ("5.1", 6, 2, "256k", "20", "on")):
+            src = self.p("m.opus")
+            name = f"opus {layout} family {fam} {fd}ms vbr={vbr}"
+            p = run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(48000, ch, 1.0),
+                    "-af", f"aformat=channel_layouts={layout}", "-c:a", "libopus", "-b:a", br,
+                    "-frame_duration", fd, "-vbr", vbr, "-mapping_family", str(fam), src, check=False)
+            if p.returncode != 0:
+                self.record("ogg", name, False, "ffmpeg cannot write it")
+                continue
+            ref = ff_decode(src, self.p("ref.f64"), "-c:a", "libopus")
+            if fam != 1:
+                ref = libopus_mapping_order(ref, ch)
+            self.decode_vs("ogg", name, src, ref, False)
 
     # -- encode direction -------------------------------------------------------
 

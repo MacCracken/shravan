@@ -17,12 +17,15 @@ shravan/
     fft.cyr         -- Mixed-radix FFT (2,3,5), cached radix-2 FFT, MDCT/IMDCT via an
                        N/4-point FFT (direct O(N^2) forms kept as fallback + reference)
     opus.cyr        -- Opus decode (CELT+SILK+hybrid, mono/stereo, 10/20 ms, all bandwidths,
-                       bit-exact vs libopus) + RFC-6716 CELT encode (mono 20 ms, interop-verified);
-                       OpusHead/OpusTags parsing
+                       bit-exact vs libopus; multistream, RFC 7845 families 0/1/2/255) +
+                       RFC-6716 CELT encode (mono 20 ms, interop-verified); OpusHead/OpusTags parsing
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
-    aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows; encoder psy + rate loop)
-    mp4.cyr         -- MP4/M4A/QuickTime demux (box tree, sample table, esds, AAC -> aac_decode, ALAC -> alac_decode_frames)
+    aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows;
+                       decode: any channel layout, configurations or a PCE, in ffmpeg's order;
+                       encoder psy + rate loop)
+    mp4.cyr         -- MP4/M4A/QuickTime demux (box tree, sample table, esds/AudioSpecificConfig,
+                       AAC -> _aac_decode_frames, ALAC -> alac_decode_frames)
     resample.cyr    -- Windowed sinc resampler (Draft/Good/Best)
     dither.cyr      -- TPDF + noise-shaped dithering
     simd.cyr        -- SIMD-style PCM conversions (unrolled scalar)
@@ -58,11 +61,14 @@ Raw bytes --> codec_open()    --> decode_result (FormatInfo + samples vec)
                +-- wav_decode()   --> parse RIFF/fmt/data --> PCM to f64
                +-- flac_decode()  --> parse STREAMINFO/frames --> subframes --> f64
                +-- aiff_decode()  --> parse FORM/COMM/SSND --> PCM to f64
-               +-- mp4_decode()   --> default track --> demux --> AAC: aac_decode, ALAC: alac_decode_frames
+               +-- mp4_decode()   --> default track --> demux --> AAC: _aac_decode_frames (layout from the
+                                  AudioSpecificConfig), ALAC: alac_decode_frames
                                   --> gapless: stts durations, edit list or iTunSMPB --> f64
-               +-- ogg_decode()   --> extract packets --> opus_decode_from_packets()
+               +-- ogg_decode()   --> extract packets --> opus_decode_from_packets() --> per packet, its
+                                  streams (self-delimited) --> a stream decoder each --> channels by the mapping
                +-- mp3_decode()   --> frame scan --> Layer I/II/III decode --> LAME tag delay/padding --> f64 PCM
-               +-- aac_decode()   --> ADTS frames --> ICS/spectral/IMDCT --> f64
+               +-- aac_decode()   --> ADTS frames --> layout (configuration or PCE) --> per block, its
+                                  elements (SCE/CPE/LFE) --> ICS/spectral/IMDCT --> channels in ffmpeg order --> f64
                +-- codec_open()   --> also handles FMT_ALAC, FMT_OPUS
                    (every one-shot decode refuses past shravan_set_max_samples: ERR_TOO_LARGE)
 

@@ -525,12 +525,124 @@ fn test_interop_opus() {
     return 0;
 }
 
-# Mapping families 1 and 255 put several streams in each packet. Decoding them as
-# one stream returned garbage with success; they are refused until supported.
-fn test_opus_multistream_refused() {
-    syscall(1, 1, "test: opus multistream refused\n", 31);
-    var head = alloc(21);
-    memset(head, 0, 21);
+# Several streams a packet (RFC 7845 mapping families 1, 2 and 255), against
+# libopus: every family-1 layout from mono to 7.1 in ffmpeg's channel order, and
+# each self-delimited framing code. Refused until 2.10.3.
+fn test_interop_opus_multistream() {
+    syscall(1, 1, "test: interop opus multistream (RFC 7845 families 1, 2, 255)\n", 61);
+    _fx_gapless("opus 5.1, family 1, one frame a stream", _FX_OPMS51_B64, 48000, 6,
+      _FX_OPMS51_COUNT, _FX_OPMS51_STEP, _FX_OPMS51_REF);
+    _fx_gapless("opus 7.1, 60 ms CBR (several equal frames)", _FX_OPMS71_B64, 48000, 8,
+      _FX_OPMS71_COUNT, _FX_OPMS71_STEP, _FX_OPMS71_REF);
+    _fx_gapless("opus 3.0, 40 ms (two equal frames)", _FX_OPMS30_B64, 48000, 3,
+      _FX_OPMS30_COUNT, _FX_OPMS30_STEP, _FX_OPMS30_REF);
+    _fx_gapless("opus 5.1, 40 ms VBR (two sized frames)", _FX_OPMSC2_B64, 48000, 6,
+      _FX_OPMSC2_COUNT, _FX_OPMSC2_STEP, _FX_OPMSC2_REF);
+    _fx_gapless("opus 5.1, 120 ms VBR (several sized frames)", _FX_OPMSC3_B64, 48000, 6,
+      _FX_OPMSC3_COUNT, _FX_OPMSC3_STEP, _FX_OPMSC3_REF);
+    _fx_gapless("opus family 255, six uncoupled streams, mapping order", _FX_OPMS255_B64, 48000, 6,
+      _FX_OPMS255_COUNT, _FX_OPMS255_STEP, _FX_OPMS255_REF);
+    _fx_gapless("opus family 2, first-order ambisonics and a stereo pair", _FX_OPMSAMB_B64, 48000, 6,
+      _FX_OPMSAMB_COUNT, _FX_OPMSAMB_STEP, _FX_OPMSAMB_REF);
+    return 0;
+}
+
+# AAC with more than two channels (2.10.3), each channel its own tone: channel
+# configurations 4 and 6 in ADTS, a PCE in an ADTS stream (7.1 wide), and in MP4
+# configuration 12 and a PCE in the AudioSpecificConfig. ffmpeg's decodes, in its
+# channel order, are the references.
+fn test_interop_aac_multichannel() {
+    syscall(1, 1, "test: interop aac multichannel (configurations and PCE)\n", 56);
+    _fx_gapless("aac 4.0, ADTS configuration 4", _FX_AACMC40_B64, 48000, 4,
+      _FX_AACMC40_COUNT, _FX_AACMC40_STEP, _FX_AACMC40_REF);
+    _fx_gapless("aac 5.1, ADTS configuration 6", _FX_AACMC51_B64, 48000, 6,
+      _FX_AACMC51_COUNT, _FX_AACMC51_STEP, _FX_AACMC51_REF);
+    _fx_gapless("aac 7.1 wide, a PCE in the ADTS stream", _FX_AACMC71W_B64, 48000, 8,
+      _FX_AACMC71W_COUNT, _FX_AACMC71W_STEP, _FX_AACMC71W_REF);
+    _fx_gapless("aac 7.1 in MP4, configuration 12", _FX_AACMC71_B64, 48000, 8,
+      _FX_AACMC71_COUNT, _FX_AACMC71_STEP, _FX_AACMC71_REF);
+    _fx_gapless("aac 6.1 in MP4, a PCE in the AudioSpecificConfig", _FX_AACMC61_B64, 48000, 7,
+      _FX_AACMC61_COUNT, _FX_AACMC61_STEP, _FX_AACMC61_REF);
+    # A header that disagrees with its stream, as ffmpeg reads it.
+    _fx_gapless("aac stereo stream under a mono configuration", _FX_AACCPEMONO_B64, 48000, 2,
+      _FX_AACCPEMONO_COUNT, _FX_AACCPEMONO_STEP, _FX_AACCPEMONO_REF);
+    _fx_gapless("aac mono stream under a stereo configuration", _FX_AACSCESTEREO_B64, 48000, 2,
+      _FX_AACSCESTEREO_COUNT, _FX_AACSCESTEREO_STEP, _FX_AACSCESTEREO_REF);
+    return 0;
+}
+
+# What no encoder at hand writes, against ffmpeg's rules (libavcodec/aac/aacdec.c):
+# ff_aac_get_che's slips (5.1 with its LFE coded as an SCE, 4.0 with its back
+# SCE as an LFE), configurations 13 (22.2) and 14, and sniff_channel_order's 22.2
+# order, reached through its fixed swaps rather than the sort.
+fn test_aac_element_mapping() {
+    syscall(1, 1, "test: aac element mapping (ffmpeg's get_che and channel order)\n", 63);
+    assert_eq(_aac_che_slot(6, 3, _AAC_T_SCE, 1), _AAC_T_LFE * 16, "5.1: an SCE last stands for the LFE");
+    assert_eq(_aac_che_slot(6, 3, _AAC_T_LFE, 0), _AAC_T_LFE * 16, "5.1: the LFE");
+    assert_eq(_aac_che_slot(4, 2, _AAC_T_LFE, 0), _AAC_T_SCE * 16 + 1, "4.0: an LFE last stands for the back SCE");
+    assert_eq(_aac_che_slot(4, 2, _AAC_T_SCE, 1), _AAC_T_SCE * 16 + 1, "4.0: the back SCE");
+    assert_eq(_aac_che_slot(5, 2, _AAC_T_CPE, 1), _AAC_T_CPE * 16 + 1, "5.0: the back CPE");
+    # 5.0: an SCE third falls through to 4.0's rule, che[SCE][1], which 5.0 does
+    # not have (ffmpeg: "channel element 0.1 is not allocated").
+    assert_eq(_aac_che_slot(5, 2, _AAC_T_SCE, 1), _AAC_T_SCE * 16 + 1, "5.0: an SCE third takes 4.0's slot");
+    assert_eq(_aac_layout_entry(_aac_layout_config(5), _AAC_T_SCE, 1, 2), 0 - 1, "5.0: which its layout lacks");
+    assert_eq(_aac_che_slot(2, 0, _AAC_T_CPE, 0), _AAC_T_CPE * 16, "stereo: the CPE");
+    assert_eq(_aac_che_slot(2, 1, _AAC_T_SCE, 1), _AAC_T_SCE * 16 + 1, "stereo: a second SCE");
+    assert_eq(_aac_che_slot(1, 0, _AAC_T_CPE, 0), 0 - 1, "mono: a CPE is the layout's change, not a slot");
+    assert_eq(_aac_che_slot(1, 1, _AAC_T_SCE, 0), 0 - 1, "mono: one element");
+    assert_eq(_aac_che_slot(7, 0, _AAC_T_CPE, 0), 0 - 1, "7.1: a CPE first has no place");
+    assert_eq(_aac_che_slot(12, 3, _AAC_T_CPE, 2), _AAC_T_CPE * 16 + 2, "configuration 12: the back CPE");
+    assert_eq(_aac_che_slot(12, 4, _AAC_T_LFE, 0), _AAC_T_LFE * 16, "configuration 12: the LFE");
+    assert_eq(_aac_che_slot(11, 3, _AAC_T_SCE, 1), _AAC_T_SCE * 16 + 1, "configuration 11: the back SCE");
+    assert_eq(_aac_che_slot(13, 10, _AAC_T_CPE, 5), _AAC_T_CPE * 16 + 5, "22.2: past the fourth, by tag");
+    assert_eq(_aac_che_slot(13, 7, _AAC_T_LFE, 1), _AAC_T_LFE * 16 + 1, "22.2: the second LFE");
+    assert_eq(_aac_che_slot(13, 9, _AAC_T_SCE, 6), 0 - 1, "22.2: no seventh SCE");
+    assert_eq(_aac_che_slot(14, 3, _AAC_T_LFE, 0), _AAC_T_LFE * 16, "configuration 14: the LFE fourth");
+    assert_eq(_aac_che_slot(14, 4, _AAC_T_CPE, 2), _AAC_T_CPE * 16 + 2, "configuration 14: the top front CPE");
+    assert_eq(_aac_che_slot(9, 0, _AAC_T_SCE, 0), 0 - 1, "a reserved configuration");
+    # 22.2: entries in declaration order (ISO/IEC 14496-3 table 1.19) and the
+    # output channel each starts at: FL FR FC LFE BL BR FLC FRC BC LFE2 SL SR
+    # TFL TFR TFC TC TBL TBR TSL TSR TBC BFC BFL BFR.
+    var lay = _aac_layout_config(13);
+    assert_eq(_aac_layout_channels(lay), 24, "22.2: 24 channels");
+    var want = "\x02\x06\x00\x0a\x04\x08\x03\x09\x0e\x0c\x12\x0f\x10\x14\x15\x16";
+    var e = load64(lay + _AAC_L_E);
+    var bad = 0;
+    var i = 0;
+    while (i < 16) {
+        if (load64(e + i * 32 + 24) != load8(want + i)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "22.2: ffmpeg's channel order");
+    # Configuration 14 (7.1 top front): FL FR FC LFE BL BR TFL TFR.
+    lay = _aac_layout_config(14);
+    e = load64(lay + _AAC_L_E);
+    assert_eq(_aac_layout_channels(lay), 8, "configuration 14: 8 channels");
+    assert_eq(load64(e + 3 * 32 + 24), 3, "configuration 14: LFE fourth");
+    assert_eq(load64(e + 4 * 32 + 24), 6, "configuration 14: the top front pair last");
+    assert_eq(_aac_layout_config(8), 0, "configuration 8 is reserved");
+    return 0;
+}
+
+# The mapping table: a short one, a channel past the decoded ones and more coupled
+# than streams are malformed; family 3 (it needs a demixing matrix) and the
+# reserved families are refused; a valid 5.1 header whose one packet is lost
+# conceals six channels.
+fn _opus_ms_pk(head, hlen, pkt, plen) {
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var pk = vec_new();
+    vec_push(pk, str_from_buf(head, hlen));
+    vec_push(pk, str_from_buf(tags, 16));
+    vec_push(pk, str_from_buf(pkt, plen));
+    return pk;
+}
+
+fn test_opus_multistream_header() {
+    syscall(1, 1, "test: opus multistream mapping table\n", 37);
+    var head = alloc(27);
+    memset(head, 0, 27);
     memcpy(head, "OpusHead", 8);
     store8(head + 8, 1);
     store8(head + 9, 6);
@@ -538,16 +650,32 @@ fn test_opus_multistream_refused() {
     store8(head + 18, 1);
     store8(head + 19, 4);
     store8(head + 20, 2);
-    var tags = alloc(16);
-    memset(tags, 0, 16);
-    memcpy(tags, "OpusTags", 8);
-    var pk = vec_new();
-    vec_push(pk, str_from_buf(head, 21));
-    vec_push(pk, str_from_buf(tags, 16));
-    var one = alloc(4);
-    store8(one, 0xF8);
-    vec_push(pk, str_from_buf(one, 1));
-    assert_eq(opus_decode_from_packets(pk, 0, 0), err(ERR_UNSUPPORTED_FMT), "5.1 opus refused");
+    var i = 0;
+    while (i < 6) { store8(head + 21 + i, i); i = i + 1; }
+    var lost = alloc(1);
+    assert_eq(opus_decode_from_packets(_opus_ms_pk(head, 21, lost, 0), 0, 0), err(ERR_INVALID_HEADER),
+      "opus mapping table cut short");
+    store8(head + 21 + 5, 6);
+    assert_eq(opus_decode_from_packets(_opus_ms_pk(head, 27, lost, 0), 0, 0), err(ERR_INVALID_HEADER),
+      "opus mapping past the decoded channels");
+    store8(head + 21 + 5, 255);
+    store8(head + 20, 5);
+    assert_eq(opus_decode_from_packets(_opus_ms_pk(head, 27, lost, 0), 0, 0), err(ERR_INVALID_HEADER),
+      "opus more coupled than streams");
+    store8(head + 20, 2);
+    store8(head + 18, 3);
+    assert_eq(opus_decode_from_packets(_opus_ms_pk(head, 27, lost, 0), 0, 0), err(ERR_UNSUPPORTED_FMT),
+      "opus family 3 refused");
+    store8(head + 18, 7);
+    assert_eq(opus_decode_from_packets(_opus_ms_pk(head, 27, lost, 0), 0, 0), err(ERR_UNSUPPORTED_FMT),
+      "opus reserved family refused");
+    store8(head + 18, 1);
+    var r = opus_decode_from_packets(_opus_ms_pk(head, 27, lost, 0), 0, 0);
+    assert(res_ok(r) == 1, "opus 5.1 with a lost packet decodes");
+    if (res_ok(r) == 1) {
+        assert_eq(fmtinfo_channels(decode_result_info(r)), 6, "opus 5.1: six channels");
+        assert_eq(vec_len(decode_result_samples(r)), 960 * 6, "opus 5.1: one concealed 20 ms packet");
+    }
     return 0;
 }
 
@@ -1002,9 +1130,19 @@ fn test_interop_mp4_audit() {
     assert(is_err(_fx_decode(_FX_MP4CONST1_B64, _FX_KIND_CODEC)) == 1, "mp4 constant size-1 sample table refused");
     # F2: chunks pointing many AAC samples at one access unit (the staging copy was their sum).
     assert(is_err(_fx_decode(_FX_MP4OVERLAP_B64, _FX_KIND_CODEC)) == 1, "mp4 overlapping samples refused");
-    # F4: an AU too long for the ADTS bridge, and channel configuration 7.
-    assert_eq(_fx_decode(_FX_MP4BIGAU_B64, _FX_KIND_CODEC), err(ERR_DECODE), "mp4 AAC access unit over 8184 bytes");
-    assert_eq(_fx_decode(_FX_MP4ASCCH7_B64, _FX_KIND_CODEC), err(ERR_UNSUPPORTED_FMT), "mp4 AAC channel config 7");
+    # F4: an AU too long for the ADTS header the bridge used to build (13-bit
+    # length). Since 2.10.3 access units go to the decoder as they are, and this
+    # one (a real AU, zeros after its END) gives its one frame.
+    var big = _fx_decode(_FX_MP4BIGAU_B64, _FX_KIND_CODEC);
+    assert(res_ok(big) == 1, "mp4 AAC access unit over 8184 bytes decodes");
+    if (res_ok(big) == 1) {
+        assert_eq(fmtinfo_channels(decode_result_info(big)), 2, "mp4 AAC big access unit: stereo");
+        assert_eq(vec_len(decode_result_samples(big)), 2048, "mp4 AAC big access unit: one frame");
+    }
+    # F4: channel configuration 7 (the bridge wrote 0) over a stereo stream. The
+    # 7.1 layout has no place for a CPE first in a block, so every block fails,
+    # as ffmpeg's do ("channel element 1.0 is not allocated").
+    assert_eq(_fx_decode(_FX_MP4ASCCH7_B64, _FX_KIND_CODEC), err(ERR_DECODE), "mp4 AAC channel config 7 over a stereo stream");
     # ... and an explicit rate (22000 Hz) ADTS has no index for; ffmpeg refuses it too.
     assert_eq(_fx_decode(_FX_MP4RATE_B64, _FX_KIND_CODEC), err(ERR_UNSUPPORTED_FMT), "mp4 AAC explicit 22000 Hz rate");
     # F3: the audio trak behind a 64-bit size header, decoded as ffmpeg decodes it.
@@ -1081,7 +1219,10 @@ fn test_interop_all() {
     test_interop_mp3();
     test_interop_mp4_boxes();
     test_interop_opus();
-    test_opus_multistream_refused();
+    test_opus_multistream_header();
+    test_interop_opus_multistream();
+    test_interop_aac_multichannel();
+    test_aac_element_mapping();
     test_interop_mpeg_conformance();
     test_interop_aiff();
     test_pcm_quant_inverse();

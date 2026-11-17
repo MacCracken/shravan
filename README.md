@@ -14,7 +14,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (13,200 assertions)
+# Build + run the test suite (13,320 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -37,11 +37,11 @@ cyrius build src/bench.cyr build/bench
 | **aiff** | AIFF/AIFF-C encoder/decoder (big-endian, 80-bit extended sample rate; AIFF-C sowt, fl32, fl64) |
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |
-| **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo, every frame size and bandwidth, FEC, packet-loss concealment, DTX, matching libopus; RFC-6716 CELT-frame encoder; header parsing (output gain applied) |
+| **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo and multistream (surround and ambisonics, RFC 7845 families 1, 2, 255), every frame size and bandwidth, FEC, packet-loss concealment, DTX, matching libopus; RFC-6716 CELT-frame encoder; header parsing (output gain applied) |
 | **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus |
 | **mp3** | MP3 decoder to PCM (MPEG-1/2/2.5 Layer I/II/III — reservoir, Huffman, requant, IMDCT, polyphase synthesis, intensity stereo, free format); ID3v2 tag skipping; gapless from the LAME tag |
-| **aac** | AAC-LC decoder (mono/stereo, all 13 sample rates, TNS, short windows, M/S, intensity, PNS), encoder (ADTS, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, rate loop with a bit reservoir) |
-| **mp4** | MP4/M4A and QuickTime demux (box tree, sample table, esds, AAC → aac_decode, ALAC → alac_decode_frames); every audio track by index, the default as ffmpeg picks it; gapless (sample durations, edit lists, iTunSMPB) |
+| **aac** | AAC-LC decoder (any channel layout, to 22.2, in ffmpeg's channel order; all 13 sample rates, TNS, short windows, M/S, intensity, PNS), encoder (ADTS, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, rate loop with a bit reservoir) |
+| **mp4** | MP4/M4A and QuickTime demux (box tree, sample table, esds and its channel layout, AAC and ALAC access units to their decoders); every audio track by index, the default as ffmpeg picks it; gapless (sample durations, edit lists, iTunSMPB) |
 | **serde** | JSON serialization of format/pcm/error + codec config/metadata types |
 | **pcm** | Sample format conversion (u8/i16/i24/i32/f32/f64), interleave/deinterleave |
 | **fft** | Mixed-radix FFT (2,3,5), cached radix-2 FFT, FFT-based forward/inverse MDCT |
@@ -84,8 +84,13 @@ MP4 and MP3 decode gapless, as ffmpeg plays them: an AAC file comes out at its s
 the encoder's priming or the last frame's padding. MP4 uses the sample table, the edit list and iTunes'
 `iTunSMPB`; MP3 uses the LAME tag's delay and padding. `shravan_set_gapless(0)` (it returns the previous
 setting) decodes every frame whole instead, as before 2.10.2. An MP4 with several audio tracks decodes the
-one ffmpeg would play; `mp4_track_count`, `mp4_track_info` and `mp4_decode_track` reach the others. The streaming decoders take bytes as they arrive, in pieces of any size, and have no
-ceiling:
+one ffmpeg would play; `mp4_track_count`, `mp4_track_info` and `mp4_decode_track` reach the others.
+
+Multichannel audio comes out interleaved in ffmpeg's channel order, whatever the codec: 5.1 as FL FR FC
+LFE BL BR, from AAC (any channel configuration or PCE, to 22.2), ALAC, and Opus mapping family 1. Opus
+families 2 (ambisonics) and 255 keep the stream's mapping order, as RFC 7845 assigns them no layout.
+
+The streaming decoders take bytes as they arrive, in pieces of any size, and have no ceiling:
 
 ```
 var dr = decode_reader(4096);              # WAV, AIFF or FLAC, detected from the first bytes
@@ -97,19 +102,21 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 
 ## Performance
 
-`src/bench.cyr` on the library itself, v2.10.2, one core (the history is in `bench-history.csv`):
+`src/bench.cyr` on the library itself, v2.10.3, one core (the history is in `bench-history.csv`):
 
 | Benchmark | Time | Real-time multiple |
 |-----------|------|--------------------|
-| WAV decode, 1 s mono 16-bit | 173 µs | ~5800× |
-| FLAC decode, 1 s mono 16-bit | 3.30 ms | ~300× |
-| FLAC encode, 1 s mono 16-bit (level 5) | 5.72 ms | ~175× |
-| AAC decode, 1 s stereo, 128 kbit/s | 17.2 ms | ~58× |
-| AAC encode, 1 s stereo, 128 kbit/s | 52 ms | ~19× |
-| MP4 (AAC) decode, 1 s stereo, 128 kbit/s | 17.7 ms | ~56× |
-| MP3 decode, 44.1 kHz stereo, 64 kbit/s | 69 ms a second | ~15× |
-| Opus CELT decode, one 20 ms frame | 2.19 ms | ~9× |
-| MDCT, 2048 points | 56 µs | |
+| WAV decode, 1 s mono 16-bit | 172 µs | ~5800× |
+| FLAC decode, 1 s mono 16-bit | 3.24 ms | ~310× |
+| FLAC encode, 1 s mono 16-bit (level 5) | 5.70 ms | ~175× |
+| AAC decode, 1 s stereo, 128 kbit/s | 16.2 ms | ~62× |
+| AAC decode, 5.1 at 240 kbit/s (0.28 s) | 12.4 ms | ~22× |
+| AAC encode, 1 s stereo, 128 kbit/s | 53 ms | ~19× |
+| MP4 (AAC) decode, 1 s stereo, 128 kbit/s | 15.8 ms | ~63× |
+| MP3 decode, 44.1 kHz stereo, 64 kbit/s | 63 ms a second | ~16× |
+| Opus CELT decode, one 20 ms frame | 2.13 ms | ~9× |
+| Opus decode, 5.1 (four streams, 0.4 s) | 249 ms | ~1.6× |
+| MDCT, 2048 points | 55 µs | |
 
 On real files through `codec_open` (the interop CLI): 30 s of transient-rich AAC stereo decodes in
 0.47 s, a minute of 16-bit stereo FLAC in 0.39 s, and the same FLAC streamed in 4 KiB pieces in 0.50 s.

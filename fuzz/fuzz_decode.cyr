@@ -715,6 +715,18 @@ total = total + _fz_real(_FX_GLMULTI_B64, 7, 8, 0);
 total = total + _fz_real(_FX_GLMP3LSF_B64, 2, 8, 0);
 total = total + _fz_real(_FX_GLMP3CRC_B64, 2, 8, 0);
 total = total + _fz_real(_FX_OGGGAIN_B64, 0, 8, 0);
+# Multichannel (2.10.3): AAC 5.1 (configuration 6) and 7.1 wide (a PCE in the
+# stream) as ADTS; MP4 with a PCE in the AudioSpecificConfig, and configuration
+# 12 through the track API; multistream Ogg Opus, families 1, 255 and 2, with
+# every self-delimited framing code between them.
+total = total + _fz_real(_FX_AACMC51_B64, 1, 8, 0);
+total = total + _fz_real(_FX_AACMC71W_B64, 1, 8, 0);
+total = total + _fz_real(_FX_AACMC61_B64, 0, 8, 0);
+total = total + _fz_real(_FX_AACMC71_B64, 7, 8, 0);
+total = total + _fz_real(_FX_OPMS51_B64, 0, 8, 0);
+total = total + _fz_real(_FX_OPMSC3_B64, 0, 8, 0);
+total = total + _fz_real(_FX_OPMS255_B64, 0, 8, 0);
+total = total + _fz_real(_FX_OPMSAMB_B64, 0, 8, 0);
 syscall(1, 1, "ok\n", 3);
 
 # ================================================================

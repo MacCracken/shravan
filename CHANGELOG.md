@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.3] - 2026-11-16
+
+**Multichannel decode: Opus multistream and AAC past two channels.** Surround and ambisonic Ogg Opus
+(RFC 7845 mapping families 1, 2 and 255) and AAC in any channel layout (ADTS or MP4, by channel
+configuration or a program_config_element, up to 22.2) now decode. Both were refused with
+`ERR_UNSUPPORTED_FMT` since 2.9.3, where they had decoded garbage. Channels come out in ffmpeg's order,
+the order ALAC already used. Every layout ffmpeg's encoders write is matched against libopus and ffmpeg.
+13,320 assertions (was 13,200).
+
+### Added
+
+- **Opus multistream decode** (RFC 7845 section 5.1.1):
+  - **The OpusHead channel mapping table** is read and checked.
+    - Families 1 (Vorbis order, at most 8 channels), 2 (ambisonics) and 255 (no defined meaning) decode.
+    - Family 3 (it needs a demixing matrix) and the reserved families are `ERR_UNSUPPORTED_FMT`.
+    - A table that is short, has no stream, more coupled streams than streams or more than 255 in all,
+      or maps a channel past the decoded ones is `ERR_INVALID_HEADER`.
+  - **Packets are split into their streams** by RFC 6716 Appendix B's self-delimited framing, as libopus
+    splits them (`opus_packet_parse_impl`). Every stream but the last carries its last frame's size, or
+    for CBR every frame's.
+  - **Each stream has its own decoder**, CELT and SILK state and mode history included:
+    - coupled streams decode as stereo, the rest as mono;
+    - mapping value 255 is a silent channel;
+    - a packet whose streams cannot be split is concealed from that stream on, as libopus refuses it.
+  - **Channel order.** Family 1 comes out in ffmpeg's order (5.1 as FL FR FC LFE BL BR). Families 2 and
+    255 stay in mapping order, as RFC 7845 and ffmpeg's own Opus decoder leave them.
+  - Accessors `opus_head_streams`, `opus_head_coupled` and `opus_head_channel_map`; `opus_head_new` is
+    72 bytes.
+- **AAC with more than two channels** (SCE, CPE and LFE elements):
+  - **Layouts** come from three places:
+    - channel configurations 1–7 and 11–14 (configuration 7 is read as 7.1, as ffmpeg reads it by
+      default);
+    - a program_config_element in an ADTS stream (configuration 0);
+    - a PCE in the MP4 AudioSpecificConfig.
+  - **Elements are placed as ffmpeg places them** (`ff_aac_get_che`, ported as `_aac_che_slot`):
+    - under a PCE, by instance tag;
+    - under a configuration, by their order in each block, with ffmpeg's allowances for 5.1 whose LFE
+      is coded as an SCE and 4.0 whose back SCE is an LFE;
+    - a mono configuration whose stream opens with a CPE decodes as stereo, and a stereo one that opens
+      with an SCE as two SCEs.
+  - **Channels are ordered as ffmpeg orders them** (`sniff_channel_order`): each position's channels
+    are assigned by layer, then sorted by channel; 22.2 takes its fixed order.
+  - **Block failures follow ffmpeg:**
+    - an element the layout has no place for fails its block;
+    - a block with no audio element gives no output;
+    - an element missing from a block repeats its channels' last output.
+
+    Coupling channel elements are `ERR_UNSUPPORTED_FMT`.
+  - **MP4:** the AudioSpecificConfig's GASpecificConfig is read. Configurations 11–14 and a PCE set the
+    channel count and layout. 960-sample frames (`frameLengthFlag`) are `ERR_UNSUPPORTED_FMT` rather
+    than decoded at the wrong length.
+  - `aac_adts_channel_config(h)`. The ADTS header struct is 48 bytes, and `aac_parse_adts_header` accepts
+    configuration 0.
+- Benchmarks: `aac_decode_51_adts` and `opus_decode_51_multistream`.
+
+### Changed
+
+- **MP4 AAC access units go straight to the decoder** (`_aac_decode_frames`, the core behind ADTS
+  too). 2.10.2 wrapped each one in an ADTS header and copied the track into a staging buffer, which
+  limited an access unit to 8,184 bytes and a stream to channel configurations 1–7.
+- **AAC decode writes each block into the output in place.** 2.10.2 pushed it sample by sample, so
+  stereo decode is 5% faster (see Performance).
+- **A block with no audio element** (only fill or END) gives no output, as in ffmpeg. 2.10.2 gave 1024
+  samples of overlap, and a mono frame of them even in a stereo stream.
+- **An AAC stream whose every block fails** is `ERR_DECODE`, not an empty success.
+- `MP4_DX_LAYOUT` (+64) in the demux struct; `MP4_DX_SIZE` is 72.
+- The 2.9.3 MP4 audit's two ADTS-bridge assertions now check the bridge's absence:
+  - the access unit over 8,184 bytes decodes to its one frame;
+  - the stereo stream that claims configuration 7 fails every block, as ffmpeg's do ("channel element
+    1.0 is not allocated").
+
+### Verified
+
+- **Fixtures** (`scripts/gen-interop-fixtures.py`). Each channel carries its own tone, so a channel out
+  of place shows.
+  - AAC from ffmpeg's encoder, with PNS off (its noise is random, and the comparison is sample by
+    sample):
+    - ADTS 4.0 and 5.1 (configurations 4 and 6), and 7.1(wide) (a PCE in the stream);
+    - m4a 7.1 (configuration 12), and 6.1 (a PCE in the AudioSpecificConfig);
+    - a stereo stream under a mono header and a mono stream under a stereo one.
+  - Ogg Opus from libopus:
+    - family 1 at 3.0, 5.1 and 7.1;
+    - family 255 at 5.1 (six mono streams) and family 2 at six channels (first-order ambisonics and a
+      non-diegetic pair);
+    - self-delimited framing codes 0–3, CBR and VBR, across 20, 40, 60 and 120 ms packets.
+  - **Every piece was reverted in a scratch copy and its fixtures failed:**
+    - no family-1 reorder, and the reorder applied to families 2 and 255 as well;
+    - self-delimited packets parsed as plain ones;
+    - the CBR size read as the total;
+    - no channel sort;
+    - PCE positions ignored;
+    - configuration 12's back CPE misplaced;
+    - the PCE comment not skipped;
+    - no LFE slot.
+  - `test_aac_element_mapping` checks what no encoder at hand writes against ffmpeg's source: the 5.1 and
+    4.0 slips, configurations 11, 13 and 14, and 22.2's channel order.
+- **`scripts/interop.py`:**
+  - The AAC group's 3- and 6-channel cases (11 rates × ADTS and m4a) are compared with ffmpeg instead of
+    expected to fail.
+  - Every layout ffmpeg's AAC encoder writes, in both containers: 23 cases.
+  - 14 multistream Ogg Opus cases: families 1, 2 and 255, 3 to 8 channels, 20 to 120 ms.
+  - The whole sweep: 1,006 of 1,006 against a default libopus build (was 969).
+- **The libopus wrapper's channel order.** ffmpeg's libopus wrapper reorders every 3- to 8-channel stream
+  as if it were family 1. Its decode of family 2 or 255 is put back in mapping order before comparison.
+  ffmpeg's native decoder agrees with shravan's order, though not exactly with libopus's values on
+  hybrid. The 4-channel fixtures 2.10.3 started with could not tell (quad's reorder is the identity).
+- **Fuzzing.** The new fixtures are `fuzz/fuzz_decode.cyr` seeds: ADTS with and without a PCE, MP4
+  through the track API, and multistream Ogg Opus. `./fuzz/run.sh 90000` and `--poison`:
+  97,800 and 90,000 calls and 2,200 cold starts, clean; 48 further poison seeds of `fuzz_decode` and 24
+  of `fuzz_opus`, clean.
+
+### Performance
+
+One session, pinned to one core, median of three, the same benchmark code built against 2.10.2 and
+2.10.3:
+
+| Benchmark | 2.10.2 | 2.10.3 | Change |
+|---|---|---|---|
+| `aac_decode_1sec_stereo` | 17.2 ms | 16.2 ms | −5.4% |
+| `mp4_decode_1sec_stereo` | 17.1 ms | 15.8 ms | −7.4% |
+| `aac_decode_51_adts` (0.28 s of 5.1) | refused | 12.4 ms | ~22× real time |
+| `opus_decode_51_multistream` (0.4 s of 5.1) | refused | 249 ms | ~1.6× real time |
+
+Code neither release touched moved by up to ±3.7% (MP3 −3.7%; an unused function alone moves
+`opus_celt_decode_20ms` by 3.4%).
+- **AAC gains from writing in place.** 2.10.2 pushed each sample into the vec. The stdlib's `memcpy` is a
+  byte loop, so the first version of the new path, which copied each block, was 4% *slower*.
+- **MP4 also skips the ADTS staging copy** it no longer makes.
+- **5.1 Opus decodes at only 1.6× real time.** That is four streams (two coupled) at CELT's speed of
+  2.1 ms per mono 20 ms frame, about what that predicts. The multistream layer adds little, and surround
+  Opus playback has little headroom until the CELT decoder is faster.
+
 ## [2.10.2] - 2026-11-16
 
 **Gapless MP4 and MP3, and MP4 track selection.** An AAC file now decodes to its source's length: the
