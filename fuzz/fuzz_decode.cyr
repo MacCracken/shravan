@@ -472,7 +472,9 @@ syscall(1, 1, "ok\n", 3);
 # ================================================================
 # Target: SILK encoder. Random internal rates and packet lengths (valid and
 # not), bit rates, complexities, CBR, packet loss settings (2.12.0, valid and
-# not), buffers from none to plenty, over hostile f64 input (NaN, infinities,
+# not), input rates, FEC and DTX (2.12.1, valid and not; a DTX payload may be
+# empty, and its Opus packet the TOC alone, under CBR too), buffers from none
+# to plenty, over hostile f64 input (NaN, infinities,
 # values past full scale, silence, constants, square waves, noise, and periodic
 # input for the voiced path: impulse trains and squares at lags in and out of
 # the pitch range). Bad parameters must be refused, and only those; a payload must
@@ -483,7 +485,7 @@ syscall(1, 1, "ok\n", 3);
 # violation exits 89.
 # ================================================================
 syscall(1, 1, "  silk_encode... ", 17);
-var se_pcm = alloc(960 * 8);
+var se_pcm = alloc(2880 * 8);
 var se_buf = alloc(1400);
 var se_head = alloc(19);
 memset(se_head, 0, 19);
@@ -518,12 +520,20 @@ while (fi < se_iters) {
     var se_cx = _fz_u(2);
     if (_fz_u(6) == 0) { se_cx = _fz_u(12) - 1; }
     var se_cbr = _fz_u(2);
+    var se_api = se_rate;
+    var as = _fz_u(10);
+    if (as == 1) { se_api = 24000; }
+    if (as == 2) { se_api = 48000; }
+    if (as == 3) { se_api = 12000; }
+    if (as == 4) { se_api = 8000; }
+    if (as == 5) { se_api = 44100; }
     var se_valid = 1;
     if (se_rate != 8000 && se_rate != 12000 && se_rate != 16000) { se_valid = 0; }
+    if (se_api != 8000 && se_api != 12000 && se_api != 16000 && se_api != 24000 && se_api != 48000) { se_valid = 0; }
     if (se_ms != 10 && se_ms != 20 && se_ms != 40 && se_ms != 60) { se_valid = 0; }
     if (se_br < 1 || se_br > 1000000) { se_valid = 0; }
     if (se_cx < 0 || se_cx > 1) { se_valid = 0; }
-    var se_e = silk_encoder_new(se_rate, se_ms, se_br, se_cx, se_cbr);
+    var se_e = silk_encoder_new_api(se_api, se_rate, se_ms, se_br, se_cx, se_cbr);
     var se_bad = 0;
     if ((is_err(se_e) == 1) != (se_valid == 0)) { se_bad = 1; }
     if (se_bad == 0 && se_valid == 1) {
@@ -531,6 +541,11 @@ while (fi < se_iters) {
         var se_loss = _fz_u(111) - 5;
         var se_lr = silk_encoder_set_packet_loss(se_e, se_loss);
         if ((is_err(se_lr) == 1) != (se_loss < 0 || se_loss > 100)) { se_bad = 11; }
+        var se_fec = _fz_u(4) - 1;
+        var se_dtx = _fz_u(4) - 1;
+        if ((is_err(silk_encoder_set_fec(se_e, se_fec)) == 1) != (se_fec < 0 || se_fec > 1)) { se_bad = 12; }
+        if ((is_err(silk_encoder_set_dtx(se_e, se_dtx)) == 1) != (se_dtx < 0 || se_dtx > 1)) { se_bad = 12; }
+        if (se_dtx != 1) { se_dtx = 0; }
         var se_pk = vec_new();
         vec_push(se_pk, str_from_buf(se_head, 19));
         vec_push(se_pk, str_from_buf(se_tags, 16));
@@ -566,7 +581,7 @@ while (fi < se_iters) {
             while (q < 64) { store8(se_buf + se_cap + q, 0xA5); q = q + 1; }
             if (_fz_u(3) == 0) {
                 var r = silk_encode(se_e, se_pcm, se_buf, se_cap);
-                if (is_err(r) == 0 && (r < 1 || r > se_cap || r > 1275)) { se_bad = 2; }
+                if (is_err(r) == 0 && (r < 1 - se_dtx || r > se_cap || r > 1275)) { se_bad = 2; }
                 if (is_err(r) == 1 && r != err(ERR_ENCODE)) { se_bad = 3; }
             } else {
                 var o = silk_encode_opus(se_e, se_pcm, se_buf, se_cap);
@@ -580,7 +595,7 @@ while (fi < se_iters) {
                             if (se_cb > se_cap) { se_cb = se_cap; }
                             if (se_cb > 1276) { se_cb = 1276; }
                             if (se_cb < 1) { se_cb = 1; }
-                            if (o != se_cb) { se_bad = 6; }
+                            if (o != se_cb) { if (se_dtx == 0 || o != 1) { se_bad = 6; } }
                         }
                         if ((load8(se_buf) & 0xFC) != (load8(se_buf) & 0xF8)) { se_bad = 7; }
                         vec_push(se_pk, str_from_buf(se_buf, o));

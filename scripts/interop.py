@@ -782,6 +782,92 @@ class Sweep:
                         ok = ok and (sz == lsz and len(sz) == 1 if cbr else abs(rate / lrate - 1) <= 0.10)
                         self.record("encode", f"silk {src} {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
                                     f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) {rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")
+        self.silk_api_fec_dtx(voiced, sizes)
+
+    def silk_api_fec_dtx(self, voiced, sizes):
+        """2.12.1. The input at an API rate, resampled to the internal one,
+        against libopus's own encoder at the same rates (opus_encode at the API
+        rate), as above. In-band FEC with every fifth packet lost, which libopus
+        recovers from the next packet's LBRR frames: LBRR frames in at least half
+        the packets, and the recovery correlating better than concealment (by
+        0.01 to 0.17 here; least at 10 ms, whose gaps conceal well). DTX on
+        bursts with 0.65 s of silence between them: 1-byte packets where
+        libopus's own encoder leaves its out too (within two), a decode of the
+        stream's length, following the input. (At 8 kHz in 10 ms frames neither
+        encoder's VAD lets this input go quiet enough for DTX.)"""
+        def lbrr(path, ms):
+            d = open(path, "rb").read()
+            n, p, bit = 0, 0, 1 << (7 - (ms // 20 if ms > 10 else 1))
+            while p + 4 <= len(d):
+                k = struct.unpack_from("<I", d, p)[0]
+                if k > 1 and d[p + 5] & bit:
+                    n += 1
+                p += 4 + k
+            return n
+        for api, fs, ms in ((48000, 16000, 20), (48000, 12000, 60), (48000, 8000, 40), (24000, 16000, 40),
+                            (24000, 12000, 20), (16000, 12000, 10), (16000, 8000, 20), (12000, 8000, 60)):
+            br = {8000: 12000, 12000: 16000, 16000: 20000}[fs]
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", voiced + f":s={api}:d=1.5", "-ac", "1",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk, back = self.p(who + ".pk"), self.p(who + ".dec")
+                if who == "shravan":
+                    run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), "0", pk, "opus", "1276", "0",
+                        "0", "0", str(api))
+                else:
+                    run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), "0", pk, f"api={api}")
+                run(OPUSREF, "dec", pk, "1", back, str(api))
+                lag0 = 13 * api // 2000
+                c, lag = best_lag_corr(x, f64(back), 1, lag0 + 3 * api // 1000, api // 10, lag0 - 3)
+                sz = sizes(pk)
+                res[who] = (c, lag, sum(sz) * 8 / (len(sz) * ms / 1000))
+            (c, lag, rate), (lc, llag, lrate) = res["shravan"], res["libopus"]
+            ok = abs(lag - llag) <= 1 and c >= 0.8 and c >= lc - 0.03 and abs(rate / lrate - 1) <= 0.10
+            self.record("encode", f"silk api {api // 1000}k -> {fs // 1000}k {ms}ms -> libopus", ok,
+                        f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) {rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")
+        speech = voiced + "*(0.15+0.85*max(0\\,sin(2*PI*2.5*t)))"
+        for fs, ms in ((16000, 20), (16000, 60), (12000, 40), (8000, 20), (8000, 10)):
+            br = {8000: 16000, 12000: 20000, 16000: 24000}[fs]
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", speech + f":s={fs}:d=3", "-ac", "1",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            pk = self.p("fec.pk")
+            run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), "0", pk, "opus", "1276", "20", "1", "0")
+            cs = []
+            for fec in (0, 1):
+                run(OPUSREF, "dec", pk, "1", self.p("fec.dec"), str(fs), "lose=5", f"fec={fec}")
+                lag0 = 13 * fs // 2000
+                cs.append(best_lag_corr(x, f64(self.p("fec.dec")), 1, lag0 + 3, fs // 10, lag0 - 3)[0])
+            nl, npk = lbrr(pk, ms), len(sizes(pk))
+            ok = nl * 2 >= npk and cs[1] > cs[0] and cs[1] >= 0.8
+            self.record("encode", f"silk fec {fs // 1000}k {ms}ms, 1 in 5 lost -> libopus", ok,
+                        f"concealed {cs[0]:.4f} recovered {cs[1]:.4f}, LBRR in {nl} of {npk} packets")
+        bursts = voiced + "*lt(mod(t\\,1)\\,0.35)"
+        for fs, ms, cbr in ((16000, 20, 0), (16000, 60, 1), (12000, 40, 0), (16000, 10, 0), (8000, 20, 1)):
+            br = {8000: 12000, 12000: 16000, 16000: 20000}[fs]
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", bursts + f":s={fs}:d=4", "-ac", "1",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk = self.p(who + ".pk")
+                if who == "shravan":
+                    run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), str(cbr), pk, "opus", "1276",
+                        "0", "0", "1")
+                else:
+                    run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), str(cbr), pk, "dtx=1")
+                sz = sizes(pk)
+                res[who] = (sum(1 for k in sz if k == 1), len(sz))
+            run(OPUSREF, "dec", self.p("shravan.pk"), "1", self.p("dtx.dec"), str(fs))
+            y = f64(self.p("dtx.dec"))
+            lag0 = 13 * fs // 2000
+            c = best_lag_corr(x, y, 1, lag0 + 3, fs // 10, lag0 - 3)[0]
+            (nd, npk), (ld, _) = res["shravan"], res["libopus"]
+            ok = nd > 0 and abs(nd - ld) <= 2 and len(y) == npk * ms * fs // 1000 and c >= 0.8
+            self.record("encode", f"silk dtx {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                        f"{nd} of {npk} packets left out (libopus {ld}) corr={c:.4f}")
 
 
 def main():

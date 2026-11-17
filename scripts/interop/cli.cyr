@@ -16,13 +16,15 @@
 #   opusdec <in.pk> <channels> <out.f64>           raw Opus packets, each prefixed by
 #                                                  a u32le length; no pre-skip
 #   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
-#   silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw [cap [loss]]]
+#   silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw|opus [cap [loss [fec [dtx [api]]]]]]
 #                                                  mono SILK at the internal rate:
 #                                                  Opus packets (silk_encode_opus), or
 #                                                  with raw the bare SILK payloads
 #                                                  (silk_encode, into cap bytes,
 #                                                  default 1275); u32le length each;
-#                                                  loss: the packet loss percentage
+#                                                  loss: the packet loss percentage;
+#                                                  fec, dtx: 0 or 1; api: the input's
+#                                                  rate (default: rate)
 #   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
 #   id3     <in>                                   ID3v2 title
 #   tracks  <in.mp4>                               print the audio track count and the
@@ -361,8 +363,18 @@ fn _cli_celtenc() {
 
 fn _cli_silkenc() {
     var v = _cli_read_vec(argv(2));
-    var e = silk_encoder_new(atoi(argv(3)), atoi(argv(6)), atoi(argv(4)), atoi(argv(5)), atoi(argv(7)));
+    var api = atoi(argv(3));
+    if (argc() > 14) { api = atoi(argv(14)); }
+    var e = silk_encoder_new_api(api, atoi(argv(3)), atoi(argv(6)), atoi(argv(4)), atoi(argv(5)), atoi(argv(7)));
     if (is_err(e) == 1) { _cli_fail(e); }
+    if (argc() > 12) {
+        var fr = silk_encoder_set_fec(e, atoi(argv(12)));
+        if (is_err(fr) == 1) { _cli_fail(fr); }
+    }
+    if (argc() > 13) {
+        var dr = silk_encoder_set_dtx(e, atoi(argv(13)));
+        if (is_err(dr) == 1) { _cli_fail(dr); }
+    }
     var raw = 0;
     var cap = 1275;
     if (argc() > 9) { if (streq(argv(9), "raw") == 1) { raw = 1; } }

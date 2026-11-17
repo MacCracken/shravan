@@ -1,9 +1,11 @@
 /* silkref: libopus's SILK encoder on a mono 16-bit stream at the internal rate.
- *   silkref <in.s16> <out.pk> <rate_hz> <bitrate> <complexity> <frame_ms> [cbr [maxbytes [loss]]]
- * out.pk: per packet, u32le length then the SILK payload (no TOC). maxbytes
- * caps a VBR packet (maxBits; default 1275 bytes), as shravan's silk_encode
- * takes it from its buffer; loss is packetLossPercentage (default 0). With
- * SILKDUMP=<file> the instrumented library records each stage. */
+ *   silkref <in.s16> <out.pk> <rate_hz> <bitrate> <complexity> <frame_ms> [cbr [maxbytes [loss [fec [dtx [api_hz]]]]]]
+ * out.pk: per packet, u32le length then the SILK payload (no TOC; length 0 for
+ * a packet DTX leaves out). rate_hz is the internal rate, api_hz the input's
+ * (default rate_hz). maxbytes caps a VBR packet (maxBits; default 1275 bytes),
+ * as shravan's silk_encode takes it from its buffer; loss is
+ * packetLossPercentage (default 0); fec sets useInBandFEC and LBRR_coded, dtx
+ * useDTX. With SILKDUMP=<file> the instrumented library records each stage. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,9 @@ int main(int argc, char **argv) {
     int cbr = argc > 7 ? atoi(argv[7]) : 0;
     int maxbytes = argc > 8 ? atoi(argv[8]) : 1275;
     int loss = argc > 9 ? atoi(argv[9]) : 0;
+    int fec = argc > 10 ? atoi(argv[10]) : 0;
+    int dtx = argc > 11 ? atoi(argv[11]) : 0;
+    int api = argc > 12 ? atoi(argv[12]) : rate;
     fseek(fi, 0, SEEK_END); long len = ftell(fi) / 2; fseek(fi, 0, SEEK_SET);
     short *pcm = malloc(len * 2 + 2);
     if (fread(pcm, 2, len, fi) != (size_t)len) return 2;
@@ -27,13 +32,13 @@ int main(int argc, char **argv) {
     silk_EncControlStruct ctl; memset(&ctl, 0, sizeof ctl);
     if (silk_InitEncoder(enc, 1, 0, &ctl)) { fprintf(stderr, "init failed\n"); return 1; }
     ctl.nChannelsAPI = 1; ctl.nChannelsInternal = 1;
-    ctl.API_sampleRate = rate; ctl.maxInternalSampleRate = rate; ctl.minInternalSampleRate = rate;
+    ctl.API_sampleRate = api; ctl.maxInternalSampleRate = rate; ctl.minInternalSampleRate = rate;
     ctl.desiredInternalSampleRate = rate; ctl.payloadSize_ms = ms; ctl.bitRate = bitrate;
-    ctl.packetLossPercentage = loss; ctl.complexity = complexity; ctl.useInBandFEC = 0; ctl.useDRED = 0;
-    ctl.LBRR_coded = 0; ctl.useDTX = 0; ctl.useCBR = cbr; ctl.toMono = 0; ctl.opusCanSwitch = 0;
+    ctl.packetLossPercentage = loss; ctl.complexity = complexity; ctl.useInBandFEC = fec; ctl.useDRED = 0;
+    ctl.LBRR_coded = fec; ctl.useDTX = dtx; ctl.useCBR = cbr; ctl.toMono = 0; ctl.opusCanSwitch = 0;
     ctl.reducedDependency = 0;
     ctl.maxBits = cbr ? bitrate * ms / 1000 : maxbytes * 8;
-    int n = rate * ms / 1000;
+    int n = api * ms / 1000;
     float *buf = malloc(n * sizeof(float));
     unsigned char data[1275];
     long p; int packets = 0;

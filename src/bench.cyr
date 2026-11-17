@@ -800,6 +800,25 @@ fn _bench_silk_encode(name, br, cbr, iters, voiced) {
     return bench_report(t1 - t0, iters);
 }
 
+# 2.12.1: a second of the voiced input at 48 kHz, resampled to wideband, with
+# in-band FEC for 10% loss: every frame quantised twice, the LBRR copy carried.
+fn bench_silk_encode_48k_fec(name, iters) {
+    var x = alloc(48000 * 8);
+    _bench_silk_voiced(48000, 48000, x);
+    var buf = alloc(1280);
+    var e = silk_encoder_new_api(48000, 16000, 20, 20000, 1, 0);
+    silk_encoder_set_fec(e, 1);
+    silk_encoder_set_packet_loss(e, 10);
+    for (var p = 0; p < 50; p = p + 1) { silk_encode(e, x + p * 960 * 8, buf, 1275); }
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        for (var q = 0; q < 50; q = q + 1) { silk_encode(e, x + q * 960 * 8, buf, 1275); }
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: fft_1024
 # ================================================================
@@ -1018,7 +1037,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.12.0 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.1 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -1050,6 +1069,7 @@ var silk_cbr_ns = bench_silk_encode("silk_encode_1sec_wb_cbr12k", 12000, 1, 5);
 var silk_pitch_ns = bench_silk_pitch();
 var silk_ltp_ns = bench_silk_ltp();
 var silk_voiced_ns = _bench_silk_encode("silk_encode_1sec_wb_voiced20k", 20000, 0, 10, 1);
+var silk_fec_ns = bench_silk_encode_48k_fec("silk_encode_1sec_48k_wb_fec20k", 10);
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

@@ -204,7 +204,9 @@ def int_signal(kind, fs, n, seed, prm=COMB):
     Kind 6 (2.12.0) is voiced: the noise through a comb, y[n] = w[n] + G y[n-T]
     (G in Q14), T the period of a pitch gliding from flo to fhi Hz and back
     every 2 s, at 3/2 T in every other jump ms (when jump > 0); with gate 1 the
-    last 0.1 s of every 0.4 s is 30 dB down, with gate 2 silent. A comb on
+    last 0.1 s of every 0.4 s is 30 dB down, with gate 2 silent, and with gate
+    3 the last 0.7 s of every second is silent (long enough for DTX to leave
+    packets out, and to send one after 400 ms of them). A comb on
     white noise is as periodic as speech to the pitch estimator but flat within
     the LPC orders, so the float stages round as shravan's double ones do (a
     pulse train through formants is so ill-conditioned there that libopus's
@@ -239,7 +241,10 @@ def int_signal(kind, fs, n, seed, prm=COMB):
             y = w + ((G * hist[(i - T + H) % H]) >> 14)
             hist[i % H] = y
             x = y >> 3
-            if gate and i % (fs * 2 // 5) >= fs * 3 // 10:
+            if gate == 3:
+                if i % fs >= fs * 3 // 10:
+                    x = 0
+            elif gate and i % (fs * 2 // 5) >= fs * 3 // 10:
                 x = x >> 5 if gate == 1 else 0
         elif kind == 1:
             x = (w * 5) >> 4
@@ -307,6 +312,14 @@ def read_packets(path):
 # from its first sample (libopus does not run the pitch estimator on a first
 # frame, which would find it voiced); k28 scales by 1% loss, two frames a
 # packet, right at the first scaling threshold.
+# 2.12.1 (a dict of extras last: api, the input's rate; fec; dtx): input
+# resampled to the internal rate by each of the encoder's FIR ratios (k29 1/3,
+# k30 1/2, k31 1/6, k32 3/4, k33 2/3, k34 1/4); in-band FEC (k35-k38: LBRR
+# frames at each rate and length, the gain step by loss, conditionally coded
+# LBRR frames and the flags of 2 and 3 frames); DTX (k39-k41: packets left out
+# after 200 ms of silence, and one sent after 400 ms of them); all at once
+# (k42, k43); frames just over LBRR's 30% speech activity (k44); and the rest
+# of the rate pairs' delays (k45-k47: 16 to 8, 24 to 8 and 24 to 16 kHz).
 PACKETS = [
     ("k0", 0, 1, 16000, 20, 1, 20000, 0, 1000, 1275),
     ("k1", 0, 1, 12000, 20, 1, 20000, 0, 1000, 1275),
@@ -337,6 +350,25 @@ PACKETS = [
     ("k26", 6, 10, 12000, 60, 1, 8000, 1, 1200, 1275, 0, (14000, 100, 180, 2, 0)),
     ("k27", 7, 1, 12000, 20, 1, 20000, 0, 1000, 1275, 0, (400, 6, 0, 0, 0)),
     ("k28", 6, 4, 16000, 40, 1, 20000, 0, 1000, 1275, 1),
+    ("k29", 6, 1, 16000, 20, 1, 20000, 0, 1000, 1275, dict(api=48000)),
+    ("k30", 6, 2, 12000, 60, 1, 20000, 0, 1000, 1275, dict(api=24000)),
+    ("k31", 6, 3, 8000, 40, 1, 20000, 0, 1000, 1275, dict(api=48000)),
+    ("k32", 6, 4, 12000, 20, 1, 20000, 0, 1000, 1275, dict(api=16000)),
+    ("k33", 6, 5, 8000, 10, 1, 20000, 0, 1000, 1275, dict(api=12000)),
+    ("k34", 6, 6, 12000, 20, 1, 20000, 0, 1000, 1275, dict(api=48000)),
+    ("k35", 6, 2, 16000, 20, 1, 24000, 0, 1000, 1275, 10, COMB, dict(fec=1)),
+    ("k36", 6, 2, 12000, 60, 1, 24000, 0, 1000, 1275, 30, COMB, dict(fec=1)),
+    ("k37", 6, 2, 8000, 40, 1, 24000, 0, 1000, 1275, 0, COMB, dict(fec=1)),
+    ("k38", 6, 2, 16000, 10, 1, 24000, 0, 1000, 1275, 30, COMB, dict(fec=1)),
+    ("k39", 6, 1, 16000, 20, 1, 20000, 0, 3000, 1275, 0, (14000, 100, 180, 3, 0), dict(dtx=1)),
+    ("k40", 6, 1, 8000, 10, 1, 20000, 1, 3000, 1275, 0, (14000, 100, 180, 3, 0), dict(dtx=1)),
+    ("k41", 6, 1, 16000, 60, 1, 20000, 1, 3000, 1275, 0, (14000, 100, 180, 3, 0), dict(dtx=1)),
+    ("k42", 6, 1, 16000, 20, 1, 20000, 0, 3000, 1275, 10, (14000, 100, 180, 3, 0), dict(api=48000, fec=1, dtx=1)),
+    ("k43", 6, 2, 12000, 60, 1, 20000, 0, 3000, 1275, 20, (14000, 100, 180, 3, 0), dict(api=24000, fec=1, dtx=1)),
+    ("k44", 0, 2, 8000, 20, 1, 24000, 0, 1000, 1275, 10, COMB, dict(fec=1)),
+    ("k45", 6, 7, 8000, 40, 1, 20000, 0, 600, 1275, dict(api=16000)),
+    ("k46", 6, 8, 8000, 20, 1, 20000, 0, 600, 1275, dict(api=24000)),
+    ("k47", 6, 9, 16000, 40, 1, 20000, 0, 600, 1275, dict(api=24000)),
 ]
 
 
@@ -475,36 +507,46 @@ def main():
     with tempfile.TemporaryDirectory() as work:
         exe, probe = build(args.opus_src, work)
         for name, kind, seed, fs, ms, cx, br, cbr, total, cap, *opt in PACKETS:
+            extra = opt.pop() if opt and isinstance(opt[-1], dict) else {}
             loss = opt[0] if opt else 0
             prm = opt[1] if len(opt) > 1 else COMB
-            x = int_signal(kind, fs, fs * total // 1000, seed, prm)
+            api, fec, dtx = extra.get("api", fs), extra.get("fec", 0), extra.get("dtx", 0)
+            x = int_signal(kind, api, api * total // 1000, seed, prm)
             pcm = os.path.join(work, name + ".s16")
             x.tofile(pcm)
             pk = os.path.join(work, name + ".pk")
             dump = os.path.join(work, name + ".dump")
-            run(exe, pcm, pk, str(fs), str(br), str(cx), str(ms), str(cbr), str(cap), str(loss),
-                env=dict(os.environ, SILKDUMP=dump))
+            run(exe, pcm, pk, str(fs), str(br), str(cx), str(ms), str(cbr), str(cap), str(loss), str(fec), str(dtx),
+                str(api), env=dict(os.environ, SILKDUMP=dump))
             frames = total // (10 if ms == 10 else 20)
             voiced = sum(1 for line in open(dump) if line.startswith("nsq.hdr ") and line.split()[8] == "2")
             if kind >= 6:
-                require(voiced * 2 >= frames, name + ": only %d of %d frames voiced" % (voiced, frames))
+                share = 5 if prm[3] == 3 else 2          # gate 3 is silent 70% of the time
+                require(voiced * share >= frames, name + ": only %d of %d frames voiced" % (voiced, frames))
             else:
                 require(voiced == 0, name + ": libopus coded %d frames voiced" % voiced)
             pks = read_packets(pk)
             require(len(pks) == total // ms, name + ": packet count")
             require(max(map(len, pks)) <= cap, name + ": a packet over its buffer")
+            if dtx:
+                require(any(len(p) == 0 for p in pks), name + ": no packet left out")
+            if fec:
+                lb = 1 << (7 - (ms // 20 if ms > 10 else 1))
+                require(any(len(p) > 0 and p[0] & lb for p in pks), name + ": no LBRR frame")
             if os.path.exists(cli):
                 f64 = os.path.join(work, name + ".f64")
                 (x.astype(np.float64) / 32768).astype("<f8").tofile(f64)
                 mine = os.path.join(work, name + ".shr")
-                run(cli, "silkenc", f64, str(fs), str(br), str(cx), str(ms), str(cbr), mine, "raw", str(cap), str(loss))
+                run(cli, "silkenc", f64, str(fs), str(br), str(cx), str(ms), str(cbr), mine, "raw", str(cap), str(loss),
+                    str(fec), str(dtx), str(api))
                 diff = [i for i, (a, b) in enumerate(zip(pks, read_packets(mine))) if a != b]
                 require(not diff, name + ": shravan's packets %s differ from libopus's" % diff[:8])
             h = fnv_i16(x)
             hp = [line.split()[1] for line in open(dump) if line.startswith("hp.out ")]
             pk_sets.append(([kind, seed, fs, ms, cx, br, cbr, len(x), len(pks),
                              struct.unpack("<i", struct.pack("<I", h & 0xFFFFFFFF))[0],
-                             struct.unpack("<i", struct.pack("<I", h >> 32))[0], cap, loss, *prm, hp[-1]], pks))
+                             struct.unpack("<i", struct.pack("<I", h >> 32))[0], cap, loss, *prm, hp[-1], fec, dtx, api],
+                            pks))
         if not os.path.exists(cli):
             print("note: no build/interop-cli, shravan's packets not checked")
         pdump = os.path.join(work, "probe.dump")
@@ -764,7 +806,8 @@ def main():
 
     # 2.11.3: whole packets for inputs the suite builds (one config a segment:
     # its header, then its packets as u32le length and bytes). The header ends
-    # (2.12.0) on the pitch-tracking high-pass's smoother after the last frame.
+    # (2.12.0) on the pitch-tracking high-pass's smoother after the last frame,
+    # then (2.12.1) FEC, DTX and the input's rate.
     w.int("_SKK_N", len(pk_sets))
     w.field("_SKK_HDR", pk_sets, lambda c: c[0], "i")
     w.field("_SKK_PK", pk_sets, lambda c: b"".join(struct.pack("<I", len(p)) + p for p in c[1]), "b")

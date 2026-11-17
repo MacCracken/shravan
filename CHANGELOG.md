@@ -5,6 +5,124 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.1] - 2026-11-17
+
+**SILK encode: input at any API rate, in-band FEC, DTX.** This completes libopus's mono `silk_Encode`:
+an 8 to 48 kHz input is resampled to the internal rate, voice-active frames can carry a coarser copy (LBRR)
+in the next packet, and DTX leaves out packets of silence. shravan's packets are still libopus's byte for
+byte (2,537 in the suite). On real speech from a 48 kHz input, libopus decodes them as well as its own
+encoder's, within 0.002 in correlation, and it recovers lost packets from shravan's LBRR frames.
+15,313 assertions (was 15,115).
+
+### Added
+
+- **Input resampling** (libopus's encoder-side `silk_resampler`): `silk_enc_resampler_new`,
+  `silk_enc_resample`.
+  - From 8, 12, 16, 24 or 48 kHz to the internal rate, with each pair's delay (`delay_matrix_enc`).
+  - Equal rates copy through that delay, which the 2.11.3 packet layer did by hand.
+  - Lower internal rates go through a second-order AR filter and a FIR interpolation
+    (`silk_resampler_private_down_FIR`) at 3/4, 2/3, 1/2, 1/3, 1/4 or 1/6, in 10 ms batches.
+  - Fixed point, exact. The tables come from libopus's `resampler_rom.c` by script.
+- **In-band FEC** (LBRR):
+  - `silk_lbrr_encode_flp` (libopus `silk_LBRR_encode_FLP`). With FEC on and a frame over 30% speech
+    activity, the frame is quantised a second time. It uses the same indices, the first gain raised
+    `LBRR_GainIncreases` steps unless an LBRR frame precedes it in the packet, and the gains dequantised
+    as the decoder will. The quantiser starts from a copy of the regular coding's state.
+  - `silk_setup_LBRR` once a packet: the gain step is 7 after a packet without FEC, otherwise
+    7 − 0.2 × loss, at least 3.
+  - The packet layer writes the previous packet's LBRR frames after the flags: their flag symbol for 2
+    and 3 frames a packet, then each frame's indices (coded conditionally after another LBRR frame) and
+    pulses.
+  - The LBRR flag in the packet's first bits, and in the LTP scaling's loss term.
+  - The bit target subtracts a running average of the LBRR bits. As in libopus, only the first frame of
+    a packet sees them: the average is back to zero for the frames after it, which count those bits
+    as overshoot.
+- **DTX**. After 10 frames without voice activity, up to 20 more at a time, a packet carries nothing:
+  `silk_encode` returns 0 bytes, and `silk_encode_opus` returns the TOC alone, even under CBR, as
+  `opus_encode` does.
+- **Public API**:
+  - `silk_encoder_new_api(api_hz, fs_hz, packet_ms, bitrate, complexity, cbr)`. An internal rate above
+    the input's codes at the input's, as libopus clamps it. `silk_encoder_new` is the equal-rate case.
+  - `silk_encoder_samples` now counts at the input's rate.
+  - `silk_encoder_set_fec(e, 0|1)` (libopus `LBRR_coded`) and `silk_encoder_set_dtx(e, 0|1)`.
+  - `silk_encoder_set_packet_loss` now also sets the LBRR frames' gain step.
+- `_sk_nsq_wrapper`: the quantiser with a given state and pulse buffer.
+- **Tools**:
+  - `silkref` takes FEC, DTX and an API rate.
+  - The interop CLI's `silkenc` takes them too, with `opus` naming the Opus-packet mode.
+  - `opusref dec` takes `lose=N` (every Nth packet lost) and `fec=1` (decoded from the next packet's
+    in-band FEC).
+  - `opusref silk` takes `fec=P`, `dtx=1` and `api=HZ`.
+  - Kind 6's gate 3 silences 0.7 s of every second.
+- The `silk` interop group: 8 API-rate cases, 5 FEC cases and 5 DTX cases (90, was 72).
+- The `silk_encode` fuzz target sets random input rates, FEC and DTX, valid and not.
+- Benchmark `silk_encode_1sec_48k_wb_fec20k`.
+
+### Verified
+
+- **`test_silk_enc_packets_vs_libopus`**: 2,537 packets in 48 configurations, byte for byte libopus's
+  `silk_Encode`. 1,292 are new, in 19 configurations:
+  - every input/internal rate pair, so every FIR ratio and every delay;
+  - FEC at every rate and packet length, under 0 to 30% loss (every gain step), with conditionally coded
+    LBRR frames and the flags of 2 and 3 frames;
+  - frames just over LBRR's speech-activity threshold;
+  - DTX leaving packets out, and sending one after 400 ms of them;
+  - all three at once.
+  - Beyond the suite, 113 of 122 runs of 1 to 3 s matched libopus packet for packet: every rate pair,
+    FEC setting and DTX case. Each of the 9 that parted traces to one coefficient rounding ±1 with every
+    other input equal: a shaping coefficient (`AR_Q13`) in 7, the low-frequency shaping (`LF_AR_Q14`,
+    a near-tie at 8280.5) in 2.
+- **`test_silk_enc_api_fec_dtx`**:
+  - DTX's Opus packets are the TOC alone, under CBR too, exactly where `silk_encode` is empty, and
+    shravan decodes the stream to its length.
+  - FEC payloads set their LBRR flag.
+  - A 48 kHz input codes wideband and decodes following the input.
+  - The API refuses 44.1 and 96 kHz, clamps an internal rate above the input's, and refuses FEC and DTX
+    values other than 0 and 1.
+- **Real speech** (the Opus test vectors) from a 48 kHz input, libopus decoding, against libopus's own
+  encoder: 0.917–0.991 against 0.915–0.991 at 16 kHz, 0.956–0.991 against 0.953–0.991 at 8 kHz
+  (12 and 24 kbit/s).
+- **FEC in libopus**: with every fifth packet lost and decoded from the next packet's LBRR frames, the
+  correlation of 16 kHz speech rose from 0.82 to 0.92 and from 0.71 to 0.92.
+  - libopus's own `silk_Encode`, packetised the same way, gives the same within 0.005.
+  - libopus's whole encoder recovers about 0.02 better. That is `opus_encode`'s layer around SILK: its
+    FEC decision by rate and bandwidth (`decide_fec`) and its input high-pass, for 2.12.x.
+- **Interop sweep**, `silk` group, 90 of 90:
+  - API rates: correlation within 0.003 of libopus's own encoder.
+  - FEC: recovered 0.82–0.95 against 0.78–0.90 concealed.
+  - DTX: exactly as many packets left out as libopus's own encoder at every setting.
+- **Mutations**: 43 tried, 39 caught.
+  - The first run's search found the inputs the suite lacked: three rate pairs' delays, and frames just
+    over the speech-activity threshold.
+  - Four are equivalent:
+    - the resampler's batch size (its state carries across batches) and its final-batch test (whole
+      frames never leave one sample);
+    - the LBRR average's reset threshold (a packet's LBRR bits are 0 or well over 10);
+    - the LBRR term of the bit balance (libopus resets that average to 0 for every frame it applies
+      to).
+- **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included. 24 further
+  poisoned seeds were clean too (236,496 calls).
+- **Memory**: 3,000 packets allocate nothing past the first hundred: 48 kHz to wideband, 24 kHz to
+  mediumband at 60 ms CBR, and 16 kHz to narrowband at 10 ms, all with FEC and DTX on.
+
+### Performance
+
+Pinned to one core, 2.12.0 and 2.12.1 alternating in one session, three rounds each (medians):
+
+| Benchmark | 2.12.0 | 2.12.1 | Real-time multiple |
+|-----------|--------|--------|--------------------|
+| `silk_encode_1sec_48k_wb_fec20k` (new: 48 kHz voiced input to wideband, FEC on) | | 70.7 ms | ~14× |
+| `silk_encode_1sec_wb_voiced20k` | 41.3 ms | 41.4 ms (+0.5%) | ~24× |
+| `silk_encode_1sec_wb_vbr20k` | 30.8 ms | 30.9 ms (+0.5%) | ~32× |
+| `silk_encode_1sec_wb_cbr12k` | 68.8 ms | 69.0 ms (+0.3%) | ~14× |
+| `silk_lpc_analysis_20ms_wb` | 299 µs | 315 µs (+5.5%) | |
+
+The FEC bench quantises every voice-active frame twice and resamples from 48 kHz. `silk_lpc_analysis_20ms_wb`
+creates an encoder state on every run, and the state now holds the LBRR frames' indices, pulses and
+quantiser state: `silk_enc_state_new` alone went from 59–62 µs to 78–79 µs, the bench's whole difference.
+The analysis did not change. Every other benchmark moved between −1.6% and +2.0%, which is noise. All
+numbers this session run about 5% above 2.12.0's own session, so compare rows only within one.
+
 ## [2.12.0] - 2026-11-17
 
 **SILK encode: the voiced path.** Pitch estimation and long-term prediction arrive, so shravan's SILK

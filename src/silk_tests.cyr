@@ -11643,7 +11643,8 @@ fn test_silk_enc_nsq_vs_libopus() {
 # through a sharp resonance, 1, 5 and 3 white at three levels; kind 6 (voiced)
 # the noise through a comb y[n] = w[n] + G y[n - T], T the period of a pitch
 # gliding from flo to fhi Hz and back every 2 s (3/2 T in every other jump ms),
-# with gate 1 the last 0.1 s of every 0.4 s 30 dB down, with gate 2 silent;
+# with gate 1 the last 0.1 s of every 0.4 s 30 dB down, with gate 2 silent,
+# with gate 3 the last 0.7 s of every second silent;
 # kind 7 the noise's first period repeated at prm[0] Hz, 18 dB down, under the
 # noise prm[1] bits down (periodic from its first sample). prm: kind 6's G, flo,
 # fhi, gate, jump, or kind 7's pitch and noise shift (words). Into x (int16
@@ -11691,8 +11692,12 @@ fn _skk_signal(kind, fs, n, seed, x, prm) {
             store64(hist + (i % H) * 8, yc);
             v = sar(yc, 3);
             var gate = load64(prm + 24);
-            if (gate > 0 && i % (fs * 2 / 5) >= fs * 3 / 10) {
-                if (gate == 1) { v = sar(v, 5); } else { v = 0; }
+            if (gate == 3) {
+                if (i % fs >= fs * 3 / 10) { v = 0; }
+            } else {
+                if (gate > 0 && i % (fs * 2 / 5) >= fs * 3 / 10) {
+                    if (gate == 1) { v = sar(v, 5); } else { v = 0; }
+                }
             }
         }
         if (kind == 1) { v = sar(w * 5, 4); }
@@ -12001,27 +12006,34 @@ fn test_silk_enc_hp_vs_libopus() {
 # Since 2.12.0 voiced frames too (kind 6): long-term prediction at every rate
 # and frame size, lags delta and absolutely coded, the LTP scaled under loss,
 # lags at both ends of the range, and the moves between voiced, unvoiced and
-# silent frames.
+# silent frames. Since 2.12.1: input at the API rate through each of the
+# resampler's ratios, in-band FEC (LBRR frames), DTX, and all three at once.
 fn test_silk_enc_packets_vs_libopus() {
     syscall(1, 1, "=== silk encode: whole packets vs libopus ===\n", 46);
     var h = alloc(24 * 8);
-    var x = alloc(19200 * 8);
-    var pcm = alloc(960 * 8);
+    var pcm = alloc(2880 * 8);
     var buf = alloc(1280);
     var ref = alloc(65536);
     var c = 0;
     while (c < _SKK_N) {
         # kind, seed, rate, ms, complexity, bit rate, CBR, samples, packets,
         # the input's hash (2 words), buffer, loss, kind 6's parameters (5),
-        # and libopus's high-pass smoother at the end
+        # libopus's high-pass smoother at the end, then FEC, DTX and the
+        # input's rate (2.12.1)
+        memset(h, 0, 24 * 8);
         _skv_load(_SKK_HDR, c, h);
         var fs = load64(h + 16);
+        var api = load64(h + 168);
+        if (api == 0) { api = fs; }
         var n = load64(h + 56);
         var npk = load64(h + 64);
+        var x = alloc(n * 8);
         var want = (load64(h + 72) & 0xFFFFFFFF) | ((load64(h + 80) & 0xFFFFFFFF) << 32);
-        assert(_skk_signal(load64(h), fs, n, load64(h + 8), x, h + 104) == want, "silk encode: the suite's input is the generator's");
-        var e = silk_encoder_new(fs, load64(h + 24), load64(h + 40), load64(h + 32), load64(h + 48));
+        assert(_skk_signal(load64(h), api, n, load64(h + 8), x, h + 104) == want, "silk encode: the suite's input is the generator's");
+        var e = silk_encoder_new_api(api, fs, load64(h + 24), load64(h + 40), load64(h + 32), load64(h + 48));
         assert_eq(silk_encoder_set_packet_loss(e, load64(h + 96)), 0, "silk encode: the packet loss setting");
+        assert_eq(silk_encoder_set_fec(e, load64(h + 152)), 0, "silk encode: the FEC setting");
+        assert_eq(silk_encoder_set_dtx(e, load64(h + 160)), 0, "silk encode: the DTX setting");
         var spp = silk_encoder_samples(e);
         _skk_bytes(_SKK_PK, c, ref);
         var rp = 0;
@@ -12155,6 +12167,136 @@ fn test_silk_enc_opus_packets() {
         }
         c = c + 1;
     }
+    return 0;
+}
+
+# 2.12.1 through silk_encode_opus: DTX's packets are the TOC alone (under CBR
+# too), as many as silk_encode leaves empty, and shravan's decoder takes the
+# stream at its length; with FEC the payloads set their LBRR flag; a 48 kHz
+# input codes at its internal rate's TOC, decodes to the input's length and
+# follows it. The API's bounds.
+fn test_silk_enc_api_fec_dtx() {
+    syscall(1, 1, "=== silk encode: API rate, FEC, DTX ===\n", 40);
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, 1);
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var prm = alloc(5 * 8);
+    store64(prm, 14000); store64(prm + 8, 100); store64(prm + 16, 180); store64(prm + 24, 3); store64(prm + 32, 0);
+    var buf = alloc(1300);
+    var raw = alloc(1300);
+    var pcm = alloc(2880 * 8);
+    # DTX, VBR and CBR, 20 and 10 ms
+    var c = 0;
+    while (c < 3) {
+        var fs = 16000;
+        var ms = 20;
+        var cbr = c & 1;
+        if (c == 2) { ms = 10; }
+        var n = fs * 3;
+        var x = alloc(n * 8);
+        _skk_signal(6, fs, n, 1, x, prm);
+        var e = silk_encoder_new(fs, ms, 20000, 1, cbr);
+        var e2 = silk_encoder_new(fs, ms, 20000, 1, cbr);
+        silk_encoder_set_dtx(e, 1);
+        silk_encoder_set_dtx(e2, 1);
+        var spp = silk_encoder_samples(e);
+        var pk = vec_new();
+        vec_push(pk, str_from_buf(head, 19));
+        vec_push(pk, str_from_buf(tags, 16));
+        var toc_only = 0;
+        var empty = 0;
+        var same = 1;
+        var p = 0;
+        while ((p + 1) * spp <= n) {
+            _skk_pcm(x, p, spp, pcm);
+            var len = silk_encode_opus(e, pcm, buf, 1276);
+            var rl = silk_encode(e2, pcm, raw, 1275);
+            if (len == 1) { toc_only = toc_only + 1; if (load8(buf) != _silk_toc(e)) { same = 0; } }
+            if (rl == 0) { empty = empty + 1; }
+            if ((len == 1) != (rl == 0)) { same = 0; }
+            vec_push(pk, str_from_buf(buf, len));
+            p = p + 1;
+        }
+        assert(toc_only > 0, "silk encode: DTX leaves packets out");
+        assert(same == 1, "silk encode: a DTX packet is the TOC alone, where the payload is empty");
+        var r = opus_decode_from_packets(pk, 0, 0);
+        assert(is_err(r) == 0, "silk encode: shravan decodes a DTX stream");
+        if (is_err(r) == 0) {
+            assert_eq(vec_len(decode_result_samples(r)), p * ms * 48, "silk encode: a DTX stream decodes to its length");
+        }
+        c = c + 1;
+    }
+    # FEC: the LBRR flag in the payload's first bits, and shravan decodes it
+    var ef = silk_encoder_new(12000, 40, 24000, 1, 0);
+    silk_encoder_set_fec(ef, 1);
+    silk_encoder_set_packet_loss(ef, 20);
+    var nf = 12000;
+    var xf = alloc(nf * 8);
+    store64(prm + 24, 0);
+    _skk_signal(6, 12000, nf, 2, xf, prm);
+    var spf = silk_encoder_samples(ef);
+    var pkf = vec_new();
+    vec_push(pkf, str_from_buf(head, 19));
+    vec_push(pkf, str_from_buf(tags, 16));
+    var flagged = 0;
+    var q = 0;
+    while ((q + 1) * spf <= nf) {
+        _skk_pcm(xf, q, spf, pcm);
+        var lf = silk_encode_opus(ef, pcm, buf, 1276);
+        if (lf > 1) { if ((load8(buf + 1) & 32) != 0) { flagged = flagged + 1; } }
+        vec_push(pkf, str_from_buf(buf, lf));
+        q = q + 1;
+    }
+    assert(flagged >= q / 2, "silk encode: FEC packets carry LBRR frames");
+    assert(is_err(opus_decode_from_packets(pkf, 0, 0)) == 0, "silk encode: shravan decodes a FEC stream");
+    # a 48 kHz input at a 16 kHz internal rate
+    var ea = silk_encoder_new_api(48000, 16000, 20, 24000, 1, 0);
+    assert_eq(silk_encoder_samples(ea), 960, "silk encode: a packet takes 20 ms at the input's rate");
+    var na = 48000;
+    var xa = alloc(na * 8);
+    _skk_signal(0, 48000, na, 3, xa, 0);          # coloured: SILK keeps its band, below 8 kHz
+    var pka = vec_new();
+    vec_push(pka, str_from_buf(head, 19));
+    vec_push(pka, str_from_buf(tags, 16));
+    var tocs = 1;
+    var a = 0;
+    while ((a + 1) * 960 <= na) {
+        _skk_pcm(xa, a, 960, pcm);
+        var la = silk_encode_opus(ea, pcm, buf, 1276);
+        if ((load8(buf) >> 3) != 9) { tocs = 0; }
+        vec_push(pka, str_from_buf(buf, la));
+        a = a + 1;
+    }
+    assert(tocs == 1, "silk encode: a 48 kHz input codes wideband (configuration 9)");
+    var ra = opus_decode_from_packets(pka, 0, 0);
+    assert(is_err(ra) == 0, "silk encode: shravan decodes it");
+    if (is_err(ra) == 0) {
+        var ya = decode_result_samples(ra);
+        assert_eq(vec_len(ya), na, "silk encode: to the input's length at 48 kHz");
+        var best = F64_ZERO;
+        var lag = 300;
+        while (lag <= 330) {
+            var cc = _skk_corr(xa, na, ya, 1, lag);
+            if (f64_gt(cc, best) == 1) { best = cc; }
+            lag = lag + 1;
+        }
+        assert(f64_gt(best, f64_div(f64_from(3), f64_from(4))) == 1, "silk encode: following the input (correlation over 0.75)");
+    }
+    # bounds
+    assert_eq(silk_encoder_new_api(44100, 16000, 20, 20000, 1, 0), err(ERR_INVALID_RATE), "silk encode: 44.1 kHz is not an API rate");
+    assert_eq(silk_encoder_new_api(96000, 16000, 20, 20000, 1, 0), err(ERR_INVALID_RATE), "silk encode: nor 96 kHz");
+    assert_eq(silk_encoder_new_api(48000, 24000, 20, 20000, 1, 0), err(ERR_INVALID_RATE), "silk encode: 24 kHz is not an internal rate");
+    var ec = silk_encoder_new_api(8000, 16000, 20, 20000, 1, 0);
+    assert_eq(load64(ec + _SKX_FS_HZ), 8000, "silk encode: the internal rate never exceeds the input's");
+    assert_eq(silk_encoder_samples(ec), 160, "silk encode: and the packet takes 20 ms at 8 kHz");
+    assert_eq(silk_encoder_set_fec(ec, 2), err(ERR_ENCODE), "silk encode: FEC is 0 or 1");
+    assert_eq(silk_encoder_set_dtx(ec, 0 - 1), err(ERR_ENCODE), "silk encode: DTX is 0 or 1");
     return 0;
 }
 
@@ -12377,6 +12519,7 @@ fn test_silk_all() {
     test_silk_enc_hp_vs_libopus();
     test_silk_enc_packets_vs_libopus();
     test_silk_enc_opus_packets();
+    test_silk_enc_api_fec_dtx();
     test_silk_enc_hostile();
     return 0;
 }

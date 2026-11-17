@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.12.0.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.12.1.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -12,7 +12,7 @@
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
 | AAC-LC | channel configurations 1–7 and 11–14 and any PCE layout (to 22.2), in ffmpeg's channel order; all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact, every layout its encoder writes (ADTS and MP4); PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
-| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo; SILK mono at 8, 12 and 16 kHz, 10–60 ms, VBR and CBR, complexity 0–1, voiced and unvoiced frames, LTP scaled by the expected loss | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced (1,245 packets in the suite), and on real speech libopus decodes them as well as its own encoder's (within 0.003 in correlation) |
+| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo; SILK mono at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–1, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX (2,537 packets in the suite); on real speech libopus decodes them as well as its own encoder's (within 0.003 in correlation), and recovers lost packets from their FEC |
 | MP4 | AAC (any channel layout, a PCE in the AudioSpecificConfig) and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
@@ -45,19 +45,25 @@ since 2.11.3 (voiced frames since 2.12.0).
 
 ## v2.12.x — hybrid encode and the Opus encoder layer · large
 
-The SILK encoder codes voiced and unvoiced frames since 2.12.0 (`silk_encoder_new`, `silk_encode`,
-`silk_encode_opus`), byte for byte libopus's `silk_Encode` wherever libopus's float stages round as
-shravan's doubles do, and on real speech as well as libopus's own encoder. Verify the way 2.11 and
-2.12.0 did: `scripts/gen-silk-vectors.py` records libopus's stages, and `src/silk_tests.cyr` holds
-shravan's packets to libopus's.
+Since 2.12.1 the SILK encoder is libopus's mono `silk_Encode` complete (`silk_encoder_new_api`,
+`silk_encode`, `silk_encode_opus`): voiced and unvoiced frames, an 8–48 kHz input resampled to the
+internal rate, in-band FEC and DTX, byte for byte libopus's wherever libopus's float stages round as
+shravan's doubles do. Verify the way 2.11 and 2.12.0–2.12.1 did: `scripts/gen-silk-vectors.py` records
+libopus's stages and packets, and `src/silk_tests.cyr` holds shravan's to them.
+- First, room for the vectors: the suite's string data is at 97% of the compiler's fixed 2 MB. The interop
+  fixtures' reference decodes (`src/interop_fixtures.cyr`, about 420 KB of decimal text) move to the
+  zlib-in-base64 fields the SILK vectors use.
+- `feat(silk): stereo SILK` — `silk_Encode`'s two-channel path: left/right to mid/side with the stereo
+  predictor (`silk_stereo_LR_to_MS`, the prediction and mid-only indices), the side channel's own state,
+  restarted after mid-only frames, and the rate split between them.
 - `feat(opus): hybrid encode (SILK low band + CELT high band over one range coder) + the encoder
   mode/bandwidth decision and TOC assembly`, so shravan encodes **every** Opus config libopus decodes.
   That is libopus's `opus_encode` around SILK, which `silk_encode_opus` does not do yet:
-  - input at the API rate, resampled to the internal one;
   - the input high-pass (`dc_reject`, 3 Hz, or VOIP's variable cutoff, which reads the smoother
     `silk_hp_variable_cutoff` keeps since 2.12.0);
-  - stereo SILK (mid/side prediction, mid-only frames);
-  - in-band FEC (LBRR frames; the LTP scaling's FEC term waits on it) and DTX.
+  - the FEC decision by rate and bandwidth (`decide_fec`; on real speech libopus's whole encoder
+    recovers lost packets about 0.02 better than `silk_Encode` alone, shravan's or libopus's);
+  - bandwidth switching (SILK's low-pass transition, `silk_LP_variable_cutoff`) and redundancy frames.
 - SILK complexity 2 and up: `silk_NSQ_del_dec`, the delayed-decision quantiser libopus selects there.
   `silk_encoder_new` refuses those complexities until it exists. (The pitch estimator's complexity 2,
   which complexity 8 and up selects, is already in and checked.)
