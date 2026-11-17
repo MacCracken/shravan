@@ -334,4 +334,42 @@ patch("silk/enc_API.c", [
             silk_HP_variable_cutoff( psEnc->state_Fxx );
             sd_int("hp.out", psEnc->state_Fxx[ 0 ].sCmn.variable_HP_smth1_Q15);"""),
 ])
+# 2.12.2: stereo, silk_stereo_LR_to_MS's inputs, state and outputs.
+MS_STATE = """    {
+        int t[13], k;
+        t[0] = state->pred_prev_Q13[0]; t[1] = state->pred_prev_Q13[1]; t[2] = state->sMid[0]; t[3] = state->sMid[1];
+        t[4] = state->sSide[0]; t[5] = state->sSide[1];
+        for (k = 0; k < 4; k++) t[6 + k] = state->mid_side_amp_Q0[k];
+        t[10] = state->smth_width_Q14; t[11] = state->width_prev_Q14; t[12] = state->silent_side_len;
+        sd_i32("%s", t, 13);
+    }
+"""
+patch("silk/stereo_LR_to_MS.c", [
+    ("""    opus_int16 *mid = &x1[ -2 ];
+    SAVE_STACK;
+""", """    opus_int16 *mid = &x1[ -2 ];
+    SAVE_STACK;
+    {
+        int h[6];
+        h[0] = total_rate_bps; h[1] = prev_speech_act_Q8; h[2] = toMono; h[3] = fs_kHz; h[4] = frame_length;
+        h[5] = 0;
+        sd_i32("ms.hdr", h, 6);
+        sd_i16("ms.x1", x1 - 2, frame_length + 2);
+        sd_i16("ms.x2", x2 - 2, frame_length + 2);
+    }
+""" + MS_STATE % "ms.st_in"),
+    ("""    frac_Q16 = silk_SMLABB( HP_ratio_Q14, LP_ratio_Q14, 3 );""", """    { int t[4]; t[0] = pred_Q13[0]; t[1] = pred_Q13[1]; t[2] = LP_ratio_Q14; t[3] = HP_ratio_Q14; sd_i32("ms.pred", t, 4); }
+    frac_Q16 = silk_SMLABB( HP_ratio_Q14, LP_ratio_Q14, 3 );"""),
+    ("""    state->width_prev_Q14     = (opus_int16)width_Q14;
+    RESTORE_STACK;""", """    state->width_prev_Q14     = (opus_int16)width_Q14;
+    {
+        int o[9], k;
+        for (k = 0; k < 6; k++) o[k] = ix[k / 3][k % 3];
+        o[6] = *mid_only_flag; o[7] = mid_side_rates_bps[0]; o[8] = mid_side_rates_bps[1];
+        sd_i32("ms.out", o, 9);
+        sd_i16("ms.mid", mid, frame_length + 2);
+        sd_i16("ms.side", x2 - 1, frame_length);
+    }
+""" + MS_STATE % "ms.st_out" + """    RESTORE_STACK;"""),
+])
 print("patch: instrumented " + ROOT)

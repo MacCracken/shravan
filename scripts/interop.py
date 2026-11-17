@@ -783,6 +783,126 @@ class Sweep:
                         self.record("encode", f"silk {src} {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
                                     f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) {rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")
         self.silk_api_fec_dtx(voiced, sizes)
+        self.silk_stereo(ph, sizes)
+
+    def silk_stereo(self, ph, sizes):
+        """2.12.2. Stereo against libopus's own encoder forced to two channels
+        (OPUS_SET_FORCE_CHANNELS), libopus decoding both: the left a voiced source
+        at 110 Hz, the right half of it and half another at 165 Hz (a partly
+        correlated image), at every rate, 10 to 60 ms, VBR and CBR, and from 48
+        and 24 kHz input. Each channel must follow its input at libopus's lag
+        (within a sample), correlate at least 0.8 and within 0.03 of libopus's,
+        at libopus's bits as above. At a rate low enough for mid-only coding the
+        same against libopus, without the floor; stereo input coded mono against
+        libopus forced to one channel, each decoded channel following the
+        inputs' average; in-band FEC recovering better than concealment; and DTX
+        on bursts over a faint noise floor, its packets left out where libopus's
+        are (within two). (On digital silence libopus's Opus layer turns SILK's
+        DTX off and decides DTX itself, a packet sooner at 60 ms: that is
+        opus_encode's, which silk_encode_opus does not have.)"""
+        def voice(f0, seed):
+            p = ph.replace("110*t", f"{f0}*t")
+            return "+".join(f"{0.3 / k:.4f}*sin(2*PI*{k}*{p})" for k in range(1, 9)) + f"+0.01*random({seed})"
+        L = voice(110, 0)
+        R = f"0.5*({voice(110, 0)})+0.5*({voice(165, 1)})"
+
+        def make(api, d, gate="", floor=""):
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                f"aevalsrc=({L}){gate}{floor.format(2)}|({R}){gate}{floor.format(3)}:s={api}:d={d}",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            return x[0::2], x[1::2]
+
+        def chans(path):
+            y = f64(path)
+            return y[0::2], y[1::2]
+
+        def corr2(xs, ys, api, ms):
+            lag0 = 13 * api // 2000
+            return [best_lag_corr(a, b, 1, lag0 + 3 * api // 1000, api // 10, lag0 - 3) for a, b in zip(xs, ys)]
+
+        cases = [(fs, ms, cbr, fs) for fs in (8000, 12000, 16000) for ms in (20, 60) for cbr in (0, 1)]
+        cases += [(16000, 10, 0, 16000), (12000, 40, 1, 12000), (16000, 20, 0, 48000), (12000, 40, 0, 24000)]
+        for fs, ms, cbr, api in cases:
+            br = {8000: 20000, 12000: 28000, 16000: 36000}[fs]
+            xs = make(api, 1.5)
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk, back = self.p(who + ".pk"), self.p(who + ".dec")
+                if who == "shravan":
+                    run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), str(cbr), pk, "opus", "1276",
+                        "0", "0", "0", str(api), "2")
+                else:
+                    run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), str(cbr), pk, f"api={api}", "ch=2")
+                run(OPUSREF, "dec", pk, "2", back, str(api))
+                sz = sizes(pk)
+                res[who] = (corr2(xs, chans(back), api, ms), sum(sz) * 8 / (len(sz) * ms / 1000), set(sz))
+            (cs, rate, sz), (lcs, lrate, lsz) = res["shravan"], res["libopus"]
+            ok = all(abs(c[1] - l[1]) <= 1 and c[0] >= 0.8 and c[0] >= l[0] - 0.03 for c, l in zip(cs, lcs))
+            ok = ok and (sz == lsz and len(sz) == 1 if cbr else abs(rate / lrate - 1) <= 0.10)
+            src = f"{api // 1000}k -> " if api != fs else ""
+            self.record("encode", f"silk stereo {src}{fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                        "corr L=%.4f R=%.4f (libopus %.4f %.4f) lag=%d,%d (%d,%d) %.1f kb/s (%.1f)"
+                        % (cs[0][0], cs[1][0], lcs[0][0], lcs[1][0], cs[0][1], cs[1][1], lcs[0][1], lcs[1][1],
+                           rate / 1000, lrate / 1000))
+        # mid-only coding at a low rate, and stereo input coded mono
+        for fs, ms, br, fch in ((16000, 20, 14000, 2), (8000, 40, 9000, 2), (16000, 20, 20000, 1), (12000, 60, 16000, 1)):
+            xs = make(fs, 1.5)
+            mid = array.array("d", ((a + b) / 2 for a, b in zip(*xs)))
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk, back = self.p(who + ".pk"), self.p(who + ".dec")
+                if who == "shravan":
+                    run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), "0", pk, "opus", "1276",
+                        "0", "0", "0", str(fs), "2", str(fch))
+                else:
+                    run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), "0", pk, "ch=2", f"fch={fch}")
+                run(OPUSREF, "dec", pk, "2", back, str(fs))
+                sz = sizes(pk)
+                ref = (mid, mid) if fch == 1 else xs
+                res[who] = (corr2(ref, chans(back), fs, ms), sum(sz) * 8 / (len(sz) * ms / 1000))
+            (cs, rate), (lcs, lrate) = res["shravan"], res["libopus"]
+            ok = all(abs(c[1] - l[1]) <= 1 and c[0] >= l[0] - 0.03 for c, l in zip(cs, lcs))
+            ok = ok and abs(rate / lrate - 1) <= 0.10 and (fch == 2 or min(c[0] for c in cs) >= 0.8)
+            what = "mono-coded" if fch == 1 else "low-rate"
+            self.record("encode", f"silk stereo {what} {fs // 1000}k {ms}ms {br // 1000}k -> libopus", ok,
+                        "corr L=%.4f R=%.4f (libopus %.4f %.4f) %.1f kb/s (%.1f)"
+                        % (cs[0][0], cs[1][0], lcs[0][0], lcs[1][0], rate / 1000, lrate / 1000))
+        # in-band FEC, every fifth packet lost
+        for fs, ms in ((16000, 20), (12000, 60), (8000, 40)):
+            br = {8000: 24000, 12000: 32000, 16000: 40000}[fs]
+            xs = make(fs, 3, "*(0.15+0.85*max(0\\,sin(2*PI*2.5*t)))")
+            pk = self.p("fec.pk")
+            run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), "0", pk, "opus", "1276", "20", "1",
+                "0", str(fs), "2")
+            cs = []
+            for fec in (0, 1):
+                run(OPUSREF, "dec", pk, "2", self.p("fec.dec"), str(fs), "lose=5", f"fec={fec}")
+                cs.append(min(c[0] for c in corr2(xs, chans(self.p("fec.dec")), fs, ms)))
+            ok = cs[1] > cs[0] and cs[1] >= 0.8
+            self.record("encode", f"silk stereo fec {fs // 1000}k {ms}ms, 1 in 5 lost -> libopus", ok,
+                        f"concealed {cs[0]:.4f} recovered {cs[1]:.4f} (the worse channel)")
+        # DTX on bursts
+        for fs, ms, cbr in ((16000, 20, 0), (12000, 40, 1), (8000, 60, 0)):
+            br = {8000: 20000, 12000: 28000, 16000: 36000}[fs]
+            xs = make(fs, 4, "*lt(mod(t\\,1)\\,0.35)", "+0.0003*random({})")
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk = self.p(who + ".pk")
+                if who == "shravan":
+                    run(CLI, "silkenc", self.p("s.f64"), str(fs), str(br), "1", str(ms), str(cbr), pk, "opus", "1276",
+                        "0", "0", "1", str(fs), "2")
+                else:
+                    run(OPUSREF, "silk", self.p("s.f64"), str(fs), str(br), str(ms), str(cbr), pk, "dtx=1", "ch=2")
+                sz = sizes(pk)
+                res[who] = (sum(1 for k in sz if k == 1), len(sz))
+            run(OPUSREF, "dec", self.p("shravan.pk"), "2", self.p("dtx.dec"), str(fs))
+            ys = chans(self.p("dtx.dec"))
+            c = min(cc[0] for cc in corr2(xs, ys, fs, ms))
+            (nd, npk), (ld, _) = res["shravan"], res["libopus"]
+            ok = nd > 0 and abs(nd - ld) <= 2 and len(ys[0]) == npk * ms * fs // 1000 and c >= 0.8
+            self.record("encode", f"silk stereo dtx {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                        f"{nd} of {npk} packets left out (libopus {ld}) corr={c:.4f}")
 
     def silk_api_fec_dtx(self, voiced, sizes):
         """2.12.1. The input at an API rate, resampled to the internal one,

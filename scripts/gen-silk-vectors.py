@@ -5,13 +5,16 @@
 
 Builds libopus (v1.6.1, cloned, or the source tree DIR) with the dump hooks of
 scripts/silkref/patch.py, runs its SILK encoder (scripts/silkref/silkref.c:
-silk_Encode, mono at the internal rate) over deterministic test signals, and
+silk_Encode) over deterministic test signals, and
 writes src/silk_enc_vectors.cyr: chosen frames' stage inputs and outputs, so
 shravan's stages can be fed libopus's own inputs (src/silk_tests.cyr), and
 (2.11.3) libopus's whole packets for inputs the suite builds itself
-(int_signal), which shravan's encoder must reproduce byte for byte. With
-build/interop-cli present (scripts/interop.sh builds it) the generator checks
-that shravan does.
+(int_signal), which shravan's encoder must reproduce byte for byte; and
+(2.12.2) stereo: silk_stereo_LR_to_MS on chosen frames, and libopus's stereo
+packets for inputs the suite builds (stereo_signal), stored as each packet's
+length and FNV-1a hash. With build/interop-cli present (scripts/interop.sh
+builds it) the generator checks that shravan's packets are libopus's, bytes
+and all.
 
 Each field holds one frame per segment, the frame's values packed as
 little-endian 32-bit words (ints, or floats as their f32 bit patterns; packets as
@@ -269,6 +272,64 @@ def int_signal(kind, fs, n, seed, prm=COMB):
     return np.array(out, dtype="<i2")
 
 
+def stereo_signal(kind, seed, fs, n, prm, rkind, rseed, rg, rsh, rq):
+    """2.12.2: interleaved stereo for the suite to build too (_skk_stereo):
+    left int_signal(kind, seed), right the left times rg (Q14, negative for
+    anti-phase) plus int_signal(rkind, rseed) shifted down rsh bits and, with
+    rq > 0, faded in over the first 2^rq samples (a stereo image that widens),
+    with rq < 0 faded out over the first 2^-rq (one that narrows)."""
+    L = int_signal(kind, fs, n, seed, prm).astype(np.int64)
+    O = int_signal(rkind, fs, n, rseed, prm).astype(np.int64) >> rsh
+    if rq > 0:
+        O = (O * np.minimum(np.arange(n), 1 << rq)) >> rq
+    elif rq < 0:
+        O = (O * np.maximum((1 << -rq) - np.arange(n), 0)) >> -rq
+    R = np.clip(((L * rg) >> 14) + O, -32768, 32767)
+    x = np.empty(2 * n, dtype=np.int64)
+    x[0::2], x[1::2] = L, R
+    return x.astype("<i2")
+
+
+def fnv_bytes(b):
+    """FNV-1a over bytes (the suite's hash of each stereo packet)."""
+    h = 1469598103934665603
+    for v in b:
+        h = ((h ^ v) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def split64(h):
+    """A 64-bit value as two signed 32-bit words, low first."""
+    return [struct.unpack("<i", struct.pack("<I", h & 0xFFFFFFFF))[0], struct.unpack("<i", struct.pack("<I", h >> 32))[0]]
+
+
+def stereo_frames(dump):
+    """silk_stereo_LR_to_MS's records (scripts/silkref/patch.py), one a frame."""
+    out, cur = [], None
+    for line in open(dump):
+        t, *v = line.split()
+        if t == "ms.hdr":
+            cur = {"hdr": [int(q) for q in v]}
+            out.append(cur)
+        elif t.startswith("ms.") and cur is not None:
+            cur[t[3:]] = [int(q) for q in v]
+    return out
+
+
+def stereo_kind(f):
+    """Which branch of silk_stereo_LR_to_MS's width decision a frame took."""
+    mo, wi, wo = f["out"][6], f["st_in"][11], f["st_out"][11]
+    if f["hdr"][2]:
+        return "tomono"
+    if mo:
+        return "midonly"
+    if wi == 0 and wo == 0:
+        return "taper"           # mid-only, but the side still coded while its taper goes out
+    if wi != 0 and wo == 0:
+        return "collapse"
+    return "full" if wo == 16384 else "reduced"
+
+
 def fnv_i16(x):
     """FNV-1a over the samples as 32-bit words, as _skk_signal hashes them."""
     h = 1469598103934665603
@@ -416,6 +477,85 @@ def pack_f(vals):
     return base64.b64encode(struct.pack("<%df" % len(vals), *(float(v) for v in vals))).decode()
 
 
+# 2.12.2: stereo (silk_Encode's two-channel path) on stereo_signal's inputs.
+# name, kind, seed, rate, packet ms, complexity, bit rate, CBR, input ms, then
+# the extras: buffer, loss, fec, dtx, api (the input's rate), sched (each
+# packet's coded channels in turn: 1 mono, 2 stereo, 3 stereo going to mono),
+# rates (each packet's bit rate in turn, "rate*count,..."), kind 6's
+# parameters, and the right channel's (rkind, rseed, rg, rsh, rq). Between
+# them, every branch of the width decision: full width (s0), mid-only from a
+# low rate (s1) and from a panned image (s2), rate schedules that collapse the
+# width, code the mid alone, narrow it and widen it again (s3; s4 at 10 ms,
+# where the first two mid-only frames still code the side; s6 and s7 at 40 and
+# 60 ms, the mid's rate at its minimum), an image that widens until the side
+# is coded again in the middle of a packet, coded independently without LTP
+# scaling (s5); input resampled for both channels (s8, s9); in-band FEC, LBRR
+# frames for both channels and for the mid alone (s10, s11) and for the side
+# alone, mid and side in anti-phase (s23, s24); DTX of both channels (s12);
+# stereo input coded mono, the channels averaged (s13); moves between mono and
+# stereo, with and without toMono first (s14-s16, s20); CBR, the mid's share of
+# the budget (s17, s18); complexity 0 (s19); unvoiced input (s21); and
+# uncorrelated channels (s22). The rest each put frames on one side of a
+# threshold the mutation search found nothing near: s3's last step collapses a
+# coded width by the rate alone (8 total < 11 min_mid, not 10); s5's image
+# widens slowly enough for a mid-only frame at frac x width 806 (under 819);
+# s25's narrows past 326 (under 328) with the width still coded; s26's smoothed
+# width sits in (15000, 15565] for 100 frames (narrowed, not full); s27's high
+# band clamps its residual ratio at 32767 while the low band leaves frac
+# unsaturated; s28's side is reset in silence, its first gain floored at
+# LastGainIndex 10 less 4; and s29's side, a sharp resonance the mid predicts
+# none of, is reset where libopus's first frame holds prediction gain to 20 dB.
+# s30 is full-scale clipped noise against its own negative, left 32767 to right
+# -32768: the side's half difference saturates (where, the mid being 0, the
+# side's residual clamps as well; s32's louder mix of two noises saturates it
+# once where the predictor's term keeps the residual inside int16). In s31 a loud comb gated on
+# and off against the predictor fitted without it drives the side's residual
+# past both int16 limits.
+STEREO = [
+    ("s0", 6, 3, 16000, 20, 1, 32000, 0, 1000, dict(rkind=2, rg=12000, rsh=0)),
+    ("s1", 6, 1, 8000, 20, 1, 7000, 0, 1000, dict()),
+    ("s2", 6, 1, 16000, 20, 1, 32000, 0, 1000, dict(rg=6000, rsh=12)),
+    ("s3", 6, 1, 16000, 20, 1, 26000, 0, 4500, dict(rates="26000*50,12000*50,26000*50,21000*50,15800*25")),
+    ("s4", 6, 1, 16000, 10, 1, 26000, 0, 3000, dict(rates="26000*100,12000*100,26000*100")),
+    ("s5", 6, 1, 16000, 60, 1, 32000, 0, 3000, dict(rq=16, rsh=1, rkind=6, rseed=77, rg=12000)),
+    ("s6", 6, 1, 12000, 40, 1, 20000, 0, 4000, dict(rates="20000*25,10000*25,15000*25,17000*25")),
+    ("s7", 6, 1, 8000, 60, 1, 13000, 0, 4020, dict(rates="13000*17,8000*17,10500*17,12000*16")),
+    ("s8", 6, 1, 16000, 20, 1, 32000, 0, 1000, dict(api=48000)),
+    ("s9", 6, 1, 12000, 40, 1, 24000, 0, 1000, dict(api=24000)),
+    ("s10", 6, 1, 16000, 20, 1, 32000, 0, 1000, dict(fec=1, loss=10)),
+    ("s11", 6, 1, 16000, 60, 1, 32000, 0, 2040, dict(fec=1, loss=5, rkind=2, rg=12000, rsh=0)),
+    ("s12", 6, 1, 16000, 20, 1, 20000, 0, 3000, dict(dtx=1, prm=(14000, 100, 180, 3, 0), rkind=6, rseed=3, rg=8000, rsh=3)),
+    ("s13", 6, 1, 16000, 20, 1, 20000, 0, 1000, dict(api=48000, sched="1")),
+    ("s14", 6, 1, 16000, 20, 1, 24000, 0, 2000, dict(sched="2222311112")),
+    ("s15", 6, 1, 12000, 40, 1, 24000, 0, 2000, dict(sched="2311", api=48000)),
+    ("s16", 6, 1, 16000, 60, 1, 24000, 0, 2040, dict(sched="231", fec=1, loss=10)),
+    ("s17", 6, 1, 16000, 20, 1, 24000, 1, 1000, dict()),
+    ("s18", 6, 1, 12000, 60, 1, 24000, 1, 2040, dict()),
+    ("s19", 6, 1, 8000, 20, 0, 16000, 0, 1000, dict()),
+    ("s20", 6, 1, 8000, 10, 0, 16000, 0, 1000, dict(sched="21", api=16000)),
+    ("s21", 0, 1, 16000, 20, 1, 32000, 0, 1000, dict()),
+    ("s22", 6, 1, 12000, 20, 1, 24000, 0, 1000, dict(rkind=6, rseed=99, rg=0, rsh=0)),
+    ("s23", 6, 1, 16000, 20, 1, 32000, 0, 1000, dict(fec=1, loss=10, rg=-16384, rsh=6)),
+    ("s24", 6, 1, 12000, 40, 1, 32000, 0, 1000, dict(fec=1, loss=10, rg=-15000, rsh=4)),
+    ("s25", 6, 3, 16000, 20, 1, 32000, 0, 6000, dict(rq=-15, rsh=1, rkind=6, rseed=77, rg=12000)),
+    ("s26", 6, 1, 16000, 20, 1, 20000, 0, 4000, dict()),
+    ("s27", 3, 1, 16000, 20, 1, 32000, 0, 1000, dict(rkind=0, rg=-16384, rsh=0)),
+    ("s28", 6, 1, 16000, 20, 1, 26000, 0, 3000, dict(rates="26000*50,12000*45,26000*55", prm=(14000, 100, 180, 3, 0))),
+    ("s29", 6, 2, 16000, 20, 1, 26000, 0, 600, dict(rates="26000*10,12000*10,26000*10", rkind=4, rseed=9, rg=16384, rsh=3)),
+    ("s30", 1, 1, 16000, 20, 1, 32000, 0, 1000, dict(rkind=0, rg=-16400, rsh=14)),
+    ("s31", 1, 4, 16000, 20, 1, 32000, 0, 1000, dict(prm=(14000, 100, 180, 2, 0), rkind=6, rseed=5, rg=-10000, rsh=0)),
+    ("s32", 1, 2, 16000, 20, 1, 32000, 0, 1000, dict(rkind=1, rseed=5, rg=-24576, rsh=1)),
+]
+
+
+def rate_list(spec):
+    """'rate*count,...' as [rate, count, ...]."""
+    out = []
+    for part in filter(None, spec.split(",")):
+        r, _, c = part.partition("*")
+        out += [int(r), int(c or 1)]
+    return out
+
 class Writer:
     def __init__(self):
         self.parts = []
@@ -547,6 +687,80 @@ def main():
                              struct.unpack("<i", struct.pack("<I", h & 0xFFFFFFFF))[0],
                              struct.unpack("<i", struct.pack("<I", h >> 32))[0], cap, loss, *prm, hp[-1], fec, dtx, api],
                             pks))
+        # 2.12.2: stereo
+        st_sets, st_frames, cover = [], [], {}
+        for name, kind, seed, fs, ms, cx, br, cbr, total, ex in STEREO:
+            cap, loss, fec, dtx = ex.get("cap", 1275), ex.get("loss", 0), ex.get("fec", 0), ex.get("dtx", 0)
+            api, sched, rates = ex.get("api", fs), ex.get("sched", "2"), ex.get("rates", "")
+            prm = ex.get("prm", COMB)
+            rkind, rseed, rg, rsh, rq = (ex.get(k, d) for k, d in (("rkind", 0), ("rseed", 5), ("rg", 8192), ("rsh", 1), ("rq", 0)))
+            n = api * total // 1000
+            x = stereo_signal(kind, seed, api, n, prm, rkind, rseed, rg, rsh, rq)
+            pcm = os.path.join(work, name + ".s16")
+            x.tofile(pcm)
+            pk = os.path.join(work, name + ".pk")
+            dump = os.path.join(work, name + ".dump")
+            tail = [str(cap), str(loss), str(fec), str(dtx), str(api), "2", sched, rates]
+            run(exe, pcm, pk, str(fs), str(br), str(cx), str(ms), str(cbr), *tail, env=dict(os.environ, SILKDUMP=dump))
+            pks = read_packets(pk)
+            require(len(pks) == total // ms, name + ": packet count")
+            require(max(map(len, pks)) <= cap, name + ": a packet over its buffer")
+            if os.path.exists(cli):
+                f64 = os.path.join(work, name + ".f64")
+                (x.astype(np.float64) / 32768).astype("<f8").tofile(f64)
+                mine = os.path.join(work, name + ".shr")
+                run(cli, "silkenc", f64, str(fs), str(br), str(cx), str(ms), str(cbr), mine, "raw", *tail)
+                diff = [i for i, (a, b) in enumerate(zip(pks, read_packets(mine))) if a != b]
+                require(not diff, name + ": shravan's packets %s differ from libopus's" % diff[:8])
+            # what the run reaches: the width decision's branches, the side's
+            # reset after mid-only frames (inside a packet: coded independently
+            # without LTP scaling), LBRR frames per channel, DTX, mono packets
+            nfr = 1 if ms == 10 else ms // 20
+            frames = stereo_frames(dump)
+            pos = [f for p_, c in enumerate(sched * len(pks)) if p_ < len(pks) and c != "1" for f in range(nfr)]
+            require(len(pos) == len(frames), name + ": stereo frame count")
+            prev = 0
+            for j, f in enumerate(frames):
+                f["run"] = name
+                if any(a - b >= 65535 for a, b in zip(f["x1"][2:], f["x2"][2:])):
+                    cover["sidesat"] = 1
+                if 32767 in f["side"]:
+                    cover["outhi"] = 1
+                if -32768 in f["side"]:
+                    cover["outlo"] = 1
+                k = stereo_kind(f)
+                cover[k] = cover.get(k, 0) + 1
+                if not f["out"][6] and f["out"][7] == 2000 + 600 * (fs // 1000):
+                    cover["minrate"] = 1
+                if prev and not f["out"][6]:
+                    cover["sidereset"] = 1
+                    if pos[j] > 0:
+                        cover["cond1"] = 1
+                prev = f["out"][6]
+            st_frames += frames
+            for p_, b in enumerate(pks):
+                c = sched[p_ % len(sched)]
+                if not b:
+                    cover["dtx"] = 1
+                    continue
+                if c == "1":
+                    cover["mono"] = 1
+                    continue
+                nb = 2 * (nfr + 1)
+                bits = b[0] >> (8 - nb)
+                lb0, lb1 = (bits >> nfr) & 1, bits & 1
+                if lb0 or lb1:
+                    cover["lbrr_" + ("both" if lb0 and lb1 else "mid" if lb0 else "side")] = 1
+            if "3" in sched:
+                cover["switch"] = 1
+            hp = [line.split()[1] for line in open(dump) if line.startswith("hp.out ")]
+            st_sets.append(([kind, seed, fs, ms, cx, br, cbr, n, len(pks), *split64(fnv_i16(x)), cap, loss, *prm, fec, dtx,
+                             api, 2, rkind, rseed, rg, rsh, rq, hp[-1]],
+                            [int(c) for c in sched], rate_list(rates),
+                            [v for b in pks for v in [len(b)] + split64(fnv_bytes(b))]))
+        for k in ("full", "reduced", "collapse", "midonly", "taper", "tomono", "minrate", "sidereset", "cond1",
+                  "lbrr_both", "lbrr_mid", "lbrr_side", "dtx", "mono", "switch", "sidesat", "outhi", "outlo"):
+            require(k in cover, "stereo set: no run reaches " + k)
         if not os.path.exists(cli):
             print("note: no build/interop-cli, shravan's packets not checked")
         pdump = os.path.join(work, "probe.dump")
@@ -812,10 +1026,52 @@ def main():
     w.field("_SKK_HDR", pk_sets, lambda c: c[0], "i")
     w.field("_SKK_PK", pk_sets, lambda c: b"".join(struct.pack("<I", len(p)) + p for p in c[1]), "b")
 
+    # 2.12.2: stereo packets (one config a segment each: its header, its
+    # coded-channel schedule, its rate schedule as rate, count pairs, and per
+    # packet its length and FNV-1a hash), and silk_stereo_LR_to_MS on
+    # libopus's own frames, one of each branch and rate and the first
+    w.int("_SKM_N", len(st_sets))
+    w.field("_SKM_HDR", st_sets, lambda c: c[0], "i")
+    w.field("_SKM_SCHED", st_sets, lambda c: c[1], "i")
+    w.field("_SKM_RATES", st_sets, lambda c: c[2], "i")
+    w.field("_SKM_PK", st_sets, lambda c: c[3], "i")
+    pick, seen = [], set()
+    for i, f in enumerate(st_frames):
+        keys = [("kind", stereo_kind(f)), ("fs", f["hdr"][3]), ("fl", f["hdr"][4])]
+        if not f["out"][6] and f["out"][7] == 2000 + 600 * f["hdr"][3]:
+            keys.append(("minrate", 1))
+        if i == 0:
+            keys.append(("first", 1))
+        if f["hdr"][1] > 200 and f["out"][6] == 0:
+            keys.append(("speech", 1))
+        if abs(f["pred"][0]) == 16384 or abs(f["pred"][1]) == 16384:
+            keys.append(("predclamp", 1))     # the predictor at its limit (its square sets the smoothing)
+        if f["pred"][3] == 32767 and f["pred"][2] < 10923:
+            keys.append(("hpclamp", 1))       # the high band's ratio at its limit, frac below 1
+        if any(f["x1"][j] - f["x2"][j] >= 65535 and f["side"][j - 1] < 32767 for j in range(2, len(f["x1"]) - 1)):
+            keys.append(("sidesat", 1))       # the side's half difference saturating, its residual unclamped
+        if 32767 in f["side"]:
+            keys.append(("outhi", 1))         # the side's residual clamped, above
+        if -32768 in f["side"]:
+            keys.append(("outlo", 1))         # and below
+        if any(k not in seen for k in keys):
+            seen.update(keys)
+            pick.append(f)
+    require({k for k, _ in seen} >= {"kind", "fs", "fl", "minrate", "first", "speech", "predclamp", "hpclamp", "sidesat",
+                                     "outhi", "outlo"},
+            "stereo stage set: coverage")
+    require(len({v for k, v in seen if k == "kind"}) == 6, "stereo stage set: every width branch")
+    w.int("_SKB_N", len(pick))
+    w.field("_SKB_HDR", pick, lambda f: f["hdr"][:5] + f["st_in"] + f["out"] + f["st_out"] + split64(fnv_i16(f["mid"]))
+            + split64(fnv_i16(f["side"])), "i")
+    w.field("_SKB_X1", pick, lambda f: f["x1"], "i")
+    w.field("_SKB_X2", pick, lambda f: f["x2"], "i")
+
     open(OUT, "w").write("".join(w.parts))
     print("wrote %s (LPC %d, VAD %d, shape %d frames, NSQ %d + %d calls, conversion %d, pitch %d, LTP %d, HP %d, "
-          "packets %d; %d bytes)" % (OUT, len(sel), len(vad), len(shp), len(calls), len(agg), len(conv), len(pit),
-                                     len(ltp), len(hp), sum(len(c[1]) for c in pk_sets), os.path.getsize(OUT)))
+          "packets %d, stereo packets %d, stereo frames %d; %d bytes)" % (OUT, len(sel), len(vad), len(shp), len(calls),
+                                     len(agg), len(conv), len(pit), len(ltp), len(hp), sum(len(c[1]) for c in pk_sets),
+                                     sum(len(c[3]) // 3 for c in st_sets), len(pick), os.path.getsize(OUT)))
 
 
 if __name__ == "__main__":

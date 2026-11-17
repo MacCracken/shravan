@@ -5,6 +5,155 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.2] - 2026-11-17
+
+**SILK encode: stereo.** libopus's two-channel `silk_Encode` arrives: left and right become an adaptive
+mid and side, the side predicted from the mid's low and high bands, the bit rate split between them, and
+the stereo image narrowed or collapsed to mid-only coding at low rates or for nearly panned input. The
+encoder also moves between mono and stereo packet by packet and codes stereo input as mono. shravan's
+stereo packets are libopus's packet for packet (2,724 in the suite). On real stereo music and speech,
+libopus decodes them to within 0.001 of the correlation it reaches on its own encoder's. 15,550 assertions
+(was 15,313).
+
+### Added
+
+- **Stereo** (libopus `stereo_LR_to_MS.c`, `stereo_find_predictor.c`, `stereo_quant_pred.c`,
+  `stereo_encode_pred.c`; fixed point, exact):
+  - `silk_stereo_lr_to_ms`: the mid and side with their 2-sample buffers, both split into a 3-tap low
+    band and the high band, a predictor of each side band from the mid's, and the mid's and side's
+    bit rates (8 parts to 5 + 3 × the side's residual ratio, the mid at least 2000 + 600 × kHz bit/s).
+    - The width: smoothed by the speech activity, narrowed when the mid's rate is short, collapsed
+      at low rates or for a residual under 5% of the mid (2% once coded), full above 0.95.
+    - Mid-only frames, the side still coded until its 8 ms taper and the 5 ms shaping lookahead
+      have gone out (two 10 ms frames).
+    - The side less its prediction, the predictors and width interpolated over the first 8 ms.
+  - `silk_stereo_find_predictor`: least squares in Q13, at most ±2, and the smoothed norms of the mid
+    and of the residual.
+  - `silk_stereo_quant_pred` (15 × 5 levels, the search stopping where the error grows) and the index
+    writers `silk_stereo_encode_pred`, `silk_stereo_encode_mid_only`.
+- **The packet layer for two channels** (`_silk_encode_packet`, libopus `silk_Encode`):
+  - Both channels resampled; the header's flags for both channels; LBRR flags and frames per channel,
+    the predictors ahead of the mid's LBRR frame, the mid-only flag where the side has none.
+  - Per frame: left/right to mid/side, the side's VAD, the predictors and mid-only flag in the bit
+    stream, then the mid's frame, its budget cut to leave the side half a frame's share (and never
+    CBR while the side is coded), then the side's frame.
+  - The side's first frame after mid-only ones starts from a reset shaping and quantiser state and
+    NLSF history, coded independently without LTP scaling inside a packet.
+  - DTX only when both channels are inactive.
+  - Moving between mono and stereo: going to stereo starts the side's state afresh and its resampler
+    from the mid's; the first mono frame after stereo averages both resamplers' output; `toMono`
+    narrows the image to nothing first.
+  - Stereo input coded mono: the channels summed as libopus's floats (each rounded to f32, the sum
+    to f32), then halved.
+- **Public API**:
+  - `silk_encoder_new_channels(api_hz, fs_hz, channels, packet_ms, bitrate, complexity, cbr)`:
+    1 or 2 input channels, interleaved. `silk_encoder_new_api` is the mono case.
+  - `silk_encoder_set_channels(e, 1|2)` (libopus `nChannelsInternal`), `silk_encoder_set_to_mono(e,
+    0|1)`, `silk_encoder_set_bitrate(e, bps)` (libopus takes the rate afresh each packet), and
+    `silk_encoder_stereo_width(e)` (`stereoWidth_Q14`, which libopus's Opus layer reads).
+  - `silk_encode_opus` sets the TOC's stereo bit on two-channel packets.
+- `silk_enc_state_reset`: an encoder state reinitialised in place, its buffers kept.
+- **Tools**:
+  - `silkref` takes the input's channels, a per-packet channel schedule (`toMono` included) and a
+    per-packet bit rate schedule.
+  - The interop CLI's `silkenc` takes the same.
+  - `opusref silk` takes `ch=N` and `fch=N` (`OPUS_SET_FORCE_CHANNELS`).
+  - `scripts/silkref/patch.py` records `silk_stereo_LR_to_MS`'s inputs, state, predictors and outputs.
+- The `silk` interop group: 26 stereo cases (116, was 90).
+- The `silk_encode` fuzz target takes stereo input, invalid channel counts, and channels, `toMono` and
+  bit rates changing per packet.
+- Benchmarks `silk_encode_1sec_wb_stereo32k` and `silk_stereo_lr_to_ms_20ms_wb`.
+
+### Changed
+
+- **Interop fixtures zlib-compressed**: the reference decodes in `src/interop_fixtures.cyr` are
+  base64 of zlib of int16 (`ref_literal` in `scripts/gen-interop-fixtures.py`), inflated once by
+  `_fx_ref`. The file went from 1,140,940 to 921,670 bytes and the suite's string data from 97% to 88%
+  of the compiler's 2 MB cap, which made room for the stereo vectors (now 91%).
+- `silk_encode_indices_ec` takes libopus's `condCoding` (0 independent, 1 independent without LTP
+  scaling, 2 conditional), which the side's frames after mid-only ones need.
+- `silk_enc_state_new` allocates and then calls `silk_enc_state_reset`; `silk_vad_new` and
+  `silk_nsq_new` likewise over in-place `_sk_vad_init` and `_sk_nsq_init`.
+
+### Verified
+
+- **`test_silk_enc_stereo_vs_libopus`**: 2,724 packets in 33 configurations, each one's length and
+  FNV-1a hash libopus's `silk_Encode`'s (the generator compares the bytes too; as hashes the stereo
+  sets take 35 KB of the suite's string data, where the bytes would take about 200 KB). Between them:
+  - every branch of the width decision: full, narrowed, collapsed by rate and by residual, mid-only
+    from a low rate and from a panned image, the side still coded during its taper;
+  - the side reset after mid-only frames, at a packet's first frame and inside a packet;
+  - every rate, 10 to 60 ms, VBR and CBR, both complexities, input resampled from 24 and 48 kHz;
+  - in-band FEC with LBRR frames for both channels, for the mid alone, for the side alone;
+  - DTX of both channels; stereo input coded mono; mono and stereo packets in turn, with and without
+    `toMono`; bit rates changing mid-stream; full-scale clipped and anti-phase input.
+- **`test_silk_enc_stereo_stage_vs_libopus`**: `silk_stereo_lr_to_ms` on 15 of libopus's own frames
+  (its inputs, state and rate): one of each width branch, every rate and frame length, the predictor
+  and residual ratio at their limits, the side saturating and clamped at both ends. Indices, flag,
+  rates, state and both signals exactly.
+- **`test_silk_enc_stereo_api`**: the TOC's stereo bit; shravan's decoder (exact against libopus's)
+  giving both channels, each following its input over 0.75; stereo coded mono following the
+  average; channel switching decoding at its length; the downmix's f32 rounding on a constructed tie
+  (`1000.5/32768 + 2^-31` and `2^-30` round to 500, not 501); hostile stereo (NaN, infinities against
+  their negatives, full-scale anti-phase squares, denormals) through VBR and CBR with the channels
+  switching; and the setters' bounds.
+- **Beyond the suite**, 19 of 29 sweep runs of 1 to 3 s (28 stereo, one mono) matched libopus packet
+  for packet. Each of the 10 that parted traces to one or two shaping coefficients (`AR_Q13`) rounding
+  ±1, the float value within 0.032 of the tie in every case, every other quantiser input equal. The
+  noise shaping is held to 3e-3 against libopus's own inputs in the stage tests; its double precision
+  against libopus's floats is the whole difference. The suite's configurations are seeds that round as
+  libopus does.
+- **Real stereo audio** (Opus test vectors 1, 5, 7, 9 and 11, 10 s each, from 48 kHz), libopus
+  decoding, against libopus's own encoder forced to stereo SILK: within 0.001 in correlation per
+  channel (0.9610/0.9555 against 0.9619/0.9557 on test vector 1 at 32 kbit/s wideband,
+  0.9077/0.8938 against 0.9078/0.8943 at 20 kbit/s mediumband), and the same bit rates.
+- **Interop sweep**, 1,122 of 1,122; the `silk` group's 26 stereo cases: correlation within 0.008 of
+  libopus's own encoder per channel at every rate and duration, VBR and CBR, from 24 and 48 kHz (20 of
+  the 40 channels at or above it), the same bit rates; mid-only coding at low rates and stereo coded
+  mono within 0.007; FEC recovering 0.92–0.95 against 0.87–0.90 concealed; DTX leaving out the same
+  packets as libopus's own encoder.
+  - On digitally silent input libopus leaves out one packet more per gap at 60 ms. That is
+    `opus_encode`'s layer: on digital silence it turns SILK's DTX off and decides DTX itself
+    (`decide_dtx_mode`), which `silk_encode_opus` does not do. The stereo DTX cases keep a faint noise
+    floor, as the mono ones do; the Opus layer is the next item.
+- **Mutations**: 60 tried. 42 caught at once, 12 more by inputs the search found: a rate step into the
+  collapse band, an image widening and one narrowing through the residual thresholds, a smoothed width
+  just under 0.95, a side reset in silence and one of a sharp resonance, a clamped high-band ratio, the
+  side's residual clamped above and below, stage frames with the predictor at its limit and with the
+  side saturating where its residual is not clamped, and the downmix's constructed tie. Four are equivalent: the predictor
+  quantiser's early stop (its levels increase, so its error is V-shaped), the side's NLSF history
+  (read only with interpolation, which complexity 0 and 1 never use), and either of the two resampler
+  copies at a move to stereo alone (each covers the other; removing both fails 5 assertions). Two
+  int32 wraps in the inlined arithmetic were dead at every frame length and are gone.
+- **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included; after the
+  last two changes (the stereo state starting zeroed, the word-wise clearing) `./fuzz/run.sh 20000`
+  both ways, clean.
+- **Memory**: after one growth of the packet arena, 9,000 stereo packets allocate nothing, with FEC,
+  DTX, channel switching and bit rate changes on, from 48, 24 and 16 kHz input.
+
+### Performance
+
+Pinned to one core, 2.12.1 and 2.12.2 alternating in one session, three rounds each (medians):
+
+| Benchmark | 2.12.1 | 2.12.2 | Real-time multiple |
+|-----------|--------|--------|--------------------|
+| `silk_encode_1sec_wb_stereo32k` (new: 1 s of wideband stereo at 32 kbit/s) | | 76.3 ms | ~13× |
+| `silk_stereo_lr_to_ms_20ms_wb` (new: the stereo stage on one frame) | | 44.6 µs | |
+| `silk_encode_1sec_wb_voiced20k` | 42.7 ms | 42.6 ms (−0.2%) | ~23× |
+| `silk_encode_1sec_48k_wb_fec20k` | 72.9 ms | 72.8 ms (−0.1%) | ~14× |
+| `silk_encode_1sec_wb_vbr20k` | 31.7 ms | 31.9 ms (+0.5%) | ~31× |
+| `silk_encode_1sec_wb_cbr12k` | 71.1 ms | 71.2 ms (+0.1%) | ~14× |
+| `silk_lpc_analysis_20ms_wb` | 321 µs | 262 µs (−18.4%) | |
+
+Stereo costs 1.8× the voiced mono bench, the stereo stage 3% of it. That stage first ran at 118 µs a
+frame: each sample went through a dozen helper calls (`silk_SMULWB`, `silk_SAT16` and the rest). Its
+loops now do the arithmetic inline, on bounds that make the int16 and int32 casts no-ops where they
+are dropped (stated beside each loop, and checked by the stage test on libopus's frames): 2.6× faster,
+the stereo encode 5% faster. `silk_lpc_analysis_20ms_wb` creates an encoder state on every run: the
+state is now cleared a word at a time instead of by the stdlib's byte-wise `memset`, and
+`silk_enc_state_new` went from 78–80 µs to 17 µs, although the reset now clears every buffer (2.12.1
+cleared a few). Every other benchmark moved between −0.3% and +1.4%, which is noise.
+
 ## [2.12.1] - 2026-11-17
 
 **SILK encode: input at any API rate, in-band FEC, DTX.** This completes libopus's mono `silk_Encode`:

@@ -50,12 +50,13 @@
  *       packet: concealed (opus_decode with no data), or with fec=1 decoded
  *       from the next packet's in-band FEC (decode_fec), as a receiver would.
  *
- *   opusref silk <in.f64> <rate> <bitrate> <ms> <cbr> <out.pk> [fec=P] [dtx=1] [api=HZ]
- *       libopus's encoder on a mono input at a SILK internal rate (8000, 12000,
+ *   opusref silk <in.f64> <rate> <bitrate> <ms> <cbr> <out.pk> [fec=P] [dtx=1] [api=HZ] [ch=N] [fch=N]
+ *       libopus's encoder on an input at a SILK internal rate (8000, 12000,
  *       16000), forced to SILK only at that bandwidth, complexity 1: the
  *       yardstick for shravan's SILK encoder. Packets as gen writes them.
  *       fec=P: in-band FEC for P% loss; dtx=1; api: the input's rate (default
- *       the internal one).
+ *       the internal one); ch: its channels (1, or 2 interleaved); fch: the
+ *       channels coded (OPUS_SET_FORCE_CHANNELS; default ch).
  *
  * opus_decode_float, not opus_decode: the int16 path runs opus_pcm_soft_clip,
  * a limiter that is not part of the codec and pulls loud output down by up to 20%.
@@ -290,9 +291,9 @@ static int dec_file(const char *pk_path, int channels, const char *out_path, int
 }
 
 static int silk_file(const char *in_path, int rate, int bitrate, int ms, int cbr, const char *pk_path,
-                     int fec, int dtx, int api) {
+                     int fec, int dtx, int api, int ch, int fch) {
     int err;
-    OpusEncoder *enc = opus_encoder_create(api, 1, OPUS_APPLICATION_AUDIO, &err);
+    OpusEncoder *enc = opus_encoder_create(api, ch, OPUS_APPLICATION_AUDIO, &err);
     FILE *fi = fopen(in_path, "rb"), *fp = fopen(pk_path, "wb");
     if (!enc || !fi || !fp) return fprintf(stderr, "open failed\n"), 2;
     opus_encoder_ctl(enc, FORCE_MODE_REQUEST, MODE_SILK_ONLY);
@@ -307,17 +308,18 @@ static int silk_file(const char *in_path, int rate, int bitrate, int ms, int cbr
         opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(fec));
     }
     if (dtx) opus_encoder_ctl(enc, OPUS_SET_DTX(1));
+    opus_encoder_ctl(enc, OPUS_SET_FORCE_CHANNELS(fch));
     int n = api * ms / 1000, packets = 0;
-    float *pcm = malloc(sizeof(float) * n);
+    float *pcm = malloc(sizeof(float) * n * ch);
     unsigned char pkt[MAX_PACKET];
     for (;;) {
         int i;
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n * ch; i++) {
             double d;
             if (fread(&d, 8, 1, fi) != 1) break;
             pcm[i] = (float)d;
         }
-        if (i < n) break;
+        if (i < n * ch) break;
         int len = opus_encode_float(enc, pcm, n, pkt, MAX_PACKET);
         if (len < 1) return fprintf(stderr, "encode failed: %d\n", len), 2;
         put_u32(fp, len);
@@ -350,12 +352,16 @@ int main(int argc, char **argv) {
             if (!kv(argv[i], "lose", &lose) && !kv(argv[i], "fec", &fec)) return fprintf(stderr, "bad option: %s\n", argv[i]), 2;
         return dec_file(argv[2], atoi(argv[3]), argv[4], argc >= 6 ? atoi(argv[5]) : 48000, lose, fec);
     }
-    if (argc >= 8 && argc <= 11 && !strcmp(argv[1], "silk")) {
-        int fec = 0, dtx = 0, api = atoi(argv[3]);
+    if (argc >= 8 && argc <= 13 && !strcmp(argv[1], "silk")) {
+        int fec = 0, dtx = 0, api = atoi(argv[3]), ch = 1, fch = -1;
         for (int i = 8; i < argc; i++)
-            if (!kv(argv[i], "fec", &fec) && !kv(argv[i], "dtx", &dtx) && !kv(argv[i], "api", &api))
+            if (!kv(argv[i], "fec", &fec) && !kv(argv[i], "dtx", &dtx) && !kv(argv[i], "api", &api)
+                && !kv(argv[i], "ch", &ch) && !kv(argv[i], "fch", &fch))
                 return fprintf(stderr, "bad option: %s\n", argv[i]), 2;
-        return silk_file(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), argv[7], fec, dtx, api);
+        if (ch != 1 && ch != 2) return fprintf(stderr, "bad channels\n"), 2;
+        if (fch < 0) fch = ch;
+        return silk_file(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), argv[7], fec, dtx, api,
+                         ch, fch);
     }
     if (argc == 2 && !strcmp(argv[1], "caps")) {
         /* A deep-PLC build (DRED or OSCE) carries LPCNet state in every decoder:

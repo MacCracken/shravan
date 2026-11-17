@@ -1547,8 +1547,10 @@ fn silk_decode_core(st, ctrl, xq, pulses) {
 #     14 PERIndex   15 LTP_scaleIndex   16 seed   17 (ec_tell, unused)
 #     18..18+order NLSF indices (stage-1 then `order` residuals)
 #     19+order..    LTP gain indices
-# `cond` is condCoding (0 independent, 1 conditional); `ecprev` is the 2-slot
-# [ec_prevSignalType, ec_prevLagIndex] predictor state, matching the decoder.
+# `cond` is libopus's condCoding (0 independent, 1 independent without the LTP
+# scaling index, which a side channel after a mid-only frame needs, 2
+# conditional; 2.12.2, was 0/1); `ecprev` is the 2-slot [ec_prevSignalType,
+# ec_prevLagIndex] predictor state, matching the decoder.
 fn silk_encode_indices_ec(ec, fs_kHz, idx, nb_subfr, cond, ecprev) {
     if (_silk_type_VAD == 0) { _silk_tables_init(); }
     if (_silk_ec_sel_nb == 0) { _silk_tables2_init(); }
@@ -1565,7 +1567,7 @@ fn silk_encode_indices_ec(ec, fs_kHz, idx, nb_subfr, cond, ecprev) {
 
     # B: gains — first subframe conditional or two-stage absolute, rest delta
     var g0 = load64(idx + 2 * 8);
-    if (cond == 1) {
+    if (cond == 2) {
         ec_enc_icdf(ec, g0, _silk_delta_gain, 8);
     } else {
         ec_enc_icdf(ec, g0 >> 3, _silk_gain_iCDF + signalType * 8, 8);
@@ -1611,7 +1613,7 @@ fn silk_encode_indices_ec(ec, fs_kHz, idx, nb_subfr, cond, ecprev) {
         # allows it, otherwise absolute as high/low parts.
         var lagIndex = load64(idx + 12 * 8);
         var absolute = 1;
-        if (cond == 1) {
+        if (cond == 2) {
             if (load64(ecprev + 0) == 2) {
                 var dl = lagIndex - load64(ecprev + 8);
                 if (dl < 0 - 8) { dl = 0; } else { if (dl > 11) { dl = 0; } else { dl = dl + 9; absolute = 0; } }

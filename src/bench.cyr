@@ -819,6 +819,76 @@ fn bench_silk_encode_48k_fec(name, iters) {
     return bench_report(t1 - t0, iters);
 }
 
+# 2.12.2: a second of wideband stereo at 32 kbit/s, 20 ms packets: the left
+# the voiced input, the right half of it and half the noise input (a partly
+# correlated image, coded mid and side at full width).
+fn bench_silk_encode_stereo(name, iters) {
+    var xl = alloc(16000 * 8);
+    var xn = alloc(16000 * 8);
+    _bench_silk_voiced(16000, 16000, xl);
+    _bench_silk_input(16000, 16000, xn);
+    var x = alloc(2 * 16000 * 8);
+    for (var i = 0; i < 16000; i = i + 1) {
+        store64(x + 2 * i * 8, load64(xl + i * 8));
+        store64(x + (2 * i + 1) * 8, f64_mul(f64_add(load64(xl + i * 8), load64(xn + i * 8)), F64_HALF));
+    }
+    var buf = alloc(1280);
+    var e = silk_encoder_new_channels(16000, 16000, 2, 20, 32000, 1, 0);
+    for (var p = 0; p < 50; p = p + 1) { silk_encode(e, x + p * 640 * 8, buf, 1275); }
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        for (var q = 0; q < 50; q = q + 1) { silk_encode(e, x + q * 640 * 8, buf, 1275); }
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# 2.12.2: silk_stereo_lr_to_ms alone on a wideband 20 ms frame: the mid/side
+# conversion, both band splits, the two predictor searches and quantisers,
+# and the side's prediction.
+fn bench_silk_stereo_lr_to_ms() {
+    var x1 = alloc(330 * 8);
+    var x2 = alloc(330 * 8);
+    var s1 = alloc(330 * 8);
+    var s2 = alloc(330 * 8);
+    var xl = alloc(16000 * 8);
+    var xn = alloc(16000 * 8);
+    _bench_silk_voiced(16000, 16000, xl);
+    _bench_silk_input(16000, 16000, xn);
+    for (var i = 0; i < 322; i = i + 1) {
+        var l = _sk_float2int16(load64(xl + (1000 + i) * 8));
+        store64(s1 + i * 8, l);
+        store64(s2 + i * 8, sar(l + _sk_float2int16(load64(xn + (1000 + i) * 8)), 1));
+    }
+    var stst = silk_stereo_enc_state_new();
+    store64(stst + _SKST_AMP + 8, 1);
+    store64(stst + _SKST_AMP + 24, 1);
+    store64(stst + _SKST_SMTH_WIDTH, 16384);
+    var smid = alloc(16);
+    memset(smid, 0, 16);
+    var ix = alloc(6 * 8);
+    var mo = alloc(8);
+    var rates = alloc(16);
+    var iters = 2000;
+    for (var w = 0; w < 20; w = w + 1) {
+        memcpy(x1, s1, 322 * 8);
+        memcpy(x2, s2, 322 * 8);
+        silk_stereo_lr_to_ms(stst, smid, x1 + 16, x2 + 16, ix, mo, rates, 32000, 200, 0, 16, 320);
+    }
+    bench("silk_stereo_lr_to_ms_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        memcpy(x1, s1, 322 * 8);
+        memcpy(x2, s2, 322 * 8);
+        _opus_frame_begin();
+        silk_stereo_lr_to_ms(stst, smid, x1 + 16, x2 + 16, ix, mo, rates, 32000, 200, 0, 16, 320);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: fft_1024
 # ================================================================
@@ -1037,7 +1107,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.12.1 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.2 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -1070,6 +1140,8 @@ var silk_pitch_ns = bench_silk_pitch();
 var silk_ltp_ns = bench_silk_ltp();
 var silk_voiced_ns = _bench_silk_encode("silk_encode_1sec_wb_voiced20k", 20000, 0, 10, 1);
 var silk_fec_ns = bench_silk_encode_48k_fec("silk_encode_1sec_48k_wb_fec20k", 10);
+var silk_st_ns = bench_silk_encode_stereo("silk_encode_1sec_wb_stereo32k", 5);
+var silk_ms_ns = bench_silk_stereo_lr_to_ms();
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

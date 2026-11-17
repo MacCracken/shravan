@@ -16,15 +16,21 @@
 #   opusdec <in.pk> <channels> <out.f64>           raw Opus packets, each prefixed by
 #                                                  a u32le length; no pre-skip
 #   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
-#   silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw|opus [cap [loss [fec [dtx [api]]]]]]
-#                                                  mono SILK at the internal rate:
+#   silkenc <in.f64> <rate> <bitrate> <complexity> <ms> <cbr> <out.pk> [raw|opus [cap [loss [fec [dtx [api [ch [sched [rates]]]]]]]]]
+#                                                  SILK at the internal rate:
 #                                                  Opus packets (silk_encode_opus), or
 #                                                  with raw the bare SILK payloads
 #                                                  (silk_encode, into cap bytes,
 #                                                  default 1275); u32le length each;
 #                                                  loss: the packet loss percentage;
 #                                                  fec, dtx: 0 or 1; api: the input's
-#                                                  rate (default: rate)
+#                                                  rate (default: rate); ch: its
+#                                                  channels (interleaved); sched: the
+#                                                  packets' coded channels in turn,
+#                                                  cycled (1 mono, 2 stereo, 3 stereo
+#                                                  with to_mono; default ch); rates:
+#                                                  the packets' bit rates in turn,
+#                                                  cycled, as rate*count,...
 #   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
 #   id3     <in>                                   ID3v2 title
 #   tracks  <in.mp4>                               print the audio track count and the
@@ -365,7 +371,11 @@ fn _cli_silkenc() {
     var v = _cli_read_vec(argv(2));
     var api = atoi(argv(3));
     if (argc() > 14) { api = atoi(argv(14)); }
-    var e = silk_encoder_new_api(api, atoi(argv(3)), atoi(argv(6)), atoi(argv(4)), atoi(argv(5)), atoi(argv(7)));
+    var ch = 1;
+    if (argc() > 15) { ch = atoi(argv(15)); }
+    var sched = 0;
+    if (argc() > 16) { sched = argv(16); }
+    var e = silk_encoder_new_channels(api, atoi(argv(3)), ch, atoi(argv(6)), atoi(argv(4)), atoi(argv(5)), atoi(argv(7)));
     if (is_err(e) == 1) { _cli_fail(e); }
     if (argc() > 12) {
         var fr = silk_encoder_set_fec(e, atoi(argv(12)));
@@ -383,13 +393,49 @@ fn _cli_silkenc() {
         var lr = silk_encoder_set_packet_loss(e, atoi(argv(11)));
         if (is_err(lr) == 1) { _cli_fail(lr); }
     }
-    var n = silk_encoder_samples(e);
+    # the rate schedule, expanded
+    var rts = alloc(4096 * 8);
+    var nr = 0;
+    if (argc() > 17) {
+        var q = argv(17);
+        var ql = strlen(q);
+        var qi = 0;
+        while (qi < ql && nr < 4096) {
+            var rv = 0;
+            while (qi < ql && load8(q + qi) >= 48 && load8(q + qi) <= 57) { rv = rv * 10 + load8(q + qi) - 48; qi = qi + 1; }
+            var rc = 1;
+            if (qi < ql && load8(q + qi) == 42) {
+                qi = qi + 1;
+                rc = 0;
+                while (qi < ql && load8(q + qi) >= 48 && load8(q + qi) <= 57) { rc = rc * 10 + load8(q + qi) - 48; qi = qi + 1; }
+            }
+            while (rc > 0 && nr < 4096) { store64(rts + nr * 8, rv); nr = nr + 1; rc = rc - 1; }
+            if (qi < ql) { qi = qi + 1; }
+        }
+    }
+    var n = silk_encoder_samples(e) * ch;
     var packets = vec_len(v) / n;
     var pcm = alloc(n * 8);
     var out = alloc(packets * 1281 + 8);
     var op = 0;
+    var ns = 0;
+    if (sched != 0) { ns = strlen(sched); }
     for (var p = 0; p < packets; p = p + 1) {
         for (var i = 0; i < n; i = i + 1) { store64(pcm + i * 8, vec_get(v, p * n + i)); }
+        if (ns > 0) {
+            var c = load8(sched + p % ns);
+            var sc = 2;
+            if (c == 49) { sc = 1; }
+            var cr = silk_encoder_set_channels(e, sc);
+            if (is_err(cr) == 1) { _cli_fail(cr); }
+            var tm = 0;
+            if (c == 51) { tm = 1; }
+            silk_encoder_set_to_mono(e, tm);
+        }
+        if (nr > 0) {
+            var br = silk_encoder_set_bitrate(e, load64(rts + (p % nr) * 8));
+            if (is_err(br) == 1) { _cli_fail(br); }
+        }
         var r = 0;
         if (raw == 1) { r = silk_encode(e, pcm, out + op + 4, cap); }
         else { r = silk_encode_opus(e, pcm, out + op + 4, 1276); }

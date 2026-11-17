@@ -78,24 +78,53 @@ fn _fx_exact(name, b64, rate, channels, bps, count, hash) {
     return 0;
 }
 
-# Read the next integer from a comma-separated cstring at *pos_ptr.
-fn _fx_next_int(s, pos_ptr) {
-    var p = load64(pos_ptr);
-    var neg = 0;
-    if (load8(s + p) == 45) { neg = 1; p = p + 1; }
-    var v = 0;
-    while (load8(s + p) >= 48 && load8(s + p) <= 57) {
-        v = v * 10 + load8(s + p) - 48;
-        p = p + 1;
+# A fixture's reference samples (scripts/gen-interop-fixtures.py, ref_literal:
+# little-endian int16, one zlib stream, base64), inflated once with sankoch and
+# kept as words; the count at word -1.
+var _fx_ref_keys = 0;
+var _fx_ref_vals = 0;
+var _fx_ref_cnt = 0;
+var _fx_ref_zb = 0;
+fn _fx_ref(s) {
+    if (_fx_ref_keys == 0) { _fx_ref_keys = alloc(128 * 8); _fx_ref_vals = alloc(128 * 8); _fx_ref_zb = alloc(1 << 20); }
+    var i = 0;
+    while (i < _fx_ref_cnt) {
+        if (load64(_fx_ref_keys + i * 8) == s) { return load64(_fx_ref_vals + i * 8); }
+        i = i + 1;
     }
-    if (load8(s + p) == 44) { p = p + 1; }
-    store64(pos_ptr, p);
-    if (neg == 1) { return 0 - v; }
+    var t = alloc(strlen(s) + 8);
+    var nb = _mp3_b64_decode(s, t);
+    var r = zlib_decompress_capped(t, nb, _fx_ref_zb, 1 << 20, 1 << 20);
+    if (r < 0) { r = 0; }
+    var n = r / 2;
+    var v = alloc((n + 1) * 8) + 8;
+    store64(v - 8, n);
+    i = 0;
+    while (i < n) {
+        var w = load8(_fx_ref_zb + 2 * i) | (load8(_fx_ref_zb + 2 * i + 1) << 8);
+        if (w >= 32768) { w = w - 65536; }
+        store64(v + i * 8, w);
+        i = i + 1;
+    }
+    if (_fx_ref_cnt < 128) {
+        store64(_fx_ref_keys + _fx_ref_cnt * 8, s);
+        store64(_fx_ref_vals + _fx_ref_cnt * 8, v);
+        _fx_ref_cnt = _fx_ref_cnt + 1;
+    }
     return v;
 }
 
+# The next reference sample, the *pos_ptr-th (0 past the end).
+fn _fx_ref_next(s, pos_ptr) {
+    var v = _fx_ref(s);
+    var i = load64(pos_ptr);
+    store64(pos_ptr, i + 1);
+    if (i >= load64(v - 8)) { return 0; }
+    return load64(v + i * 8);
+}
+
 # A lossy stream must match on every sampled point, to within rounding as 16-bit
-# values. `ref_csv` holds every step-th reference sample.
+# values. `ref_csv` holds every step-th reference sample (_fx_ref).
 fn _fx_lossy(name, b64, kind, rate, channels, count, step, ref_csv) {
     var r = _fx_decode(b64, kind);
     assert(res_ok(r) == 1, name);
@@ -111,7 +140,7 @@ fn _fx_lossy(name, b64, kind, rate, channels, count, step, ref_csv) {
     var i = 0;
     var off = 0;
     while (i < count) {
-        var want = _fx_next_int(ref_csv, pos);
+        var want = _fx_ref_next(ref_csv, pos);
         var got = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
         var d = got - want;
         if (d < 0) { d = 0 - d; }
@@ -139,7 +168,7 @@ fn _fx_check(name, r, rate, channels, count, step, ref_csv) {
     var off = 0;
     var i = 0;
     while (i < count) {
-        var want = _fx_next_int(ref_csv, pos);
+        var want = _fx_ref_next(ref_csv, pos);
         var got = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
         var d = got - want;
         if (d < 0) { d = 0 - d; }
@@ -226,7 +255,7 @@ fn _fx_lossy_off(name, b64, kind, rate, channels, count, off, step, ref_csv) {
     var i = off;
     var bad = 0;
     while (i < count) {
-        var want = _fx_next_int(ref_csv, pos);
+        var want = _fx_ref_next(ref_csv, pos);
         var got = f64_to(f64_round(f64_mul(vec_get(samples, i), scale)));
         if (got > 32767) { got = 32767; }
         if (got < 0 - 32768) { got = 0 - 32768; }

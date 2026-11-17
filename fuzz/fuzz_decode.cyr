@@ -473,7 +473,10 @@ syscall(1, 1, "ok\n", 3);
 # Target: SILK encoder. Random internal rates and packet lengths (valid and
 # not), bit rates, complexities, CBR, packet loss settings (2.12.0, valid and
 # not), input rates, FEC and DTX (2.12.1, valid and not; a DTX payload may be
-# empty, and its Opus packet the TOC alone, under CBR too), buffers from none
+# empty, and its Opus packet the TOC alone, under CBR too), stereo input
+# (2.12.2: 1 or 2 channels and the odd invalid count; the coded channels,
+# toMono and the bit rate changing packet by packet, valid and not; a stereo
+# packet's TOC carries the stereo bit), buffers from none
 # to plenty, over hostile f64 input (NaN, infinities,
 # values past full scale, silence, constants, square waves, noise, and periodic
 # input for the voiced path: impulse trains and squares at lags in and out of
@@ -485,7 +488,7 @@ syscall(1, 1, "ok\n", 3);
 # violation exits 89.
 # ================================================================
 syscall(1, 1, "  silk_encode... ", 17);
-var se_pcm = alloc(2880 * 8);
+var se_pcm = alloc(5760 * 8);
 var se_buf = alloc(1400);
 var se_head = alloc(19);
 memset(se_head, 0, 19);
@@ -527,13 +530,17 @@ while (fi < se_iters) {
     if (as == 3) { se_api = 12000; }
     if (as == 4) { se_api = 8000; }
     if (as == 5) { se_api = 44100; }
+    # 2.12.2: stereo input (and the odd invalid count)
+    var se_ch = 1 + _fz_u(2);
+    if (_fz_u(20) == 0) { se_ch = _fz_u(2) * 3; }
     var se_valid = 1;
+    if (se_ch != 1 && se_ch != 2) { se_valid = 0; }
     if (se_rate != 8000 && se_rate != 12000 && se_rate != 16000) { se_valid = 0; }
     if (se_api != 8000 && se_api != 12000 && se_api != 16000 && se_api != 24000 && se_api != 48000) { se_valid = 0; }
     if (se_ms != 10 && se_ms != 20 && se_ms != 40 && se_ms != 60) { se_valid = 0; }
     if (se_br < 1 || se_br > 1000000) { se_valid = 0; }
     if (se_cx < 0 || se_cx > 1) { se_valid = 0; }
-    var se_e = silk_encoder_new_api(se_api, se_rate, se_ms, se_br, se_cx, se_cbr);
+    var se_e = silk_encoder_new_channels(se_api, se_rate, se_ch, se_ms, se_br, se_cx, se_cbr);
     var se_bad = 0;
     if ((is_err(se_e) == 1) != (se_valid == 0)) { se_bad = 1; }
     if (se_bad == 0 && se_valid == 1) {
@@ -547,6 +554,7 @@ while (fi < se_iters) {
         if ((is_err(silk_encoder_set_dtx(se_e, se_dtx)) == 1) != (se_dtx < 0 || se_dtx > 1)) { se_bad = 12; }
         if (se_dtx != 1) { se_dtx = 0; }
         var se_pk = vec_new();
+        store8(se_head + 9, se_ch);
         vec_push(se_pk, str_from_buf(se_head, 19));
         vec_push(se_pk, str_from_buf(se_tags, 16));
         var se_opus = 0;
@@ -556,16 +564,32 @@ while (fi < se_iters) {
         var se_np = _fz_u(6) + 1;
         var p = 0;
         while (se_bad == 0 && p < se_np) {
+            # stereo: the coded channels, toMono and the bit rate, packet by packet
+            if (se_ch == 2 && _fz_u(3) == 0) {
+                var se_c = _fz_u(4);
+                if ((is_err(silk_encoder_set_channels(se_e, se_c)) == 1) != (se_c < 1 || se_c > 2)) { se_bad = 13; }
+                var se_tm = _fz_u(3);
+                if ((is_err(silk_encoder_set_to_mono(se_e, se_tm)) == 1) != (se_tm > 1)) { se_bad = 13; }
+            }
+            if (_fz_u(4) == 0) {
+                var se_nb = _fz_u(60000) - 100;
+                if (_fz_u(10) == 0) { se_nb = 1000000 + _fz_u(3) - 1; }
+                if ((is_err(silk_encoder_set_bitrate(se_e, se_nb)) == 1) != (se_nb < 1 || se_nb > 1000000)) { se_bad = 14; }
+                if (se_nb >= 1 && se_nb <= 1000000) { se_br = se_nb; }
+            }
             var k = 0;
-            while (k < se_n) {
+            while (k < se_n * se_ch) {
                 var x = f64_div(f64_from(_fz_u(2000001) - 1000000), f64_from(1000000));
-                if (se_shape == 1) { x = f64_sin(f64_mul(se_w, f64_from(p * se_n + k))); }
+                var se_t = p * se_n + k / se_ch;
+                if (se_shape == 1) { x = f64_sin(f64_mul(se_w, f64_from(se_t))); }
                 if (se_shape == 2) { x = f64_div(F64_ONE, f64_from(3)); }
-                if (se_shape == 3) { x = F64_ONE; if (((p * se_n + k) & 16) == 16) { x = f64_neg(F64_ONE); } }
+                if (se_shape == 3) { x = F64_ONE; if ((se_t & 16) == 16) { x = f64_neg(F64_ONE); } }
                 if (se_shape == 4) { x = F64_ZERO; }
                 if (se_shape == 5) { x = f64_div(f64_from(_fz_u(201) - 100), f64_from(3200)); }
-                if (se_shape == 7) { x = F64_ZERO; if ((p * se_n + k) % se_per == 0) { x = F64_ONE; } }
-                if (se_shape == 8) { x = F64_ONE; if ((p * se_n + k) % se_per >= se_per / 2) { x = f64_neg(F64_ONE); } }
+                if (se_shape == 7) { x = F64_ZERO; if (se_t % se_per == 0) { x = F64_ONE; } }
+                if (se_shape == 8) { x = F64_ONE; if (se_t % se_per >= se_per / 2) { x = f64_neg(F64_ONE); } }
+                # the right channel: the left, its negative, or its own noise
+                if (se_ch == 2 && (k & 1) == 1 && se_shape != 0 && se_shape != 5 && _fz_u(4) == 0) { x = f64_neg(x); }
                 var sp = _fz_u(100);
                 if (sp == 0) { x = 0x7FF8000000000000; }
                 if (sp == 1) { x = 0x7FF0000000000000; }
@@ -597,7 +621,9 @@ while (fi < se_iters) {
                             if (se_cb < 1) { se_cb = 1; }
                             if (o != se_cb) { if (se_dtx == 0 || o != 1) { se_bad = 6; } }
                         }
-                        if ((load8(se_buf) & 0xFC) != (load8(se_buf) & 0xF8)) { se_bad = 7; }
+                        var se_sb = 0;
+                        if (load64(se_e + _SKX_CH_INT) == 2) { se_sb = 4; }
+                        if ((load8(se_buf) & 4) != se_sb) { se_bad = 7; }
                         vec_push(se_pk, str_from_buf(se_buf, o));
                         se_opus = se_opus + 1;
                     }
@@ -612,7 +638,7 @@ while (fi < se_iters) {
             if (is_err(se_r) == 1) { se_bad = 9; }
             else {
                 var se_d = decode_result_samples(se_r);
-                if (vec_len(se_d) != se_opus * se_ms * 48) { se_bad = 10; }
+                if (vec_len(se_d) != se_opus * se_ms * 48 * se_ch) { se_bad = 10; }
                 var q2 = 0;
                 while (se_bad == 0 && q2 < vec_len(se_d)) {
                     var v = vec_get(se_d, q2);
@@ -635,6 +661,8 @@ while (fi < se_iters) {
         fmt_int(se_cx);
         syscall(1, 1, " cbr ", 5);
         fmt_int(se_cbr);
+        syscall(1, 1, " ch ", 4);
+        fmt_int(se_ch);
         syscall(1, 1, "\n", 1);
         syscall(60, 89);
     }

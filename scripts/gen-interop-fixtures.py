@@ -84,6 +84,17 @@ def b64_literal(name, data):
     return 'var %s = "%s";\n' % (name, base64.b64encode(data).decode("ascii"))
 
 
+def ref_literal(name, vals):
+    """Reference samples as little-endian int16, one zlib stream, in base64: half the
+    size of decimal text, and the suite's string data has a fixed 2 MB. The suite
+    inflates each once (src/interop_tests.cyr, _fx_ref_next)."""
+    vals = [int(v) for v in vals]
+    if any(v < -32768 or v > 32767 for v in vals):
+        sys.exit("gen-interop-fixtures: %s: a reference sample outside int16" % name)
+    data = zlib.compress(struct.pack("<%dh" % len(vals), *vals), 9)
+    return 'var %s = "%s";\n' % (name, base64.b64encode(data).decode("ascii"))
+
+
 def exact_fixture(name, path, bps):
     """Lossless: every sample must match, so a hash of all of them is enough."""
     ref = reference_f64(path)
@@ -407,7 +418,7 @@ def opus_fixture(tmp, name, config, channels, packets, step, *opts, want=None):
     text = b64_literal("_FX_%s_B64" % name, open(pk, "rb").read())
     text += "var _FX_%s_COUNT = %d;\n" % (name, len(a))
     text += "var _FX_%s_STEP = %d;\n" % (name, step)
-    text += 'var _FX_%s_REF = "%s";\n' % (name, ",".join(map(str, picks)))
+    text += ref_literal("_FX_%s_REF" % name, picks)
     return text, out
 
 
@@ -556,7 +567,7 @@ def iso_excerpt(vectors, name, stem, first, count, skip, step):
     text += "var _FX_%s_COUNT = %d;\n" % (name, total)
     text += "var _FX_%s_OFF = %d;\n" % (name, off)
     text += "var _FX_%s_STEP = %d;\n" % (name, step)
-    text += 'var _FX_%s_REF = "%s";\n' % (name, ",".join(map(str, picks)))
+    text += ref_literal("_FX_%s_REF" % name, picks)
     return text
 
 
@@ -858,7 +869,7 @@ def gapless_fixtures(p):
     text += b64_literal("_FX_GLEMPTY_B64", open(p("glempty.m4a"), "rb").read())
     text += "var _FX_GLEMPTY_COUNT = %d;\n" % len(base)
     text += "var _FX_GLEMPTY_STEP = 7;\n"
-    text += 'var _FX_GLEMPTY_REF = "%s";\n' % ",".join(str(int(round(base[i] * 32768))) for i in range(0, len(base), 7))
+    text += ref_literal("_FX_GLEMPTY_REF", (round(base[i] * 32768) for i in range(0, len(base), 7)))
 
     # Two edits, two stretches of the media in order. ffmpeg trims only the first
     # edit's start to the sample (later ones to the frame), so the reference is the
@@ -871,7 +882,7 @@ def gapless_fixtures(p):
     text += b64_literal("_FX_GLTWO_B64", open(p("gltwo.m4a"), "rb").read())
     text += "var _FX_GLTWO_COUNT = %d;\n" % len(two)
     text += "var _FX_GLTWO_STEP = 5;\n"
-    text += 'var _FX_GLTWO_REF = "%s";\n' % ",".join(str(int(round(two[i] * 32768))) for i in range(0, len(two), 5))
+    text += ref_literal("_FX_GLTWO_REF", (round(two[i] * 32768) for i in range(0, len(two), 5)))
 
     # Without an edit list the sample table alone trims the end: its last frame
     # is short. No start trim (ffmpeg plays the priming).
@@ -894,7 +905,7 @@ def gapless_fixtures(p):
     text += lossy_fixture("GLMULTI", p("glmulti.m4a"), 7)
     t1 = reference_f64(p("glmulti.m4a"), post=("-map", "0:a:0"))
     text += "var _FX_GLMULTI1_COUNT = %d;\n" % len(t1)
-    text += 'var _FX_GLMULTI1_REF = "%s";\n' % ",".join(str(int(round(t1[i] * 32768))) for i in range(0, len(t1), 7))
+    text += ref_literal("_FX_GLMULTI1_REF", (round(t1[i] * 32768) for i in range(0, len(t1), 7)))
 
     # MP3: the tag sits 9, 17 or 32 bytes past the header by version and mode.
     # MPEG-2 mono VBR from the lame CLI (a "Xing" tag), MPEG-2 stereo from ffmpeg's
@@ -941,7 +952,7 @@ def lossy_fixture(name, path, step, skip_frames=0, extra=(), mapping_order=0):
     text = b64_literal("_FX_%s_B64" % name, open(path, "rb").read())
     text += "var _FX_%s_COUNT = %d;\n" % (name, len(ref))
     text += "var _FX_%s_STEP = %d;\n" % (name, step)
-    text += 'var _FX_%s_REF = "%s";\n' % (name, ",".join(map(str, picks)))
+    text += ref_literal("_FX_%s_REF" % name, picks)
     return text
 
 

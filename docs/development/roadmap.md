@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.12.1.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.12.2.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -12,7 +12,7 @@
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
 | AAC-LC | channel configurations 1–7 and 11–14 and any PCE layout (to 22.2), in ffmpeg's channel order; all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact, every layout its encoder writes (ADTS and MP4); PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
-| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo; SILK mono at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–1, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX (2,537 packets in the suite); on real speech libopus decodes them as well as its own encoder's (within 0.003 in correlation), and recovers lost packets from their FEC |
+| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo; SILK mono and stereo (mid/side, mid-only, stereo input coded mono, moves between them) at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–1, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX, mono and stereo (2,537 mono and 2,724 stereo packets in the suite); on real speech and stereo music libopus decodes them as well as its own encoder's (within 0.003 in correlation mono, 0.001 stereo), and recovers lost packets from their FEC |
 | MP4 | AAC (any channel layout, a PCE in the AudioSpecificConfig) and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
@@ -45,17 +45,14 @@ since 2.11.3 (voiced frames since 2.12.0).
 
 ## v2.12.x — hybrid encode and the Opus encoder layer · large
 
-Since 2.12.1 the SILK encoder is libopus's mono `silk_Encode` complete (`silk_encoder_new_api`,
-`silk_encode`, `silk_encode_opus`): voiced and unvoiced frames, an 8–48 kHz input resampled to the
-internal rate, in-band FEC and DTX, byte for byte libopus's wherever libopus's float stages round as
-shravan's doubles do. Verify the way 2.11 and 2.12.0–2.12.1 did: `scripts/gen-silk-vectors.py` records
-libopus's stages and packets, and `src/silk_tests.cyr` holds shravan's to them.
-- First, room for the vectors: the suite's string data is at 97% of the compiler's fixed 2 MB. The interop
-  fixtures' reference decodes (`src/interop_fixtures.cyr`, about 420 KB of decimal text) move to the
-  zlib-in-base64 fields the SILK vectors use.
-- `feat(silk): stereo SILK` — `silk_Encode`'s two-channel path: left/right to mid/side with the stereo
-  predictor (`silk_stereo_LR_to_MS`, the prediction and mid-only indices), the side channel's own state,
-  restarted after mid-only frames, and the rate split between them.
+Since 2.12.2 the SILK encoder is libopus's `silk_Encode` complete at complexity 0–1
+(`silk_encoder_new_channels`, `silk_encode`, `silk_encode_opus`): voiced and unvoiced frames, an 8–48
+kHz input resampled to the internal rate, in-band FEC and DTX, mono and stereo and the moves between
+them, byte for byte libopus's wherever libopus's float stages round as shravan's doubles do. Verify the
+way 2.11 and 2.12.0–2.12.2 did: `scripts/gen-silk-vectors.py` records libopus's stages and packets, and
+`src/silk_tests.cyr` holds shravan's to them. The suite's string data is at 91% of the compiler's fixed
+2 MB (2.12.2 compressed the interop fixtures to make room); new packet sets go in as hashes, as the
+stereo ones do.
 - `feat(opus): hybrid encode (SILK low band + CELT high band over one range coder) + the encoder
   mode/bandwidth decision and TOC assembly`, so shravan encodes **every** Opus config libopus decodes.
   That is libopus's `opus_encode` around SILK, which `silk_encode_opus` does not do yet:
@@ -63,7 +60,13 @@ libopus's stages and packets, and `src/silk_tests.cyr` holds shravan's to them.
     `silk_hp_variable_cutoff` keeps since 2.12.0);
   - the FEC decision by rate and bandwidth (`decide_fec`; on real speech libopus's whole encoder
     recovers lost packets about 0.02 better than `silk_Encode` alone, shravan's or libopus's);
-  - bandwidth switching (SILK's low-pass transition, `silk_LP_variable_cutoff`) and redundancy frames.
+  - bandwidth switching (SILK's low-pass transition, `silk_LP_variable_cutoff`) and redundancy frames;
+  - the channel decision: stereo or mono by rate (`stream_channels`), `toMono` for the packet before a
+    switch, and the hybrid stereo width from `silk_encoder_stereo_width` (the SILK side of all three is
+    in since 2.12.2: `silk_encoder_set_channels`, `silk_encoder_set_to_mono`);
+  - DTX on digital silence: there `opus_encode` turns SILK's DTX off and decides DTX itself
+    (`decide_dtx_mode`), a packet sooner than SILK at 60 ms;
+  - the prefill at mode switches (`silk_Encode`'s `prefillFlag`).
 - SILK complexity 2 and up: `silk_NSQ_del_dec`, the delayed-decision quantiser libopus selects there.
   `silk_encoder_new` refuses those complexities until it exists. (The pitch estimator's complexity 2,
   which complexity 8 and up selects, is already in and checked.)

@@ -12300,6 +12300,409 @@ fn test_silk_enc_api_fec_dtx() {
     return 0;
 }
 
+# 2.12.2: the generator's stereo_signal, sample for sample: left
+# _skk_signal(kind, seed), right the left times rg (Q14) plus
+# _skk_signal(rkind, rseed) rsh bits down, faded in over the first 2^rq
+# samples when rq > 0, out over the first 2^-rq when rq < 0. Into x
+# interleaved (int16 words, 2n); returns the FNV-1a hash of the interleaved
+# samples.
+fn _skk_stereo(kind, fs, n, seed, prm, rkind, rseed, rg, rsh, rq, x) {
+    var L = alloc(n * 8);
+    var O = alloc(n * 8);
+    _skk_signal(kind, fs, n, seed, L, prm);
+    _skk_signal(rkind, fs, n, rseed, O, prm);
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) {
+        var o = sar(load64(O + i * 8), rsh);
+        if (rq > 0) {
+            var m = i;
+            if (m > (1 << rq)) { m = 1 << rq; }
+            o = sar(o * m, rq);
+        }
+        if (rq < 0) {
+            var m2 = (1 << (0 - rq)) - i;
+            if (m2 < 0) { m2 = 0; }
+            o = sar(o * m2, 0 - rq);
+        }
+        var l = load64(L + i * 8);
+        var r = sar(l * rg, 14) + o;
+        if (r < 0 - 32768) { r = 0 - 32768; }
+        if (r > 32767) { r = 32767; }
+        store64(x + 2 * i * 8, l);
+        store64(x + (2 * i + 1) * 8, r);
+        h = (h ^ (l & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ (r & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+# FNV-1a over n bytes (the generator's fnv_bytes), and over int16 words as
+# 32-bit values (its fnv_i16).
+fn _skk_fnv_bytes(b, n) {
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) { h = (h ^ load8(b + i)) * 1099511628211; i = i + 1; }
+    return h;
+}
+
+fn _skk_fnv_words(w, n) {
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) { h = (h ^ (load64(w + i * 8) & 0xFFFFFFFF)) * 1099511628211; i = i + 1; }
+    return h;
+}
+
+# Two signed 32-bit words, low first, as the 64-bit value they split.
+fn _skk_u64(lo, hi) { return (lo & 0xFFFFFFFF) | ((hi & 0xFFFFFFFF) << 32); }
+
+# The stereo encoder (silk_Encode's two-channel path) against libopus, packet
+# for packet (each one's length and FNV-1a hash), on inputs built here: every
+# branch of the width decision (full, narrowed, collapsed, mid-only from the
+# rate and from a panned image, the side still coded while its taper goes out),
+# the side's reset after mid-only frames, in the middle of a packet too
+# (coded independently without LTP scaling), input resampled for both channels,
+# in-band FEC with LBRR frames for both channels, the mid alone and the side
+# alone, DTX of both channels, stereo input coded mono, moves between mono and
+# stereo with and without toMono, bit rates changing packet by packet, CBR and
+# both complexities.
+fn test_silk_enc_stereo_vs_libopus() {
+    syscall(1, 1, "=== silk encode: stereo packets vs libopus ===\n", 47);
+    var h = alloc(32 * 8);
+    var sch = alloc(64 * 8);
+    var rts = alloc(64 * 8);
+    var pkw = alloc(3 * 512 * 8);
+    var pcm = alloc(5760 * 8);
+    var buf = alloc(1280);
+    var c = 0;
+    while (c < _SKM_N) {
+        # kind, seed, rate, ms, complexity, bit rate, CBR, samples a channel,
+        # packets, the input's hash (2 words), buffer, loss, kind 6's
+        # parameters (5), FEC, DTX, the input's rate, channels, the right
+        # channel's kind, seed, gain, shift and fade, libopus's high-pass
+        # smoother at the end
+        _skv_load(_SKM_HDR, c, h);
+        var fs = load64(h + 16);
+        var ms = load64(h + 24);
+        var api = load64(h + 160);
+        var n = load64(h + 56);
+        var npk = load64(h + 64);
+        var x = alloc(2 * n * 8);
+        var want = _skk_u64(load64(h + 72), load64(h + 80));
+        assert(_skk_stereo(load64(h), api, n, load64(h + 8), h + 104, load64(h + 176), load64(h + 184), load64(h + 192),
+          load64(h + 200), load64(h + 208), x) == want, "silk stereo: the suite's input is the generator's");
+        var ns = _skv_load(_SKM_SCHED, c, sch);
+        var nr = _skv_load(_SKM_RATES, c, rts);
+        var period = 0;
+        var k = 1;
+        while (k < nr) { period = period + load64(rts + k * 8); k = k + 2; }
+        _skv_load(_SKM_PK, c, pkw);
+        var e = silk_encoder_new_channels(api, fs, 2, ms, load64(h + 40), load64(h + 32), load64(h + 48));
+        assert_eq(silk_encoder_set_packet_loss(e, load64(h + 96)), 0, "silk stereo: the packet loss setting");
+        assert_eq(silk_encoder_set_fec(e, load64(h + 144)), 0, "silk stereo: the FEC setting");
+        assert_eq(silk_encoder_set_dtx(e, load64(h + 152)), 0, "silk stereo: the DTX setting");
+        var spp = silk_encoder_samples(e);
+        var same = 0;
+        var p = 0;
+        while (p < npk) {
+            var sc = load64(sch + (p % ns) * 8);
+            var ch = 2;
+            if (sc == 1) { ch = 1; }
+            silk_encoder_set_channels(e, ch);
+            var tm = 0;
+            if (sc == 3) { tm = 1; }
+            silk_encoder_set_to_mono(e, tm);
+            if (period > 0) {
+                var q = p % period;
+                k = 0;
+                while (q >= load64(rts + (k + 1) * 8)) { q = q - load64(rts + (k + 1) * 8); k = k + 2; }
+                silk_encoder_set_bitrate(e, load64(rts + k * 8));
+            }
+            _skk_pcm(x, p, 2 * spp, pcm);
+            var len = silk_encode(e, pcm, buf, load64(h + 88));
+            if (len == load64(pkw + 3 * p * 8)) {
+                if (_skk_fnv_bytes(buf, len) == _skk_u64(load64(pkw + (3 * p + 1) * 8), load64(pkw + (3 * p + 2) * 8))) {
+                    same = same + 1;
+                }
+            }
+            p = p + 1;
+        }
+        assert_eq(same, npk, "silk stereo: libopus's packets, length and hash");
+        assert_eq(load64(load64(e + _SKX_ST) + _SKE_HP_SMTH1), load64(h + 216),
+          "silk stereo: libopus's pitch-tracking high-pass after the last frame");
+        c = c + 1;
+    }
+    return 0;
+}
+
+# silk_stereo_lr_to_ms on libopus's own frames (its inputs, state and rate):
+# one of each width branch, every internal rate and frame length, the mid's
+# rate at its minimum, the first frame, and frames after speech (the faster
+# smoothing). The predictor indices, mid-only flag, rate split, state after,
+# and the mid and side signals (by hash), exactly.
+fn test_silk_enc_stereo_stage_vs_libopus() {
+    syscall(1, 1, "=== silk encode: stereo stage vs libopus ===\n", 45);
+    var h = alloc(48 * 8);
+    var x1 = alloc(330 * 8);
+    var x2 = alloc(330 * 8);
+    var ix = alloc(6 * 8);
+    var mo = alloc(8);
+    var rates = alloc(2 * 8);
+    var smid = alloc(2 * 8);
+    var stst = silk_stereo_enc_state_new();
+    var ok_out = 0;
+    var ok_state = 0;
+    var ok_sig = 0;
+    var b = 0;
+    while (b < _SKB_N) {
+        # total rate, previous speech activity, toMono, kHz, frame length;
+        # the state before (pred_prev 2, sMid 2, sSide 2, amp 4, smth_width,
+        # width_prev, silent_side_len); ix 6, mid-only, rates 2; the state
+        # after; the mid's hash, the side's
+        _skv_load(_SKB_HDR, b, h);
+        var fl = load64(h + 32);
+        _skv_load(_SKB_X1, b, x1);
+        _skv_load(_SKB_X2, b, x2);
+        store64(stst + _SKST_PRED_PREV, load64(h + 40));
+        store64(stst + _SKST_PRED_PREV + 8, load64(h + 48));
+        store64(smid, load64(h + 56));
+        store64(smid + 8, load64(h + 64));
+        store64(stst + _SKST_SSIDE, load64(h + 72));
+        store64(stst + _SKST_SSIDE + 8, load64(h + 80));
+        var k = 0;
+        while (k < 4) { store64(stst + _SKST_AMP + k * 8, load64(h + (11 + k) * 8)); k = k + 1; }
+        store64(stst + _SKST_SMTH_WIDTH, load64(h + 120));
+        store64(stst + _SKST_WIDTH_PREV, load64(h + 128));
+        store64(stst + _SKST_SILENT_SIDE, load64(h + 136));
+        silk_stereo_lr_to_ms(stst, smid, x1 + 16, x2 + 16, ix, mo, rates, load64(h), load64(h + 8), load64(h + 16),
+          load64(h + 24), fl);
+        var o = 1;
+        k = 0;
+        while (k < 6) { if (load64(ix + k * 8) != load64(h + (18 + k) * 8)) { o = 0; } k = k + 1; }
+        if (load64(mo) != load64(h + 24 * 8)) { o = 0; }
+        if (load64(rates) != load64(h + 25 * 8) || load64(rates + 8) != load64(h + 26 * 8)) { o = 0; }
+        ok_out = ok_out + o;
+        var t = 1;
+        if (load64(stst + _SKST_PRED_PREV) != load64(h + 27 * 8) || load64(stst + _SKST_PRED_PREV + 8) != load64(h + 28 * 8)) { t = 0; }
+        if (load64(smid) != load64(h + 29 * 8) || load64(smid + 8) != load64(h + 30 * 8)) { t = 0; }
+        if (load64(stst + _SKST_SSIDE) != load64(h + 31 * 8) || load64(stst + _SKST_SSIDE + 8) != load64(h + 32 * 8)) { t = 0; }
+        k = 0;
+        while (k < 4) { if (load64(stst + _SKST_AMP + k * 8) != load64(h + (33 + k) * 8)) { t = 0; } k = k + 1; }
+        if (load64(stst + _SKST_SMTH_WIDTH) != load64(h + 37 * 8)) { t = 0; }
+        if (load64(stst + _SKST_WIDTH_PREV) != load64(h + 38 * 8)) { t = 0; }
+        if (load64(stst + _SKST_SILENT_SIDE) != load64(h + 39 * 8)) { t = 0; }
+        ok_state = ok_state + t;
+        var g = 0;
+        if (_skk_fnv_words(x1, fl + 2) == _skk_u64(load64(h + 40 * 8), load64(h + 41 * 8))) { g = g + 1; }
+        if (_skk_fnv_words(x2 + 8, fl) == _skk_u64(load64(h + 42 * 8), load64(h + 43 * 8))) { g = g + 1; }
+        if (g == 2) { ok_sig = ok_sig + 1; }
+        b = b + 1;
+    }
+    assert(_SKB_N >= 8, "silk stereo: the stage frames");
+    assert_eq(ok_out, _SKB_N, "silk stereo: libopus's predictor indices, mid-only flag and rate split");
+    assert_eq(ok_state, _SKB_N, "silk stereo: libopus's state after the frame");
+    assert_eq(ok_sig, _SKB_N, "silk stereo: libopus's mid and side signals");
+    return 0;
+}
+
+# Channel c of an interleaved stereo decode, as its own vector.
+fn _skk_chan(y, c) {
+    var v = vec_new();
+    var i = c;
+    while (i < vec_len(y)) { vec_push(v, vec_get(y, i)); i = i + 2; }
+    return v;
+}
+
+# The best correlation of x (int16 words, n) with y, every f-th sample of y,
+# over the lags lo to hi (48 kHz samples).
+fn _skk_best_corr(x, n, y, f, lo, hi) {
+    var best = F64_ZERO;
+    var lag = lo;
+    while (lag <= hi) {
+        var cc = _skk_corr(x, n, y, f, lag);
+        if (f64_gt(cc, best) == 1) { best = cc; }
+        lag = lag + 1;
+    }
+    return best;
+}
+
+# 2.12.2 through silk_encode_opus and the setters: stereo packets carry the
+# TOC's stereo bit and decode (shravan's decoder, exact against libopus's)
+# to both channels, each following its input; stereo input coded mono is the
+# channels' average, without the bit; packets that move between mono and
+# stereo decode at their length; the width the encoder reports; and the
+# channel settings' bounds.
+fn test_silk_enc_stereo_api() {
+    syscall(1, 1, "=== silk encode: stereo API ===\n", 32);
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, 2);
+    write_u32_le(head, 12, 48000);
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    var buf = alloc(1300);
+    var pcm = alloc(5760 * 8);
+    var n = 16000;
+    var x = alloc(2 * n * 8);
+    _skk_stereo(0, 16000, n, 1, 0, 0, 9, 8192, 1, 0, x);
+    var xl = alloc(n * 8);
+    var xr = alloc(n * 8);
+    var xm = alloc(n * 8);
+    var i = 0;
+    while (i < n) {
+        store64(xl + i * 8, load64(x + 2 * i * 8));
+        store64(xr + i * 8, load64(x + (2 * i + 1) * 8));
+        store64(xm + i * 8, sar(load64(x + 2 * i * 8) + load64(x + (2 * i + 1) * 8), 1));
+        i = i + 1;
+    }
+    var mode = 0;
+    while (mode < 3) {
+        # 0: stereo; 1: stereo input coded mono; 2: mono and stereo packets in turn
+        var e = silk_encoder_new_channels(16000, 16000, 2, 20, 40000, 1, 0);
+        if (mode == 1) { assert_eq(silk_encoder_set_channels(e, 1), 0, "silk stereo: stereo input coded mono"); }
+        var spp = silk_encoder_samples(e);
+        assert_eq(spp, 320, "silk stereo: a packet takes 20 ms a channel");
+        var pk = vec_new();
+        vec_push(pk, str_from_buf(head, 19));
+        vec_push(pk, str_from_buf(tags, 16));
+        var tocs = 1;
+        var p = 0;
+        while ((p + 1) * spp <= n) {
+            if (mode == 2) {
+                var c2 = 2;
+                if ((p / 10) % 2 == 1) { c2 = 1; }
+                silk_encoder_set_channels(e, c2);
+                var tm = 0;
+                if (p % 10 == 9 && c2 == 2) { tm = 1; }
+                silk_encoder_set_to_mono(e, tm);
+            }
+            _skk_pcm(x, p, 2 * spp, pcm);
+            var len = silk_encode_opus(e, pcm, buf, 1276);
+            var st = 4;
+            if (load64(e + _SKX_CH_INT) == 1) { st = 0; }
+            if ((load8(buf) >> 3) != 9 || (load8(buf) & 4) != st) { tocs = 0; }
+            vec_push(pk, str_from_buf(buf, len));
+            p = p + 1;
+        }
+        assert(tocs == 1, "silk stereo: the TOC's stereo bit, as the packet codes");
+        var r = opus_decode_from_packets(pk, 0, 0);
+        assert(is_err(r) == 0, "silk stereo: shravan decodes the stereo stream");
+        if (is_err(r) == 0) {
+            var y = decode_result_samples(r);
+            assert_eq(vec_len(y), 2 * p * spp * 3, "silk stereo: two channels of the packets' length at 48 kHz");
+            var yl = _skk_chan(y, 0);
+            var yr = _skk_chan(y, 1);
+            var lim = f64_div(f64_from(3), f64_from(4));
+            if (mode == 0) {
+                assert(f64_gt(_skk_best_corr(xl, n, yl, 3, 280, 360), lim) == 1, "silk stereo: the left follows the left (over 0.75)");
+                assert(f64_gt(_skk_best_corr(xr, n, yr, 3, 280, 360), lim) == 1, "silk stereo: the right follows the right");
+            }
+            if (mode == 1) {
+                assert(f64_gt(_skk_best_corr(xm, n, yl, 3, 280, 360), lim) == 1, "silk stereo: coded mono, the average");
+                assert(f64_gt(_skk_best_corr(xm, n, yr, 3, 280, 360), lim) == 1, "silk stereo: in both channels");
+            }
+        }
+        if (mode == 0) {
+            var wd = silk_encoder_stereo_width(e);
+            assert(wd > 0 && wd <= 16384, "silk stereo: the width coded, Q14");
+            silk_encoder_set_to_mono(e, 1);
+            assert_eq(silk_encoder_stereo_width(e), 0, "silk stereo: none under toMono");
+        }
+        mode = mode + 1;
+    }
+    # the downmix adds the channels as libopus's floats do: each rounded to
+    # f32, the sum rounded to f32 (ties to even), then FLOAT2INT16 and halved.
+    # Left 1000.5/32768 + 2^-31 rounds to 1000.5/32768 (a quarter ulp off);
+    # right 2^-30 is half an ulp of it, so the f32 sum ties back to 1000.5/32768:
+    # 1000 (ties to even), halved 500. Added as doubles first it would be
+    # 1000.5/32768 + 3/4 ulp: 1001, halved 501.
+    var ed = silk_encoder_new_channels(16000, 16000, 2, 20, 20000, 1, 0);
+    silk_encoder_set_channels(ed, 1);
+    var lv = f64_add(f64_div(f64_from(2001), f64_from(65536)), f64_div(F64_ONE, f64_pow(F64_TWO, f64_from(31))));
+    var rv = f64_div(F64_ONE, f64_pow(F64_TWO, f64_from(30)));
+    i = 0;
+    while (i < 320) { store64(pcm + 2 * i * 8, lv); store64(pcm + (2 * i + 1) * 8, rv); i = i + 1; }
+    silk_encode(ed, pcm, buf, 1275);
+    var dm = 1;
+    i = 0;
+    while (i < 320) { if (load64(load64(ed + _SKX_X16) + i * 8) != 500) { dm = 0; } i = i + 1; }
+    assert(dm == 1, "silk stereo: the downmix in f32, as libopus adds the channels");
+    # hostile stereo: NaN in one channel, infinities against their negatives,
+    # full-scale squares in anti-phase, denormals, one channel silent, through
+    # VBR and CBR with the channels switching; packets that fit and decode to
+    # finite audio of their length
+    var nan = f64_div(F64_ZERO, F64_ZERO);
+    var inf = f64_div(F64_ONE, F64_ZERO);
+    var tiny = f64_div(F64_ONE, f64_pow(F64_TWO, f64_from(1060)));
+    var hfit = 1;
+    var hdec = 1;
+    var hc = 0;
+    while (hc < 2) {
+        var eh = silk_encoder_new_channels(48000, 16000, 2, 20, 30000, 1, hc);
+        var pkh = vec_new();
+        vec_push(pkh, str_from_buf(head, 19));
+        vec_push(pkh, str_from_buf(tags, 16));
+        var hk = 0;
+        while (hk < 12) {
+            if (hk == 8) { silk_encoder_set_to_mono(eh, 1); }
+            if (hk == 9) { silk_encoder_set_to_mono(eh, 0); silk_encoder_set_channels(eh, 1); }
+            if (hk == 11) { silk_encoder_set_channels(eh, 2); }
+            i = 0;
+            while (i < 960) {
+                var hl = F64_ZERO;
+                var hr = F64_ZERO;
+                var hkind = hk % 6;
+                if (hkind == 0) { hl = nan; hr = f64_div(f64_from((i * 7) % 200 - 100), f64_from(200)); }
+                if (hkind == 1) { hl = inf; if ((i & 1) == 1) { hl = f64_neg(inf); } hr = f64_neg(hl); }
+                if (hkind == 2) { hl = F64_ONE; if ((i & 8) == 8) { hl = f64_neg(F64_ONE); } hr = f64_neg(hl); }
+                if (hkind == 3) { hl = tiny; hr = f64_neg(tiny); }
+                if (hkind == 4) { hl = f64_from(1000000); if ((i & 1) == 1) { hl = f64_from(0 - 1000000); } }
+                if (hkind == 5) { hr = F64_ONE; if ((i & 32) == 32) { hr = f64_neg(F64_ONE); } }
+                store64(pcm + 2 * i * 8, hl);
+                store64(pcm + (2 * i + 1) * 8, hr);
+                i = i + 1;
+            }
+            var oh = silk_encode_opus(eh, pcm, buf, 1276);
+            if (oh < 1 || oh > 1276) { hfit = 0; }
+            if (oh >= 1) { vec_push(pkh, str_from_buf(buf, oh)); }
+            hk = hk + 1;
+        }
+        var rh = opus_decode_from_packets(pkh, 0, 0);
+        if (is_err(rh) == 1) { hdec = 0; }
+        if (is_err(rh) == 0) {
+            var yh = decode_result_samples(rh);
+            if (vec_len(yh) != 12 * 960 * 2) { hdec = 0; }
+            var qh = 0;
+            while (qh < vec_len(yh)) { if (((vec_get(yh, qh) >> 52) & 0x7FF) == 0x7FF) { hdec = 0; } qh = qh + 1; }
+        }
+        hc = hc + 1;
+    }
+    assert(hfit == 1, "silk stereo: hostile input gives packets that fit");
+    assert(hdec == 1, "silk stereo: and they decode to finite audio of their length");
+    var ew = silk_encoder_new_channels(16000, 16000, 2, 20, 20000, 1, 0);
+    assert_eq(silk_encoder_stereo_width(ew), 0, "silk stereo: no width before the first stereo packet, as libopus reports");
+    # bounds
+    assert_eq(silk_encoder_new_channels(16000, 16000, 0, 20, 20000, 1, 0), err(ERR_INVALID_CHANNELS), "silk stereo: no 0-channel input");
+    assert_eq(silk_encoder_new_channels(16000, 16000, 3, 20, 20000, 1, 0), err(ERR_INVALID_CHANNELS), "silk stereo: nor 3");
+    var em = silk_encoder_new(16000, 20, 20000, 1, 0);
+    assert_eq(silk_encoder_set_channels(em, 2), err(ERR_INVALID_CHANNELS), "silk stereo: mono input codes mono");
+    assert_eq(silk_encoder_stereo_width(em), 0, "silk stereo: mono input has no width");
+    var es = silk_encoder_new_channels(48000, 16000, 2, 20, 20000, 1, 0);
+    assert_eq(silk_encoder_samples(es), 960, "silk stereo: 20 ms a channel at 48 kHz");
+    assert_eq(silk_encoder_set_channels(es, 0), err(ERR_INVALID_CHANNELS), "silk stereo: 0 channels coded");
+    assert_eq(silk_encoder_set_channels(es, 3), err(ERR_INVALID_CHANNELS), "silk stereo: 3 channels coded");
+    assert_eq(silk_encoder_set_to_mono(es, 2), err(ERR_ENCODE), "silk stereo: toMono is 0 or 1");
+    assert_eq(silk_encoder_set_bitrate(es, 0), err(ERR_ENCODE), "silk stereo: a bit rate of 0");
+    assert_eq(silk_encoder_set_bitrate(es, 1000001), err(ERR_ENCODE), "silk stereo: over 1 Mbit/s");
+    assert_eq(silk_encoder_set_bitrate(es, 24000), 0, "silk stereo: a bit rate");
+    assert_eq(load64(es + _SKX_BITRATE), 24000, "silk stereo: taken");
+    return 0;
+}
+
 # Hostile input and parameters: NaN, infinities, full-scale square waves and
 # denormals through both entry points give packets that fit and decode; bad
 # rates, durations, complexities and buffers are refused.
@@ -12520,6 +12923,9 @@ fn test_silk_all() {
     test_silk_enc_packets_vs_libopus();
     test_silk_enc_opus_packets();
     test_silk_enc_api_fec_dtx();
+    test_silk_enc_stereo_vs_libopus();
+    test_silk_enc_stereo_stage_vs_libopus();
+    test_silk_enc_stereo_api();
     test_silk_enc_hostile();
     return 0;
 }
