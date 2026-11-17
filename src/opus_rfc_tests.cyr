@@ -804,6 +804,58 @@ fn test_celt_imdct_unit() {
     return 0;
 }
 
+# _celt_dft (2.10.4), the FFT both CELT MDCTs run, against the direct DFT it
+# replaced, at all four sizes (60, 120, 240 and 480 points) on a pseudo-random
+# complex input. They agree to rounding; an index or sign slip is O(1).
+fn test_celt_dft_sizes() {
+    test_group("opus: CELT MDCT FFT vs the direct DFT, 60 to 480 points");
+    var shift = 0;
+    while (shift < 4) {
+        _mdct_cache_init(shift);
+        var N4 = (1920 >> shift) >> 2;
+        var dc = load64(_mdct_dc + shift * 8);
+        var ds = load64(_mdct_ds + shift * 8);
+        var Cr = alloc(N4 * 8);
+        var Ci = alloc(N4 * 8);
+        var seed = 12345 + shift;
+        var i = 0;
+        while (i < N4) {
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            store64(Cr + i * 8, f64_div(f64_from((seed >> 8) % 2001 - 1000), f64_from(1000)));
+            seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+            store64(Ci + i * 8, f64_div(f64_from((seed >> 8) % 2001 - 1000), f64_from(1000)));
+            i = i + 1;
+        }
+        var Fr = alloc(N4 * 8);
+        var Fi = alloc(N4 * 8);
+        _celt_dft(Cr, Ci, Fr, Fi, N4, dc, ds);
+        var worst = F64_ZERO;
+        var k = 0;
+        while (k < N4) {
+            var sr = F64_ZERO;
+            var si = F64_ZERO;
+            i = 0;
+            while (i < N4) {
+                var m = (k * i) % N4;
+                var cs = load64(dc + m * 8);
+                var sn = load64(ds + m * 8);
+                sr = f64_add(sr, f64_add(f64_mul(load64(Cr + i * 8), cs), f64_mul(load64(Ci + i * 8), sn)));
+                si = f64_add(si, f64_sub(f64_mul(load64(Ci + i * 8), cs), f64_mul(load64(Cr + i * 8), sn)));
+                i = i + 1;
+            }
+            var dr = f64_abs(f64_sub(sr, load64(Fr + k * 8)));
+            var di = f64_abs(f64_sub(si, load64(Fi + k * 8)));
+            if (f64_gt(dr, worst) == 1) { worst = dr; }
+            if (f64_gt(di, worst) == 1) { worst = di; }
+            k = k + 1;
+        }
+        # inputs within +-1 and at most 480 terms: 1e-11 is far above rounding
+        assert(f64_lt(worst, f64_div(F64_ONE, f64_from(100000000000))) == 1, "CELT FFT matches the direct DFT");
+        shift = shift + 1;
+    }
+    return 0;
+}
+
 fn test_celt_pcm_rfc() {
     test_group("opus: CELT decode -> PCM correlation vs ffmpeg");
     var st = celt_dec_state_new();
@@ -3256,6 +3308,7 @@ fn test_opus_rfc_all() {
     test_celt_cwrs_rfc();
     test_celt_bands_rfc();
     test_celt_imdct_unit();
+    test_celt_dft_sizes();
     test_celt_pcm_rfc();
     test_celt_pcm_stereo_rfc();
     test_opus_hybrid_rfc();

@@ -394,6 +394,37 @@ fn bench_opus_celt_decode() {
     return bench_report(t1 - t0, iters);
 }
 
+# The CELT encoder on the same 20 ms mono frame: its forward MDCT runs on the
+# FFT the decoder's inverse does (2.10.4).
+fn bench_opus_celt_encode() {
+    var N = 960;
+    var pcmw = alloc((N + 120) * 8);
+    var two_pi = f64_mul(F64_TWO, f64_mul(f64_from(3), f64_add(F64_ONE, f64_div(f64_from(47197), f64_from(100000)))));
+    for (var k = 0; k < N + 120; k = k + 1) {
+        var ph = f64_div(f64_mul(two_pi, f64_from(k % N)), f64_from(48000));
+        var v = f64_add(f64_mul(f64_sin(f64_mul(ph, f64_from(440))), f64_div(F64_ONE, F64_TWO)),
+          f64_mul(f64_sin(f64_mul(ph, f64_from(3300))), f64_div(F64_ONE, f64_from(5))));
+        store64(pcmw + k * 8, v);
+    }
+    var pkt = alloc(4096);
+    var est = celt_dec_state_new();   # the encoder shares the CELT state layout
+    var mem = alloc(8); store64(mem, 0);
+    var enc = ec_enc_new(pkt, 160);
+    celt_encode(est, enc, pcmw, 1, 3, 0, 0, mem);     # warm the tables
+    ec_enc_done(enc);
+
+    var iters = 50;
+    bench("opus_celt_encode_20ms", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        var e = ec_enc_new(pkt, 160);
+        celt_encode(est, e, pcmw, 1, 3, 0, 0, mem);
+        ec_enc_done(e);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: fft_1024
 # ================================================================
@@ -612,7 +643,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.10.3 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.10.4 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -634,6 +665,7 @@ var flac_st_ns  = bench_flac_stream_1sec();
 var aac_enc_ns  = bench_aac_encode_1sec();
 var aac_dec_ns  = bench_aac_decode_1sec();
 var opus_dec_ns = bench_opus_celt_decode();
+var opus_enc_ns = bench_opus_celt_encode();
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

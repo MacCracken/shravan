@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.4] - 2026-11-16
+
+**The CELT decoder is 15 times faster.** Both CELT MDCTs ran their N/4-point transform as a direct DFT,
+230,400 complex multiply-adds per channel for a 20 ms frame and 95% of a CELT decode. They now run an
+FFT. A 20 ms CELT frame decodes in 130 µs (2.10.3: 1.98 ms), and the 5.1 Ogg Opus benchmark in 17.3 ms
+(235 ms), about 23× real time where it was 1.6×. The decoded samples are unchanged to within
+1.6e-13. 13,324 assertions (was 13,320).
+
+### Changed
+
+- **`_celt_dft`, the transform behind `clt_mdct_backward` and `clt_mdct_forward`.** It splits
+  N/4 = 15 × P (P = 4, 8, 16, 32; 60 to 480 points) by Cooley-Tukey:
+  - for each of the P columns, a 15-point DFT (`_celt_dft15`): Good-Thomas over 3 × 5, five 3-point
+    butterflies and three 5-point ones with no twiddles between them;
+  - a twiddle, skipped where it is exactly 1;
+  - for each of the 15 rows, a P-point radix-2 FFT whose first two stages are one multiply-free 4-point
+    pass (their twiddles are 1 and −j).
+
+  The twiddles come from the MDCT's own cached tables. Nothing is allocated per frame beyond the Opus
+  frame arena.
+- **The CELT encoder's forward MDCT** runs on the same FFT.
+- **De-emphasis** multiplies by 2⁻¹⁵ instead of dividing by 32768 per sample. The two are equal for a
+  power of two.
+- Benchmark `opus_celt_encode_20ms`.
+
+### Verified
+
+- **Old against new.** A copy of the tree with 2.10.3's direct DFT restored, compared over:
+  - every Opus configuration (0–31), mono and stereo;
+  - loss, FEC, DTX, and mode, bandwidth, frame-size and channel switches (72 libopus-generated streams);
+  - the multistream files.
+
+  The largest sample difference is 1.6e-13 (the FFT sums in another order). Agreement with libopus is
+  unchanged: 0.727 LSB at worst, before and after.
+- **`test_celt_dft_sizes`** checks the FFT against the direct DFT at all four sizes on a pseudo-random
+  input, to 1e-11. Four mutations were caught by it and by 32 to 48 decode assertions each against
+  libopus and ffmpeg: −j for +j in the merged stage, two 15-point outputs swapped, every twiddle taken
+  as 1, and the radix-2 twiddle step doubled.
+- **`scripts/interop.py --only opus,encoders`**: 295 of 295 against a default libopus build, libopus's
+  decodes of shravan's CELT encoder included.
+- **Fuzzing**: `./fuzz/run.sh 90000` and `--poison`: 97,800 and 90,000 calls and 2,200 cold starts,
+  clean; 24 further poison seeds of `fuzz_opus`, clean.
+
+### Performance
+
+One session, pinned to one core, median of three. The same benchmark code was built against 2.10.4
+and against a copy with 2.10.3's direct DFT restored:
+
+| Benchmark | 2.10.3 | 2.10.4 | Change |
+|---|---|---|---|
+| `opus_celt_decode_20ms` | 1.98 ms | 130 µs | −93.4% (15.2×) |
+| `opus_celt_encode_20ms` | 2.05 ms | 220 µs | −89.3% (9.3×) |
+| `opus_decode_51_multistream` (0.4 s of 5.1) | 235 ms | 17.3 ms | −92.6% (13.6×) |
+
+Code the change did not touch moved by up to ±2.9%.
+- **The decode is no longer the transform's.** Of what remains in a 5.1 decode, band decoding (PVQ
+  pulses, theta splits, folding) is about 40% and the inverse MDCT about 35%; the postfilter,
+  de-emphasis and energy decoding share the rest.
+- **Where the gain came from.** The FFT alone took the 5.1 decode from 235 ms to 26 ms. The
+  Good-Thomas 15-point kernel took it to 17.6 ms, and the merged first radix-2 stages to 17.0 ms.
+
 ## [2.10.3] - 2026-11-16
 
 **Multichannel decode: Opus multistream and AAC past two channels.** Surround and ambisonic Ogg Opus

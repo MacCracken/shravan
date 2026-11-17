@@ -14,7 +14,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (13,320 assertions)
+# Build + run the test suite (13,324 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -102,7 +102,7 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 
 ## Performance
 
-`src/bench.cyr` on the library itself, v2.10.3, one core (the history is in `bench-history.csv`):
+`src/bench.cyr` on the library itself, v2.10.4, one core (the history is in `bench-history.csv`):
 
 | Benchmark | Time | Real-time multiple |
 |-----------|------|--------------------|
@@ -114,8 +114,9 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 | AAC encode, 1 s stereo, 128 kbit/s | 53 ms | ~19× |
 | MP4 (AAC) decode, 1 s stereo, 128 kbit/s | 15.8 ms | ~63× |
 | MP3 decode, 44.1 kHz stereo, 64 kbit/s | 63 ms a second | ~16× |
-| Opus CELT decode, one 20 ms frame | 2.13 ms | ~9× |
-| Opus decode, 5.1 (four streams, 0.4 s) | 249 ms | ~1.6× |
+| Opus CELT decode, one 20 ms frame | 130 µs | ~150× |
+| Opus CELT encode, one 20 ms frame | 220 µs | ~90× |
+| Opus decode, 5.1 (four streams, 0.4 s) | 17.3 ms | ~23× |
 | MDCT, 2048 points | 55 µs | |
 
 On real files through `codec_open` (the interop CLI): 30 s of transient-rich AAC stereo decodes in

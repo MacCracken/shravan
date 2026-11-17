@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
-is one entry point**, `src/main.cyr`, running the whole 13,320-assertion suite
+is one entry point**, `src/main.cyr`, running the whole 13,324-assertion suite
 (core codecs, Opus decode, the CELT encoder, SILK golden vectors, the real-file
 interop fixtures). It was split into three until 2.9.3 for a ~3.15 MB code buffer
 that has been a growable 64 MiB region since Cyrius 6.4.49. `cyrius distlib`
@@ -72,7 +72,7 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run the suite (13,320 assertions)
+./scripts/test-all.sh                       # build + run the suite (13,324 assertions)
 cyrius build src/main.cyr build/shravan    # the same by hand (Cyrius 6.7.18)
 ./build/shravan
 ./scripts/interop.sh                        # reference sweep: ffmpeg, flac, mpg123, libopus (needs libopus-dev)
@@ -103,7 +103,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM), free format, LAME/Xing/VBRI frames skipped, the LAME tag's delay and padding trimmed (gapless, as ffmpeg plays it; `shravan_set_gapless(0)` keeps every frame whole). ISO conformance vectors within 1 LSB; Layer III exact vs ffmpeg at all 9 rates |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading and writing. ID3v2 de-unsynchronisation, v2.3 and v2.4 frame flags, zlib-compressed frames inflated with sankoch (per-frame and per-tag limits) |
 | fft | src/fft.cyr | Mixed-radix FFT (2,3,5); cached radix-2 FFT for powers of two; MDCT/IMDCT through an N/4-point FFT (the O(N²) direct forms kept as fallback and test reference) |
-| opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). Multistream (RFC 7845 families 0, 1, 2, 255): self-delimited stream packets (RFC 6716 Appendix B), a stream decoder each; family 1 in ffmpeg's channel order, 2 and 255 in mapping order. RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
+| opus | src/opus.cyr | RFC-6716 Opus **decode** → PCM: CELT + SILK + hybrid + stereo, **10 ms and 20 ms** frames, all bandwidths (`opus_decode_from_packets` dispatch, bit-exact vs libopus). Multistream (RFC 7845 families 0, 1, 2, 255): self-delimited stream packets (RFC 6716 Appendix B), a stream decoder each; family 1 in ffmpeg's channel order, 2 and 255 in mapping order. Both CELT MDCTs run an N/4-point FFT (`_celt_dft`: 15 × 2^a by Cooley-Tukey, a Good-Thomas 15-point kernel, radix 2); the direct DFT it replaced in 2.10.4 was 95% of a CELT decode. RFC-6716 CELT **encode** (`celt_encode_frame_ec`: fwd MDCT → energy → allocation → PVQ → range coder) — a real interoperable CELT frame (mono, 20 ms; libopus decodes it sample-identically). Encoder-quality knobs + stereo/SILK/hybrid encode = 2.6.6+. |
 | silk | src/silk.cyr | Opus SILK-mode decode: NLSF/LTP/LPC synthesis + resampler + stereo (mid/side), 10/20 ms, bit-exact vs libopus — part of the RFC-6716 Opus decode path |
 | opus_legacy | src/opus_legacy.cyr | Retired 2.5.x bespoke CELT encoder/decoder + old Opus encoder framework — **off the RFC path**, kept only for its tests, included by the test harnesses but **excluded from `[lib]`** (holds `opus.cyr` under the 256 KB distlib cap) |
 | aac | src/aac.cyr | AAC-LC encode/decode (ADTS), ISO/IEC 14496-3. Decode: SCE + CPE + LFE, any layout: channel configurations 1–7 and 11–14, or a PCE (in the ADTS stream or the MP4 AudioSpecificConfig); elements placed and channels ordered as ffmpeg does (`_aac_che_slot` = ff_aac_get_che, `_aac_layout_finish` = sniff_channel_order); `_aac_decode_frames` is the core behind ADTS and MP4. All 13 sample rates (`_aac_select_swb`), long/short windows, sine+KBD, full TNS, PNS, intensity, per-band M/S, ISO codebooks 1--11, independent windows. Exact vs ffmpeg; PNS bands at exactly the transmitted energy (decode energy within 1e-5 of ffmpeg's). Encode: 3GPP TS 26.403 psychoacoustics (spreading, ATH, pre-echo control, tonality-adjusted SMR), block switching (LONG_START / EIGHT_SHORT / LONG_STOP, groups by energy), TNS with thresholds in the filtered domain, a rate loop over the threshold scale with exact bit counts and a reservoir that starts full, M/S by perceptual entropy, PNS (at most 24 kbit/s a channel) and intensity (at most 48). ffmpeg and faad decode it at every rate, and `scripts/interop.py` holds it within 0.02 of ffmpeg's own encoder |
@@ -130,7 +130,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,320 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,324 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards

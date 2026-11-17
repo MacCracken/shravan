@@ -3800,7 +3800,8 @@ fn denormalise_bands(X, freq, bandLogE, silence, start, end, LM) {
 # ================================================================
 # CELT inverse MDCT + synthesis + de-emphasis (RFC 6716 §4.3.7) — mdct.c/celt_decoder.c
 # ================================================================
-# Float path: clt_mdct_backward as a direct O(N^2) DFT (correctness-first).
+# Float path: clt_mdct_backward over an N/4-point FFT (_celt_dft; a direct O(N^2)
+# DFT until 2.10.4).
 # trig[i]=cos(2*PI*(i+1/8)/N), N=1920>>shift; window[i]=sin(pi/2*sin(pi/2*(i+.5)/120)^2).
 
 var _celt_window = 0;         # 120 f64
@@ -3861,7 +3862,256 @@ fn _mdct_cache_init(shift) {
     return 0;
 }
 
-# clt_mdct_backward (float, direct DFT). in: MDCT coeffs (stride in_stride);
+# The N4-point forward DFT both CELT MDCTs run: F[k] = sum_i C[i] e^(-2 pi j ki/N4),
+# C and F as separate real and imaginary arrays. N4 = 15 * P with P = 4, 8, 16 or
+# 32 (60 to 480 points), so Cooley-Tukey splits it, n = P n1 + n2 and
+# k = k1 + 15 k2:
+#   1. for each n2, the 15-point DFT over n1 of C[P n1 + n2] (_celt_dft15), times
+#      the twiddle e^(-2 pi j n2 k1/N4), into row k1 at column n2;
+#   2. each row's P-point DFT (radix 2), whose k2-th output is F[k1 + 15 k2].
+# The twiddles are points of the MDCT's own tables (dc, ds: cos and sin of
+# 2 pi m/N4). The direct DFT this replaces (2.10.3 and before) took 230,400
+# complex multiply-adds for 480 points, 95% of a CELT decode.
+var _celt_dft_rev = 0;      # [4] bit reversals for P = 4, 8, 16, 32
+var _celt_dft_map = 0;      # [30] the 15-point DFT's index maps (_celt_dft15)
+var _celt_dft_k = 0;        # [4] cos(2 pi/5), cos(4 pi/5), sin(2 pi/5), sin(4 pi/5); [4] sqrt(3)/2; [5] 1/2
+
+fn _celt_dft_init() {
+    # Good-Thomas for 15 = 3 x 5 (gcd 1, so no twiddles between the stages): input
+    # n = (5 a + 3 b) mod 15 and output k = (10 a + 6 b) mod 15, a < 3, b < 5, by
+    # a * 5 + b. Then nk = 5 a a' + 3 b b' (mod 15): a 3-point DFT over a and a
+    # 5-point one over b.
+    _celt_dft_map = alloc(30 * 8);
+    var a = 0;
+    while (a < 3) {
+        var b = 0;
+        while (b < 5) {
+            store64(_celt_dft_map + (a * 5 + b) * 8, (5 * a + 3 * b) % 15);
+            store64(_celt_dft_map + (15 + a * 5 + b) * 8, (10 * a + 6 * b) % 15);
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    var twopi = f64_mul(F64_TWO, F64_PI);
+    _celt_dft_k = alloc(6 * 8);
+    store64(_celt_dft_k, f64_cos(f64_div(twopi, f64_from(5))));
+    store64(_celt_dft_k + 8, f64_cos(f64_div(f64_mul(F64_TWO, twopi), f64_from(5))));
+    store64(_celt_dft_k + 16, f64_sin(f64_div(twopi, f64_from(5))));
+    store64(_celt_dft_k + 24, f64_sin(f64_div(f64_mul(F64_TWO, twopi), f64_from(5))));
+    store64(_celt_dft_k + 32, f64_sin(f64_div(twopi, f64_from(3))));
+    store64(_celt_dft_k + 40, F64_HALF);
+    _celt_dft_rev = alloc(4 * 8);
+    var b = 0;
+    while (b < 4) {
+        var bits = b + 2;
+        var P = 1 << bits;
+        var rv = alloc(P * 8);
+        var x = 0;
+        while (x < P) {
+            var r = 0;
+            var q = 0;
+            while (q < bits) { r = (r << 1) | ((x >> q) & 1); q = q + 1; }
+            store64(rv + x * 8, r);
+            x = x + 1;
+        }
+        store64(_celt_dft_rev + b * 8, rv);
+        b = b + 1;
+    }
+    return 0;
+}
+
+# The 15-point forward DFT of x[base + P n], n < 15 (xr, xi), into yr, yi in
+# natural order: five 3-point DFTs, then three 5-point ones (_celt_dft_init).
+fn _celt_dft15(xr, xi, base, P, tr, ti, yr, yi) {
+    var c1 = load64(_celt_dft_k);
+    var c2 = load64(_celt_dft_k + 8);
+    var s1 = load64(_celt_dft_k + 16);
+    var s2 = load64(_celt_dft_k + 24);
+    var s3 = load64(_celt_dft_k + 32);
+    var h = load64(_celt_dft_k + 40);
+    # 3-point DFTs over a for each b: A[a'][b] into t at a' * 5 + b.
+    var b = 0;
+    while (b < 5) {
+        var i0 = (base + P * load64(_celt_dft_map + b * 8)) * 8;
+        var i1 = (base + P * load64(_celt_dft_map + (5 + b) * 8)) * 8;
+        var i2 = (base + P * load64(_celt_dft_map + (10 + b) * 8)) * 8;
+        var x0r = load64(xr + i0);
+        var x0i = load64(xi + i0);
+        var x1r = load64(xr + i1);
+        var x1i = load64(xi + i1);
+        var x2r = load64(xr + i2);
+        var x2i = load64(xi + i2);
+        var sr = f64_add(x1r, x2r);
+        var si = f64_add(x1i, x2i);
+        var dr = f64_mul(s3, f64_sub(x1r, x2r));
+        var di = f64_mul(s3, f64_sub(x1i, x2i));
+        var mr = f64_sub(x0r, f64_mul(h, sr));
+        var mi = f64_sub(x0i, f64_mul(h, si));
+        store64(tr + b * 8, f64_add(x0r, sr));
+        store64(ti + b * 8, f64_add(x0i, si));
+        store64(tr + (5 + b) * 8, f64_add(mr, di));
+        store64(ti + (5 + b) * 8, f64_sub(mi, dr));
+        store64(tr + (10 + b) * 8, f64_sub(mr, di));
+        store64(ti + (10 + b) * 8, f64_add(mi, dr));
+        b = b + 1;
+    }
+    # 5-point DFTs over b for each a'.
+    var a = 0;
+    while (a < 3) {
+        var q = tr + a * 40;
+        var r = ti + a * 40;
+        var x0r5 = load64(q);
+        var x0i5 = load64(r);
+        var a1r = f64_add(load64(q + 8), load64(q + 32));
+        var a1i = f64_add(load64(r + 8), load64(r + 32));
+        var b1r = f64_sub(load64(q + 8), load64(q + 32));
+        var b1i = f64_sub(load64(r + 8), load64(r + 32));
+        var a2r = f64_add(load64(q + 16), load64(q + 24));
+        var a2i = f64_add(load64(r + 16), load64(r + 24));
+        var b2r = f64_sub(load64(q + 16), load64(q + 24));
+        var b2i = f64_sub(load64(r + 16), load64(r + 24));
+        var r1r = f64_add(x0r5, f64_add(f64_mul(c1, a1r), f64_mul(c2, a2r)));
+        var r1i = f64_add(x0i5, f64_add(f64_mul(c1, a1i), f64_mul(c2, a2i)));
+        var r2r = f64_add(x0r5, f64_add(f64_mul(c2, a1r), f64_mul(c1, a2r)));
+        var r2i = f64_add(x0i5, f64_add(f64_mul(c2, a1i), f64_mul(c1, a2i)));
+        var u1r = f64_add(f64_mul(s1, b1r), f64_mul(s2, b2r));
+        var u1i = f64_add(f64_mul(s1, b1i), f64_mul(s2, b2i));
+        var u2r = f64_sub(f64_mul(s2, b1r), f64_mul(s1, b2r));
+        var u2i = f64_sub(f64_mul(s2, b1i), f64_mul(s1, b2i));
+        var om = _celt_dft_map + (15 + a * 5) * 8;
+        var o0 = load64(om) * 8;
+        var o1 = load64(om + 8) * 8;
+        var o2 = load64(om + 16) * 8;
+        var o3 = load64(om + 24) * 8;
+        var o4 = load64(om + 32) * 8;
+        store64(yr + o0, f64_add(x0r5, f64_add(a1r, a2r)));
+        store64(yi + o0, f64_add(x0i5, f64_add(a1i, a2i)));
+        store64(yr + o1, f64_add(r1r, u1i));
+        store64(yi + o1, f64_sub(r1i, u1r));
+        store64(yr + o4, f64_sub(r1r, u1i));
+        store64(yi + o4, f64_add(r1i, u1r));
+        store64(yr + o2, f64_add(r2r, u2i));
+        store64(yi + o2, f64_sub(r2i, u2r));
+        store64(yr + o3, f64_sub(r2r, u2i));
+        store64(yi + o3, f64_add(r2i, u2r));
+        a = a + 1;
+    }
+    return 0;
+}
+
+fn _celt_dft(Cr, Ci, Fr, Fi, N4, dc, ds) {
+    if (_celt_dft_map == 0) { _celt_dft_init(); }
+    var P = N4 / 15;
+    var lg = 2;
+    while ((1 << lg) < P) { lg = lg + 1; }
+    var rev = load64(_celt_dft_rev + (lg - 2) * 8);
+    var Yr = _opus_tmp(N4 * 8);
+    var Yi = _opus_tmp(N4 * 8);
+    var tr15 = _opus_tmp(15 * 8);
+    var ti15 = _opus_tmp(15 * 8);
+    var ar = _opus_tmp(15 * 8);
+    var ai = _opus_tmp(15 * 8);
+    # 1. 15-point DFTs and twiddles; row k1 is written bit-reversed for step 2.
+    var n2 = 0;
+    while (n2 < P) {
+        _celt_dft15(Cr, Ci, n2, P, tr15, ti15, ar, ai);
+        var col = load64(rev + n2 * 8);
+        var k1 = 0;
+        while (k1 < 15) {
+            var sr = load64(ar + k1 * 8);
+            var si = load64(ai + k1 * 8);
+            var tw = n2 * k1;
+            if (tw == 0) {
+                # the twiddle is 1 (cos 0, sin 0 exactly)
+                store64(Yr + (k1 * P + col) * 8, sr);
+                store64(Yi + (k1 * P + col) * 8, si);
+            } else {
+                var tc = load64(dc + tw * 8);
+                var ts = load64(ds + tw * 8);
+                store64(Yr + (k1 * P + col) * 8, f64_add(f64_mul(sr, tc), f64_mul(si, ts)));
+                store64(Yi + (k1 * P + col) * 8, f64_sub(f64_mul(si, tc), f64_mul(sr, ts)));
+            }
+            k1 = k1 + 1;
+        }
+        n2 = n2 + 1;
+    }
+    # 2. radix-2 DIT over each row (in bit-reversed order), out to F[k1 + 15 k2].
+    var k1b = 0;
+    while (k1b < 15) {
+        var rr = Yr + k1b * P * 8;
+        var ri = Yi + k1b * P * 8;
+        # The first two stages in one pass: their twiddles are 1 and -j, so a
+        # 4-point butterfly with no multiplies.
+        var g = 0;
+        while (g < P) {
+            var p0 = g * 8;
+            var x0r = load64(rr + p0);
+            var x0i = load64(ri + p0);
+            var x1r = load64(rr + p0 + 8);
+            var x1i = load64(ri + p0 + 8);
+            var x2r = load64(rr + p0 + 16);
+            var x2i = load64(ri + p0 + 16);
+            var x3r = load64(rr + p0 + 24);
+            var x3i = load64(ri + p0 + 24);
+            var a0r = f64_add(x0r, x1r);
+            var a0i = f64_add(x0i, x1i);
+            var a1r = f64_sub(x0r, x1r);
+            var a1i = f64_sub(x0i, x1i);
+            var a2r = f64_add(x2r, x3r);
+            var a2i = f64_add(x2i, x3i);
+            var a3r = f64_sub(x2r, x3r);
+            var a3i = f64_sub(x2i, x3i);
+            store64(rr + p0, f64_add(a0r, a2r));
+            store64(ri + p0, f64_add(a0i, a2i));
+            store64(rr + p0 + 16, f64_sub(a0r, a2r));
+            store64(ri + p0 + 16, f64_sub(a0i, a2i));
+            store64(rr + p0 + 8, f64_add(a1r, a3i));        # a1 - j a3
+            store64(ri + p0 + 8, f64_sub(a1i, a3r));
+            store64(rr + p0 + 24, f64_sub(a1r, a3i));       # a1 + j a3
+            store64(ri + p0 + 24, f64_add(a1i, a3r));
+            g = g + 4;
+        }
+        var half = 4;
+        while (half < P) {
+            var step = 15 * (P / (half * 2));      # W_(2 half)^j = W_N4^(15 j P / (2 half))
+            var b0 = 0;
+            while (b0 < P) {
+                var j = 0;
+                while (j < half) {
+                    var wc = load64(dc + j * step * 8);
+                    var wsn = load64(ds + j * step * 8);
+                    var ua = rr + (b0 + j) * 8;
+                    var ub = ri + (b0 + j) * 8;
+                    var va = rr + (b0 + j + half) * 8;
+                    var vb = ri + (b0 + j + half) * 8;
+                    var xr2 = load64(va);
+                    var xi2 = load64(vb);
+                    var tr = f64_add(f64_mul(xr2, wc), f64_mul(xi2, wsn));
+                    var ti = f64_sub(f64_mul(xi2, wc), f64_mul(xr2, wsn));
+                    var ur = load64(ua);
+                    var ui = load64(ub);
+                    store64(va, f64_sub(ur, tr));
+                    store64(vb, f64_sub(ui, ti));
+                    store64(ua, f64_add(ur, tr));
+                    store64(ub, f64_add(ui, ti));
+                    j = j + 1;
+                }
+                b0 = b0 + half * 2;
+            }
+            half = half * 2;
+        }
+        var k2 = 0;
+        while (k2 < P) {
+            store64(Fr + (k1b + 15 * k2) * 8, load64(rr + k2 * 8));
+            store64(Fi + (k1b + 15 * k2) * 8, load64(ri + k2 * 8));
+            k2 = k2 + 1;
+        }
+        k1b = k1b + 1;
+    }
+    return 0;
+}
+
+# clt_mdct_backward (float, via _celt_dft). in: MDCT coeffs (stride in_stride);
 # out: writes out[0 .. N2+59], reading out[0..59] as prev overlap. overlap=120.
 fn clt_mdct_backward(inp, in_stride, out, shift) {
     _mdct_cache_init(shift);
@@ -3886,25 +4136,7 @@ fn clt_mdct_backward(inp, in_stride, out, shift) {
     # forward DFT: Fout[k] = sum_i C[i]*(cos(2pi ki/N4) - j sin)
     var Fr = _opus_tmp(N4 * 8);
     var Fi = _opus_tmp(N4 * 8);
-    var k = 0;
-    while (k < N4) {
-        var sr = F64_ZERO;
-        var si = F64_ZERO;
-        i = 0;
-        while (i < N4) {
-            var m = (k * i) % N4;
-            var cs = load64(dc + m * 8);
-            var sn = load64(ds + m * 8);
-            var cri = load64(Cr + i * 8);
-            var cii = load64(Ci + i * 8);
-            sr = f64_add(sr, f64_add(f64_mul(cri, cs), f64_mul(cii, sn)));
-            si = f64_add(si, f64_sub(f64_mul(cii, cs), f64_mul(cri, sn)));
-            i = i + 1;
-        }
-        store64(Fr + k * 8, sr);
-        store64(Fi + k * 8, si);
-        k = k + 1;
-    }
+    _celt_dft(Cr, Ci, Fr, Fi, N4, dc, ds);
     # post-rotate -> out[60 ..]
     var lim = (N4 + 1) >> 1;
     i = 0;
@@ -4001,25 +4233,7 @@ fn clt_mdct_forward(inp, out, out_stride, shift) {
     # --- N4-point forward DFT (same kernel as backward) ---
     var Fr = _opus_tmp(N4 * 8);
     var Fi = _opus_tmp(N4 * 8);
-    var k = 0;
-    while (k < N4) {
-        var sr = F64_ZERO;
-        var si = F64_ZERO;
-        i = 0;
-        while (i < N4) {
-            var m = (k * i) % N4;
-            var cs = load64(dc + m * 8);
-            var sn = load64(ds + m * 8);
-            var cri = load64(Cr + i * 8);
-            var cii = load64(Ci + i * 8);
-            sr = f64_add(sr, f64_add(f64_mul(cri, cs), f64_mul(cii, sn)));
-            si = f64_add(si, f64_sub(f64_mul(cii, cs), f64_mul(cri, sn)));
-            i = i + 1;
-        }
-        store64(Fr + k * 8, sr);
-        store64(Fi + k * 8, si);
-        k = k + 1;
-    }
+    _celt_dft(Cr, Ci, Fr, Fi, N4, dc, ds);
     # --- post-rotation -> out (stride) ---
     i = 0;
     while (i < N4) {
@@ -4145,10 +4359,12 @@ fn celt_deemphasis(out_syn, pcm, c, CC, preemph_ptr, accum, LM) {
     var m = load64(preemph_ptr + c * 8);
     var j = 0;
     var N = 120 << LM;
+    # 1/32768 is a power of two, so the product is the quotient, bit for bit.
+    var inv = f64_div(F64_ONE, f64_from(32768));
     while (j < N) {
         var tmp = f64_add(f64_add(load64(out_syn + j * 8), F64_1E30INV), m);
         m = f64_mul(CELT_DEEMPH, tmp);
-        var v = f64_div(tmp, f64_from(32768));
+        var v = f64_mul(tmp, inv);
         # Hybrid: accumulate the CELT high band onto the SILK low band already in pcm.
         if (accum != 0) { v = f64_add(load64(pcm + (j * CC + c) * 8), v); }
         store64(pcm + (j * CC + c) * 8, v);

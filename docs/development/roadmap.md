@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.10.3.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.10.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 

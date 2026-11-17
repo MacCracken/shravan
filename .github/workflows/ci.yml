@@ -57,7 +57,7 @@ jobs:
         # 0 failed and at least MIN_ASSERTIONS run. Raise the floor when tests
         # are added; lowering it is a decision, not a fix.
         run: |
-          MIN_ASSERTIONS=13320
+          MIN_ASSERTIONS=13324
           LINE=$(grep '^shravan tests: ' /tmp/test-output.txt) \
             || { echo "No result line"; cat /tmp/test-output.txt; exit 1; }
           echo "$LINE"

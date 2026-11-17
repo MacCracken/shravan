@@ -17,7 +17,8 @@ shravan/
     fft.cyr         -- Mixed-radix FFT (2,3,5), cached radix-2 FFT, MDCT/IMDCT via an
                        N/4-point FFT (direct O(N^2) forms kept as fallback + reference)
     opus.cyr        -- Opus decode (CELT+SILK+hybrid, mono/stereo, 10/20 ms, all bandwidths,
-                       bit-exact vs libopus; multistream, RFC 7845 families 0/1/2/255) +
+                       bit-exact vs libopus; multistream, RFC 7845 families 0/1/2/255;
+                       the CELT MDCTs over a 15 x 2^a FFT) +
                        RFC-6716 CELT encode (mono 20 ms, interop-verified); OpusHead/OpusTags parsing
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo)
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
