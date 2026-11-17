@@ -471,9 +471,11 @@ syscall(1, 1, "ok\n", 3);
 
 # ================================================================
 # Target: SILK encoder. Random internal rates and packet lengths (valid and
-# not), bit rates, complexities, CBR, buffers from none to plenty, over hostile
-# f64 input (NaN, infinities, values past full scale, silence, constants, square
-# waves, noise). Bad parameters must be refused, and only those; a payload must
+# not), bit rates, complexities, CBR, packet loss settings (2.12.0, valid and
+# not), buffers from none to plenty, over hostile f64 input (NaN, infinities,
+# values past full scale, silence, constants, square waves, noise, and periodic
+# input for the voiced path: impulse trains and squares at lags in and out of
+# the pitch range). Bad parameters must be refused, and only those; a payload must
 # fit its buffer or be refused, with nothing written past it; an Opus packet
 # must fit (a buffer of 1 byte holds the TOC alone), carry the configured TOC
 # and, under CBR, be the configured size; and
@@ -526,12 +528,16 @@ while (fi < se_iters) {
     if ((is_err(se_e) == 1) != (se_valid == 0)) { se_bad = 1; }
     if (se_bad == 0 && se_valid == 1) {
         var se_n = silk_encoder_samples(se_e);
+        var se_loss = _fz_u(111) - 5;
+        var se_lr = silk_encoder_set_packet_loss(se_e, se_loss);
+        if ((is_err(se_lr) == 1) != (se_loss < 0 || se_loss > 100)) { se_bad = 11; }
         var se_pk = vec_new();
         vec_push(se_pk, str_from_buf(se_head, 19));
         vec_push(se_pk, str_from_buf(se_tags, 16));
         var se_opus = 0;
-        var se_shape = _fz_u(7);
+        var se_shape = _fz_u(9);
         var se_w = f64_div(F64_ONE, f64_from(_fz_u(60) + 2));
+        var se_per = _fz_u(300) + 20;
         var se_np = _fz_u(6) + 1;
         var p = 0;
         while (se_bad == 0 && p < se_np) {
@@ -543,6 +549,8 @@ while (fi < se_iters) {
                 if (se_shape == 3) { x = F64_ONE; if (((p * se_n + k) & 16) == 16) { x = f64_neg(F64_ONE); } }
                 if (se_shape == 4) { x = F64_ZERO; }
                 if (se_shape == 5) { x = f64_div(f64_from(_fz_u(201) - 100), f64_from(3200)); }
+                if (se_shape == 7) { x = F64_ZERO; if ((p * se_n + k) % se_per == 0) { x = F64_ONE; } }
+                if (se_shape == 8) { x = F64_ONE; if ((p * se_n + k) % se_per >= se_per / 2) { x = f64_neg(F64_ONE); } }
                 var sp = _fz_u(100);
                 if (sp == 0) { x = 0x7FF8000000000000; }
                 if (sp == 1) { x = 0x7FF0000000000000; }

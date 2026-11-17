@@ -439,26 +439,38 @@ fn _bench_skv_frame(k, hdr, x, gains, cq, prev) {
     return 0;
 }
 
-# Frame k of a vector field (src/silk_enc_vectors.cyr: ';'-separated base64 of
-# little-endian 32-bit words) into i64 words, ints sign-extended.
+# Frame k of a vector field (src/silk_enc_vectors.cyr: one zlib stream in
+# base64 of the segment count, the segments' lengths and the segments, one a
+# frame) into i64 words, ints sign-extended. Each field is inflated once.
+var _bench_skv_cs = 0;
+var _bench_skv_cb = 0;
+var _bench_skv_cn = 0;
 fn _bench_skv_ints(s, k, out) {
-    var seg = alloc(65536);
-    var raw = alloc(65536);
-    var p = 0;
-    var sg = 0;
-    while (sg < k) { if (load8(s + p) == 59) { sg = sg + 1; } p = p + 1; }
-    var n = 0;
-    var c = load8(s + p);
-    while (c != 0 && c != 59) { store8(seg + n, c); n = n + 1; c = load8(s + p + n); }
-    store8(seg + n, 0);
-    var nb = _mp3_b64_decode(seg, raw);
-    var i = 0;
-    while (i < nb / 4) {
-        var b = raw + i * 4;
-        store64(out + i * 8, silk_sx32(load8(b) | (load8(b + 1) << 8) | (load8(b + 2) << 16) | (load8(b + 3) << 24)));
-        i = i + 1;
+    if (_bench_skv_cs == 0) { _bench_skv_cs = alloc(64 * 8); _bench_skv_cb = alloc(64 * 8); }
+    var z = 0;
+    var c = 0;
+    while (c < _bench_skv_cn) {
+        if (load64(_bench_skv_cs + c * 8) == s) { z = load64(_bench_skv_cb + c * 8); }
+        c = c + 1;
     }
-    return nb / 4;
+    if (z == 0) {
+        var t = alloc(strlen(s) + 8);
+        var nb = _mp3_b64_decode(s, t);
+        z = alloc(1 << 20);
+        if (zlib_decompress_capped(t, nb, z, 1 << 20, 1 << 20) < 4) { return 0; }
+        if (_bench_skv_cn < 64) {
+            store64(_bench_skv_cs + _bench_skv_cn * 8, s);
+            store64(_bench_skv_cb + _bench_skv_cn * 8, z);
+            _bench_skv_cn = _bench_skv_cn + 1;
+        }
+    }
+    var off = 4 + 4 * read_u32_le(z, 0);
+    var j = 0;
+    while (j < k) { off = off + read_u32_le(z, 4 + 4 * j); j = j + 1; }
+    var n = read_u32_le(z, 4 + 4 * k) / 4;
+    var i = 0;
+    while (i < n) { store64(out + i * 8, silk_sx32(read_u32_le(z, off + i * 4))); i = i + 1; }
+    return n;
 }
 
 fn bench_silk_lpc_analysis() {
@@ -497,7 +509,7 @@ fn bench_silk_lpc_analysis() {
         while (j < 4) { store64(c + _SKC_GAINS + j * 8, load64(gains + j * 8)); j = j + 1; }
         store64(c + _SKC_CODING_QUALITY, f32_to(load64(cq) & 0xFFFFFFFF));
         _opus_frame_begin();
-        silk_find_pred_coefs_flp(st, c, x + 16 * 8);
+        silk_find_pred_coefs_flp(st, c, 0, x + 16 * 8, 0);
         _opus_frame_end();
     }
     var t1 = time_now_ns();
@@ -618,6 +630,99 @@ fn bench_silk_nsq() {
     return bench_report(t1 - t0, iters);
 }
 
+# SILK pitch estimation (2.12.0): silk_pitch_analysis_core_FLP on libopus's
+# residual of a voiced 20 ms wideband frame, at the estimator's complexity 1
+# (the reference vectors' first such frame).
+fn bench_silk_pitch() {
+    var h = alloc(16 * 8);
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKT_N && found < 0) {
+        _bench_skv_ints(_SKT_HDR, k, h);
+        if (load64(h + 8) == 16 && load64(h + 24) == 4 && load64(h + 16) == 1 && load64(h) > 0) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_ints(_SKT_HDR, found, h);
+    var fin = alloc(4 * 8);
+    var res = alloc(800 * 8);
+    _bench_skv_ints(_SKT_IN, found, fin);
+    var n = _bench_skv_ints(_SKT_RES, found, res);
+    var i = 0;
+    while (i < 3) { store64(fin + i * 8, f32_to(load64(fin + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    i = 0;
+    while (i < n) { store64(res + i * 8, f32_to(load64(res + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    var po = alloc(4 * 8);
+    var li = alloc(2 * 8);
+    var lc = alloc(8);
+    var thr1 = f64_div(f64_from(load64(h + 72)), f64_from(65536));
+    var iters = 200;
+    bench("silk_pitch_analysis_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        _opus_frame_begin();
+        store64(lc, load64(fin + 8));
+        silk_pitch_analysis_core_flp(res, po, li, lc, load64(h), thr1, load64(fin), 16, 1, 4);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# The long-term predictor (2.12.0): correlations, gain quantisation, scaling
+# and the LTP residual of a voiced 20 ms wideband frame of the reference vectors.
+fn bench_silk_ltp() {
+    var h = alloc(32 * 8);
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKL_N && found < 0) {
+        _bench_skv_ints(_SKL_HDR, k, h);
+        if (load64(h) == 4 && load64(h + 200) == 16) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_ints(_SKL_HDR, found, h);
+    var fv = alloc(16 * 8);
+    var res = alloc(800 * 8);
+    var x = alloc(800 * 8);
+    var nf = _bench_skv_ints(_SKL_F, found, fv);
+    var nr = _bench_skv_ints(_SKL_RES, found, res);
+    var nx = _bench_skv_ints(_SKL_X, found, x);
+    var i = 0;
+    while (i < nf) { store64(fv + i * 8, f32_to(load64(fv + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    i = 0;
+    while (i < nr) { store64(res + i * 8, f32_to(load64(res + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    i = 0;
+    while (i < nx) { store64(x + i * 8, f32_to(load64(x + i * 8) & 0xFFFFFFFF)); i = i + 1; }
+    var st = silk_enc_state_new(16, 4);
+    store64(st + _SKE_SNR_Q7, load64(h + 64));
+    var ctrl = silk_enc_ctrl_new();
+    var inv = alloc(4 * 8);
+    i = 0;
+    while (i < 4) {
+        store64(ctrl + _SKC_PITCHL + i * 8, load64(h + 80 + i * 8));
+        store64(inv + i * 8, f64_div(F64_ONE, load64(fv + (4 + i) * 8)));
+        i = i + 1;
+    }
+    var XX = alloc(100 * 8);
+    var xX = alloc(20 * 8);
+    var pre = alloc(400 * 8);
+    var lm = load64(h + 72);
+    var iters = 200;
+    bench("silk_ltp_analysis_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        _opus_frame_begin();
+        store64(st + _SKE_SUM_LOG_GAIN, load64(h + 32));
+        silk_find_ltp_flp(XX, xX, res + lm * 8, ctrl + _SKC_PITCHL, 80, 4);
+        silk_quant_ltp_gains_flp(ctrl + _SKC_LTPCOEF, st + _SKE_IDX + 35 * 8, st + _SKE_IDX + _SKI_PER * 8,
+          st + _SKE_SUM_LOG_GAIN, ctrl + _SKC_LTPRED_GAIN, XX, xX, 80, 4);
+        silk_ltp_scale_ctrl_flp(st, ctrl, 0);
+        silk_ltp_analysis_filter_flp(pre, x + (lm - 16) * 8, ctrl + _SKC_LTPCOEF, ctrl + _SKC_PITCHL, inv, 80, 4, 16);
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: the SILK encoder, a second of audio a run (2.11.3)
 # ================================================================
@@ -648,10 +753,41 @@ fn _bench_silk_input(fs, n, x) {
     return 0;
 }
 
-# name: the bench; a second of wideband at 20 ms packets, VBR or CBR.
-fn bench_silk_encode(name, br, cbr, iters) {
+# The suite's voiced input (_skk_signal kind 6 at its defaults, 2.12.0): white
+# noise through a comb at a gliding pitch, which libopus codes voiced on nearly
+# every frame.
+fn _bench_silk_voiced(fs, n, x) {
+    var s = 1;
+    var H = fs / 25;
+    var hist = alloc(H * 8);
+    memset(hist, 0, H * 8);
+    for (var i = 0; i < n; i = i + 1) {
+        var w = 0;
+        for (var d = 0; d < 4; d = d + 1) {
+            s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+            w = w + (s >> 16) - 32768;
+        }
+        var t = i % (2 * fs);
+        var tri = t;
+        if (t >= fs) { tri = 2 * fs - t; }
+        var T = fs / (100 + 80 * tri / fs);
+        var y = w + sar(14000 * load64(hist + ((i - T + H) % H) * 8), 14);
+        store64(hist + (i % H) * 8, y);
+        var v = sar(y, 3);
+        if (v < 0 - 32768) { v = 0 - 32768; }
+        if (v > 32767) { v = 32767; }
+        store64(x + i * 8, f64_div(f64_from(v), f64_from(32768)));
+    }
+    return 0;
+}
+
+# name: the bench; a second of wideband at 20 ms packets, VBR or CBR; voiced:
+# the comb input instead of the noise.
+fn bench_silk_encode(name, br, cbr, iters) { return _bench_silk_encode(name, br, cbr, iters, 0); }
+fn _bench_silk_encode(name, br, cbr, iters, voiced) {
     var x = alloc(16000 * 8);
-    _bench_silk_input(16000, 16000, x);
+    if (voiced == 1) { _bench_silk_voiced(16000, 16000, x); }
+    else { _bench_silk_input(16000, 16000, x); }
     var buf = alloc(1280);
     var e = silk_encoder_new(16000, 20, br, 1, cbr);
     for (var p = 0; p < 50; p = p + 1) { silk_encode(e, x + p * 320 * 8, buf, 1275); }
@@ -882,7 +1018,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.11.3 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.0 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -911,6 +1047,9 @@ var silk_nsa_ns = bench_silk_noise_shape();
 var silk_nsq_ns = bench_silk_nsq();
 var silk_enc_ns = bench_silk_encode("silk_encode_1sec_wb_vbr20k", 20000, 0, 10);
 var silk_cbr_ns = bench_silk_encode("silk_encode_1sec_wb_cbr12k", 12000, 1, 5);
+var silk_pitch_ns = bench_silk_pitch();
+var silk_ltp_ns = bench_silk_ltp();
+var silk_voiced_ns = _bench_silk_encode("silk_encode_1sec_wb_voiced20k", 20000, 0, 10, 1);
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

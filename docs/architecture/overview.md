@@ -22,12 +22,15 @@ shravan/
                        RFC-6716 CELT encode (mono 20 ms, interop-verified); OpusHead/OpusTags parsing
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo);
                        the encoder's quantisers and bitstream writers
-    silk_enc.cyr    -- SILK encoder (2.11.x): VAD, pitch-analysis residual, noise shaping,
-                       gains, LPC analysis (Burg, NLSF interpolation search and
-                       quantisation), the noise shaping quantiser (NSQ), the frame
-                       and its rate loop, the packet, silk_encoder_new / silk_encode /
-                       silk_encode_opus; checked stage by stage against libopus, and
-                       whole packets byte for byte (every frame unvoiced until 2.12)
+    silk_enc.cyr    -- SILK encoder (2.11.x, 2.12.0): VAD, pitch estimation (decimation,
+                       three stages, the voicing decision), noise shaping, gains, LPC
+                       analysis (Burg, NLSF interpolation search and quantisation),
+                       long-term prediction (correlations, gain VQ, scaling by loss),
+                       the noise shaping quantiser (NSQ), the frame and its rate loop,
+                       the packet, the pitch-tracking high-pass smoother,
+                       silk_encoder_new / silk_encode / silk_encode_opus; checked stage
+                       by stage against libopus, and whole packets byte for byte,
+                       voiced and unvoiced
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows;
                        decode: any channel layout, configurations or a PCE, in ffmpeg's order;

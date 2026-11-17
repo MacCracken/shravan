@@ -11028,47 +11028,62 @@ fn test_silk_encode_bitstream_roundtrip() {
 }
 
 # ---------------------------------------------------------------- SILK encoder vs libopus
-# src/silk_enc_vectors.cyr holds libopus's own stage inputs and outputs for 30
-# frames (scripts/gen-silk-vectors.py: WB, MB and NB, 10 and 20 ms, complexity
-# 1 and 5, both unvoiced signal types, every NLSF interpolation index). Each
-# shravan stage gets libopus's inputs. Its float stages run in f64 where libopus
-# runs in single precision, so they agree to float precision; the fixed-point
-# stages, and everything they feed, agree exactly.
+# src/silk_enc_vectors.cyr holds libopus's own stage inputs and outputs
+# (scripts/gen-silk-vectors.py): the LPC analysis of 30 frames (WB, MB and NB,
+# 10 and 20 ms, complexity 1 and 5, both unvoiced signal types, every NLSF
+# interpolation index), the VAD, noise shaping, gains and quantiser (2.11.x),
+# pitch estimation, long-term prediction and the variable high-pass (2.12.0),
+# and whole packets. Each shravan stage gets libopus's inputs. Its float stages
+# run in f64 where libopus runs in single precision, so they agree to float
+# precision; the fixed-point stages, and everything they feed, agree exactly.
 
-# Frame k of a vector: frames are ';'-separated segments, each its values as
-# little-endian 32-bit words in base64 (scripts/gen-silk-vectors.py). Ints come
-# back sign-extended; returns the count.
-var _skv_s = 0;
-var _skv_k = 0;
-var _skv_p = 0;
-var _skv_seg = 0;
-var _skv_raw = 0;
+# A vector field (scripts/gen-silk-vectors.py) is one zlib stream in base64:
+# the segment count, each segment's length (u32), then the segments, one a
+# frame. Each field is inflated once (sankoch) and kept; returns the stream.
+var _skv_cs = 0;
+var _skv_cb = 0;
+var _skv_cn = 0;
+var _skv_zb = 0;
+fn _skv_field(s) {
+    if (_skv_cs == 0) { _skv_cs = alloc(256 * 8); _skv_cb = alloc(256 * 8); _skv_zb = alloc(1 << 20); }
+    var i = 0;
+    while (i < _skv_cn) {
+        if (load64(_skv_cs + i * 8) == s) { return load64(_skv_cb + i * 8); }
+        i = i + 1;
+    }
+    var t = alloc(strlen(s) + 8);
+    var nb = _mp3_b64_decode(s, t);
+    var r = zlib_decompress_capped(t, nb, _skv_zb, 1 << 20, 1 << 20);
+    if (r < 4) { return 0; }
+    var b = alloc(r + 8);
+    memcpy(b, _skv_zb, r);
+    if (_skv_cn < 256) {
+        store64(_skv_cs + _skv_cn * 8, s);
+        store64(_skv_cb + _skv_cn * 8, b);
+        _skv_cn = _skv_cn + 1;
+    }
+    return b;
+}
+
+# Segment k of field s: its bytes at *pp; returns its length.
+fn _skv_seg(s, k, pp) {
+    var b = _skv_field(s);
+    var off = 4 + 4 * read_u32_le(b, 0);
+    var j = 0;
+    while (j < k) { off = off + read_u32_le(b, 4 + 4 * j); j = j + 1; }
+    store64(pp, b + off);
+    return read_u32_le(b, 4 + 4 * k);
+}
+
+# Frame k of a vector, its 32-bit words into out (ints sign-extended); returns
+# the count.
 fn _skv_load(s, k, out) {
-    if (_skv_seg == 0) { _skv_seg = alloc(65536); _skv_raw = alloc(65536); }
-    var p = 0;
-    var seg = 0;
-    if (s == _skv_s && k >= _skv_k) { p = _skv_p; seg = _skv_k; }
-    while (seg < k) {
-        if (load8(s + p) == 59) { seg = seg + 1; }
-        p = p + 1;
-    }
-    _skv_s = s;
-    _skv_k = k;
-    _skv_p = p;
-    var n = 0;
-    var c = load8(s + p + n);
-    while (c != 0 && c != 59 && n < 65535) {
-        store8(_skv_seg + n, c);
-        n = n + 1;
-        c = load8(s + p + n);
-    }
-    store8(_skv_seg + n, 0);
-    var nb = _mp3_b64_decode(_skv_seg, _skv_raw);
+    var pp = alloc(8);
+    var nb = _skv_seg(s, k, pp);
+    var src = load64(pp);
     var i = 0;
     while (i < nb / 4) {
-        var b = _skv_raw + i * 4;
-        var w = load8(b) | (load8(b + 1) << 8) | (load8(b + 2) << 16) | (load8(b + 3) << 24);
-        store64(out + i * 8, silk_sx32(w));
+        store64(out + i * 8, silk_sx32(read_u32_le(src, i * 4)));
         i = i + 1;
     }
     return nb / 4;
@@ -11215,7 +11230,7 @@ fn test_silk_enc_lpc_vs_libopus() {
         _skv_loadf(_SKV_CQ, f, v);
         store64(c2 + _SKC_CODING_QUALITY, load64(v));
         _skv_loadf(_SKV_X, f, x);
-        var m2 = silk_find_pred_coefs_flp(st2, c2, x + ord * 8);
+        var m2 = silk_find_pred_coefs_flp(st2, c2, 0, x + ord * 8, 0);
         assert(_skv_close(m2, mig, tol) == 1, "find_pred_coefs: libopus's prediction gain limit");
         assert_eq(_ske_idx(st2, _SKI_NLSF_INTERP), interp, "find_pred_coefs: libopus's interpolation index");
         _skv_load(_SKV_NLSFIDX, f, v);
@@ -11622,17 +11637,34 @@ fn test_silk_enc_nsq_vs_libopus() {
 
 # ---------------------------------------------------------------- 2.11.3: the encoder
 
-# gen-silk-vectors.py's int_signal, sample for sample, into x (n words): a
-# 32-bit LCG, four draws summed. Kind 0 through a two-pole resonator under a
-# 1.3 Hz triangle envelope, 2 the same with every other quarter second silent,
-# 4 through a sharp resonance; white loud (1), at -6 dB (5) and -18 dB (3).
-# Returns its FNV-1a hash.
-fn _skk_signal(kind, fs, n, seed, x) {
+# The generator's int_signal (scripts/gen-silk-vectors.py), sample for sample:
+# a 32-bit LCG, four draws summed. Kind 0 through a two-pole resonator under a
+# triangle envelope, 2 the same with every other quarter second silent, 4
+# through a sharp resonance, 1, 5 and 3 white at three levels; kind 6 (voiced)
+# the noise through a comb y[n] = w[n] + G y[n - T], T the period of a pitch
+# gliding from flo to fhi Hz and back every 2 s (3/2 T in every other jump ms),
+# with gate 1 the last 0.1 s of every 0.4 s 30 dB down, with gate 2 silent;
+# kind 7 the noise's first period repeated at prm[0] Hz, 18 dB down, under the
+# noise prm[1] bits down (periodic from its first sample). prm: kind 6's G, flo,
+# fhi, gate, jump, or kind 7's pitch and noise shift (words). Into x (int16
+# words); returns the samples' FNV-1a hash.
+fn _skk_signal(kind, fs, n, seed, x, prm) {
     var s = seed & 0xFFFFFFFF;
     var y1 = 0;
     var y2 = 0;
     var P = fs * 10 / 13;
     var h = 1469598103934665603;
+    var H = fs / 25;
+    var hist = 0;
+    if (kind == 6) {
+        hist = alloc(H * 8);
+        memset(hist, 0, H * 8);
+    }
+    var T7 = 1;
+    if (kind == 7) {
+        T7 = fs / load64(prm);
+        hist = alloc(T7 * 8);
+    }
     var i = 0;
     while (i < n) {
         var w = 0;
@@ -11643,6 +11675,26 @@ fn _skk_signal(kind, fs, n, seed, x) {
             d = d + 1;
         }
         var v = 0;
+        if (kind == 7) {
+            if (i < T7) { store64(hist + i * 8, w); }
+            v = sar(load64(hist + (i % T7) * 8), 3) + sar(w, load64(prm + 8));
+        }
+        if (kind == 6) {
+            var t = i % (2 * fs);
+            var tri = t;
+            if (t >= fs) { tri = 2 * fs - t; }
+            var flo = load64(prm + 8);
+            var T = fs / (flo + (load64(prm + 16) - flo) * tri / fs);
+            var jump = load64(prm + 32);
+            if (jump > 0) { if ((i / (fs * jump / 1000)) % 2 == 1) { T = T * 3 / 2; } }
+            var yc = w + sar(load64(prm) * load64(hist + ((i - T + H) % H) * 8), 14);
+            store64(hist + (i % H) * 8, yc);
+            v = sar(yc, 3);
+            var gate = load64(prm + 24);
+            if (gate > 0 && i % (fs * 2 / 5) >= fs * 3 / 10) {
+                if (gate == 1) { v = sar(v, 5); } else { v = 0; }
+            }
+        }
         if (kind == 1) { v = sar(w * 5, 4); }
         if (kind == 3) { v = sar(w * 5, 7); }
         if (kind == 5) { v = sar(w * 5, 5); }
@@ -11657,9 +11709,9 @@ fn _skk_signal(kind, fs, n, seed, x) {
             y2 = y1;
             y1 = y;
             var ph = i % P;
-            var tri = ph;
-            if (ph >= P / 2) { tri = P - ph; }
-            v = sar(y * (19661 + 45875 * 2 * tri / P), 20);
+            var tri0 = ph;
+            if (ph >= P / 2) { tri0 = P - ph; }
+            v = sar(y * (19661 + 45875 * 2 * tri0 / P), 20);
             if (kind == 2 && i % (fs / 2) >= fs / 4) { v = 0; }
         }
         if (v < 0 - 32768) { v = 0 - 32768; }
@@ -11671,20 +11723,12 @@ fn _skk_signal(kind, fs, n, seed, x) {
     return h;
 }
 
-# The k-th ';'-separated base64 segment of s, decoded into out. Returns its bytes.
+# Segment k of field s, copied into out. Returns its bytes.
 fn _skk_bytes(s, k, out) {
-    var p = 0;
-    var seg = 0;
-    while (seg < k) {
-        if (load8(s + p) == 59) { seg = seg + 1; }
-        p = p + 1;
-    }
-    var n = 0;
-    while (load8(s + p + n) != 0 && load8(s + p + n) != 59) { n = n + 1; }
-    var t = alloc(n + 1);
-    memcpy(t, s + p, n);
-    store8(t + n, 0);
-    return _mp3_b64_decode(t, out);
+    var pp = alloc(8);
+    var n = _skv_seg(s, k, pp);
+    memcpy(out, load64(pp), n);
+    return n;
 }
 
 # One packet's input: samples p * spp on of x (int16 words), as f64 in -1..1.
@@ -11697,28 +11741,287 @@ fn _skk_pcm(x, p, spp, pcm) {
     return 0;
 }
 
+# 2.12.0: the pitch estimator on libopus's own residual, each rate, frame
+# size and estimator complexity: the 8 and 4 kHz decimations exactly, the
+# voicing decision, lag and contour indices and per-subframe lags exactly, and
+# LTPCorr to float precision; the voicing threshold from the state; and the
+# estimator's settings at the frame's encoder complexity.
+fn test_silk_enc_pitch_vs_libopus() {
+    syscall(1, 1, "=== silk encode: pitch estimation vs libopus ===\n", 49);
+    var h = alloc(16 * 8);
+    var fin = alloc(4 * 8);
+    var res = alloc(800 * 8);
+    var dec = alloc(600 * 8);
+    var o = alloc(8 * 8);
+    var fx = alloc(700 * 8);
+    var x8 = alloc(400 * 8);
+    var x4 = alloc(200 * 8);
+    var fst = alloc(6 * 8);
+    var po = alloc(4 * 8);
+    var li = alloc(2 * 8);
+    var lc = alloc(8);
+    var tol = f64_div(F64_ONE, f64_from(100000));
+    var voiced = 0;
+    var f = 0;
+    while (f < _SKT_N) {
+        _skv_load(_SKT_HDR, f, h);
+        _skv_loadf(_SKT_IN, f, fin);
+        _skv_loadf(_SKT_RES, f, res);
+        var ndec = _skv_load(_SKT_DEC, f, dec);
+        _skv_load(_SKT_OUT, f, o);
+        var fs = load64(h + 8);
+        var cx = load64(h + 16);
+        var nb = load64(h + 24);
+        var fl = (20 + nb * 5) * fs;
+        var fl8 = (20 + nb * 5) * 8;
+        var fl4 = (20 + nb * 5) * 4;
+        _opus_frame_begin();
+        # the decimations, from the residual through int16
+        var k = 0;
+        if (fs == 8) {
+            while (k < fl8) { store64(x8 + k * 8, silk_sat16(_sk_lrint(load64(res + k * 8)))); k = k + 1; }
+        } else {
+            while (k < fl) { store64(fx + k * 8, silk_sat16(_sk_lrint(load64(res + k * 8)))); k = k + 1; }
+            memset(fst, 0, 6 * 8);
+            if (fs == 16) { silk_resampler_down2(fst, x8, fx, fl); } else { silk_resampler_down2_3(fst, x8, fx, fl); }
+        }
+        memset(fst, 0, 2 * 8);
+        silk_resampler_down2(fst, x4, x8, fl8);
+        var same = 1;
+        k = 0;
+        while (k < fl8) { if (load64(x8 + k * 8) != load64(dec + k * 8)) { same = 0; } k = k + 1; }
+        k = 0;
+        while (k < fl4) { if (load64(x4 + k * 8) != load64(dec + (fl8 + k) * 8)) { same = 0; } k = k + 1; }
+        if (ndec > 0) { assert(same == 1, "pitch: libopus's 8 and 4 kHz decimations"); }
+        # the settings of the frame's encoder complexity
+        var st = silk_enc_state_new(fs, nb);
+        silk_enc_setup_complexity(st, load64(h + 96));
+        assert_eq(load64(st + _SKE_PE_COMPLEXITY), cx, "pitch: libopus's estimator complexity");
+        assert_eq(load64(st + _SKE_PE_THRES_Q16), load64(h + 72), "pitch: libopus's candidate threshold");
+        assert_eq(load64(st + _SKE_PITCH_ORDER), load64(h + 64), "pitch: libopus's analysis order");
+        # the threshold
+        store64(st + _SKE_PITCH_ORDER, load64(h + 64));
+        store64(st + _SKE_SPEECH_Q8, load64(h + 48));
+        store64(st + _SKE_PREV_SIGNAL, load64(h + 40));
+        store64(st + _SKE_TILT_Q15, load64(h + 56));
+        assert(_skv_close(_sk_pitch_threshold(st), load64(fin), f64_div(F64_ONE, f64_from(1000000))) == 1,
+          "pitch: libopus's voicing threshold");
+        # the estimator
+        store64(lc, load64(fin + 8));
+        var v = silk_pitch_analysis_core_flp(res, po, li, lc, load64(h), _skf(load64(h + 72), 65536), load64(fin), fs, cx, nb);
+        var sig = 1;
+        if (v == 0) { sig = 2; voiced = voiced + 1; }
+        assert_eq(sig, load64(o), "pitch: libopus's voicing decision");
+        assert_eq(load64(li), load64(o + 8), "pitch: libopus's lag index");
+        assert_eq(load64(li + 8), load64(o + 16), "pitch: libopus's contour index");
+        same = 1;
+        k = 0;
+        while (k < nb) { if (load64(po + k * 8) != load64(o + (3 + k) * 8)) { same = 0; } k = k + 1; }
+        assert(same == 1, "pitch: libopus's subframe lags");
+        assert(_skv_close(load64(lc), load64(fin + 16), tol) == 1, "pitch: libopus's LTPCorr");
+        _opus_frame_end();
+        f = f + 1;
+    }
+    assert(voiced > 0 && voiced < _SKT_N, "pitch: voiced and unvoiced decisions");
+    return 0;
+}
+
+# 2.12.0: the long-term predictor on libopus's inputs: the correlations
+# (silk_find_LTP_FLP, to float precision), the gain quantiser, its codebook
+# choice and the carried log gain (exactly), the LTP scaling under each loss
+# (exactly), and the LTP residual (to float precision); on the comb's frames
+# the whole voiced prediction analysis (silk_find_pred_coefs_FLP) from the
+# pitch residual and the input: the same quantised LTP, NLSFs and
+# interpolation, residual energies to float precision.
+fn test_silk_enc_ltp_vs_libopus() {
+    syscall(1, 1, "=== silk encode: long-term prediction vs libopus ===\n", 53);
+    var h = alloc(32 * 8);
+    var fv = alloc(16 * 8);
+    var res = alloc(800 * 8);
+    var x = alloc(800 * 8);
+    var XX = alloc(100 * 8);
+    var xX = alloc(20 * 8);
+    var B = alloc(20 * 8);
+    var pre = alloc(500 * 8);
+    var rn = alloc(4 * 8);
+    var nl = alloc(40 * 8);
+    var mXX = alloc(100 * 8);
+    var mxX = alloc(20 * 8);
+    var mB = alloc(20 * 8);
+    var mi = alloc(4 * 8);
+    var mper = alloc(8);
+    var mslg = alloc(8);
+    var mpg = alloc(8);
+    var mpre = alloc(500 * 8);
+    var inv = alloc(4 * 8);
+    var t_corr = f64_div(F64_ONE, f64_from(100000));
+    var t_res = f64_div(F64_ONE, f64_from(1000000));
+    var t_nrg = f64_div(F64_ONE, f64_from(1000));
+    var wholes = 0;
+    var f = 0;
+    while (f < _SKL_N) {
+        _skv_load(_SKL_HDR, f, h);
+        _skv_loadf(_SKL_F, f, fv);
+        _skv_loadf(_SKL_RES, f, res);
+        _skv_loadf(_SKL_X, f, x);
+        _skv_loadf(_SKL_XX, f, XX);
+        _skv_loadf(_SKL_XXV, f, xX);
+        _skv_loadf(_SKL_B, f, B);
+        var npre = _skv_loadf(_SKL_PRE, f, pre);
+        _skv_loadf(_SKL_RESNRG, f, rn);
+        _skv_load(_SKL_NLSF, f, nl);
+        var nb = load64(h);
+        var sl = load64(h + 8);
+        var ord = load64(h + 16);
+        var cond = load64(h + 24);
+        var lm = load64(h + 72);
+        var pl = h + 80;
+        var idx = h + 112;
+        _opus_frame_begin();
+        # the correlations
+        silk_find_ltp_flp(mXX, mxX, res + lm * 8, pl, sl, nb);
+        var ok = 1;
+        var k = 0;
+        while (k < nb * 25) { ok = ok & _skv_close(load64(mXX + k * 8), load64(XX + k * 8), t_corr); k = k + 1; }
+        k = 0;
+        while (k < nb * 5) { ok = ok & _skv_close(load64(mxX + k * 8), load64(xX + k * 8), t_corr); k = k + 1; }
+        assert(ok == 1, "LTP: libopus's correlation matrices and vectors");
+        # the gain quantiser on libopus's correlations
+        store64(mslg, load64(h + 32));
+        silk_quant_ltp_gains_flp(mB, mi, mper, mslg, mpg, XX, xX, sl, nb);
+        assert_eq(load64(mper), load64(idx), "LTP: libopus's periodicity index");
+        var same = 1;
+        k = 0;
+        while (k < nb) { if (load64(mi + k * 8) != load64(idx + (1 + k) * 8)) { same = 0; } k = k + 1; }
+        assert(same == 1, "LTP: libopus's codebook indices");
+        assert_eq(load64(mslg), load64(idx + 40), "LTP: libopus's carried log gain");
+        same = 1;
+        k = 0;
+        while (k < nb * 5) { if (load64(mB + k * 8) != load64(B + k * 8)) { same = 0; } k = k + 1; }
+        assert(same == 1, "LTP: libopus's quantised filters");
+        assert(load64(mpg) == load64(fv), "LTP: libopus's prediction gain");
+        # the scaling
+        var st = silk_enc_state_new(load64(h + 200), nb);
+        store64(st + _SKE_PACKET_LOSS, load64(h + 40));
+        store64(st + _SKE_NFRAMES_PP, load64(h + 48));
+        store64(st + _SKE_LBRR_FLAG, load64(h + 56));
+        store64(st + _SKE_SNR_Q7, load64(h + 64));
+        var ctrl = silk_enc_ctrl_new();
+        store64(ctrl + _SKC_LTPRED_GAIN, load64(fv));
+        silk_ltp_scale_ctrl_flp(st, ctrl, cond);
+        assert_eq(_ske_idx(st, _SKI_LTP_SCALE), load64(h + 160), "LTP: libopus's scaling index");
+        assert(load64(ctrl + _SKC_LTP_SCALE) == load64(fv + 8), "LTP: libopus's scale");
+        # the LTP residual, scaled by the inverse gains
+        k = 0;
+        while (k < nb) { store64(inv + k * 8, f64_div(F64_ONE, load64(fv + (4 + k) * 8))); k = k + 1; }
+        silk_ltp_analysis_filter_flp(mpre, x + (lm - ord) * 8, B, pl, inv, sl, nb, ord);
+        assert(f64_le(_skv_peakerr(mpre, pre, npre), t_res) == 1, "LTP: libopus's LTP residual");
+        if (load64(h + 168) == 1) {
+            # the whole voiced prediction analysis
+            wholes = wholes + 1;
+            var s2 = silk_enc_state_new(load64(h + 200), nb);
+            store64(s2 + _SKE_FIRST, load64(h + 176));
+            store64(s2 + _SKE_USE_INTERP, load64(h + 184));
+            store64(s2 + _SKE_SURVIVORS, load64(h + 192));
+            store64(s2 + _SKE_SPEECH_Q8, load64(h + 208));
+            store64(s2 + _SKE_SUM_LOG_GAIN, load64(h + 32));
+            store64(s2 + _SKE_PACKET_LOSS, load64(h + 40));
+            store64(s2 + _SKE_NFRAMES_PP, load64(h + 48));
+            store64(s2 + _SKE_SNR_Q7, load64(h + 64));
+            _ske_set_idx(s2, _SKI_SIGNAL_TYPE, 2);
+            k = 0;
+            while (k < ord) { store64(s2 + _SKE_PREV_NLSF + k * 8, load64(nl + k * 8)); k = k + 1; }
+            var c2 = silk_enc_ctrl_new();
+            k = 0;
+            while (k < nb) {
+                store64(c2 + _SKC_GAINS + k * 8, load64(fv + (4 + k) * 8));
+                store64(c2 + _SKC_PITCHL + k * 8, load64(pl + k * 8));
+                k = k + 1;
+            }
+            store64(c2 + _SKC_CODING_QUALITY, load64(fv + 24));
+            var mig = silk_find_pred_coefs_flp(s2, c2, res + lm * 8, x + lm * 8, cond);
+            assert(_skv_close(mig, load64(fv + 16), t_corr) == 1, "find_pred_coefs (voiced): libopus's prediction gain limit");
+            assert_eq(_ske_idx(s2, _SKI_PER), load64(idx), "find_pred_coefs (voiced): libopus's periodicity index");
+            assert_eq(_ske_idx(s2, _SKI_LTP_SCALE), load64(h + 160), "find_pred_coefs (voiced): libopus's scaling index");
+            same = 1;
+            k = 0;
+            while (k < nb) { if (_ske_idx(s2, 19 + ord + k) != load64(idx + (1 + k) * 8)) { same = 0; } k = k + 1; }
+            assert(same == 1, "find_pred_coefs (voiced): libopus's LTP indices");
+            assert_eq(_ske_idx(s2, _SKI_NLSF_INTERP), load64(h + 216), "find_pred_coefs (voiced): libopus's interpolation index");
+            same = 1;
+            k = 0;
+            while (k <= ord) { if (_ske_idx(s2, _SKI_NLSF + k) != load64(nl + (ord + k) * 8)) { same = 0; } k = k + 1; }
+            assert(same == 1, "find_pred_coefs (voiced): libopus's NLSF indices");
+            ok = 1;
+            k = 0;
+            while (k < nb) { ok = ok & _skv_close(load64(c2 + _SKC_RESNRG + k * 8), load64(rn + k * 8), t_nrg); k = k + 1; }
+            assert(ok == 1, "find_pred_coefs (voiced): libopus's residual energies");
+        }
+        _opus_frame_end();
+        f = f + 1;
+    }
+    assert(wholes >= 4, "LTP: whole voiced prediction analyses");
+    return 0;
+}
+
+# 2.12.0: the pitch-tracking high-pass's smoother over whole runs, exactly.
+fn test_silk_enc_hp_vs_libopus() {
+    syscall(1, 1, "=== silk encode: variable high-pass vs libopus ===\n", 51);
+    var r = alloc(_SKH_N * 7 * 8 + 8);
+    _skv_load(_SKH_REC, 0, r);
+    var st = silk_enc_state_new(16, 4);
+    assert_eq(load64(st + _SKE_HP_SMTH1), load64(r + 5 * 8), "HP: libopus's initial cutoff");
+    var same = 0;
+    var moved = 0;
+    var i = 0;
+    while (i < _SKH_N) {
+        var p = r + i * 7 * 8;
+        store64(st + _SKE_PREV_SIGNAL, load64(p));
+        store64(st + _SKE_PREV_LAG, load64(p + 8));
+        store64(st + _SKE_FS_KHZ, load64(p + 16));
+        store64(st + _SKE_QUALITY, load64(p + 24));
+        store64(st + _SKE_SPEECH_Q8, load64(p + 32));
+        store64(st + _SKE_HP_SMTH1, load64(p + 40));
+        silk_hp_variable_cutoff(st);
+        if (load64(st + _SKE_HP_SMTH1) == load64(p + 48)) { same = same + 1; }
+        if (load64(p + 40) != load64(p + 48)) { moved = moved + 1; }
+        i = i + 1;
+    }
+    assert_eq(same, _SKH_N, "HP: libopus's smoothed cutoff, every frame");
+    assert(moved >= 50, "HP: the smoother moves");
+    return 0;
+}
+
 # The whole encoder (silk_encode: frames, rate loop, packet layer) against
 # libopus's silk_Encode, byte for byte, on inputs built here: every bandwidth,
 # packet length (10 to 60 ms) and complexity shravan has, VBR (in a small
 # buffer too) and CBR, voice-inactive frames, and every branch of the rate loop
 # (gains bracketed and interpolated, Lambda raised and floored, gains locked,
 # damage control, the shares of a multi-frame budget, the 5 kbit/s floor).
+# Since 2.12.0 voiced frames too (kind 6): long-term prediction at every rate
+# and frame size, lags delta and absolutely coded, the LTP scaled under loss,
+# lags at both ends of the range, and the moves between voiced, unvoiced and
+# silent frames.
 fn test_silk_enc_packets_vs_libopus() {
     syscall(1, 1, "=== silk encode: whole packets vs libopus ===\n", 46);
-    var h = alloc(16 * 8);
+    var h = alloc(24 * 8);
     var x = alloc(19200 * 8);
     var pcm = alloc(960 * 8);
     var buf = alloc(1280);
     var ref = alloc(65536);
     var c = 0;
     while (c < _SKK_N) {
+        # kind, seed, rate, ms, complexity, bit rate, CBR, samples, packets,
+        # the input's hash (2 words), buffer, loss, kind 6's parameters (5),
+        # and libopus's high-pass smoother at the end
         _skv_load(_SKK_HDR, c, h);
         var fs = load64(h + 16);
         var n = load64(h + 56);
         var npk = load64(h + 64);
         var want = (load64(h + 72) & 0xFFFFFFFF) | ((load64(h + 80) & 0xFFFFFFFF) << 32);
-        assert(_skk_signal(load64(h), fs, n, load64(h + 8), x) == want, "silk encode: the suite's input is the generator's");
+        assert(_skk_signal(load64(h), fs, n, load64(h + 8), x, h + 104) == want, "silk encode: the suite's input is the generator's");
         var e = silk_encoder_new(fs, load64(h + 24), load64(h + 40), load64(h + 32), load64(h + 48));
+        assert_eq(silk_encoder_set_packet_loss(e, load64(h + 96)), 0, "silk encode: the packet loss setting");
         var spp = silk_encoder_samples(e);
         _skk_bytes(_SKK_PK, c, ref);
         var rp = 0;
@@ -11739,6 +12042,8 @@ fn test_silk_enc_packets_vs_libopus() {
             p = p + 1;
         }
         assert_eq(same, npk, "silk encode: libopus's packets, byte for byte");
+        assert_eq(load64(load64(e + _SKX_ST) + _SKE_HP_SMTH1), load64(h + 144),
+          "silk encode: libopus's pitch-tracking high-pass after the last frame");
         c = c + 1;
     }
     return 0;
@@ -11794,7 +12099,7 @@ fn test_silk_enc_opus_packets() {
         var ms = load64(cfg + c * 32 + 8);
         var br = load64(cfg + c * 32 + 16);
         var cbr = load64(cfg + c * 32 + 24);
-        _skk_signal(0, fs, fs, 1, x);
+        _skk_signal(0, fs, fs, 1, x, 0);
         var e = silk_encoder_new(fs, ms, br, 1, cbr);
         var spp = silk_encoder_samples(e);
         var toc_cfg = 8;
@@ -11992,6 +12297,63 @@ fn test_silk_enc_hostile() {
     if (r2 > 8) { big = 0; }
     assert(big == 1, "silk encode: a payload never exceeds its buffer");
     assert_eq(load64(buf + 8), 0x5A5A5A5A5A5A5A5A, "silk encode: nothing written past the buffer");
+    # 2.12.0: the loss setting's range
+    var el = silk_encoder_new(16000, 20, 20000, 1, 0);
+    assert_eq(silk_encoder_set_packet_loss(el, 0 - 1), err(ERR_ENCODE), "silk encode: no negative loss");
+    assert_eq(silk_encoder_set_packet_loss(el, 101), err(ERR_ENCODE), "silk encode: no loss over 100%");
+    assert_eq(silk_encoder_set_packet_loss(el, 100), 0, "silk encode: 100% loss is a setting");
+    # periodic extremes through the voiced path, under total loss: full-scale
+    # sine and squares (at the shortest lag, inside the range, past the
+    # longest), and a full-scale impulse train; packets that fit, decode to
+    # finite audio of their length, and voiced frames among them
+    var vk = 0;
+    var vfit = 1;
+    var vdec = 1;
+    var nvoiced = 0;
+    while (vk < 5) {
+        var vc = 0;
+        while (vc < 2) {
+            var ev = silk_encoder_new(16000, 20, 24000, 1, vc);
+            silk_encoder_set_packet_loss(ev, 100);
+            var stv = load64(ev + _SKX_ST);
+            var pkv = vec_new();
+            vec_push(pkv, str_from_buf(head, 19));
+            vec_push(pkv, str_from_buf(tags, 16));
+            var pv = 0;
+            while (pv < 25) {
+                var iv = 0;
+                while (iv < 320) {
+                    var n = pv * 320 + iv;
+                    var vv = F64_ZERO;
+                    if (vk == 0) { vv = f64_sin(f64_div(f64_mul(f64_from(2 * 130 * n), F64_PI), f64_from(16000))); }
+                    if (vk == 1) { vv = F64_ONE; if (n % 32 >= 16) { vv = f64_neg(F64_ONE); } }
+                    if (vk == 2) { vv = F64_ONE; if (n % 160 >= 80) { vv = f64_neg(F64_ONE); } }
+                    if (vk == 3) { vv = F64_ONE; if (n % 290 >= 145) { vv = f64_neg(F64_ONE); } }
+                    if (vk == 4) { if (n % 128 == 0) { vv = F64_ONE; } }
+                    store64(pcm + iv * 8, vv);
+                    iv = iv + 1;
+                }
+                var ov = silk_encode_opus(ev, pcm, buf, 1276);
+                if (ov < 2 || ov > 1276) { vfit = 0; }
+                if (ov >= 2) { vec_push(pkv, str_from_buf(buf, ov)); }
+                if (_ske_idx(stv, _SKI_SIGNAL_TYPE) == 2) { nvoiced = nvoiced + 1; }
+                pv = pv + 1;
+            }
+            var rv = opus_decode_from_packets(pkv, 0, 0);
+            if (is_err(rv) == 1) { vdec = 0; }
+            if (is_err(rv) == 0) {
+                var smp = decode_result_samples(rv);
+                if (vec_len(smp) != 25 * 20 * 48) { vdec = 0; }
+                var q2 = 0;
+                while (q2 < vec_len(smp)) { if (((vec_get(smp, q2) >> 52) & 0x7FF) == 0x7FF) { vdec = 0; } q2 = q2 + 1; }
+            }
+            vc = vc + 1;
+        }
+        vk = vk + 1;
+    }
+    assert(vfit == 1, "silk encode: periodic extremes give packets that fit");
+    assert(vdec == 1, "silk encode: and decode to finite audio of their length");
+    assert(nvoiced >= 100, "silk encode: the periodic extremes are coded voiced");
     return 0;
 }
 
@@ -12010,6 +12372,9 @@ fn test_silk_all() {
     test_silk_enc_vad_vs_libopus();
     test_silk_enc_shape_vs_libopus();
     test_silk_enc_nsq_vs_libopus();
+    test_silk_enc_pitch_vs_libopus();
+    test_silk_enc_ltp_vs_libopus();
+    test_silk_enc_hp_vs_libopus();
     test_silk_enc_packets_vs_libopus();
     test_silk_enc_opus_packets();
     test_silk_enc_hostile();

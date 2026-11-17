@@ -732,12 +732,17 @@ class Sweep:
         """shravan's SILK encoder (silk_encode_opus, complexity 1) beside libopus's
         own (opus_encode at the internal rate, forced to SILK at that bandwidth,
         complexity 1), libopus decoding both: every rate and packet duration, VBR
-        and CBR, on pink noise and on the sweep's tones. Each must follow the input
-        at libopus's lag, correlate at least 0.8 and within 0.03 of libopus's,
-        and spend libopus's bits: within 10% under VBR, the same packet size
-        under CBR. libopus's Opus layer high-passes its input at 3 Hz (dc_reject),
-        which costs it correlation on pink noise; on unvoiced input shravan's
-        payloads are silk_Encode's byte for byte (src/silk_tests.cyr)."""
+        and CBR, on pink noise, on the sweep's tones and on a voiced source (eight
+        harmonics of a 110 Hz pitch with vibrato, falling 6 dB an octave: long-term
+        prediction on nearly every frame). Each must follow the input at libopus's
+        lag, correlate at least 0.8 and within 0.03 of libopus's, and spend
+        libopus's bits: within 10% under VBR, the same packet size under CBR. On
+        the voiced source the correlation is flat to the fourth decimal across
+        neighbouring lags, so its best lag may land a sample from libopus's; the
+        noise and the tones pin the delay to the sample.
+        libopus's Opus layer high-passes its input at 3 Hz (dc_reject), which costs
+        it correlation on pink noise; shravan's payloads are silk_Encode's byte for
+        byte on the suite's inputs, voiced ones included (src/silk_tests.cyr)."""
         def sizes(path):
             d = open(path, "rb").read()
             out, p = [], 0
@@ -746,13 +751,17 @@ class Sweep:
                 out.append(n)
                 p += 4 + n
             return out
-        for src in ("pink", "tones"):
+        ph = "(110*t+15*sin(2*PI*0.7*t)/(2*PI*0.7))"
+        voiced = ("aevalsrc=" + "+".join(f"{0.3 / k:.4f}*sin(2*PI*{k}*{ph})" for k in range(1, 9))
+                  + "+0.01*random(0)")
+        for src in ("pink", "tones", "voiced"):
             for fs in (8000, 12000, 16000):
                 br = {8000: 12000, 12000: 16000, 16000: 20000}[fs]
                 for ms in (10, 20, 40, 60):
                     for cbr in (0, 1):
-                        lav = (f"anoisesrc=color=pink:r={fs}:a=0.25:d=1.5:seed=7" if src == "pink"
-                               else signal(fs, 1, 1.5))
+                        lav = {"pink": f"anoisesrc=color=pink:r={fs}:a=0.25:d=1.5:seed=7",
+                               "tones": signal(fs, 1, 1.5),
+                               "voiced": voiced + f":s={fs}:d=1.5"}[src]
                         run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", lav, "-ac", "1",
                             "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
                         x = f64(self.p("s.f64"))
@@ -769,7 +778,7 @@ class Sweep:
                             sz = sizes(pk)
                             res[who] = (c, lag, sum(sz) * 8 / (len(sz) * ms / 1000), set(sz))
                         (c, lag, rate, sz), (lc, llag, lrate, lsz) = res["shravan"], res["libopus"]
-                        ok = lag == llag and c >= 0.8 and c >= lc - 0.03
+                        ok = abs(lag - llag) <= (1 if src == "voiced" else 0) and c >= 0.8 and c >= lc - 0.03
                         ok = ok and (sz == lsz and len(sz) == 1 if cbr else abs(rate / lrate - 1) <= 0.10)
                         self.record("encode", f"silk {src} {fs // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
                                     f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) {rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")

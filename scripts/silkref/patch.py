@@ -252,4 +252,86 @@ patch("silk/float/wrappers_FLP.c", [
     }
     /* Convert control struct to fix control struct */"""),
 ])
+# 2.12.0: the voiced path. The voicing decision and the pitch estimator (its
+# 8 and 4 kHz decimations, its first-stage candidates and second-stage lag);
+# the LTP analysis, quantisation and scaling; the pitch-tracking high-pass.
+patch("silk/float/find_pitch_lags_FLP.c", [
+    ("""        /*****************************************/
+        /* Call Pitch estimator                  */
+        /*****************************************/""", """        {
+            int h[12];
+            h[0] = psEnc->sCmn.prevLag; h[1] = psEnc->sCmn.fs_kHz; h[2] = psEnc->sCmn.pitchEstimationComplexity;
+            h[3] = psEnc->sCmn.nb_subfr; h[4] = psEnc->sCmn.indices.signalType; h[5] = psEnc->sCmn.prevSignalType;
+            h[6] = psEnc->sCmn.speech_activity_Q8; h[7] = psEnc->sCmn.input_tilt_Q15;
+            h[8] = psEnc->sCmn.pitchEstimationLPCOrder; h[9] = psEnc->sCmn.pitchEstimationThreshold_Q16;
+            h[10] = psEnc->sCmn.frameCounter; h[11] = psEnc->sCmn.ltp_mem_length;
+            sd_i32("pac.hdr", h, 12);
+            sd_flt("pac.thr", thrhld);
+            sd_flt("pac.ltpcorr_in", psEnc->LTPCorr);
+        }
+        /*****************************************/
+        /* Call Pitch estimator                  */
+        /*****************************************/"""),
+    ("""            psEnc->sCmn.indices.signalType = TYPE_UNVOICED;
+        }""", """            psEnc->sCmn.indices.signalType = TYPE_UNVOICED;
+        }
+        {
+            int o[7], k;
+            o[0] = psEnc->sCmn.indices.signalType; o[1] = psEnc->sCmn.indices.lagIndex;
+            o[2] = psEnc->sCmn.indices.contourIndex;
+            for (k = 0; k < 4; k++) o[3 + k] = psEncCtrl->pitchL[k];
+            sd_i32("pac.out", o, 7);
+            sd_flt("pac.ltpcorr", psEnc->LTPCorr);
+        }"""),
+])
+patch("silk/float/pitch_analysis_core_FLP.c", [
+    ("""    silk_resampler_down2( filt_state, frame_4_FIX, frame_8_FIX, frame_length_8kHz );""",
+     """    silk_resampler_down2( filt_state, frame_4_FIX, frame_8_FIX, frame_length_8kHz );
+    sd_i16("pac.f8", frame_8_FIX, frame_length_8kHz);
+    sd_i16("pac.f4", frame_4_FIX, frame_length_4kHz);"""),
+    ("""    celt_assert( length_d_srch > 0 );""", """    celt_assert( length_d_srch > 0 );
+    { int t[1]; t[0] = length_d_srch; sd_i32("pac.nsrch", t, 1); sd_i32("pac.srch", d_srch, length_d_srch); }"""),
+    ("""    *LTPCorr = (silk_float)( CCmax / nb_subfr );""", """    *LTPCorr = (silk_float)( CCmax / nb_subfr );
+    { int t[2]; t[0] = lag; t[1] = CBimax; sd_i32("pac.st2", t, 2); }"""),
+])
+patch("silk/float/find_pred_coefs_FLP.c", [
+    ("""        /* Quantize LTP gain parameters */""", """        {
+            int h[14], k, nb = psEnc->sCmn.nb_subfr;
+            h[0] = nb; h[1] = psEnc->sCmn.subfr_length; h[2] = psEnc->sCmn.predictLPCOrder; h[3] = condCoding;
+            h[4] = psEnc->sCmn.sum_log_gain_Q7; h[5] = psEnc->sCmn.PacketLoss_perc;
+            h[6] = psEnc->sCmn.nFramesPerPacket; h[7] = psEnc->sCmn.LBRR_flag; h[8] = psEnc->sCmn.SNR_dB_Q7;
+            h[9] = psEnc->sCmn.ltp_mem_length;
+            for (k = 0; k < 4; k++) h[10 + k] = psEncCtrl->pitchL[k];
+            sd_i32("ltp.hdr", h, 14);
+            sd_f("ltp.res", res_pitch - psEnc->sCmn.ltp_mem_length,
+                psEnc->sCmn.ltp_mem_length + psEnc->sCmn.frame_length + psEnc->sCmn.la_pitch);
+            sd_f("ltp.x", x - psEnc->sCmn.ltp_mem_length, psEnc->sCmn.ltp_mem_length + psEnc->sCmn.frame_length);
+            sd_f("ltp.XX", XXLTP, nb * LTP_ORDER * LTP_ORDER);
+            sd_f("ltp.xX", xXLTP, nb * LTP_ORDER);
+        }
+        /* Quantize LTP gain parameters */"""),
+    ("""        /* Control LTP scaling */""", """        {
+            int o[6], k, nb = psEnc->sCmn.nb_subfr;
+            o[0] = psEnc->sCmn.indices.PERIndex;
+            for (k = 0; k < 4; k++) o[1 + k] = k < nb ? psEnc->sCmn.indices.LTPIndex[k] : 0;
+            o[5] = psEnc->sCmn.sum_log_gain_Q7;
+            sd_i32("ltp.idx", o, 6);
+            sd_f("ltp.B", psEncCtrl->LTPCoef, nb * LTP_ORDER);
+            sd_flt("ltp.predgain", psEncCtrl->LTPredCodGain);
+        }
+        /* Control LTP scaling */"""),
+    ("""        /* Create LTP residual */""", """        sd_int("ltp.scale", psEnc->sCmn.indices.LTP_scaleIndex);
+        sd_flt("ltp.scalef", psEncCtrl->LTP_scale);
+        /* Create LTP residual */"""),
+])
+patch("silk/enc_API.c", [
+    ("""            silk_HP_variable_cutoff( psEnc->state_Fxx );""", """            {
+                int h[6]; silk_encoder_state *c1 = &psEnc->state_Fxx[ 0 ].sCmn;
+                h[0] = c1->prevSignalType; h[1] = c1->prevLag; h[2] = c1->fs_kHz; h[3] = c1->input_quality_bands_Q15[0];
+                h[4] = c1->speech_activity_Q8; h[5] = c1->variable_HP_smth1_Q15;
+                sd_i32("hp.in", h, 6);
+            }
+            silk_HP_variable_cutoff( psEnc->state_Fxx );
+            sd_int("hp.out", psEnc->state_Fxx[ 0 ].sCmn.variable_HP_smth1_Q15);"""),
+])
 print("patch: instrumented " + ROOT)

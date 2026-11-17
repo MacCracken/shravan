@@ -5,7 +5,7 @@
 WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, AAC-LC, and MP4/M4A. Full **Opus decode** (CELT + SILK +
 hybrid, mono/stereo, 10/20 ms, all bandwidths, bit-exact vs libopus), a real **RFC-6716 CELT
 encoder** (libopus decodes shravan's frames sample-identically) and a **SILK encoder** (libopus's own
-packets, byte for byte, on every frame it codes unvoiced). PCM sample format conversion,
+packets, byte for byte, voiced and unvoiced). PCM sample format conversion,
 sinc resampling, FFT/MDCT, dithering, streaming decoders, and audio metadata tags. Pure Cyrius:
 the Cyrius stdlib plus two first-party libraries, sankoch (compression) and bayan-json.
 
@@ -15,7 +15,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (14,187 assertions)
+# Build + run the test suite (15,115 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -39,7 +39,7 @@ cyrius build src/bench.cyr build/bench
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |
 | **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo and multistream (surround and ambisonics, RFC 7845 families 1, 2, 255), every frame size and bandwidth, FEC, packet-loss concealment, DTX, matching libopus; RFC-6716 CELT-frame encoder; header parsing (output gain applied) |
-| **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus; SILK encoder (mono, 8/12/16 kHz, 10–60 ms packets, VBR and CBR, complexity 0–1; every frame coded unvoiced until pitch analysis), libopus's `silk_Encode` packets byte for byte on unvoiced frames |
+| **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus; SILK encoder (mono, 8/12/16 kHz, 10–60 ms packets, VBR and CBR, complexity 0–1; pitch estimation and long-term prediction for voiced frames; LTP scaled by `silk_encoder_set_packet_loss`), libopus's `silk_Encode` packets byte for byte, voiced and unvoiced |
 | **mp3** | MP3 decoder to PCM (MPEG-1/2/2.5 Layer I/II/III — reservoir, Huffman, requant, IMDCT, polyphase synthesis, intensity stereo, free format); ID3v2 tag skipping; gapless from the LAME tag |
 | **aac** | AAC-LC decoder (any channel layout, to 22.2, in ffmpeg's channel order; all 13 sample rates, TNS, short windows, M/S, intensity, PNS), encoder (ADTS, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, rate loop with a bit reservoir) |
 | **mp4** | MP4/M4A and QuickTime demux (box tree, sample table, esds and its channel layout, AAC and ALAC access units to their decoders); every audio track by index, the default as ffmpeg picks it; gapless (sample durations, edit lists, iTunSMPB) |
@@ -77,6 +77,7 @@ var title = tag_meta_title(meta);
 
 # Encode SILK: mono, its input at the internal rate (8, 12 or 16 kHz)
 var enc = silk_encoder_new(16000, 20, 20000, 1, 0);  # 20 ms packets, 20 kbit/s VBR, complexity 1
+silk_encoder_set_packet_loss(enc, 10);               # optional: expect 10% loss (scales the LTP)
 var pkt = alloc(1276);
 var n = silk_encode_opus(enc, pcm, pkt, 1276);       # pcm: silk_encoder_samples(enc) f64 samples
 ```
@@ -108,7 +109,7 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 
 ## Performance
 
-`src/bench.cyr` on the library itself, v2.10.4 (the SILK encoder v2.11.3), one core (the history is in
+`src/bench.cyr` on the library itself, v2.10.4 (the SILK encoder v2.12.0), one core (the history is in
 `bench-history.csv`):
 
 | Benchmark | Time | Real-time multiple |
@@ -123,8 +124,9 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 | MP3 decode, 44.1 kHz stereo, 64 kbit/s | 63 ms a second | ~16× |
 | Opus CELT decode, one 20 ms frame | 130 µs | ~150× |
 | Opus CELT encode, one 20 ms frame | 220 µs | ~90× |
-| SILK encode, 1 s wideband, 20 kbit/s VBR | 27.7 ms | ~36× |
-| SILK encode, 1 s wideband, 12 kbit/s CBR | 64.8 ms | ~15× |
+| SILK encode, 1 s wideband voiced, 20 kbit/s VBR | 39.8 ms | ~25× |
+| SILK encode, 1 s wideband noise, 20 kbit/s VBR | 29.5 ms | ~34× |
+| SILK encode, 1 s wideband noise, 12 kbit/s CBR | 66.2 ms | ~15× |
 | Opus decode, 5.1 (four streams, 0.4 s) | 17.3 ms | ~23× |
 | MDCT, 2048 points | 55 µs | |
 

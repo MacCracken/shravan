@@ -13,10 +13,13 @@ shravan's stages can be fed libopus's own inputs (src/silk_tests.cyr), and
 build/interop-cli present (scripts/interop.sh builds it) the generator checks
 that shravan does.
 
-Each field holds one frame per ';'-separated segment, the frame's values packed
-as little-endian 32-bit words (ints, or floats as their f32 bit patterns) in
-base64: half the size of decimal text, and the test harness has 2 MB for all its
-string data. Needs git (without --opus-src), cmake, a C compiler and numpy.
+Each field holds one frame per segment, the frame's values packed as
+little-endian 32-bit words (ints, or floats as their f32 bit patterns; packets as
+bytes). The field is one zlib stream, in base64, of the segment count, each
+segment's length (u32) and the segments: the test harness has 2 MB for all its
+string data, and the stream is half the size of the plain words (the suite
+inflates each field once, with sankoch). Needs git (without --opus-src), cmake,
+a C compiler and numpy.
 """
 import argparse
 import base64
@@ -26,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 import numpy as np
 
@@ -118,23 +122,126 @@ def vowel(fs, seconds, seed):
     return np.round(y * 32767).astype("<i2")
 
 
-def int_signal(kind, fs, n, seed):
+COMB = (14000, 100, 180, 0, 0)     # kind 6's default: G, flo, fhi, gate, jump
+
+
+def comb(fs, seconds, seed):
+    """int_signal's voiced kind 6 at its defaults, for the stage runs."""
+    return int_signal(6, fs, int(fs * seconds), seed)
+
+
+def comb_weak(fs, seconds, seed):
+    """Kind 6 with a weak comb (G 0.55): voiced frames of low LTP gain, whose
+    running sum of log gains the quantiser clamps at zero."""
+    return int_signal(6, fs, int(fs * seconds), seed, (9000, 100, 180, 0, 0))
+
+
+def _harmonics(fs, f0, n, seed, noise=0.01):
+    rng = np.random.default_rng(seed)
+    ph = np.cumsum(f0 / fs)
+    x = sum(np.sin(2 * np.pi * k * ph) / k for k in range(1, n + 1) if k * f0.max() < fs / 2)
+    x = x + noise * rng.standard_normal(len(x))
+    return np.round(x / np.abs(x).max() * 0.5 * 32767).astype("<i2")
+
+
+def _pulses(fs, f0, seed, fc, bw, noise=0.02):
+    rng = np.random.default_rng(seed)
+    ph = np.cumsum(f0 / fs)
+    src = np.zeros(len(ph))
+    src[np.nonzero(np.diff(np.floor(ph)) > 0)[0] + 1] = 1.0
+    y = src + noise * rng.standard_normal(len(ph))
+    r = np.exp(-np.pi * bw / fs)
+    a1, a2 = -2 * r * np.cos(2 * np.pi * fc / fs), r * r
+    out = np.zeros(len(y))
+    for k in range(len(y)):
+        out[k] = y[k] - a1 * (out[k - 1] if k else 0) - a2 * (out[k - 2] if k > 1 else 0)
+    return np.round(out / np.abs(out).max() * 0.5 * 32767).astype("<i2")
+
+
+def tone_high(fs, seconds, seed):
+    """Pitch-estimator inputs (2.12.0), each aimed at branches the other signals
+    leave alone. High: pulses at about 480 Hz, lags at the shortest the
+    estimator allows, where its first stage's short-lag bias and candidate count
+    pick between multiples of the period."""
+    t = np.arange(int(fs * seconds)) / fs
+    return _pulses(fs, 480 + 15 * np.sin(2 * np.pi * 2 * t), seed, 1500, 400)
+
+
+def tone_low(fs, seconds, seed):
+    """Pulses at about 57 Hz: lags at the longest, where the third stage's reach
+    and the lag limits cut in."""
+    t = np.arange(int(fs * seconds)) / fs
+    return _pulses(fs, 57 + 1.5 * np.sin(2 * np.pi * t), seed, 500, 200)
+
+
+def tone_vib(fs, seconds, seed):
+    """A harmonic series with a 9 Hz, 25% vibrato: the pitch moves within a frame,
+    and the contour codebooks with it."""
+    t = np.arange(int(fs * seconds)) / fs
+    return _harmonics(fs, 140 * (1 + 0.25 * np.sin(2 * np.pi * 9 * t)), 10, seed)
+
+
+def tone_glide(fs, seconds, seed):
+    """Twenty harmonics of a 56.5 Hz pitch with a 4 Hz vibrato: at the estimator's
+    complexity 2, the last of its 34 contours."""
+    t = np.arange(int(fs * seconds)) / fs
+    return _harmonics(fs, 56.5 + 3 * np.sin(2 * np.pi * 4 * t), 20, seed)
+
+
+def tone_jumps(fs, seconds, seed):
+    """A harmonic series jumping between 100 and 170 Hz every 60 ms."""
+    t = np.arange(int(fs * seconds)) / fs
+    return _harmonics(fs, np.where((t * 1000 // 60) % 2 == 0, 100.0, 170.0), 10, seed)
+
+
+def int_signal(kind, fs, n, seed, prm=COMB):
     """Integer-only test input, so that src/silk_tests.cyr (_skk_signal) builds
     the same samples itself: a 32-bit LCG, four draws summed. Kind 0 through a
     two-pole resonator (1.2, -0.5) under a 1.3 Hz triangle envelope (0.3 to 1);
     2 the same with every other quarter second digital silence; 4 through a
     sharp resonance (1.9, -0.98: 25 dB of prediction gain); white at three
-    levels: 1 loud (its gains reach their ceiling), 5 at -6 dB, 3 at -18 dB."""
+    levels: 1 loud (its gains reach their ceiling), 5 at -6 dB, 3 at -18 dB.
+    Kind 6 (2.12.0) is voiced: the noise through a comb, y[n] = w[n] + G y[n-T]
+    (G in Q14), T the period of a pitch gliding from flo to fhi Hz and back
+    every 2 s, at 3/2 T in every other jump ms (when jump > 0); with gate 1 the
+    last 0.1 s of every 0.4 s is 30 dB down, with gate 2 silent. A comb on
+    white noise is as periodic as speech to the pitch estimator but flat within
+    the LPC orders, so the float stages round as shravan's double ones do (a
+    pulse train through formants is so ill-conditioned there that libopus's
+    float input to them parts from shravan's doubles within a frame). Kind 7
+    repeats the noise's first period at prm[0] Hz, at -18 dB, under the noise
+    itself prm[1] bits down: periodic from the first sample, so that the first
+    frame is voiced to a pitch estimator that ran on it."""
     s = seed & 0xFFFFFFFF
     y1 = y2 = 0
     P = fs * 10 // 13
+    G, flo, fhi, gate, jump = prm
+    H = fs // 25
+    hist = [0] * H
+    pat = []
     out = []
     for i in range(n):
         w = 0
         for _ in range(4):
             s = (s * 1664525 + 1013904223) & 0xFFFFFFFF
             w += (s >> 16) - 32768
-        if kind == 1:
+        if kind == 7:
+            T = fs // prm[0]
+            if i < T:
+                pat.append(w)
+            x = (pat[i % T] >> 3) + (w >> prm[1])
+        elif kind == 6:
+            t = i % (2 * fs)
+            tri = t if t < fs else 2 * fs - t
+            T = fs // (flo + (fhi - flo) * tri // fs)
+            if jump and (i // (fs * jump // 1000)) % 2 == 1:
+                T = T * 3 // 2
+            y = w + ((G * hist[(i - T + H) % H]) >> 14)
+            hist[i % H] = y
+            x = y >> 3
+            if gate and i % (fs * 2 // 5) >= fs * 3 // 10:
+                x = x >> 5 if gate == 1 else 0
+        elif kind == 1:
             x = (w * 5) >> 4
         elif kind == 3:
             x = (w * 5) >> 7
@@ -175,8 +282,9 @@ def read_packets(path):
     return out
 
 
-# 2.11.3: whole packets. name, kind, seed, rate, packet ms, complexity, bit rate,
-# CBR, input ms, buffer (VBR's budget). Between them: every bandwidth, packet
+# Whole packets. name, kind, seed, rate, packet ms, complexity, bit rate, CBR,
+# input ms, buffer (VBR's budget), and optionally the packet loss percentage
+# and kind 6's parameters. 2.11.3: Between them: every bandwidth, packet
 # length and complexity, voice-inactive frames (k10, k11, k12), and every
 # branch of the rate loop: k6 brackets and interpolates, k7 and k8 raise Lambda
 # and lock gains, k8 falls back to damage control every frame, k9 and k15 split
@@ -186,9 +294,19 @@ def read_packets(path):
 # holds the prediction gain to 100 (only 200 ms of it: on a resonance this
 # sharp Burg is ill-conditioned, and libopus's float input to it soon parts
 # from shravan's doubles). The seeds are ones for which libopus codes every
-# frame unvoiced (shravan has no pitch analysis yet) and its float stages
-# round as shravan's double ones do (about one frame in 500 rounds a shaping
-# coefficient the other way, and the pulses can follow).
+# frame unvoiced and its float stages round as shravan's double ones do (about
+# one frame in 500 rounds a shaping coefficient the other way, and the pulses
+# can follow).
+# 2.12.0, voiced (kind 6): every bandwidth, 10 to 60 ms, complexity 0 (the
+# pitch estimator's lowest settings) and 1, VBR and CBR (the rate loop on
+# voiced frames, conditionally coded ones among them); k20's pitch jumps make
+# conditionally coded frames code their lag absolutely; k21's 90% loss scales
+# the long-term predictor by index 2, k22's 20% by 1; k23 and k26 move between
+# voiced, unvoiced and silent frames; k24's lags reach the longest the
+# estimator allows (18 ms), k25's the shortest (2 ms). k27 (kind 7) is periodic
+# from its first sample (libopus does not run the pitch estimator on a first
+# frame, which would find it voiced); k28 scales by 1% loss, two frames a
+# packet, right at the first scaling threshold.
 PACKETS = [
     ("k0", 0, 1, 16000, 20, 1, 20000, 0, 1000, 1275),
     ("k1", 0, 1, 12000, 20, 1, 20000, 0, 1000, 1275),
@@ -206,6 +324,19 @@ PACKETS = [
     ("k13", 4, 2, 16000, 20, 1, 20000, 0, 200, 1275),
     ("k14", 5, 1, 8000, 20, 1, 5000, 0, 1000, 1275),
     ("k15", 3, 1, 12000, 40, 0, 3000, 1, 1000, 1275),
+    ("k16", 6, 1, 16000, 20, 1, 20000, 0, 1000, 1275),
+    ("k17", 6, 2, 12000, 10, 1, 16000, 0, 1000, 1275),
+    ("k18", 6, 3, 8000, 40, 0, 16000, 0, 1000, 1275),
+    ("k19", 6, 4, 16000, 60, 1, 12000, 1, 1200, 1275),
+    ("k20", 6, 5, 16000, 40, 1, 20000, 0, 1000, 1275, 0, (14000, 100, 180, 0, 60)),
+    ("k21", 6, 1, 8000, 40, 1, 20000, 0, 1000, 1275, 90, (15500, 100, 180, 0, 0)),
+    ("k22", 6, 6, 16000, 20, 1, 20000, 0, 1000, 1275, 20),
+    ("k23", 6, 7, 12000, 20, 1, 20000, 0, 1000, 1275, 0, (14000, 100, 180, 1, 0)),
+    ("k24", 6, 8, 16000, 10, 1, 20000, 0, 1000, 1275, 0, (14000, 56, 70, 0, 0)),
+    ("k25", 6, 9, 16000, 20, 1, 20000, 0, 1000, 1275, 0, (14000, 400, 500, 0, 0)),
+    ("k26", 6, 10, 12000, 60, 1, 8000, 1, 1200, 1275, 0, (14000, 100, 180, 2, 0)),
+    ("k27", 7, 1, 12000, 20, 1, 20000, 0, 1000, 1275, 0, (400, 6, 0, 0, 0)),
+    ("k28", 6, 4, 16000, 40, 1, 20000, 0, 1000, 1275, 1),
 ]
 
 
@@ -258,8 +389,13 @@ class Writer:
         self.parts = []
 
     def field(self, name, frames, get, kind):
-        segs = [(pack_f if kind == "f" else pack_i)(get(f)) for f in frames]
-        self.parts.append('var %s = "%s";\n' % (name, ";".join(segs)))
+        """One segment a frame: words ("i", "f") or bytes ("b")."""
+        if kind == "b":
+            segs = [bytes(get(f)) for f in frames]
+        else:
+            segs = [base64.b64decode((pack_f if kind == "f" else pack_i)(get(f))) for f in frames]
+        blob = struct.pack("<%dI" % (len(segs) + 1), len(segs), *map(len, segs)) + b"".join(segs)
+        self.parts.append('var %s = "%s";\n' % (name, base64.b64encode(zlib.compress(blob, 9)).decode()))
 
     def int(self, name, v):
         self.parts.append("var %s = %d;\n" % (name, v))
@@ -294,7 +430,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--opus-src", help="a libopus v1.6.1 source tree (default: clone it)")
     args = ap.parse_args()
-    configs = [  # name, signal, fs, frame ms, complexity, bit rate, CBR
+    configs = [  # name, signal, fs, frame ms, complexity, [bit rate, CBR, [loss]]
         ("nwb20c1", noise, 16000, 20, 1),
         ("nwb20c5", noise, 16000, 20, 5),
         ("nmb20c1", noise, 12000, 20, 1),
@@ -304,21 +440,56 @@ def main():
         ("vnb10c1", vowel, 8000, 10, 1),
         ("vwb40c1", vowel, 16000, 40, 1),     # two frames a packet: the second coded conditionally
         ("wwb20cbr", white, 16000, 20, 1, 3000, 1),
+        # 2.12.0: the pitch estimator at each rate, frame size and its own
+        # complexity (0 at encoder complexity 0, 1 at 1, 2 at 10)
+        ("vwb10c0", vowel, 16000, 10, 0),
+        ("vwb20c10", vowel, 16000, 20, 10),
+        ("vmb20c1", vowel, 12000, 20, 1),
+        ("vmb10c10", vowel, 12000, 10, 10),
+        ("vmb20c0", vowel, 12000, 20, 0),
+        ("vnb20c10", vowel, 8000, 20, 10),
+        ("vnb20c0", vowel, 8000, 20, 0),
+        # the long-term predictor's scaling under loss, and voiced frames whose
+        # whole prediction analysis rounds as shravan's (comb)
+        ("vmb60l25", vowel, 12000, 60, 1, 20000, 0, 25),
+        ("vnb10l100", vowel, 8000, 10, 1, 20000, 0, 100),
+        ("cwb20c1", comb, 16000, 20, 1),
+        ("cmb40c1", comb, 12000, 40, 1),
+        ("cnb20l50", comb, 8000, 20, 1, 20000, 0, 50),
+        # the branches the mutation search found these unreached by, each with
+        # the input that reaches it
+        ("thigh12_10c1", tone_high, 12000, 10, 1),
+        ("thigh12_10c0", tone_high, 12000, 10, 0),
+        ("tlow12_10c10", tone_low, 12000, 10, 10),
+        ("tlow8_10c0", tone_low, 8000, 10, 0),
+        ("tvib12_20c0", tone_vib, 12000, 20, 0),
+        ("tglide12_20c10", tone_glide, 12000, 20, 10),
+        ("tjump12_10c0", tone_jumps, 12000, 10, 0),
+        ("thigh12_20c1", tone_high, 12000, 20, 1),
+        ("cweak16_20c1", comb_weak, 16000, 20, 1),
+        ("cwb20l2", comb, 16000, 20, 1, 20000, 0, 2),
     ]
     runs = {}
     pk_sets = []
     cli = os.path.join(ROOT, "build", "interop-cli")
     with tempfile.TemporaryDirectory() as work:
         exe, probe = build(args.opus_src, work)
-        for name, kind, seed, fs, ms, cx, br, cbr, total, cap in PACKETS:
-            x = int_signal(kind, fs, fs * total // 1000, seed)
+        for name, kind, seed, fs, ms, cx, br, cbr, total, cap, *opt in PACKETS:
+            loss = opt[0] if opt else 0
+            prm = opt[1] if len(opt) > 1 else COMB
+            x = int_signal(kind, fs, fs * total // 1000, seed, prm)
             pcm = os.path.join(work, name + ".s16")
             x.tofile(pcm)
             pk = os.path.join(work, name + ".pk")
             dump = os.path.join(work, name + ".dump")
-            run(exe, pcm, pk, str(fs), str(br), str(cx), str(ms), str(cbr), str(cap), env=dict(os.environ, SILKDUMP=dump))
+            run(exe, pcm, pk, str(fs), str(br), str(cx), str(ms), str(cbr), str(cap), str(loss),
+                env=dict(os.environ, SILKDUMP=dump))
+            frames = total // (10 if ms == 10 else 20)
             voiced = sum(1 for line in open(dump) if line.startswith("nsq.hdr ") and line.split()[8] == "2")
-            require(voiced == 0, name + ": libopus coded %d frames voiced" % voiced)
+            if kind >= 6:
+                require(voiced * 2 >= frames, name + ": only %d of %d frames voiced" % (voiced, frames))
+            else:
+                require(voiced == 0, name + ": libopus coded %d frames voiced" % voiced)
             pks = read_packets(pk)
             require(len(pks) == total // ms, name + ": packet count")
             require(max(map(len, pks)) <= cap, name + ": a packet over its buffer")
@@ -326,13 +497,14 @@ def main():
                 f64 = os.path.join(work, name + ".f64")
                 (x.astype(np.float64) / 32768).astype("<f8").tofile(f64)
                 mine = os.path.join(work, name + ".shr")
-                run(cli, "silkenc", f64, str(fs), str(br), str(cx), str(ms), str(cbr), mine, "raw", str(cap))
+                run(cli, "silkenc", f64, str(fs), str(br), str(cx), str(ms), str(cbr), mine, "raw", str(cap), str(loss))
                 diff = [i for i, (a, b) in enumerate(zip(pks, read_packets(mine))) if a != b]
                 require(not diff, name + ": shravan's packets %s differ from libopus's" % diff[:8])
             h = fnv_i16(x)
+            hp = [line.split()[1] for line in open(dump) if line.startswith("hp.out ")]
             pk_sets.append(([kind, seed, fs, ms, cx, br, cbr, len(x), len(pks),
                              struct.unpack("<i", struct.pack("<I", h & 0xFFFFFFFF))[0],
-                             struct.unpack("<i", struct.pack("<I", h >> 32))[0], cap], pks))
+                             struct.unpack("<i", struct.pack("<I", h >> 32))[0], cap, loss, *prm, hp[-1]], pks))
         if not os.path.exists(cli):
             print("note: no build/interop-cli, shravan's packets not checked")
         pdump = os.path.join(work, "probe.dump")
@@ -340,18 +512,19 @@ def main():
         probe_calls = parse_calls(pdump)
         for name, sig, fs, ms, cx, *rate in configs:
             pcm = os.path.join(work, name + ".s16")
-            sig(fs, 2.0, {noise: 7, vowel: 11, white: 3}[sig]).tofile(pcm)
+            sig(fs, 2.0, {noise: 7, vowel: 11, white: 3}.get(sig, 1)).tofile(pcm)
             dump = os.path.join(work, name + ".dump")
-            br, cbr = rate if rate else (20000, 0)
-            run(exe, pcm, os.path.join(work, name + ".pk"), str(fs), str(br), str(cx), str(ms), str(cbr),
-                env=dict(os.environ, SILKDUMP=dump))
+            br, cbr, loss = (list(rate) + [20000, 0, 0][len(rate):])
+            run(exe, pcm, os.path.join(work, name + ".pk"), str(fs), str(br), str(cx), str(ms), str(cbr), "1275",
+                str(loss), env=dict(os.environ, SILKDUMP=dump))
             runs[name] = parse(dump)
             require(len(runs[name]) >= 50, name + ": too few frames")
 
     w = Writer()
     w.parts.append("# silk_enc_vectors.cyr -- libopus SILK encoder stage vectors (scripts/gen-silk-vectors.py).\n"
-                   "# Generated: do not edit. One frame a ';'-separated segment, its values little-endian\n"
-                   "# 32-bit words (ints, or floats as f32 bit patterns) in base64.\n\n")
+                   "# Generated: do not edit. Each field one zlib stream in base64: the segment count, each\n"
+                   "# segment's length (u32), then the segments, one a frame: little-endian 32-bit words\n"
+                   "# (ints, or floats as f32 bit patterns), or bytes (packets).\n\n")
 
     # 2.11.0: the unvoiced prediction path, from the noise runs
     sel = []
@@ -475,17 +648,131 @@ def main():
     w.field("_SKW_ARQ", conv, lambda f: f["nsq"][0]["nsq.ar"], "i")
     w.field("_SKW_X16", conv, lambda f: f["nsq"][0]["nsq.x16"], "i")
 
+    # 2.12.0: the pitch estimator on libopus's residual: per run a voiced frame
+    # after a voiced one (the previous lag biases the search), one after an
+    # unvoiced one, and the unvoiced decisions, both early (the first stage's
+    # best correlation under 0.2) and late (no second-stage candidate)
+    cxof = {c[0]: c[4] for c in configs}
+    pitch_runs = ("vwb20c1", "vwb10c0", "vwb20c10", "vmb20c1", "vmb10c10", "vmb20c0", "vnb10c1", "vnb20c10",
+                  "vnb20c0")
+    pit = []
+    for name in pitch_runs:
+        fr = [f for f in runs[name] if "pac.hdr" in f]
+        kinds = (lambda f: f["pac.out"][0] == "2" and f["pac.hdr"][0] != "0",
+                 lambda f: f["pac.out"][0] == "2" and f["pac.hdr"][0] == "0",
+                 lambda f: f["pac.out"][0] == "1" and "pac.nsrch" not in f,
+                 lambda f: f["pac.out"][0] == "1" and "pac.nsrch" in f)
+        for want in kinds:
+            hits = [f for f in fr[8:] if want(f)] or [f for f in fr if want(f)]
+            if hits:
+                hits[0]["cx"] = cxof[name]
+                hits[0]["dec"] = 1
+                pit.append(hits[0])
+    require({(f["pac.hdr"][1], f["pac.hdr"][3], f["pac.hdr"][2]) for f in pit} == {
+        ("16", "4", "1"), ("16", "2", "0"), ("16", "4", "2"), ("12", "4", "1"), ("12", "2", "2"), ("12", "4", "0"),
+        ("8", "2", "1"), ("8", "4", "2"), ("8", "4", "0")}, "pitch set: every rate, frame size and complexity")
+    require(sum(1 for f in pit if f["pac.out"][0] == "2" and f["pac.hdr"][0] != "0") >= 9, "pitch set: voiced after voiced")
+    require(any(f["pac.out"][0] == "2" and f["pac.hdr"][0] == "0" for f in pit), "pitch set: voiced after unvoiced")
+    require(any(f["pac.out"][0] == "1" and "pac.nsrch" not in f for f in pit), "pitch set: the early unvoiced exit")
+    require(any(f["pac.out"][0] == "1" and "pac.nsrch" in f for f in pit), "pitch set: the late unvoiced exit")
+    # and from the targeted runs, voiced frames that reach their branch (their
+    # decimations are left out: those runs' first records check them)
+    def voiced_after(f):
+        return f["pac.out"][0] == "2" and f["pac.hdr"][0] != "0"
+
+    def top(f):
+        return max(int(v) for v in f["pac.out"][3:3 + int(f["pac.hdr"][3])])
+    targeted = (
+        ("thigh12_10c1", lambda f: voiced_after(f) and int(f["pac.out"][1]) <= 2, 3),
+        ("thigh12_10c0", lambda f: voiced_after(f) and int(f["pac.out"][1]) <= 2, 2),
+        ("tlow12_10c10", lambda f: f["pac.out"][0] == "2" and f.get("pac.st2", [""])[0] == "143" and top(f) == 216, 3),
+        ("tlow8_10c0", lambda f: f["pac.out"][0] == "2" and top(f) == 144, 3),
+        ("tvib12_20c0", lambda f: voiced_after(f) and int(f["pac.out"][2]) >= 8, 3),
+        ("tglide12_20c10", lambda f: f["pac.out"][0] == "2" and int(f["pac.out"][2]) >= 32, 2),
+        ("tjump12_10c0", lambda f: voiced_after(f) and int(f["pac.out"][2]) >= 7, 3))
+    for name, want, n in targeted:
+        hits = [f for f in runs[name] if "pac.hdr" in f and want(f)][:n]
+        require(len(hits) == n, "pitch set: %s has %d frames for its branch" % (name, len(hits)))
+        for f in hits:
+            f["cx"] = cxof[name]
+            f["dec"] = 0
+        pit += hits
+    # and frames the mutation search found reaching branches no criterion
+    # above singles out (2.12.0): the second widening of the candidates
+    # (tvib12_20c0's 9th estimate), the third stage's reach check and the lag
+    # limit (tlow12_10c10's 98th)
+    for name, k in (("tvib12_20c0", 8), ("tlow12_10c10", 97)):
+        f = [f for f in runs[name] if "pac.hdr" in f][k]
+        f["cx"] = cxof[name]
+        f["dec"] = 0
+        pit.append(f)
+    w.int("_SKT_N", len(pit))
+    w.field("_SKT_HDR", pit, lambda f: f["pac.hdr"] + [f["cx"]], "i")
+    w.field("_SKT_IN", pit, lambda f: f["pac.thr"] + f["pac.ltpcorr_in"] + f["pac.ltpcorr"], "f")
+    w.field("_SKT_RES", pit, lambda f: f["fpl.res"], "f")
+    w.field("_SKT_DEC", pit, lambda f: f["pac.f8"] + f["pac.f4"] if f["dec"] else [], "i")
+    w.field("_SKT_OUT", pit, lambda f: f["pac.out"], "i")
+
+    # 2.12.0: the long-term predictor on libopus's inputs: correlations, gain
+    # quantisation, scaling and the residual; on the comb's frames the whole
+    # voiced prediction analysis too. Per run its first voiced frames after
+    # the fifth, until each periodicity, scaling index and coding mode is in.
+    ltp_runs = (("vwb20c1", 2), ("vnb10c1", 2), ("vwb40c1", 2), ("vmb60l25", 3), ("vnb10l100", 2),
+                ("cwb20c1", 2), ("cmb40c1", 2), ("cnb20l50", 2), ("thigh12_20c1", 3), ("cweak16_20c1", 3),
+                ("cwb20l2", 2))
+    ltp = []
+    for name, n in ltp_runs:
+        fr = [f for f in runs[name][5:] if "ltp.hdr" in f]
+        got = set()
+        for f in fr:
+            key = (f["ltp.idx"][0], f["ltp.scale"][0], f["ltp.hdr"][3])
+            if key not in got:
+                got.add(key)
+                f["whole"] = 1 if name.startswith("c") else 0
+                ltp.append(f)
+            if len(got) == n:
+                break
+    # the quantiser's ties between codebooks (tlow8_10c0's 5th voiced frame)
+    # and a choice that hinges on the correlations' rounding to Q17
+    # (thigh12_10c1's 14th), found by the mutation search
+    for name, k in (("tlow8_10c0", 4), ("thigh12_10c1", 13)):
+        f = [f for f in runs[name] if "ltp.hdr" in f][k]
+        f["whole"] = 0
+        ltp.append(f)
+    require({f["ltp.idx"][0] for f in ltp} == {"0", "1", "2"}, "LTP set: every periodicity codebook")
+    require({f["ltp.scale"][0] for f in ltp} == {"0", "1", "2"}, "LTP set: every scaling index")
+    require({f["ltp.hdr"][3] for f in ltp} == {"0", "2"}, "LTP set: independent and conditional frames")
+    require({f["ltp.hdr"][0] for f in ltp} == {"2", "4"}, "LTP set: 10 and 20 ms frames")
+    require({f["fpc.fs_kHz"][0] for f in ltp} == {"8", "12", "16"}, "LTP set: all three internal rates")
+    require(sum(f["whole"] for f in ltp) >= 4, "LTP set: whole voiced prediction analyses")
+    w.int("_SKL_N", len(ltp))
+    w.field("_SKL_HDR", ltp, lambda f: f["ltp.hdr"] + f["ltp.idx"] + f["ltp.scale"] + [f["whole"]] + [f[k][0] for k in (
+        "fpc.first", "fpc.useinterp", "fpc.survivors", "fpc.fs_kHz", "fpc.speech_q8", "fpc.interp")], "i")
+    w.field("_SKL_F", ltp, lambda f: f["ltp.predgain"] + f["ltp.scalef"] + f["fpc.mininvgain"] + f["fpc.coding_quality"]
+            + f["fpc.gains"], "f")
+    for key, name in (("ltp.res", "RES"), ("ltp.x", "X"), ("ltp.XX", "XX"), ("ltp.xX", "XXV"), ("ltp.B", "B"),
+                      ("fpc.lpcinpre", "PRE"), ("fpc.resnrg", "RESNRG")):
+        w.field("_SKL_" + name, ltp, lambda f, k=key: f[k], "f")
+    w.field("_SKL_NLSF", ltp, lambda f: f["fpc.prevnlsf"] + f["fpc.nlsfidx"], "i")
+
+    # 2.12.0: the pitch-tracking high-pass's smoother, over whole runs
+    hp = [f for name in ("vwb20c1", "vnb10c1", "vmb20c1") for f in runs[name] if "hp.in" in f]
+    require(sum(1 for f in hp if f["hp.in"][0] == "2" and f["hp.in"][5] != f["hp.out"][0]) >= 50,
+            "HP set: the smoother moving after voiced frames")
+    w.int("_SKH_N", len(hp))
+    w.field("_SKH_REC", [None], lambda _: [v for f in hp for v in f["hp.in"] + f["hp.out"]], "i")
+
     # 2.11.3: whole packets for inputs the suite builds (one config a segment:
-    # its header, then its packets as u32le length and bytes, in base64)
+    # its header, then its packets as u32le length and bytes). The header ends
+    # (2.12.0) on the pitch-tracking high-pass's smoother after the last frame.
     w.int("_SKK_N", len(pk_sets))
     w.field("_SKK_HDR", pk_sets, lambda c: c[0], "i")
-    w.parts.append('var _SKK_PK = "%s";\n' % ";".join(
-        base64.b64encode(b"".join(struct.pack("<I", len(p)) + p for p in c[1])).decode() for c in pk_sets))
+    w.field("_SKK_PK", pk_sets, lambda c: b"".join(struct.pack("<I", len(p)) + p for p in c[1]), "b")
 
     open(OUT, "w").write("".join(w.parts))
-    print("wrote %s (LPC %d, VAD %d, shape %d frames, NSQ %d + %d calls, conversion %d, packets %d; %d bytes)" % (
-        OUT, len(sel), len(vad), len(shp), len(calls), len(agg), len(conv),
-        sum(len(c[1]) for c in pk_sets), os.path.getsize(OUT)))
+    print("wrote %s (LPC %d, VAD %d, shape %d frames, NSQ %d + %d calls, conversion %d, pitch %d, LTP %d, HP %d, "
+          "packets %d; %d bytes)" % (OUT, len(sel), len(vad), len(shp), len(calls), len(agg), len(conv), len(pit),
+                                     len(ltp), len(hp), sum(len(c[1]) for c in pk_sets), os.path.getsize(OUT)))
 
 
 if __name__ == "__main__":

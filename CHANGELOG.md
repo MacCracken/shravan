@@ -5,6 +5,151 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.0] - 2026-11-17
+
+**SILK encode: the voiced path.** Pitch estimation and long-term prediction arrive, so shravan's SILK
+encoder now codes voiced frames, and its packets are libopus's `silk_Encode`'s byte for byte on them
+too. On real speech, libopus decodes shravan's packets to within 0.003 of the correlation it reaches on
+its own encoder's (2.11.3 was 0.01–0.07 short). 15,115 assertions (was 14,187).
+
+### Added
+
+- **Pitch estimation**: `silk_pitch_analysis_core_flp` (libopus `silk_pitch_analysis_core_FLP`).
+  - The pitch residual through int16 to 8 kHz and 4 kHz: `silk_resampler_down2`, and
+    `silk_resampler_down2_3` over `_sk_resampler_ar2`. Fixed point, exact.
+  - The first stage, at 4 kHz: normalised correlations over lags of 2 to 18 ms, a short-lag bias, and
+    the best 4, 6 or 8 (by the estimator's complexity) within a threshold of the best.
+  - The second stage, at 8 kHz, over those candidates, each widened by up to two lags: per subframe, the
+    lag contour codebooks, biased towards short lags and towards the previous frame's lag. The frame is
+    voiced when the best clears the voicing threshold.
+  - The third stage, at 12 and 16 kHz: the lag ±2 and every contour at the full rate, under a bias
+    towards flat contours.
+  - `silk_find_pitch_lags_flp` now makes the voicing decision. Its threshold (`_sk_pitch_threshold`)
+    falls with the analysis order, speech activity, a voiced previous frame and the input's tilt.
+  - `silk_enc_setup_complexity` sets the estimator's complexity and candidate threshold.
+- **Long-term prediction**:
+  - `silk_find_ltp_flp` (libopus `silk_find_LTP_FLP`), over `silk_corrmatrix_flp` and
+    `silk_corrvector_flp`: per subframe, the 5-tap correlations of the pitch residual with itself one
+    lag back, normalised by its energy.
+  - `silk_quant_ltp_gains` and `silk_vq_wmat_ec`, fixed point and exact, and `silk_quant_ltp_gains_flp`
+    around them. Each of the three codebooks is searched by entropy-constrained matrix-weighted VQ, with
+    the running sum of log gains capping each subframe's gain.
+  - `silk_ltp_scale_ctrl_flp`: on an independently coded frame, the long-term predictor is scaled down by
+    the expected loss.
+  - `silk_ltp_analysis_filter_flp`: the input less its long-term prediction, which Burg then sees.
+  - `silk_find_pred_coefs_flp`'s voiced branch. It now takes `(st, ctrl, res_pitch, x, cond)`.
+- **`silk_hp_variable_cutoff`** (libopus `silk_HP_variable_cutoff`), run every frame in the packet layer.
+  It tracks a high-pass cutoff of 60–100 Hz from the pitch of voiced frames, which the Opus layer's VOIP
+  high-pass will read (2.12.x).
+- **`silk_encoder_set_packet_loss(e, perc)`**: libopus's `packetLossPercentage`, 0 to 100. Without
+  in-band FEC it only scales the long-term predictor down.
+- **Tools**:
+  - `silkref` and the interop CLI's `silkenc` take a packet loss.
+  - `scripts/silkref/patch.py` also records the voicing decision, the pitch estimator's stages, the
+    long-term predictor's and the high-pass smoother.
+  - `scripts/gen-silk-vectors.py` writes the pitch, LTP and high-pass sets, and 13 more packet sets
+    (k16–k28). Kind 6, white noise through a comb at a gliding pitch, is as periodic as speech to the
+    estimator, but flat within the LPC orders, so libopus's float stages round as shravan's doubles do.
+    Kind 7, a period of noise repeated, is periodic from its first sample.
+- The interop sweep's `silk` group has a voiced source: eight harmonics of a 110 Hz pitch with vibrato
+  (72 cases, was 48).
+- The `silk_encode` fuzz target sets random packet losses, valid and not. It also feeds impulse trains
+  and squares at lags inside and outside the pitch range.
+- Benchmarks `silk_pitch_analysis_20ms_wb`, `silk_ltp_analysis_20ms_wb` and
+  `silk_encode_1sec_wb_voiced20k`.
+
+### Changed
+
+- `src/silk_enc_vectors.cyr` stores each field as one zlib stream in base64, which the suite inflates once
+  with sankoch. With 2.12's sets in, the file is 634 KB, where 2.11.3's was 647 KB without them. The
+  suite's 2 MB of string data would not have held them otherwise.
+
+### Verified
+
+- **Stage by stage, on libopus's own inputs** (`src/silk_enc_vectors.cyr`):
+  - **`test_silk_enc_pitch_vs_libopus`**, 55 frames: every rate, 10 and 20 ms, estimator complexity 0 to
+    2; voiced after voiced and after unvoiced; both unvoiced exits; lags at both ends of the range;
+    contours to the last of 34.
+    - Exact: the decimations, the voicing decision, the lag and contour indices, every subframe's lag,
+      and the estimator's settings at each encoder complexity.
+    - Within 1e-5: LTPCorr.
+    - The threshold agrees to 1e-6.
+  - **`test_silk_enc_ltp_vs_libopus`**, 26 frames: every periodicity codebook and scaling index, both
+    coding modes, all three rates.
+    - Within 1e-5: the correlations (2e-7 seen).
+    - Exact: the quantiser, ties between codebooks included, and the scaling.
+    - Within 1e-6: the LTP residual.
+    - On 10 frames of the comb, the whole voiced `find_pred_coefs` from the pitch residual and the
+      input: the same LTP, NLSF and interpolation indices, residual energies within 1e-3.
+  - **`test_silk_enc_hp_vs_libopus`**: the smoother over 397 frames, exactly, from libopus's initial
+    value.
+  - Beyond the suite, on libopus's inputs from 2 s runs of a sung vowel and of the comb at every rate,
+    frame size and complexity, everything above matched:
+    - 2,148 pitch estimates and 4,260 whole voicing decisions from libopus's input;
+    - 2,050 voiced frames' LTP stages;
+    - 5,397 smoother updates;
+    - and, after the fix below, 198 search inputs (66 runs of 11 signals at three complexities).
+- **`test_silk_enc_packets_vs_libopus`**: 1,245 packets in 29 configurations, byte for byte libopus's
+  `silk_Encode`. 590 of them are new, voiced, in 13 configurations. They cover:
+  - every rate, 10 to 60 ms, complexity 0 and 1, VBR and CBR at 8 to 20 kbit/s;
+  - lags coded by delta and absolutely in conditionally coded frames;
+  - LTP scaling 1 and 2 under 1 to 90% loss;
+  - lags at both ends of the range;
+  - moves between voiced, unvoiced and silent frames;
+  - a first frame that a pitch estimator would find voiced.
+
+  After each set, the high-pass smoother is checked against libopus's.
+  - Beyond the suite, 2 s of the comb in 33 further configurations matched packet for packet.
+  - Packets part on harmonic input with sharp formants. A sung vowel's shaping analysis is
+    ill-conditioned there, and libopus's float window rounds away from shravan's doubles within the
+    first frame (an unvoiced one). They also part, as in 2.11.3, where one frame in about 500 rounds a
+    shaping coefficient the other way (one such, on the comb at 60 ms and 5% loss, traced to a single
+    ±1 in `AR_Q13` with every other input equal).
+- **Real speech** (the Opus test vectors), libopus decoding, against libopus's own encoder at the same
+  rates, the same delay and the same bits:
+
+  | | shravan | libopus's own encoder | 2.11.3 |
+  |-|---------|-----------------------|--------|
+  | 8 kHz, 12 and 24 kbit/s | 0.946–0.998 | 0.947–0.997 | 0.926–0.993 |
+  | 16 kHz, 12 and 24 kbit/s | 0.914–0.991 | 0.915–0.991 | 0.850–0.979 |
+  | 16 kHz, 10 to 60 ms, CBR | 0.947–0.976 | 0.950–0.976 | |
+
+  SNR is within 0.25 dB either way.
+- **Interop sweep**, `silk` group, 72 of 72:
+  - Voiced source: shravan 0.947–0.997, libopus 0.949–0.997.
+  - On it the best lag can land a sample from libopus's (correlations equal to the fourth decimal), so
+    that source alone allows one sample. The noise and the tones still pin the delay exactly.
+- **Mutations**: 81 tried, 78 caught.
+  - 20 survived the first run and were searched for inputs. The search for one of them found a real bug:
+    at the estimator's complexity 2 the third stage searched 32 contours, not libopus's 34. Restoring 32
+    now fails 6 assertions.
+  - The inputs the search found are in the suite: tones at both ends of the lag range, a fast vibrato, a
+    gliding pitch, pitch jumps, a weak comb, 1% loss, and periodic noise.
+  - Three are equivalent:
+    - the 2/3 decimator's final state, which the estimator discards;
+    - the third stage's 1e-3 on energies of voiced subframes;
+    - the in-band FEC term of the LTP scaling, unreachable until LBRR (2.12.x).
+- **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included. 24 further
+  poisoned seeds were clean too (236,496 calls).
+- **Memory**: 3,000 voiced packets allocate nothing past the first hundred: VBR, CBR, 60 ms with loss,
+  and 10 ms.
+
+### Performance
+
+Pinned to one core, 2.11.3 and 2.12.0 alternating in one session, three rounds each (medians):
+
+| Benchmark | 2.11.3 | 2.12.0 | Real-time multiple |
+|-----------|--------|--------|--------------------|
+| `silk_encode_1sec_wb_voiced20k` (new: the comb, voiced on nearly every frame) | | 39.8 ms | ~25× |
+| `silk_encode_1sec_wb_vbr20k` (coloured noise) | 27.2 ms | 29.5 ms (+8.7%) | ~34× |
+| `silk_encode_1sec_wb_cbr12k` (coloured noise) | 64.0 ms | 66.2 ms (+3.5%) | ~15× |
+| `silk_pitch_analysis_20ms_wb` (new) | | 89.5 µs | |
+| `silk_ltp_analysis_20ms_wb` (new) | | 83.3 µs | |
+
+The noise benches are slower because every frame with voice activity now runs the pitch estimator, as
+libopus's does, even where it then decides unvoiced. Every other benchmark moved between −1.0% and
++1.1%, which is noise.
+
 ## [2.11.3] - 2026-11-17
 
 **SILK encode, part 4: shravan encodes SILK.** The last of the four 2.11 steps adds the frame encoder
