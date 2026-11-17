@@ -62,6 +62,91 @@ def ff_decode(src, dst, *pre, post=()):
     return f64(dst)
 
 
+def mp4_audio_tracks(path):
+    """The audio tracks of an MP4 (ISO 14496-12), in file order: for each, the
+    tkhd enabled flag, the mdhd timescale, the edit list (segment duration in the
+    movie's timescale, media time, rate) and the sum of the stts durations."""
+    d = open(path, "rb").read()
+
+    def boxes(s, e):
+        p = s
+        while p + 8 <= e:
+            size, t = struct.unpack(">I4s", d[p:p + 8])
+            hdr = 8
+            if size == 1:
+                size = struct.unpack(">Q", d[p + 8:p + 16])[0]
+                hdr = 16
+            if size == 0:
+                size = e - p
+            yield t, p + hdr, p + size
+            p += size
+
+    def child(s, e, path):
+        for t, bs, be in boxes(s, e):
+            if t == path[0]:
+                return (bs, be) if len(path) == 1 else child(bs, be, path[1:])
+        return None
+
+    moov = child(0, len(d), [b"moov"])
+    mvhd = child(*moov, [b"mvhd"])
+    movie_ts = struct.unpack(">I", d[mvhd[0] + (20 if d[mvhd[0]] == 1 else 12):][:4])[0]
+    tracks = []
+    for t, ts_, te in boxes(*moov):
+        if t != b"trak":
+            continue
+        hdlr = child(ts_, te, [b"mdia", b"hdlr"])
+        if d[hdlr[0] + 8:hdlr[0] + 12] != b"soun":
+            continue
+        tkhd = child(ts_, te, [b"tkhd"])
+        mdhd = child(ts_, te, [b"mdia", b"mdhd"])
+        ts = struct.unpack(">I", d[mdhd[0] + (20 if d[mdhd[0]] == 1 else 12):][:4])[0]
+        stts = child(ts_, te, [b"mdia", b"minf", b"stbl", b"stts"])
+        n = struct.unpack(">I", d[stts[0] + 4:stts[0] + 8])[0]
+        total = sum(c * dl for c, dl in (struct.unpack(">II", d[stts[0] + 8 + i * 8:stts[0] + 16 + i * 8])
+                                         for i in range(n)))
+        edits = []
+        elst = child(ts_, te, [b"edts", b"elst"])
+        if elst:
+            v = d[elst[0]]
+            for i in range(struct.unpack(">I", d[elst[0] + 4:elst[0] + 8])[0]):
+                q = elst[0] + 8 + i * (20 if v == 1 else 12)
+                dur, mt, rate = struct.unpack(">QqI" if v == 1 else ">IiI", d[q:q + (20 if v == 1 else 12)])
+                edits.append((dur, mt, rate >> 16))
+        tracks.append({"enabled": d[tkhd[0] + 3] & 1, "ts": ts, "edits": edits, "stts": total})
+    return movie_ts, tracks
+
+
+def mp4_iso_ref(path, dst, index, ch):
+    """Track `index` as ISO 14496-12 presents it: ffmpeg's decode without the edit
+    list (every ffmpeg gives the same), cut to the sample table's length, then to
+    each edit's media range in order (empty and dwell edits give nothing). ffmpeg
+    itself trims an MP4's last frame to the edit list only from 9.0; older ones
+    (Ubuntu 24.04 has 6.1) play the padding, so this cut is the reference, and
+    with ffmpeg 9 it equals ffmpeg's own default decode."""
+    movie_ts, tracks = mp4_audio_tracks(path)
+    tk = tracks[index]
+    raw = ff_decode(path, dst, "-ignore_editlist", "1", post=("-map", f"0:a:{index}"))
+    media = min(len(raw) // ch, tk["stts"])
+    ranges = []
+    for dur, mt, rate in tk["edits"]:
+        if mt >= 0 and dur > 0 and rate != 0 and mt < media:
+            ranges.append((mt, min((dur * tk["ts"] + movie_ts // 2) // movie_ts, media - mt)))
+    if not tk["edits"]:
+        ranges = [(0, media)]
+    out = array.array("d")
+    for s0, n0 in ranges:
+        out.extend(raw[s0 * ch:(s0 + n0) * ch])
+    return out
+
+
+def ffmpeg_default_track(path, channels):
+    """ffmpeg's default audio stream: enabled tracks first, then the most channels,
+    then the first (fftools/ffmpeg_mux_init.c, map_auto_audio)."""
+    _, tracks = mp4_audio_tracks(path)
+    scores = [channels[i] + 5000000 * tk["enabled"] for i, tk in enumerate(tracks)]
+    return scores.index(max(scores))
+
+
 def shravan_decode(src, dst):
     p = run(CLI, "decode", src, dst, check=False)
     if p.returncode != 0:
@@ -268,8 +353,12 @@ class Sweep:
                         got, info = shravan_decode(src, self.p("got.f64"))
                         self.record("aac", name + " refused", got is None, f"{info}")
                         continue
-                    # m4a: the edit list's priming and end trim applied (2.10.2).
-                    ref = ff_decode(src, self.p("ref.f64"))
+                    # m4a: the edit list's priming and end trim applied (2.10.2), as
+                    # ISO 14496-12 cuts it (see mp4_iso_ref).
+                    if container == "m4a":
+                        ref = mp4_iso_ref(src, self.p("ref.f64"), 0, ch)
+                    else:
+                        ref = ff_decode(src, self.p("ref.f64"))
                     self.decode_vs("aac", name, src, ref, False)
 
     def gapless(self):
@@ -298,16 +387,18 @@ class Sweep:
                 if p.returncode != 0 or len(fields) < 2:
                     self.record("gapless", name, False, "shravan error")
                     continue
-                ref = ff_decode(src, self.p("ref.f64"))
+                chans = [c for _, c in srcs]
+                want = ffmpeg_default_track(src, chans)
+                ref = mp4_iso_ref(src, self.p("ref.f64"), want, chans[want])
                 got, info = shravan_decode(src, self.p("got.f64"))
                 lossless = codec == "alac"
                 e = maxerr(ref, got) if got is not None else 1e9
-                ok = (fields[0] == "3" and got is not None and len(got) == len(ref)
+                ok = (fields[0] == "3" and fields[1] == str(want) and got is not None and len(got) == len(ref)
                       and (e == 0 if lossless else e <= 2.0))
                 self.record("gapless", name + " default", ok,
                             f"default={fields[1]} n={len(got) if got else 0}/{len(ref)} maxerr={e:.3f}")
                 for i in range(len(srcs)):
-                    ref = ff_decode(src, self.p("ref.f64"), post=("-map", f"0:a:{i}"))
+                    ref = mp4_iso_ref(src, self.p("ref.f64"), i, chans[i])
                     q = run(CLI, "track", src, str(i), self.p("got.f64"), check=False)
                     got = f64(self.p("got.f64")) if q.returncode == 0 else None
                     e = maxerr(ref, got) if got is not None else 1e9

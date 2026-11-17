@@ -14,7 +14,9 @@ producing that path, this script fails rather than writing a test that proves no
 The MPEG audio conformance excerpts come from the ISO/IEC 11172-4 and 13818-4
 bitstreams with their reference decodes, as redistributed in minimp3's test vectors:
 set MINIMP3_VECTORS to a checkout's vectors/ directory, or the script fetches them
-(git, sparse). Needs ffmpeg (with libmp3lame and libopus), flac, a C compiler and the libopus
+(git, sparse). Needs ffmpeg 9 or later (the MP4 references are its gapless decodes, and only
+ffmpeg 9 trims an MP4's last frame to its edit list; the script stops on an older one), with
+libmp3lame and libopus, the lame CLI, flac, a C compiler and the libopus
 headers (the Opus fixtures come from scripts/interop/opusref.c, which records
 libopus's own decode of the exact packets). That libopus must be a default build, not
 a deep-PLC one: set OPUS_PREFIX to one made by scripts/interop/build-libopus.sh if

@@ -63,9 +63,16 @@ Everything is matched against ffmpeg to the sample and to its length. 13,200 ass
   audio track shravan cannot decode (HE-AAC, AC-3, AAC past two channels) now decodes the next one it
   can.
 - The MP4 demux struct carries its track (`MP4_DX_TRACK`; `MP4_DX_SIZE` is 64).
-- `scripts/interop.py` and `scripts/gen-interop-fixtures.py` take ffmpeg's default decode as the
-  reference: no `-ignore_editlist`, no `-flags2 +skip_manual`. MP4 AAC is now checked to the exact
-  length; before, it passed as "at least as long".
+- The interop references are gapless, with no `-ignore_editlist` and no `-flags2 +skip_manual`:
+  - **MP3:** ffmpeg's default decode.
+  - **MP4:** the ISO 14496-12 cut of ffmpeg's decode without the edit list (`mp4_iso_ref`): the sample
+    table's length, then each edit's media range. ffmpeg trims an MP4's last frame to its edit list only
+    from 9.0; 6.1 (Ubuntu 24.04's, CI's) to 8.0 skip the priming but play the padding. On ffmpeg 9 this
+    cut equals ffmpeg's own decode in all 22 AAC m4a cases, and it is the same whether the raw decode
+    ends trimmed or whole.
+
+  MP4 AAC is now checked to the exact length; before, it passed as "at least as long".
+  `scripts/gen-interop-fixtures.py` uses ffmpeg's default decode, and so needs ffmpeg 9.
 
 ### Verified
 
