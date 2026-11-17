@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.9.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.10.0.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -8,7 +8,7 @@
 |-------|--------|--------|-----------------|
 | WAV | PCM 1–32-bit (whole-byte containers), float 32/64, EXTENSIBLE, piped (unknown sizes) | PCM 8/16/24/32, float 32/64 | ffmpeg: every rate × depth × channel case exact, one-shot and streamed; float 32 encode rounds as ffmpeg does |
 | AIFF | PCM 1–32-bit; AIFF-C NONE/twos/sowt/fl32/fl64 | PCM | ffmpeg: exact, one-shot and streamed |
-| FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | Fixed only | `flac`: 79 sweep cases exact (to 32-bit, 8 channels, 16384-sample blocks); `flac -t` passes shravan's output |
+| FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | levels 0–8 as `flac -0` to `-8`: LPC to order 12, partitioned Rice, stereo decorrelation, wasted bits, seek table | `flac`: 79 decode sweep cases exact (to 32-bit, 8 channels, 16384-sample blocks). Encode: within 0.06% of `flac -L`'s size at every level on 5.5 minutes of real recordings; libFLAC (`flac -t`, `flac -d`) and ffmpeg decode 1,125 hostile cases exactly (4–32 bits, 1–8 channels, 1 Hz–1 MHz) |
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
 | AAC-LC | mono and stereo, all 13 rates, TNS, short blocks, M/S, intensity, PNS | long blocks, M/S, intensity, PNS | ffmpeg both ways. Decode exact apart from PNS noise |
@@ -35,14 +35,10 @@ Open until a reference file or decoder exists for each.
   ffmpeg's ALAC and `flac`'s fixed-size output are verified.
 - **ID3v2 grouped frames** are read per the spec; neither ffmpeg nor mutagen reads them at all.
 
-The remaining distance to **3.0.0** is (1) the encoders the suite still lacks, (2) the rest of the Opus
-encoder, (3) the multichannel paths below.
+The remaining distance to **3.0.0** is (1) the AAC encoder's quality work, (2) the rest of the Opus
+encoder, (3) the multichannel paths below. The FLAC encoder is real since 2.10.0.
 
 ## v2.10.x — the rest of the suite, matured
-
-### v2.10.0 — FLAC encoder
-`feat(flac)`: real LPC encoder (autocorrelation + Levinson-Durbin + quantized coefficients), partitioned
-Rice, adaptive stereo, CONSTANT subframes, SEEKTABLE writing. Fixed prediction only today.
 
 ### v2.10.1 — AAC encoder
 `feat(aac)`: re-enable TNS (prediction-gain gated, within `TNS_MAX_BANDS`), short windows, ATH floor and
@@ -89,7 +85,7 @@ hostile input, no known correctness bugs.
 
 **Gate:**
 - Opus encodes *and* decodes every config, interop-verified with libopus both ways.
-- FLAC LPC encoder real.
+- FLAC LPC encoder real. (Since 2.10.0: levels 0–8, within 0.1% of `flac`'s sizes.)
 - All decoders fuzzed to 0 crashes, Opus included. (Since 2.9.3: `./fuzz/run.sh 90000`, cold starts
   and poison mode included.)
 - Reference comparison running in CI, not a scratchpad. (Since 2.9.3: the `interop` CI job.)

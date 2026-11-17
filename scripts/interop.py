@@ -328,6 +328,78 @@ class Sweep:
 
     # -- encode direction -------------------------------------------------------
 
+    def flac_encoder(self):
+        """shravan's FLAC levels against libFLAC: flac -t passes, ffmpeg decodes every
+        sample back, and the audio frames are no larger than `flac -L`'s on the same
+        input (1% allowed; metadata excluded, as flac pads and shravan writes a seek
+        table). Then depths and channel counts the integer-grid sweep skips."""
+        def frames(path):
+            b = open(path, "rb").read()
+            pos = 4
+            while True:
+                last = b[pos] & 0x80
+                pos += 4 + int.from_bytes(b[pos + 1:pos + 4], "big")
+                if last:
+                    return len(b) - pos
+
+        def judge(name, out, grid, bits):
+            t = run("flac", "-t", "-s", out, check=False)
+            back = ff_decode(out, self.p("back.f64"))
+            e = maxerr(grid, back, float(1 << (bits - 1)))
+            ok = t.returncode == 0 and len(back) == len(grid) and e == 0
+            return ok, f"maxerr={e:.3f} LSB n={len(back)}/{len(grid)} flac -t {'ok' if t.returncode == 0 else 'FAILED'}"
+
+        wav = self.p("lv.wav")
+        run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(44100, 2, 3.0),
+            "-c:a", "pcm_s16le", wav)
+        grid = ff_decode(wav, self.p("lv.f64"))
+        for level in range(9):
+            out = self.p("lv.flac")
+            p = run(CLI, "encode", self.p("lv.f64"), "flac", "44100", "2", "16", out, str(level),
+                    check=False)
+            name = f"flac level {level} vs flac -{level}"
+            if p.returncode != 0:
+                self.record("encode", name, False, "shravan error " + p.stdout.decode().strip())
+                continue
+            ok, detail = judge(name, out, grid, 16)
+            ref = self.p("ref.flac")
+            run("flac", "-s", "-f", f"-{level}", "--no-padding", "--no-seektable", wav, "-o", ref)
+            ours, theirs = frames(out), frames(ref)
+            ok = ok and ours <= theirs * 1.01
+            self.record("encode", name, ok, f"{detail} frames {ours}/{theirs} ({100.0 * (ours - theirs) / theirs:+.2f}%)")
+        for bits, ch, rate in ((12, 2, 48000), (20, 2, 96000), (32, 2, 48000), (16, 8, 48000),
+                               (24, 3, 44100)):
+            codec = {12: "pcm_s16le", 16: "pcm_s16le", 20: "pcm_s24le", 24: "pcm_s24le",
+                     32: "pcm_s32le"}[bits]
+            src = self.p("dp.wav")
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(rate, ch, 0.5),
+                "-c:a", codec, src)
+            g = ff_decode(src, self.p("dp.f64"))
+            # Onto a grid of `bits` bits, so the encoder has an exact target.
+            step = float(1 << (bits - 1))
+            g = array.array("d", (round(v * step) / step for v in g))
+            with open(self.p("dp.f64"), "wb") as fh:
+                g.tofile(fh)
+            for level in (0, 5, 8):
+                out = self.p("dp.flac")
+                p = run(CLI, "encode", self.p("dp.f64"), "flac", str(rate), str(ch), str(bits),
+                        out, str(level), check=False)
+                name = f"flac {bits}b {ch}ch {rate} level {level}"
+                if p.returncode != 0:
+                    self.record("encode", name, False, "shravan error " + p.stdout.decode().strip())
+                    continue
+                ok, detail = judge(name, out, g, bits)
+                self.record("encode", name, ok, detail)
+        # A seek point every 10 seconds, read back by metaflac.
+        run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(8000, 1, 25.0),
+            "-c:a", "pcm_s16le", self.p("long.wav"))
+        ff_decode(self.p("long.wav"), self.p("long.f64"))
+        run(CLI, "encode", self.p("long.f64"), "flac", "8000", "1", "16", self.p("long.flac"), "5")
+        listing = run("metaflac", "--list", "--block-type=SEEKTABLE", self.p("long.flac")).stdout.decode()
+        want = ["sample_number=0,", "sample_number=77824,", "sample_number=159744,"]
+        ok = all(w in listing for w in want) and "seek points: 3" in listing
+        self.record("encode", "flac seek table (metaflac)", ok, " ".join(l.strip() for l in listing.splitlines() if "point" in l))
+
     def encoders(self):
         for rate in (8000, 44100, 96000):
             for ch in (1, 2, 6):
@@ -356,6 +428,7 @@ class Sweep:
                         ok = ok and t.returncode == 0
                         detail += " flac -t " + ("ok" if t.returncode == 0 else "FAILED")
                     self.record("encode", name, ok, detail)
+        self.flac_encoder()
         for kind in ("wavf32", "wavf64"):
             run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", signal(48000, 2, 0.1),
                 "-f", "f64le", "-c:a", "pcm_f64le", self.p("x.f64"))

@@ -242,6 +242,39 @@ fn bench_flac_encode_1sec() {
 }
 
 # ================================================================
+# Benchmark: flac_encode_stereo_l{0,5,8} -- one second of 44.1 kHz stereo,
+# a tone in each channel plus quiet noise, so every predictor has work to do
+# ================================================================
+
+fn _bench_flac_stereo_signal() {
+    var v = vec_new();
+    var wl = f64_div(f64_mul(F64_TWO, F64_PI), f64_from(100));
+    var wr = f64_div(f64_mul(F64_TWO, F64_PI), f64_from(67));
+    var amp = f64_div(f64_from(6), f64_from(10));
+    var seed = 12345;
+    for (var i = 0; i < 44100; i = i + 1) {
+        seed = seed * 6364136223846793005 + 1442695040888963407;
+        var nz = f64_div(f64_from(((seed >> 20) & 1023) - 512), f64_from(65536));
+        vec_push(v, f64_add(f64_mul(amp, f64_sin(f64_mul(wl, f64_from(i)))), nz));
+        vec_push(v, f64_add(f64_mul(amp, f64_sin(f64_mul(wr, f64_from(i)))), nz));
+    }
+    return v;
+}
+
+fn bench_flac_encode_stereo(name, level, iters) {
+    var samples = _bench_flac_stereo_signal();
+    var buf = alloc(flac_encode_bound(44100, 2, 16));
+    flac_encode_level(samples, 44100, 2, 16, level, buf);
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        flac_encode_level(samples, 44100, 2, 16, level, buf);
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Benchmark: flac_decode_1sec
 # ================================================================
 
@@ -502,7 +535,7 @@ fn bench_flac_stream_1sec() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.9.4 benchmarks\n", 26);
+syscall(1, 1, "shravan v2.10.0 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -516,6 +549,9 @@ var fft_ns     = bench_fft_1024();
 var mdct_ns    = bench_mdct_2048();
 var imdct_ns   = bench_imdct_2048();
 var flac_enc_ns = bench_flac_encode_1sec();
+var flac_l0_ns = bench_flac_encode_stereo("flac_encode_stereo_l0", 0, 10);
+var flac_l5_ns = bench_flac_encode_stereo("flac_encode_stereo_l5", 5, 10);
+var flac_l8_ns = bench_flac_encode_stereo("flac_encode_stereo_l8", 8, 5);
 var flac_dec_ns = bench_flac_decode_1sec();
 var flac_st_ns  = bench_flac_stream_1sec();
 var aac_enc_ns  = bench_aac_encode_1sec();

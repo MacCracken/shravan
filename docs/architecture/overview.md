@@ -7,7 +7,8 @@ shravan/
   src/
     shravan.cyr     -- library: error, format, PCM, WAV, AIFF, ALAC, codec dispatch,
                        decode_file/reader (first [lib] bundle module)
-    flac.cyr        -- FLAC decoder (all subframe types, SEEKTABLE, flac_verify), encoder (Fixed)
+    flac.cyr        -- FLAC decoder (all subframe types, SEEKTABLE, flac_verify), encoder (levels 0-8
+                       as flac -0..-8: LPC, partitioned Rice, stereo, wasted bits, seek table)
     ogg.cyr         -- Ogg container parser/muxer (CRC-32, page extraction)
     mp3.cyr         -- MP3 decode -> PCM: MPEG-1/2/2.5 Layer I/II/III (reservoir, Huffman,
                        requant, IMDCT, polyphase synth) + ID3v2 skipping
@@ -68,7 +69,8 @@ Byte chunks --> decode_reader_feed() --> wav/aiff/flac_stream_feed() --> events
                (HEADER, then SAMPLES per chunk_frames or per FLAC frame; ERROR; END on flush)
 
 f64 samples --> wav_encode()   --> RIFF WAVE bytes
-f64 samples --> flac_encode()  --> FLAC bitstream (Fixed prediction, CRC, MD5)
+f64 samples --> flac_encode_level() --> FLAC bitstream, levels 0-8 as `flac -0..-8` (LPC,
+               partitioned Rice, stereo decorrelation, wasted bits, seek table, CRC, MD5)
 f64 samples --> aiff_encode()  --> AIFF bytes (big-endian)
 f64 samples --> opus_encode()  --> Ogg/Opus bitstream (CELT mode)
 f64 samples --> aac_encode()   --> ADTS/AAC-LC bitstream
@@ -96,5 +98,5 @@ tag_write_vorbis()--> Vorbis Comment bytes
 - **Distlib bundle**: No separate compilation. Consumers `include "dist/shravan.cyr"` (the `cyrius distlib` bundle of `src/shravan.cyr` + codec modules) and get all codecs; they supply stdlib + sankoch from their own manifest, `cyrius deps` pulls `bayan-json` in through shravan's `[deps.bayan]`, and they call `shravan_init_constants()` at startup.
 - **Packed Result**: Negative values are errors (bit 63 set). No heap allocation for error paths. `is_err(r)` is a single comparison.
 - **Caller-provided buffers**: Encode functions take an output buffer pointer. Decode functions return a vec (heap-allocated via bump allocator).
-- **Bump allocator**: No individual free. Decoders presize their output from the declared length and reuse per-frame scratch (FLAC's buffer ring, the Opus and AAC frame arenas), so a one-shot decode allocates about its own output; a stream holds one unfinished chunk or frame, and the sample vecs it emits belong to the caller.
+- **Bump allocator**: No individual free. Decoders presize their output from the declared length and reuse per-frame scratch (FLAC's buffer ring, the Opus and AAC frame arenas), so a one-shot decode allocates about its own output; the FLAC encoder keeps one block's scratch and hashes frame by frame, so it allocates nothing proportional to its input; a stream holds one unfinished chunk or frame, and the sample vecs it emits belong to the caller.
 - **Lazy initialisation**: Consumers call only `alloc_init` and `shravan_init_constants`; every codec builds its own tables on first use. `fuzz/run.sh` runs cold-start processes because a warm process hides a table read that precedes its initialiser.

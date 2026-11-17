@@ -14,7 +14,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (12,972 assertions)
+# Build + run the test suite (13,063 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -33,7 +33,7 @@ cyrius build src/bench.cyr build/bench
 | Module | Description |
 |--------|-------------|
 | **wav** | RIFF WAVE encoder/decoder (PCM 8/16/24/32-bit, any depth to 32 in whole-byte containers, IEEE float 32/64-bit, EXTENSIBLE) |
-| **flac** | FLAC decoder (all subframe types, SEEKTABLE seeking, `flac_verify` MD5 check), encoder (Fixed prediction) |
+| **flac** | FLAC decoder (all subframe types, SEEKTABLE seeking, `flac_verify` MD5 check); encoder at levels 0-8, the levels of `flac -0` to `-8` (LPC to order 12, partitioned Rice, stereo decorrelation, wasted bits, seek table), sizes within 0.1% of `flac`'s |
 | **aiff** | AIFF/AIFF-C encoder/decoder (big-endian, 80-bit extended sample rate; AIFF-C sowt, fl32, fl64) |
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |

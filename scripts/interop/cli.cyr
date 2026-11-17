@@ -8,9 +8,11 @@
 # Commands (sample files are raw little-endian f64, interleaved):
 #   decode  <in> <out.f64>                         codec_open; prints "rate ch bits fmt n"
 #   stream  <wav|flac|aiff> <in> <out.f64> <chunk> feed <chunk> bytes at a time
-#   encode  <in.f64> <kind> <rate> <ch> <arg> <out> kind: wav (arg = bits), wavf32,
-#                                                  wavf64, aiff (bits), flac (bits),
-#                                                  aac (arg = bit rate)
+#   encode  <in.f64> <kind> <rate> <ch> <arg> <out> [level]
+#                                                  kind: wav (arg = bits), wavf32,
+#                                                  wavf64, aiff (bits), flac (bits;
+#                                                  level 0-8, default 5), aac (arg =
+#                                                  bit rate)
 #   opusdec <in.pk> <channels> <out.f64>           raw Opus packets, each prefixed by
 #                                                  a u32le length; no pre-skip
 #   celtenc <in.f64> <channels> <bytes> <out.pk>   20 ms CELT-only frames (config 31)
@@ -208,6 +210,8 @@ fn _cli_encode() {
     var arg = atoi(argv(6));
     var n = vec_len(v);
     var o = alloc(n * 16 + 65536);
+    var level = 5;
+    if (argc() > 8) { level = atoi(argv(8)); }
     var w = err(ERR_UNSUPPORTED_FMT);
     if (streq(kind, "wav") == 1) {
         var pf = PCM_I16;
@@ -219,7 +223,7 @@ fn _cli_encode() {
     if (streq(kind, "wavf32") == 1) { w = wav_encode(v, rate, ch, PCM_F32, o); }
     if (streq(kind, "wavf64") == 1) { w = wav_encode(v, rate, ch, PCM_F64, o); }
     if (streq(kind, "aiff") == 1) { w = aiff_encode(v, rate, ch, arg, o); }
-    if (streq(kind, "flac") == 1) { w = flac_encode(v, rate, ch, arg, o); }
+    if (streq(kind, "flac") == 1) { w = flac_encode_level(v, rate, ch, arg, level, o); }
     if (streq(kind, "aac") == 1) { w = aac_encode(v, rate, ch, arg, o); }
     if (is_err(w) == 1) { _cli_fail(w); }
     _cli_write(argv(7), o, w);

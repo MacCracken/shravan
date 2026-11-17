@@ -3333,23 +3333,34 @@ fn _aac_decode_band_range(br, cb, quant_spec, base, bstart, bend) {
                         var sy = _br_read(br, 1);
                         if (res_ok(sy) == 1) { if (sy == 1) { qy = 0 - cy; } }
                     }
+                    # A failed escape ends the band and stores nothing. Until 2.10.0
+                    # it set i = bend and stored the pair anyway, at bend and
+                    # bend + 1: 16 bytes past the spectrum when the band ends the
+                    # frame (found by fuzzing under the poison allocator).
+                    var esc_bad = 0;
                     if (cx == 16) {
                         var ax = _aac_read_escape(br);
-                        if (is_err(ax) == 1) { i = bend; }
+                        if (is_err(ax) == 1) { esc_bad = 1; }
                         if (is_err(ax) == 0) {
                             if (qx < 0) { qx = 0 - ax; } else { qx = ax; }
                         }
                     }
                     if (cy == 16) {
-                        var ay = _aac_read_escape(br);
-                        if (is_err(ay) == 1) { i = bend; }
-                        if (is_err(ay) == 0) {
-                            if (qy < 0) { qy = 0 - ay; } else { qy = ay; }
+                        if (esc_bad == 0) {
+                            var ay = _aac_read_escape(br);
+                            if (is_err(ay) == 1) { esc_bad = 1; }
+                            if (is_err(ay) == 0) {
+                                if (qy < 0) { qy = 0 - ay; } else { qy = ay; }
+                            }
                         }
                     }
-                    store64(quant_spec + (base + i) * 8, qx);
-                    store64(quant_spec + (base + i + 1) * 8, qy);
-                    i = i + 2;
+                    if (esc_bad == 1) {
+                        i = bend;
+                    } else {
+                        store64(quant_spec + (base + i) * 8, qx);
+                        store64(quant_spec + (base + i + 1) * 8, qy);
+                        i = i + 2;
+                    }
                 }
             }
         }

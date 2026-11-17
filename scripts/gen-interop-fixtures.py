@@ -647,7 +647,8 @@ def main():
         p = lambda f: os.path.join(tmp, f)
 
         # FLAC: LPC subframes and stereo decorrelation, which shravan's Fixed-only
-        # encoder never writes.
+        # encoder never wrote (before 2.10.0). Being flac's own -8 output, they are
+        # also the reference size for shravan's level 8 (test_interop_flac_encoder).
         ffmpeg_make(p("s16.wav"), TONE_NOISE % (44100, "0.12"), "-c:a", "pcm_s16le")
         run("flac", "-s", "-f", "--best", p("s16.wav"), "-o", p("flac16.flac"))
         text = flac_analysis(p("flac16.flac"))

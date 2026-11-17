@@ -5,6 +5,167 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-11-16
+
+**A real FLAC encoder.** Until now shravan wrote fixed-prediction FLAC only, 28% larger than `flac`'s
+default on real recordings (26.5% of the WAV size against 20.7%). The encoder is rewritten after libFLAC
+1.5.0, the encoder behind the `flac` tool, so its nine levels mean what `flac -0` to `flac -8` mean. At
+every level shravan's output is within 0.06% of `flac`'s size, or smaller, and libFLAC and ffmpeg decode
+it sample for sample. 13,063 assertions (was 12,972).
+
+### Added — the FLAC encoder
+
+- **`flac_encode_level(samples, rate, channels, bits, level, out)`**, levels 0 to 8. `flac_encode` is
+  level 5, `flac`'s default. The presets are `flac --help`'s:
+
+| Level | Block | Stereo | Max LPC order | Max partition order | Windows |
+|---|---|---|---|---|---|
+| 0 | 1152 | independent | fixed only | 3 | |
+| 1 | 1152 | estimated | fixed only | 3 | |
+| 2 | 1152 | exhaustive | fixed only | 3 | |
+| 3 | 4096 | independent | 6 | 4 | tukey(0.5) |
+| 4 | 4096 | estimated | 8 | 4 | tukey(0.5) |
+| 5 | 4096 | exhaustive | 8 | 5 | tukey(0.5) |
+| 6 | 4096 | exhaustive | 8 | 6 | subdivide_tukey(2) |
+| 7 | 4096 | exhaustive | 12 | 6 | subdivide_tukey(2) |
+| 8 | 4096 | exhaustive | 12 | 6 | subdivide_tukey(3) |
+
+- **LPC**: per analysis window, the windowed autocorrelation, Levinson-Durbin, the order libFLAC's
+  estimate prefers, and coefficients quantised with error feedback at libFLAC's default precision. For
+  streams up to 16 bits (17 for the side channel) the precision is held where a decoder's prediction fits
+  32-bit arithmetic, as libFLAC holds it. A candidate whose residual leaves the 32-bit range RFC 9639
+  allows is dropped. `subdivide_tukey(P)` is libFLAC's: the block, its halves, then from depth 3 every
+  part and the block without it (the "punchout", from the autocorrelations).
+- **Fixed predictors**: the order 0 to 4 with the smallest absolute residual sum.
+- **Partitioned Rice**: the partition order is chosen from partition sums, up to the level's maximum,
+  and each parameter is refined by exact bit count. Streams over 16 bits may use 5-bit (RICE2) parameters.
+- **Stereo decorrelation**: "exhaustive" levels encode left, right, mid and side and keep the cheapest
+  pair (independent, left/side, right/side or mid/side). "Estimated" levels pick the pair from
+  fixed-predictor residual sums first.
+- **CONSTANT** and **VERBATIM** subframes, and **wasted bits** (trailing zero bits every sample shares,
+  as in 16-bit audio in a 24-bit container).
+- **Seek table**: a point every 10 seconds, at the frame holding it, as `flac` writes by default.
+  `flac_decode_range` and `metaflac` read it.
+- **`flac_encode_bound(frames, channels, bits)`**: the most a stream can take, every frame verbatim.
+- **Incremental MD5**: `flac_md5_new`, `flac_md5_update` and `flac_md5_final`. The encoder hashes each
+  frame as it writes it, and `flac_md5_compute` (used by `flac_verify`) no longer copies its input.
+- **`scripts/interop/cli.cyr encode ... flac`** takes an optional level.
+
+### Fixed
+
+- **AAC: a heap overrun on a truncated escape** (present in 2.9.4). When the escape of a codebook-11
+  pair was cut off, the decoder set its position to the band's end but stored the pair anyway, at the
+  band's end and one past it. In the band that ends the frame that is coefficients 1024 and 1025, 16
+  bytes past the spectrum, written into whatever the frame arena placed next. A failed escape now ends
+  the band and stores nothing. The poison-mode fuzz gate found it: the new encoder target shifted the
+  random inputs the AAC target sees, and a mutated ADTS stream hit it. `test_aac_esc_truncated_at_frame_end`
+  builds the case bit by bit, and it fails both of its assertions with the old decoder.
+- **FLAC: a heap overrun on an impossible partition order** (present in 2.9.4). A residual's first
+  partition holds `(block >> order) - predictor order` values. When that was negative the decoder
+  skipped the partition but still read the other `2^order - 1`, so up to `(2^order - 1) * (block >>
+  order)` residuals went into a buffer of `block - predictor order`. In a mutated `flac -8` file, a
+  partition order of 9 behind an order-12 predictor wrote 4,088 residuals into 4,084. The decoder now
+  refuses a partition order whose first partition is smaller than the predictor, or which does not
+  divide the block, as libFLAC does. The poison gate found it the same way, once the AAC fix let the
+  batch run on. `test_flac_residual_partition_bounds` builds that residual section bit by bit; with the
+  old reader it decodes "successfully" and writes past the buffer.
+- **Memory.** The 2.9.x encoder allocated fresh buffers in every frame against a bump allocator that
+  never frees: 113 MB to encode 29.5 s of stereo, about 2.3 GB for ten minutes. The new one keeps fixed
+  scratch sized to one block and works frame by frame: 0.95 MB, whatever the length.
+- **Streams shorter than one block** recorded their length as STREAMINFO's block size, so a stream of
+  fewer than 16 samples said its maximum block was under 16. RFC 9639 requires at least 16, and ffmpeg
+  refused those streams. STREAMINFO now records the configured block size, as libFLAC does.
+- **Arguments FLAC cannot represent**: more than 8 channels, fewer than 4 bits a sample (libFLAC's
+  minimum) or a sample rate past STREAMINFO's 20 bits produced a malformed stream. They are now refused
+  (`ERR_INVALID_CHANNELS`, `ERR_ENCODE`, `ERR_INVALID_RATE`).
+
+### Changed
+
+- `flac_encode` writes different, smaller streams. Streams from 2.9.x decode as before.
+- `flac_encode_frame` keeps its signature and encodes with level 5's analysis. The 2.9.x fixed-prediction
+  helpers (`flac_encode_subframe`, `flac_best_fixed_order` and the rest) stay public and unchanged, unused
+  by the encoder.
+
+### Verified
+
+- **Size against `flac` 1.5.0, level for level**, on 12 real recordings: the reference decodes of the
+  Opus RFC 8251 test vectors, speech and music, 48 kHz stereo 16-bit, 5.5 minutes, 61.6 MB as WAV.
+  `flac` ran with `--no-padding --no-seektable`; shravan's files include their seek table:
+
+| Level | `flac` (% of WAV) | shravan (% of WAV) | Difference |
+|---|---|---|---|
+| 0 | 30.32 | 30.33 | +0.02% |
+| 1 | 23.92 | 23.75 | −0.71% |
+| 2 | 23.65 | 23.66 | +0.01% |
+| 3 | 27.34 | 27.33 | −0.05% |
+| 4 | 21.00 | 20.97 | −0.16% |
+| 5 | 20.66 | 20.66 | −0.03% |
+| 6 | 20.55 | 20.55 | −0.04% |
+| 7 | 20.26 | 20.25 | −0.03% |
+| 8 | 20.20 | 20.18 | −0.06% |
+
+  2.9.4's encoder wrote 26.51% on the same files. Every one of the 108 files passes `flac -t` and
+  decodes through ffmpeg to exactly its input. Level 1 is smaller than `flac -1` because its estimate
+  weighs all four channel pairs with the best fixed predictor's residual sums. libFLAC 1.5.0's loose
+  mode weighs only independent against mid/side, from first differences.
+- **Hostile and edge-case input**: 1,125 cases, 125 a level at all nine levels. They cover 4 to 32 bits,
+  1 to 8 channels and rates from 1 Hz to 1,048,575 Hz, with 0 to 8,193 samples. The signals include
+  full-scale noise, square waves, alternating extremes at 32 bits (every predictor's residual leaves
+  the 32-bit range, so verbatim must take over), DC, silence, wasted-bit containers and ramps.
+  `flac -t` passes every case, `flac -d` returns every sample at whole-byte depths, and ffmpeg returns
+  every sample at every depth. NaN, ±infinity and values past full scale are clamped, and the output
+  passes `flac -t`.
+- **In the suite** (13,063 assertions, was 12,972):
+  - All nine levels decode exactly and carry a matching signature.
+  - Edge cases: short, empty, 32-bit extremes, wasted bits, constant, 8 channels at 20 bits, the bound
+    on incompressible input, MD5 in pieces.
+  - The seek table and a range decode through it.
+  - `flac`'s own `-8` fixtures re-encoded at level 8: within 0.5% of their frame bytes (measured
+    −0.06%, 0.00%, −0.02%).
+  - Each feature proven by mutation in a scratch copy, with an unmodified control passing all
+    assertions. Each mutation fails its own test: no LPC, no wasted bits, independent stereo only,
+    Rice partition order 0 only, seek points at the target sample, the old STREAMINFO block size, an
+    MD5 that skips a byte. Both decoder fixes were proven by reverting them.
+- **`scripts/interop.sh`**: 841 of 841 against this machine's deep-PLC libopus (was 816). The new cases
+  are each level against `flac -L` on the sweep's signal (shravan's frames 0.00% to 0.13% smaller), 12,
+  20 and 32 bits, 3 and 8 channels, and the seek table through `metaflac`. After the two decoder fixes
+  the FLAC, AAC, MP4, ALAC and encoder groups ran again: 394 of 394.
+- **Fuzzing**:
+  - `fuzz_decode` gains the FLAC encoder: random lengths, levels, depths, channel counts and rates over
+    hostile f64, decoded by shravan and compared with the quantised input.
+  - `./fuzz/run.sh 90000`: 990,600 calls (fuzz_codecs 810,000, fuzz_decode 90,600, fuzz_opus 90,000) and
+    2,200 cold starts, 0 crashes. The same with `--poison`, 0 redzone violations, after the two fixes
+    above. Before them it found both.
+  - 40 further poison batches (seeds 100 to 139): none.
+- **Other gates**: `scripts/check-collisions.sh` finds no collisions. `cyrius distlib --check` passes with
+  the same single platform warning (`is_err` on x86_64-windows). `cyrius vet`: 0 untrusted, 0 missing.
+  Write lengths are correct, and every changed file is canonically formatted.
+
+### Performance
+
+`src/bench.cyr`, 2.9.4 against 2.10.0 in one session, alternating, pinned to one core, best of three.
+The stereo rows are new; their 2.9.4 column is 2.9.4's `flac_encode` on the same signal:
+
+| Benchmark | 2.9.4 | 2.10.0 | Change |
+|---|---|---|---|
+| flac_encode_1sec_i16 (level 5) | 10.84 ms | 5.63 ms | −48.1% |
+| flac_encode_stereo_l0 (new) | 22.85 ms | 8.38 ms | −63.3% |
+| flac_encode_stereo_l5 (new) | 22.95 ms | 17.70 ms | −22.8% |
+| flac_encode_stereo_l8 (new) | 22.88 ms | 56.26 ms | +145.9% |
+| flac_decode_1sec_i16 | 3.30 ms | 3.19 ms | −3.2% |
+| flac_stream_1sec_i16 | 3.84 ms | 3.74 ms | −2.6% |
+| aac_decode_1sec_stereo | 22.43 ms | 22.84 ms | +1.8% |
+
+Levels 0 and 5 are faster than 2.9.4's encoder and write about 22% less. Level 8 does more analysis
+and takes 2.5 times as long, as `flac -8` does against `flac -0`. The rest of the table is within noise.
+On a 29.5 s stereo recording level 5 encodes in 0.65 s (45 times real time), level 8 in 1.9 s and level
+0 in 0.31 s. `bench-history.csv` gains the rows stamped `2026-11-17T00:39:25Z`. They were recorded
+before commit, so they carry 2.9.4's hash (001921b).
+
+### Also
+
+- The resolved `_fft_pow2` issue moved to `docs/development/issues/archived/`.
+
 ## [2.9.4] - 2026-11-16
 
 **Namespace hygiene.** One issue, filed from dhvani: shravan's private `_fft_pow2` had abaco 2.8.0's
@@ -16,7 +177,7 @@ output changes. 12,972 assertions (was 12,960).
 ### Fixed
 
 - **`_fft_pow2` renamed `_shr_fft_pow2`**
-  (`docs/development/issues/2026-11-08-fft-pow2-clashes-with-abaco-2-8-0.md`). The two differed at
+  (`docs/development/issues/archived/2026-11-08-fft-pow2-clashes-with-abaco-2-8-0.md`). The two differed at
   `n = 1`: abaco counts 1 as a power of two and shravan does not. With abaco included first, the order
   dhvani uses, shravan's copy won, and abaco's `fft_twiddles(t, 1)` and `fft(.., 1, t, 1)` returned
   Err. abaco is the ecosystem's math library and keeps the name. Measured with the issue's repro: both

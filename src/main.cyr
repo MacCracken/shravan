@@ -1146,6 +1146,33 @@ fn test_aac_reserved_cb_no_hang() {
     return 0;
 }
 
+# A codebook-11 escape cut off by the end of the data, in the band that ends the
+# frame. Until 2.10.0 the failed escape still stored its pair, at coefficients 1024
+# and 1025: 16 bytes past the spectrum, an overrun the poison-allocator fuzz found.
+fn test_aac_esc_truncated_at_frame_end() {
+    syscall(1, 1, "test: aac escape cut off at the frame end\n", 42);
+    if (_aac_swb_offset == 0) { _aac_init_swb(); }
+    _aac_ensure_huff_tables();
+    var bw = _bw_new();
+    var eidx = 16 * 17;                   # x escaped, y = 0
+    _bw_write(bw, load64(_aac_hcb11_codes + eidx * 8), load64(_aac_hcb11_lens + eidx * 8));
+    _bw_write(bw, 0, 1);                  # sign of x
+    _bw_write(bw, 0x1FFFF, 17);           # 17 prefix ones: no escape is that long
+    var st = _bw_flush(bw);
+    var br = _br_new(load64(st), load64(st + 8));
+    var quant = alloc((AAC_FRAME_SIZE + 4) * 8);
+    memset(quant, 0, AAC_FRAME_SIZE * 8);
+    var k = 0;
+    while (k < 4) {
+        store64(quant + (AAC_FRAME_SIZE + k) * 8, 0x5A5A5A5A5A5A5A5A);
+        k = k + 1;
+    }
+    _aac_decode_band_range(br, 11, quant, 0, AAC_FRAME_SIZE - 2, AAC_FRAME_SIZE);
+    assert_eq(load64(quant + AAC_FRAME_SIZE * 8), 0x5A5A5A5A5A5A5A5A, "nothing stored at coefficient 1024");
+    assert_eq(load64(quant + (AAC_FRAME_SIZE + 1) * 8), 0x5A5A5A5A5A5A5A5A, "nothing stored at coefficient 1025");
+    return 0;
+}
+
 fn test_stream_aiff_chunking() {
     syscall(1, 1, "test: aiff stream chunking\n", 27);
 
@@ -2272,7 +2299,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.9.4 — audio codecs for AGNOS (Cyrius)\n", 51);
+syscall(1, 1, "shravan v2.10.0 — audio codecs for AGNOS (Cyrius)\n", 52);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2313,6 +2340,10 @@ test_flac_encode_decode_24bit();
 test_flac_verify();
 test_flac_reject_invalid();
 test_flac_block_size_codes();
+test_flac_encode_levels();
+test_flac_encode_edges();
+test_flac_encode_seektable();
+test_flac_residual_partition_bounds();
 test_ogg_crc32_known_vectors();
 test_ogg_page_parse_roundtrip();
 test_ogg_reject_invalid_magic();
@@ -2372,6 +2403,7 @@ test_ogg_opus_dispatch();
 test_aac_audio_roundtrip();
 test_aac_stereo_roundtrip();
 test_aac_reserved_cb_no_hang();
+test_aac_esc_truncated_at_frame_end();
 test_aac_encode_decode_roundtrip();
 test_tag_write_id3v2_roundtrip();
 test_tag_write_vorbis_roundtrip();

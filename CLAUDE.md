@@ -18,7 +18,7 @@ All shravan source lives in `src/`; `lib/` holds only the vendored Cyrius
 stdlib snapshot (via `cyrius lib sync`). `src/shravan.cyr` is the **library**
 (error, format, PCM, WAV, AIFF, ALAC, codec dispatch, decode_file/reader); the
 codec modules (FLAC, Ogg, MP3, Opus, AAC, …) are `src/*.cyr`. The **test harness
-is one entry point**, `src/main.cyr`, running the whole 12,972-assertion suite
+is one entry point**, `src/main.cyr`, running the whole 13,063-assertion suite
 (core codecs, Opus decode, the CELT encoder, SILK golden vectors, the real-file
 interop fixtures). It was split into three until 2.9.3 for a ~3.15 MB code buffer
 that has been a growable 64 MiB region since Cyrius 6.4.49. `cyrius distlib`
@@ -50,7 +50,8 @@ scripts/         -- test-all.sh, bench-history.sh, version-bump.sh,
                     build-libopus.sh): the reference sweep against ffmpeg/flac/
                     mpg123/libopus (CI job)
 fuzz/            -- fuzz_codecs.cyr (stubbed lib), fuzz_decode.cyr (real lib:
-                    codec_open/WAV/AIFF/ALAC/FLAC/MP3/Ogg/MP4/AAC/streams/tags),
+                    codec_open/WAV/AIFF/ALAC/FLAC/MP3/Ogg/MP4/AAC/streams/tags,
+                    and the FLAC encoder's round trip on hostile f64 input),
                     fuzz_opus.cyr (damaged libopus packets), run.sh
 docs/            -- architecture, roadmap
 ```
@@ -71,7 +72,7 @@ appear in `lib/` untracked and must be added.
 ```sh
 cyrius lib sync                             # vendor [deps].stdlib from the pin (after a pin bump)
 cyrius deps                                 # resolve git deps + refresh cyrius.lock
-./scripts/test-all.sh                       # build + run the suite (12,972 assertions)
+./scripts/test-all.sh                       # build + run the suite (13,063 assertions)
 cyrius build src/main.cyr build/shravan    # the same by hand (Cyrius 6.7.18)
 ./build/shravan
 ./scripts/interop.sh                        # reference sweep: ffmpeg, flac, mpg123, libopus (needs libopus-dev)
@@ -97,7 +98,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 | aiff | src/shravan.cyr | AIFF/AIFF-C encode/decode (big-endian, 80-bit extended sample rate; AIFF-C NONE/twos/sowt/fl32/fl64, other compressions refused) |
 | alac | src/shravan.cyr | Apple Lossless decoder: adaptive Rice and LPC, stereo unmix, shifted bytes, surround channel order. `alac_decode_frames` takes container frames; MP4/QuickTime route to it. Bit-exact vs ffmpeg |
 | codec | src/shravan.cyr | Auto-detect format and dispatch to decoder. One-shot decodes stop at `shravan_set_max_samples` (default 2^26 interleaved samples) with `ERR_TOO_LARGE`, presized from the declared length |
-| flac | src/flac.cyr | FLAC decode (all subframe types to 32-bit, Rice coding, channel decorrelation; one frame decoder, `_flac_frame`, shared by one-shot, range and stream; `flac_verify` checks the STREAMINFO MD5) and encode (Fixed prediction only). Decode bit-exact vs the flac CLI |
+| flac | src/flac.cyr | FLAC decode (all subframe types to 32-bit, Rice coding, channel decorrelation; one frame decoder, `_flac_frame`, shared by one-shot, range and stream; `flac_verify` checks the STREAMINFO MD5) and encode: `flac_encode_level` 0-8, the levels of `flac -0` to `-8` (LPC to order 12 over tukey/subdivide_tukey windows, partitioned Rice, stereo decorrelation, wasted bits, CONSTANT/VERBATIM, a seek table every 10 s; fixed scratch, nothing proportional to the input), `flac_encode` = level 5. Decode bit-exact vs the flac CLI; encode sizes within 0.1% of `flac -L`, libFLAC and ffmpeg decode it exactly |
 | ogg | src/ogg.cyr | Ogg container parse/mux (CRC32, page extraction, lacing) |
 | mp3 | src/mp3.cyr | MP3 decode → PCM: MPEG-1/2/2.5 Layer III (reservoir, Huffman, requant, IMDCT, polyphase synth) + Layer II + Layer I (subband PCM), free format, LAME/Xing/VBRI frames skipped. ISO conformance vectors within 1 LSB; Layer III exact vs ffmpeg at all 9 rates |
 | tag | src/tag.cyr | ID3v2 and Vorbis Comment metadata tag reading and writing. ID3v2 de-unsynchronisation, v2.3 and v2.4 frame flags, zlib-compressed frames inflated with sankoch (per-frame and per-tag limits) |
@@ -129,7 +130,7 @@ cyrius build src/bench.cyr build/bench     # compile benchmarks
 
 0. Read roadmap, CHANGELOG, and open issues -- know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `./scripts/test-all.sh`, verify all 12,972 assertions pass
+2. Cleanliness check: `./scripts/test-all.sh`, verify all 13,063 assertions pass
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Internal deep review (performance, memory, correctness, edge cases)
 5. External research -- audio codec specs (WAV, FLAC, AIFF, Ogg, MP3, Opus, AAC, ALAC), PCM standards
