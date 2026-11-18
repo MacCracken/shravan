@@ -1336,20 +1336,40 @@ fn silk_add_sat32(a, b) { return silk_sat32(a + b); }
 fn silk_smlabb_ovflw(a, b, c) { return silk_sx32(a + _i16(b) * _i16(c)); }
 
 # silk_LPC_analysis_filter (#else scalar branch): out[len] from in[len], MA coefs B[d] (Q12).
-# in/out are int16 values held in i64 slots.
+# in/out are int16 values held in i64 slots. The arithmetic is inline (2.12.3):
+# each product of two int16 casts (the coefficients cast once, into _lpcf_b), the
+# sum wrapped to int32 once per sample (silk_SMLABB_ovflw's wraps are reduction
+# mod 2^32, and d <= 16 products under 2^30 cannot overflow 64 bits); the final
+# shift arithmetic through a 2^62 bias (|acc| < 2^31).
+var _lpcf_b = 0;
 fn silk_lpc_analysis_filter(out, inp, B, len, d) {
+    var W32 = 4294967295;
+    var H31 = 2147483648;
+    if (_lpcf_b == 0) { _lpcf_b = alloc(32 * 8); }
+    var bb = _lpcf_b;
+    if (d > 32) { d = 32; }                    # LPC orders are 10 and 16: never taken
+    var j = 0;
+    while (j < d) { store64(bb + j * 8, ((load64(B + j * 8) & 0xFFFF) ^ 0x8000) - 0x8000); j = j + 1; }
+    var be = bb + d * 8;
     var ix = d;
     while (ix < len) {
         # in_ptr = &in[ix-1]; out32_Q12 = sum_{j=0..d-1} in_ptr[-j]*B[j]  (ovflw)
-        var acc = silk_smulbb(load64(inp + (ix - 1) * 8), load64(B + 0));
-        var j = 1;
-        while (j < d) {
-            acc = silk_smlabb_ovflw(acc, load64(inp + (ix - 1 - j) * 8), load64(B + j * 8));
-            j = j + 1;
+        var ip = inp + (ix - 1) * 8;
+        var bp = bb;
+        var acc = 0;
+        while (bp < be) {
+            acc = acc + (((load64(ip) & 0xFFFF) ^ 0x8000) - 0x8000) * load64(bp);
+            ip = ip - 8;
+            bp = bp + 8;
         }
+        acc = ((acc + H31) & W32) - H31;
         # out32_Q12 = (in[ix] << 12) - acc  (ovflw); out32 = RSHIFT_ROUND(.,12); SAT16
-        acc = silk_sub32_ovflw(load64(inp + ix * 8) << 12, acc);
-        store64(out + ix * 8, silk_sat16(silk_rshift_round(acc, 12)));
+        var w = (load64(inp + ix * 8) << 12) - acc;
+        acc = ((w + H31) & W32) - H31;
+        var o = ((acc + 2048 + 4611686018427387904) >> 12) - 1125899906842624;
+        if (o > 32767) { o = 32767; }
+        if (o < 0 - 32768) { o = 0 - 32768; }
+        store64(out + ix * 8, o);
         ix = ix + 1;
     }
     var z = 0;

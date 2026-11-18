@@ -15,7 +15,8 @@ SILK encoder runs at every complexity (libopus's delayed-decision quantiser from
 internal rate packet by packet through libopus's low-pass transition. shravan's packets, final ranges
 and getters are libopus's `opus_encode_float`'s, packet for packet: 6,391 in 96 configurations in the
 suite. On real speech and music libopus decodes them within 0.003 of its own encoder's correlation.
-15,929 assertions (was 15,550).
+At libopus's default complexity, 9, a second of 48 kHz audio encodes in 85 ms (12× real time) mono,
+162 ms in stereo. 15,929 assertions (was 15,550).
 
 ### Added
 
@@ -63,6 +64,13 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
     of a voiced frame without NLSF interpolation, where the LTP state is re-whitened.
   - `_sk_nsq_wrapper` picks it as libopus does (more than one state, or warped shaping);
     `silk_encoder_new`, `_new_api` and `_new_channels` take complexity 0 to 10.
+  - Its arithmetic is inline (each sample of each state went through some 500 helper calls). Three
+    identities, stated beside the code, keep it exact: `silk_SMULWB(b, c)` is `floor(b · (int16)c /
+    2^16)`; an arithmetic shift is `((x + 2^62) >> n) − 2^(62−n)` for products under 2^62; and the
+    int32 wrap is reduction mod 2^32, so a sum whose partial values feed only its next term is
+    wrapped once. The int16 casts and int32 wraps stay wherever libopus's macros apply them, but for
+    the levels' cast before × Lambda, a no-op (they stay within ±32,656). A replaced state copies
+    the 16 words of its LPC history that are read again, not all of them, eight words at a time.
 - **SILK's per-packet control** (`silk_control_encoder`):
   - `silk_control_audio_bandwidth`'s state machine: a transition down (the low-pass from full band
     to the next rate over 128 frames), `switchReady` with the budget's cut, the switch on
@@ -102,6 +110,9 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
   libopus's API has: its `opus_encode`, `opus_encode_vbr`, `opus_encode_frame*`, `opus_encoder_*` and
   `OPUS_SIGNAL_*` are `opus_legacy_*` now.
 - `dist/shravan.cyr` includes `src/opus_enc.cyr`.
+- `silk_lpc_analysis_filter` (the decoder's LTP re-whitening and both quantisers') does its
+  arithmetic inline: the coefficients cast once into a lazily allocated scratch, the sum of each
+  sample's products wrapped once.
 
 ### Verified
 
@@ -137,6 +148,9 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
   giving a new encoder's packets, memory flat over 2 s of every frame size, every frame size decoding
   to its length; NaN, infinities, huge, denormal, DC and square input with every ctl changing at
   random packet by packet, every packet within its buffer and the stream decoding to finite audio.
+- **The speed-up kept every bit**: the generator, which compares shravan's packets with libopus's
+  byte for byte on all 96 configurations, rewrote `src/silk_enc_vectors.cyr` unchanged after each
+  step, and the `silk` and `opusenc` interop groups pass 151 of 151.
 - **Beyond the suite** every packet that parts from libopus's traces to a float near-tie: a shaping
   coefficient (`AR_Q13`, the low-frequency shaping or the harmonic gain) within 0.005 of a rounding tie
   in libopus's single precision, every other input equal; the packets after follow. A 10 s bandwidth
@@ -155,7 +169,7 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
   with every fifth packet lost recovering 0.92–0.96 from 0.80–0.86 concealed (libopus's own
   0.88–0.97); DTX on silence between bursts leaving out the packets libopus's does; a rate falling to
   8 kbit/s and back moving the bandwidth down and up at libopus's packets (235 and 516).
-- **Mutations**: 211 tried, 176 caught: 118 at once, 58 by inputs the search found (a rate either
+- **Mutations**: 211 tried on the new encoder code, 176 caught: 118 at once, 58 by inputs the search found (a rate either
   side of each threshold, found by emulating the integer decision; bandwidth switching on white noise,
   which lets SILK switch often; 60 ms packets for the upward transition's end; anti-phase stereo;
   CBR at 19.4 kbit/s). 29 are equivalent, each with its reason: equal thresholds masking a raised one,
@@ -165,9 +179,13 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
   high-pass smoother, SILK over its budget). 4 stay below observability: 1-LSB changes to two
   low-pass coefficients (2^24 changes are caught), a stale low-pass state of a few LSB under the
   quantiser's step, and a trailing zero after a 3-byte payload. 2 did not compile; one, rewritten,
-  was caught, the other is in a PLC branch `RESTRICTED_SILK` never reaches. The search found one fidelity gap: the bandwidth thresholds'
-  interpolation shifted logically where libopus shifts arithmetically (libopus's tables never make
-  the term negative; it is `sar` now).
+  was caught, the other is in a PLC branch `RESTRICTED_SILK` never reaches. The search found one
+  fidelity gap: the bandwidth thresholds' interpolation shifted logically where libopus shifts
+  arithmetically (libopus's tables never make the term negative; it is `sar` now). Then 26 on the
+  inlined quantiser, its rescaling and the LPC filter: 22 caught; 3 equivalent (no level lies on a
+  pulse's rounding tie, the oldest LTP shaping samples lie beyond the longest lag, the residual's
+  cast holds under any Lambda SILK makes); the fourth showed the levels' int16 cast to be a no-op,
+  and it is gone.
 - **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included. The
   poison mode's first pass caught an overrun in the new target's ninth batch: each frame of an 80 to
   120 ms packet was coded into a 1,280-byte scratch, but its budget, behind a buffer past 7,656 bytes
@@ -184,30 +202,36 @@ suite. On real speech and music libopus decodes them within 0.003 of its own enc
 
 ### Performance
 
-Pinned to one core, 2.12.2 and 2.12.3 alternating in one session, three rounds each (medians):
+The delayed-decision quantiser first ran at 2.0 ms a 20 ms frame: each sample of each state went
+through some 500 helper calls (`silk_SMLAWB` alone is six: itself, `silk_SMULWB`, `_i16`, two `sar`,
+`silk_sx32`), and a replaced state was copied a word at a time, 285 words, on 89% of samples. Pinned to
+one core, in one session, the builds before and after:
+
+| Benchmark | before | after | Real-time multiple |
+|-----------|--------|-------|--------------------|
+| `silk_nsq_del_dec_20ms_wb` (new: four states, warped) | 2,014 µs | 491 µs (4.1×) | |
+| `opus_encode_1sec_48k_silk24k_cx9` (new: libopus's default complexity) | 186.2 ms | 84.6 ms (2.2×) | ~12× |
+| `opus_encode_1sec_48k_stereo40k_cx9` (new) | 363.9 ms | 162.3 ms (2.2×) | ~6× |
+| `opus_encode_1sec_48k_silk24k_cx1` (new) | 54.8 ms | 53.8 ms | ~19× |
+
+Then against 2.12.2, six rounds alternating (ABBA), medians. Code no change touched (the decoders,
+FLAC, AAC, CELT) reads 1.4% slower in the new build (+0.4% to +2.8%), which is the binary's size and
+layout, not its code; against that the SILK side is level or faster:
 
 | Benchmark | 2.12.2 | 2.12.3 | Real-time multiple |
 |-----------|--------|--------|--------------------|
-| `opus_encode_1sec_48k_silk24k_cx9` (new: 1 s at 48 kHz, 24 kbit/s, libopus's default complexity) | | 185.3 ms | ~5.4× |
-| `opus_encode_1sec_48k_silk24k_cx1` (new: the same at complexity 1) | | 55.0 ms | ~18× |
-| `opus_encode_1sec_48k_stereo40k_cx9` (new: stereo at 40 kbit/s, complexity 9) | | 364.3 ms | ~2.7× |
-| `silk_nsq_del_dec_20ms_wb` (new: the delayed-decision quantiser, four states, warped) | | 2.0 ms | |
-| `silk_nsq_20ms_wb` | 387.9 µs | 389.4 µs (+0.4%) | |
-| `silk_encode_1sec_wb_voiced20k` | 42.2 ms | 42.1 ms (−0.2%) | ~24× |
-| `silk_encode_1sec_48k_wb_fec20k` | 72.1 ms | 72.0 ms (−0.2%) | ~14× |
-| `silk_encode_1sec_wb_stereo32k` | 75.4 ms | 75.0 ms (−0.6%) | ~13× |
-| `silk_encode_1sec_wb_vbr20k` | 31.3 ms | 31.6 ms (+1.0%) | ~32× |
-| `silk_encode_1sec_wb_cbr12k` | 70.3 ms | 70.6 ms (+0.4%) | ~14× |
-| `silk_lpc_analysis_20ms_wb` | 257.9 µs | 265.6 µs (+3.0%) | |
+| `silk_nsq_20ms_wb` (the LPC filter) | 398.2 µs | 377.3 µs (−5.2%) | |
+| `silk_encode_1sec_wb_voiced20k` | 43.0 ms | 42.5 ms (−1.1%) | ~24× |
+| `silk_encode_1sec_48k_wb_fec20k` | 73.4 ms | 72.1 ms (−1.8%) | ~14× |
+| `silk_encode_1sec_wb_stereo32k` | 76.9 ms | 76.7 ms (−0.2%) | ~13× |
+| `silk_encode_1sec_wb_vbr20k` | 32.1 ms | 32.6 ms (+1.6%) | ~31× |
+| `silk_encode_1sec_wb_cbr12k` | 72.0 ms | 72.8 ms (+1.2%) | ~14× |
 
-The per-packet control costs the SILK benches nothing measurable. Complexity 9 costs 3.4× complexity 1
-through the whole encoder: the delayed-decision quantiser is 5.2× the plain one, and four states of it
-take about half of the complexity 9 encode; the rest is the pitch search at its full complexity, the
-24th-order warped shaping analysis and the interpolation search over all NLSF survivors. That
-quantiser calls a helper for each multiply and saturation, as the stereo stage did before 2.12.2
-inlined it; it is the place to look for speed. `silk_lpc_analysis_20ms_wb` creates an encoder state
-every run, which is now set up the way the first packet's control does it. Every other benchmark moved
-between −0.7% and +1.4%, which is noise.
+Complexity 9 still costs 1.6× complexity 1 through the whole encoder; the quantiser's four states are
+now under a third of it, and the rest is the full pitch search, the 24th-order warped shaping analysis and
+the NLSF search over all 16 survivors. A layout trap on the way: the LPC filter inlined with a wrap per
+product made the complexity 1 encodes 4% slower in one build and 2% faster in another (the quantiser
+rewrite, which they never run, moved them); with one wrap per sample it is faster in both.
 
 ## [2.12.2] - 2026-11-17
 

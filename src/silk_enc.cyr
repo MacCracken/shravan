@@ -2820,8 +2820,16 @@ fn _skss(ss, k, j, f) { return ss + ((k * 2 + j) * _SKSS_WORDS + f) * 8; }
 
 # silk_nsq_del_dec_scale_states: as _sk_nsq_scale_states, with every state's
 # filter memories and delayed values rescaled when the gain changes, and the
-# LTP state only up to the decision delay.
+# LTP state only up to the decision delay. silk_SMULWW and silk_SMULWB are
+# inline (2.12.3): the input by inv26 (under 2^26), the LTP state by inv31
+# (int16 operand), and the states by the gain ratio adj (positive, under 2^31:
+# every product under 2^62, shifted through the 2^62 bias); a ratio outside
+# that range takes the helper.
 fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstates, LTP_scale_Q14, gains, pitchL, sig, dD) {
+    var B62 = 4611686018427387904;
+    var B46 = 70368744177664;
+    var W32 = 4294967295;
+    var H31 = 2147483648;
     var sl = load64(st + _SKE_SUBFR_LEN);
     var lm = load64(st + _SKE_LTP_MEM);
     var lag = load64(pitchL + subfr * 8);
@@ -2830,9 +2838,11 @@ fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstate
     if (gm < 1) { gm = 1; }
     var inv31 = silk_inverse32_varq(gm, 47);
     var inv26 = silk_rshift_round(inv31, 5);
+    var v = 0;
     var i = 0;
     while (i < sl) {
-        store64(x_sc + i * 8, _sk_smulww(load64(x16 + i * 8), inv26));
+        v = ((load64(x16 + i * 8) * inv26 + B62) >> 16) - B46;
+        store64(x_sc + i * 8, ((v + H31) & W32) - H31);
         i = i + 1;
     }
     var lidx = load64(nsq + _SKN_SLTP_IDX);
@@ -2840,41 +2850,96 @@ fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstate
         if (subfr == 0) { inv31 = silk_sx32(silk_smulwb(inv31, LTP_scale_Q14) << 2); }
         i = lidx - lag - 2;
         while (i < lidx) {
-            store64(sLTP_Q15 + i * 8, silk_smulwb(inv31, load64(sLTP + i * 8)));
+            store64(sLTP_Q15 + i * 8, ((inv31 * (((load64(sLTP + i * 8) & 0xFFFF) ^ 0x8000) - 0x8000) + B62) >> 16) - B46);
             i = i + 1;
         }
     }
     if (g != load64(nsq + _SKN_PREV_GAIN)) {
         var adj = silk_div32_varq(load64(nsq + _SKN_PREV_GAIN), g, 16);
         var sidx = load64(nsq + _SKN_SHP_IDX);
-        i = sidx - lm;
-        while (i < sidx) {
-            store64(nsq + _SKN_SLTP_SHP + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SLTP_SHP + i * 8)));
-            i = i + 1;
-        }
-        if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
-            i = lidx - lag - 2;
-            while (i < lidx - dD) {
-                store64(sLTP_Q15 + i * 8, _sk_smulww(adj, load64(sLTP_Q15 + i * 8)));
+        if (adj >= 0 && adj < H31) {
+            var a = nsq + _SKN_SLTP_SHP + (sidx - lm) * 8;
+            var ae = nsq + _SKN_SLTP_SHP + sidx * 8;
+            while (a < ae) {
+                v = ((adj * load64(a) + B62) >> 16) - B46;
+                store64(a, ((v + H31) & W32) - H31);
+                a = a + 8;
+            }
+            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
+                a = sLTP_Q15 + (lidx - lag - 2) * 8;
+                ae = sLTP_Q15 + (lidx - dD) * 8;
+                while (a < ae) {
+                    v = ((adj * load64(a) + B62) >> 16) - B46;
+                    store64(a, ((v + H31) & W32) - H31);
+                    a = a + 8;
+                }
+            }
+            var k = 0;
+            while (k < nstates) {
+                var p = _skdd(dd, k, 0);
+                # LF_AR and DIFF (words 320, 321), sLPC_Q14's 16 newest, sAR2,
+                # and the delayed Pred and Shape
+                v = ((adj * load64(p + _SKDD_LF_AR * 8) + B62) >> 16) - B46;
+                store64(p + _SKDD_LF_AR * 8, ((v + H31) & W32) - H31);
+                v = ((adj * load64(p + _SKDD_DIFF * 8) + B62) >> 16) - B46;
+                store64(p + _SKDD_DIFF * 8, ((v + H31) & W32) - H31);
+                a = p + _SKDD_LPC * 8;
+                ae = a + 16 * 8;
+                while (a < ae) {
+                    v = ((adj * load64(a) + B62) >> 16) - B46;
+                    store64(a, ((v + H31) & W32) - H31);
+                    a = a + 8;
+                }
+                a = p + _SKDD_AR2 * 8;
+                ae = a + 24 * 8;
+                while (a < ae) {
+                    v = ((adj * load64(a) + B62) >> 16) - B46;
+                    store64(a, ((v + H31) & W32) - H31);
+                    a = a + 8;
+                }
+                a = p + _SKDD_PRED * 8;
+                ae = a + 40 * 8;
+                var a2 = p + _SKDD_SHAPE * 8;
+                while (a < ae) {
+                    v = ((adj * load64(a) + B62) >> 16) - B46;
+                    store64(a, ((v + H31) & W32) - H31);
+                    v = ((adj * load64(a2) + B62) >> 16) - B46;
+                    store64(a2, ((v + H31) & W32) - H31);
+                    a = a + 8;
+                    a2 = a2 + 8;
+                }
+                k = k + 1;
+            }
+        } else {
+            i = sidx - lm;
+            while (i < sidx) {
+                store64(nsq + _SKN_SLTP_SHP + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SLTP_SHP + i * 8)));
                 i = i + 1;
             }
-        }
-        var k = 0;
-        while (k < nstates) {
-            var p = _skdd(dd, k, 0);
-            store64(p + _SKDD_LF_AR * 8, _sk_smulww(adj, load64(p + _SKDD_LF_AR * 8)));
-            store64(p + _SKDD_DIFF * 8, _sk_smulww(adj, load64(p + _SKDD_DIFF * 8)));
-            i = 0;
-            while (i < 16) { store64(p + (_SKDD_LPC + i) * 8, _sk_smulww(adj, load64(p + (_SKDD_LPC + i) * 8))); i = i + 1; }
-            i = 0;
-            while (i < 24) { store64(p + (_SKDD_AR2 + i) * 8, _sk_smulww(adj, load64(p + (_SKDD_AR2 + i) * 8))); i = i + 1; }
-            i = 0;
-            while (i < 40) {
-                store64(p + (_SKDD_PRED + i) * 8, _sk_smulww(adj, load64(p + (_SKDD_PRED + i) * 8)));
-                store64(p + (_SKDD_SHAPE + i) * 8, _sk_smulww(adj, load64(p + (_SKDD_SHAPE + i) * 8)));
-                i = i + 1;
+            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
+                i = lidx - lag - 2;
+                while (i < lidx - dD) {
+                    store64(sLTP_Q15 + i * 8, _sk_smulww(adj, load64(sLTP_Q15 + i * 8)));
+                    i = i + 1;
+                }
             }
-            k = k + 1;
+            var k2 = 0;
+            while (k2 < nstates) {
+                var p2 = _skdd(dd, k2, 0);
+                store64(p2 + _SKDD_LF_AR * 8, _sk_smulww(adj, load64(p2 + _SKDD_LF_AR * 8)));
+                store64(p2 + _SKDD_DIFF * 8, _sk_smulww(adj, load64(p2 + _SKDD_DIFF * 8)));
+                i = 0;
+                while (i < 16) { store64(p2 + (_SKDD_LPC + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_LPC + i) * 8))); i = i + 1; }
+                i = 0;
+                while (i < 24) { store64(p2 + (_SKDD_AR2 + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_AR2 + i) * 8))); i = i + 1; }
+                i = 0;
+                while (i < 40) {
+                    store64(p2 + (_SKDD_PRED + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_PRED + i) * 8)));
+                    store64(p2 + (_SKDD_SHAPE + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_SHAPE + i) * 8)));
+                    i = i + 1;
+                }
+                k2 = k2 + 1;
+            }
         }
         store64(nsq + _SKN_PREV_GAIN, g);
     }
@@ -2887,78 +2952,176 @@ fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstate
 # states whose dither seed has parted from the winner's at that point are
 # penalised, and the worst first choice is replaced by the best second one.
 # sbi: a one-word cell holding the index of the newest delayed sample.
+#
+# The arithmetic is inline (2.12.3): each sample of each state went through
+# some 500 helper calls. silk_SMULWB(b, c) is floor(b * (int16)c / 2^16)
+# exactly ((b >> 16) * c + ((b & 0xFFFF) * c) >> 16 is that floor), and an
+# arithmetic shift of x by n is ((x + 2^62) >> n) - 2^(62 - n) for |x| under
+# 2^62, which every product here is (int32 by int16 or int32 by a Q10 gain
+# under 2^25). The int16 casts and int32 wraps of libopus's macros stay where
+# they apply: the coefficients are cast once a subframe; each SMLAWB, SMLAWT,
+# SMULBB and SMLABB wraps or casts as the helpers did (W32/H31: the wrap). The
+# wrap is reduction mod 2^32, so a sum whose partial values feed only its next
+# term (the LTP and LPC predictions, the shaping filter's output) is wrapped once
+# at its end: wrap(wrap(a + x) + y) = wrap(a + x + y), and 24 terms under 2^31
+# do not overflow 64 bits.
 fn _sk_nsq_dd_quantizer(nsq, dd, ss, nstates, sig, x_Q10, pulses, xq, sLTP_Q15, dgain, a_Q12, b_Q14, ar_Q13, lag,
   harm_packed, tilt_Q14, lf_Q14, gain_Q16, lambda_Q10, offset_Q10, length, subfr, so, po, warp, sbi, dD) {
-    var shp = nsq + _SKN_SLTP_SHP + (load64(nsq + _SKN_SHP_IDX) - lag + 1) * 8;      # HARM_SHAPE_FIR_TAPS / 2
-    var pred = sLTP_Q15 + (load64(nsq + _SKN_SLTP_IDX) - lag + 2) * 8;               # LTP_ORDER / 2
+    var B62 = 4611686018427387904;           # 2^62
+    var B46 = 70368744177664;                # 2^62 >> 16
+    var B58 = 288230376151711744;            # 2^62 >> 4
+    var B52 = 4503599627370496;              # 2^62 >> 10
+    var B54 = 18014398509481984;             # 2^62 >> 8
+    var W32 = 4294967295;
+    var H31 = 2147483648;
+    var S31 = 2147483647;
+    var oLPC = _SKDD_LPC * 8;
+    var oRAND = _SKDD_RAND * 8;
+    var oQ = _SKDD_Q * 8;
+    var oXQ = _SKDD_XQ * 8;
+    var oPRED = _SKDD_PRED * 8;
+    var oSHAPE = _SKDD_SHAPE * 8;
+    var oAR2 = _SKDD_AR2 * 8;
+    var oLF = _SKDD_LF_AR * 8;
+    var oDIFF = _SKDD_DIFF * 8;
+    var oSEED = _SKDD_SEED * 8;
+    var oRD = _SKDD_RD * 8;
+    var SDD = _SKDD_WORDS * 8;
+    var SSS = _SKSS_WORDS * 8;
+    # the coefficients as the int16 the macros cast them to
+    var a16 = _opus_tmp(16 * 8);
+    var ar16 = _opus_tmp(24 * 8);
+    var b16 = _opus_tmp(5 * 8);
+    var t = 0;
+    while (t < po) { store64(a16 + t * 8, _i16(load64(a_Q12 + t * 8))); t = t + 1; }
+    t = 0;
+    while (t < so) { store64(ar16 + t * 8, _i16(load64(ar_Q13 + t * 8))); t = t + 1; }
+    t = 0;
+    while (t < 5) { store64(b16 + t * 8, _i16(load64(b_Q14 + t * 8))); t = t + 1; }
+    var w16 = _i16(warp);
+    var tilt16 = _i16(tilt_Q14);
+    var lf_lo = _i16(lf_Q14);
+    var lf_hi = sar(lf_Q14, 16);
+    var hp_lo = _i16(harm_packed);
+    var hp_hi = sar(harm_packed, 16);
+    var lam16 = _i16(lambda_Q10);
+    var rdo = lambda_Q10 / 2 - 512;
+    var sidx = load64(nsq + _SKN_SHP_IDX);
+    var lidx = load64(nsq + _SKN_SLTP_IDX);
+    var shpbuf = nsq + _SKN_SLTP_SHP;
+    var shp = shpbuf + (sidx - lag + 1) * 8;                                   # HARM_SHAPE_FIR_TAPS / 2
+    var pred = sLTP_Q15 + (lidx - lag + 2) * 8;                                # LTP_ORDER / 2
     var gain_Q10 = sar(gain_Q16, 6);
+    var bidx = load64(sbi);
     var k = 0;
     var i = 0;
+    var v = 0;
     while (i < length) {
         var ltp_pred = 0;
         if (sig == 2) {
             ltp_pred = 2;
-            var t = 0;
-            while (t < 5) {
-                ltp_pred = silk_smlawb(ltp_pred, load64(pred - t * 8), load64(b_Q14 + t * 8));
-                t = t + 1;
+            var pp = pred;
+            var bp = b16;
+            var be = b16 + 40;
+            while (bp < be) {
+                ltp_pred = ltp_pred + ((load64(pp) * load64(bp) + B62) >> 16) - B46;
+                pp = pp - 8;
+                bp = bp + 8;
             }
-            ltp_pred = silk_sx32(ltp_pred << 1);
+            ltp_pred = (((ltp_pred << 1) + H31) & W32) - H31;
             pred = pred + 8;
         }
         var n_ltp = 0;
         if (lag > 0) {
-            n_ltp = silk_smulwb(silk_add_sat32(load64(shp), load64(shp - 16)), harm_packed);
-            n_ltp = _sk_smlawt(n_ltp, load64(shp - 8), harm_packed);
-            n_ltp = silk_sx32(ltp_pred - silk_sx32(n_ltp << 2));
+            var sh = load64(shp) + load64(shp - 16);
+            if (sh > S31) { sh = S31; }
+            if (sh < 0 - H31) { sh = 0 - H31; }
+            n_ltp = ((sh * hp_lo + B62) >> 16) - B46;
+            v = n_ltp + ((load64(shp - 8) * hp_hi + B62) >> 16) - B46;
+            n_ltp = ((v + H31) & W32) - H31;
+            v = ltp_pred - ((((n_ltp << 2) + H31) & W32) - H31);
+            n_ltp = ((v + H31) & W32) - H31;
             shp = shp + 8;
         }
+        var xin = load64(x_Q10 + i * 8);
+        var xin4 = (((xin << 4) + H31) & W32) - H31;
         k = 0;
         while (k < nstates) {
-            var p = _skdd(dd, k, 0);
-            var seed = _sk_rand(load64(p + _SKDD_SEED * 8));
-            store64(p + _SKDD_SEED * 8, seed);
-            var lpc_pred = silk_sx32(_sk_short_prediction(p + (_SKDD_LPC + 15 + i) * 8, a_Q12, po) << 4);
+            var p = dd + k * SDD;
+            v = 907633515 + load64(p + oSEED) * 196314165;
+            var seed = ((v + H31) & W32) - H31;
+            store64(p + oSEED, seed);
+            # the short-term prediction (silk_noise_shape_quantizer_short_prediction)
+            var lp = p + oLPC + (15 + i) * 8;
+            var lpc_pred = po >> 1;
+            var cp = a16;
+            var ce = a16 + po * 8;
+            while (cp < ce) {
+                lpc_pred = lpc_pred + ((load64(lp) * load64(cp) + B62) >> 16) - B46;
+                lp = lp - 8;
+                cp = cp + 8;
+            }
+            lpc_pred = (((lpc_pred << 4) + H31) & W32) - H31;
             # the warped shaping filter, an allpass chain
-            var ar2 = p + _SKDD_AR2 * 8;
-            var tmp2 = silk_smlawb(load64(p + _SKDD_DIFF * 8), load64(ar2), warp);
-            var tmp1 = silk_smlawb(load64(ar2), silk_sub32_ovflw(load64(ar2 + 8), tmp2), warp);
+            var ar2 = p + oAR2;
+            var a0 = load64(ar2);
+            v = load64(p + oDIFF) + ((a0 * w16 + B62) >> 16) - B46;
+            var tmp2 = ((v + H31) & W32) - H31;
+            v = load64(ar2 + 8) - tmp2;
+            v = ((v + H31) & W32) - H31;
+            v = a0 + ((v * w16 + B62) >> 16) - B46;
+            var tmp1 = ((v + H31) & W32) - H31;
             store64(ar2, tmp2);
-            var n_ar = so >> 1;
-            n_ar = silk_smlawb(n_ar, tmp2, load64(ar_Q13));
-            var j = 2;
-            while (j < so) {
-                tmp2 = silk_smlawb(load64(ar2 + (j - 1) * 8), silk_sub32_ovflw(load64(ar2 + j * 8), tmp1), warp);
-                store64(ar2 + (j - 1) * 8, tmp1);
-                n_ar = silk_smlawb(n_ar, tmp1, load64(ar_Q13 + (j - 1) * 8));
-                tmp1 = silk_smlawb(load64(ar2 + j * 8), silk_sub32_ovflw(load64(ar2 + (j + 1) * 8), tmp2), warp);
-                store64(ar2 + j * 8, tmp2);
-                n_ar = silk_smlawb(n_ar, tmp2, load64(ar_Q13 + j * 8));
-                j = j + 2;
+            var n_ar = (so >> 1) + ((tmp2 * load64(ar16) + B62) >> 16) - B46;
+            # pa: sAR2[j - 1] for j = 2, 4, .. so - 2; pc: AR[j - 1]
+            var pa = ar2 + 8;
+            var pc = ar16 + 8;
+            var pend = ar2 + (so - 1) * 8;
+            while (pa < pend) {
+                var aj1 = load64(pa);
+                var aj = load64(pa + 8);
+                v = aj - tmp1;
+                v = ((v + H31) & W32) - H31;
+                v = aj1 + ((v * w16 + B62) >> 16) - B46;
+                tmp2 = ((v + H31) & W32) - H31;
+                store64(pa, tmp1);
+                n_ar = n_ar + ((tmp1 * load64(pc) + B62) >> 16) - B46;
+                v = load64(pa + 16) - tmp2;
+                v = ((v + H31) & W32) - H31;
+                v = aj + ((v * w16 + B62) >> 16) - B46;
+                tmp1 = ((v + H31) & W32) - H31;
+                store64(pa + 8, tmp2);
+                n_ar = n_ar + ((tmp2 * load64(pc + 8) + B62) >> 16) - B46;
+                pa = pa + 16;
+                pc = pc + 16;
             }
             store64(ar2 + (so - 1) * 8, tmp1);
-            n_ar = silk_smlawb(n_ar, tmp1, load64(ar_Q13 + (so - 1) * 8));
-            n_ar = silk_sx32(n_ar << 1);
-            var lf_ar = load64(p + _SKDD_LF_AR * 8);
-            n_ar = silk_smlawb(n_ar, lf_ar, tilt_Q14);
-            n_ar = silk_sx32(n_ar << 2);
-            var n_lf = silk_smulwb(load64(p + (_SKDD_SHAPE + load64(sbi)) * 8), lf_Q14);
-            n_lf = _sk_smlawt(n_lf, lf_ar, lf_Q14);
-            n_lf = silk_sx32(n_lf << 2);
-            var t1 = silk_add_sat32(n_ar, n_lf);
-            var t2 = silk_sx32(n_ltp + lpc_pred);
-            t1 = silk_sub_sat32(t2, t1);
-            t1 = silk_rshift_round(t1, 4);
-            var r = silk_sx32(load64(x_Q10 + i * 8) - t1);
+            n_ar = n_ar + ((tmp1 * load64(ar16 + (so - 1) * 8) + B62) >> 16) - B46;
+            var lf_ar = load64(p + oLF);
+            v = (n_ar << 1) + ((lf_ar * tilt16 + B62) >> 16) - B46;
+            n_ar = (((v << 2) + H31) & W32) - H31;
+            v = ((load64(p + oSHAPE + bidx * 8) * lf_lo + B62) >> 16) - B46 + ((lf_ar * lf_hi + B62) >> 16) - B46;
+            var n_lf = (((v << 2) + H31) & W32) - H31;
+            var t1 = n_ar + n_lf;
+            if (t1 > S31) { t1 = S31; }
+            if (t1 < 0 - H31) { t1 = 0 - H31; }
+            v = n_ltp + lpc_pred;
+            var t2 = ((v + H31) & W32) - H31;
+            t1 = t2 - t1;
+            if (t1 > S31) { t1 = S31; }
+            if (t1 < 0 - H31) { t1 = 0 - H31; }
+            t1 = ((t1 + 8 + B62) >> 4) - B58;
+            v = xin - t1;
+            var r = ((v + H31) & W32) - H31;
             if (seed < 0) { r = 0 - r; }
-            r = silk_limit(r, 0 - 31744, 30720);                                    # -(31 << 10), 30 << 10
+            if (r < 0 - 31744) { r = 0 - 31744; }                                  # -(31 << 10)
+            if (r > 30720) { r = 30720; }                                          # 30 << 10
             var q1 = r - offset_Q10;
-            var q1_0 = sar(q1, 10);
+            var q1_0 = ((q1 + B62) >> 10) - B52;
             if (lambda_Q10 > 2048) {
-                var rdo = lambda_Q10 / 2 - 512;
-                if (q1 > rdo) { q1_0 = sar(q1 - rdo, 10); }
+                if (q1 > rdo) { q1_0 = ((q1 - rdo + B62) >> 10) - B52; }
                 else {
-                    if (q1 < 0 - rdo) { q1_0 = sar(q1 + rdo, 10); }
+                    if (q1 < 0 - rdo) { q1_0 = ((q1 + rdo + B62) >> 10) - B52; }
                     else {
                         if (q1 < 0) { q1_0 = 0 - 1; } else { q1_0 = 0; }
                     }
@@ -2968,138 +3131,215 @@ fn _sk_nsq_dd_quantizer(nsq, dd, ss, nstates, sig, x_Q10, pulses, xq, sLTP_Q15, 
             var rd1 = 0;
             var rd2 = 0;
             if (q1_0 > 0) {
-                q1 = silk_sx32(q1_0 << 10) - 80 + offset_Q10;                    # QUANT_LEVEL_ADJUST_Q10
+                q1 = (q1_0 << 10) - 80 + offset_Q10;                               # QUANT_LEVEL_ADJUST_Q10
                 q2 = q1 + 1024;
-                rd1 = silk_smulbb(q1, lambda_Q10);
-                rd2 = silk_smulbb(q2, lambda_Q10);
+                rd1 = q1;
+                rd2 = q2;
             } else {
                 if (q1_0 == 0) {
                     q1 = offset_Q10;
                     q2 = q1 + 1024 - 80;
-                    rd1 = silk_smulbb(q1, lambda_Q10);
-                    rd2 = silk_smulbb(q2, lambda_Q10);
+                    rd1 = q1;
+                    rd2 = q2;
                 } else {
                     if (q1_0 == 0 - 1) {
                         q2 = offset_Q10;
                         q1 = q2 - (1024 - 80);
-                        rd1 = silk_smulbb(0 - q1, lambda_Q10);
-                        rd2 = silk_smulbb(q2, lambda_Q10);
+                        rd1 = 0 - q1;
+                        rd2 = q2;
                     } else {
-                        q1 = silk_sx32(q1_0 << 10) + 80 + offset_Q10;
+                        q1 = (q1_0 << 10) + 80 + offset_Q10;
                         q2 = q1 + 1024;
-                        rd1 = silk_smulbb(0 - q1, lambda_Q10);
-                        rd2 = silk_smulbb(0 - q2, lambda_Q10);
+                        rd1 = 0 - q1;
+                        rd2 = 0 - q2;
                     }
                 }
             }
-            var rr = r - q1;
-            rd1 = sar(silk_smlabb(rd1, rr, rr), 10);
-            rr = r - q2;
-            rd2 = sar(silk_smlabb(rd2, rr, rr), 10);
-            var rdp = load64(p + _SKDD_RD * 8);
-            var s0 = _skss(ss, k, 0, 0);
-            var s1 = _skss(ss, k, 1, 0);
+            # silk_SMULBB(rd, Lambda) then silk_SMLABB(., rr, rr): int16 operands.
+            # The levels are within +-32,656 (q1_0 runs -32 to 29 with r limited
+            # to -31,744..30,720, RDO or not; -32 x 1024 + 80 + 32 at the least),
+            # so their cast is a no-op here.
+            v = rd1 * lam16;
+            rd1 = ((v + H31) & W32) - H31;
+            v = rd2 * lam16;
+            rd2 = ((v + H31) & W32) - H31;
+            var rr = (((r - q1) & 0xFFFF) ^ 0x8000) - 0x8000;
+            v = rd1 + rr * rr;
+            rd1 = ((((v + H31) & W32) - H31 + B62) >> 10) - B52;
+            rr = (((r - q2) & 0xFFFF) ^ 0x8000) - 0x8000;
+            v = rd2 + rr * rr;
+            rd2 = ((((v + H31) & W32) - H31 + B62) >> 10) - B52;
+            var rdp = load64(p + oRD);
+            var s0 = ss + (k * 2) * SSS;
+            var s1 = s0 + SSS;
             if (rd1 < rd2) {
-                store64(s0 + _SKSS_RD * 8, silk_sx32(rdp + rd1));
-                store64(s1 + _SKSS_RD * 8, silk_sx32(rdp + rd2));
-                store64(s0 + _SKSS_Q * 8, q1);
-                store64(s1 + _SKSS_Q * 8, q2);
+                v = rdp + rd1;
+                store64(s0 + 8, ((v + H31) & W32) - H31);
+                v = rdp + rd2;
+                store64(s1 + 8, ((v + H31) & W32) - H31);
+                store64(s0, q1);
+                store64(s1, q2);
             } else {
-                store64(s0 + _SKSS_RD * 8, silk_sx32(rdp + rd2));
-                store64(s1 + _SKSS_RD * 8, silk_sx32(rdp + rd1));
-                store64(s0 + _SKSS_Q * 8, q2);
-                store64(s1 + _SKSS_Q * 8, q1);
+                v = rdp + rd2;
+                store64(s0 + 8, ((v + H31) & W32) - H31);
+                v = rdp + rd1;
+                store64(s1 + 8, ((v + H31) & W32) - H31);
+                store64(s0, q2);
+                store64(s1, q1);
             }
-            # both candidates' reconstructions and states
+            # both candidates' reconstructions and states (Q, RD, XQ, LF_AR,
+            # DIFF, SHP, LPC_EXC at words 0 to 6)
             var c = 0;
+            var sc = s0;
             while (c < 2) {
-                var sc = _skss(ss, k, c, 0);
-                var exc = silk_sx32(load64(sc + _SKSS_Q * 8) << 4);
+                var exc = load64(sc) << 4;                                         # |q| < 2^16: no wrap
                 if (seed < 0) { exc = 0 - exc; }
-                var lpc_exc = silk_sx32(exc + ltp_pred);
-                var xq14 = silk_sx32(lpc_exc + lpc_pred);
-                var dif = silk_sub32_ovflw(xq14, silk_sx32(load64(x_Q10 + i * 8) << 4));
-                store64(sc + _SKSS_DIFF * 8, dif);
-                var slf = silk_sub32_ovflw(dif, n_ar);
-                store64(sc + _SKSS_SHP * 8, silk_sub_sat32(slf, n_lf));
-                store64(sc + _SKSS_LF_AR * 8, slf);
-                store64(sc + _SKSS_LPC_EXC * 8, lpc_exc);
-                store64(sc + _SKSS_XQ * 8, xq14);
+                v = exc + ltp_pred;
+                var lpc_exc = ((v + H31) & W32) - H31;
+                v = lpc_exc + lpc_pred;
+                var xq14 = ((v + H31) & W32) - H31;
+                v = xq14 - xin4;
+                var dif = ((v + H31) & W32) - H31;
+                store64(sc + 32, dif);
+                v = dif - n_ar;
+                var slf = ((v + H31) & W32) - H31;
+                var shv = slf - n_lf;
+                if (shv > S31) { shv = S31; }
+                if (shv < 0 - H31) { shv = 0 - H31; }
+                store64(sc + 40, shv);
+                store64(sc + 24, slf);
+                store64(sc + 48, lpc_exc);
+                store64(sc + 16, xq14);
+                sc = sc + SSS;
                 c = c + 1;
             }
             k = k + 1;
         }
-        var b = (load64(sbi) - 1) % 40;
+        var b = (bidx - 1) % 40;
         if (b < 0) { b = b + 40; }
-        store64(sbi, b);
+        bidx = b;
         var last = (b + dD) % 40;
         # the winner, the expired states, the replacement
-        var rdmin = load64(_skss(ss, 0, 0, _SKSS_RD));
+        var rdmin = load64(ss + 8);
         var win = 0;
         k = 1;
         while (k < nstates) {
-            if (load64(_skss(ss, k, 0, _SKSS_RD)) < rdmin) { rdmin = load64(_skss(ss, k, 0, _SKSS_RD)); win = k; }
+            var rk = load64(ss + (k * 2) * SSS + 8);
+            if (rk < rdmin) { rdmin = rk; win = k; }
             k = k + 1;
         }
-        var wrand = load64(_skdd(dd, win, _SKDD_RAND + last));
+        var wrand = load64(dd + win * SDD + oRAND + last * 8);
         k = 0;
         while (k < nstates) {
-            if (load64(_skdd(dd, k, _SKDD_RAND + last)) != wrand) {
-                store64(_skss(ss, k, 0, _SKSS_RD), silk_sx32(load64(_skss(ss, k, 0, _SKSS_RD)) + 134217727));   # silk_int32_MAX >> 4
-                store64(_skss(ss, k, 1, _SKSS_RD), silk_sx32(load64(_skss(ss, k, 1, _SKSS_RD)) + 134217727));
+            if (load64(dd + k * SDD + oRAND + last * 8) != wrand) {
+                var sk0 = ss + (k * 2) * SSS;
+                v = load64(sk0 + 8) + 134217727;                                    # silk_int32_MAX >> 4
+                store64(sk0 + 8, ((v + H31) & W32) - H31);
+                v = load64(sk0 + SSS + 8) + 134217727;
+                store64(sk0 + SSS + 8, ((v + H31) & W32) - H31);
             }
             k = k + 1;
         }
-        var rdmax = load64(_skss(ss, 0, 0, _SKSS_RD));
-        rdmin = load64(_skss(ss, 0, 1, _SKSS_RD));
+        var rdmax = load64(ss + 8);
+        rdmin = load64(ss + SSS + 8);
         var imax = 0;
         var imin = 0;
         k = 1;
         while (k < nstates) {
-            if (load64(_skss(ss, k, 0, _SKSS_RD)) > rdmax) { rdmax = load64(_skss(ss, k, 0, _SKSS_RD)); imax = k; }
-            if (load64(_skss(ss, k, 1, _SKSS_RD)) < rdmin) { rdmin = load64(_skss(ss, k, 1, _SKSS_RD)); imin = k; }
+            var sk1 = ss + (k * 2) * SSS;
+            if (load64(sk1 + 8) > rdmax) { rdmax = load64(sk1 + 8); imax = k; }
+            if (load64(sk1 + SSS + 8) < rdmin) { rdmin = load64(sk1 + SSS + 8); imin = k; }
             k = k + 1;
         }
         if (rdmin < rdmax) {
-            _sk_copy_words(_skdd(dd, imax, i), _skdd(dd, imin, i), _SKDD_WORDS - i);
-            _sk_copy_words(_skss(ss, imax, 0, 0), _skss(ss, imin, 1, 0), _SKSS_WORDS);
+            # libopus copies the state from word i on. Of sLPC_Q14 only the 16
+            # words from i are read again before they are written (the first
+            # choice writes word 16 + i at this sample and each later one at its
+            # own); RD, LF_AR and DIFF are rewritten from the candidate below.
+            var pd = dd + imax * SDD;
+            var ps = dd + imin * SDD;
+            _sk_copy_words8(pd + oLPC + i * 8, ps + oLPC + i * 8, 16);
+            _sk_copy_words8(pd + oRAND, ps + oRAND, _SKDD_SEED_INIT - _SKDD_RAND + 1);
+            var sd2 = ss + (imax * 2) * SSS;
+            var ss2 = ss + (imin * 2 + 1) * SSS;
+            store64(sd2, load64(ss2));
+            store64(sd2 + 8, load64(ss2 + 8));
+            store64(sd2 + 16, load64(ss2 + 16));
+            store64(sd2 + 24, load64(ss2 + 24));
+            store64(sd2 + 32, load64(ss2 + 32));
+            store64(sd2 + 40, load64(ss2 + 40));
+            store64(sd2 + 48, load64(ss2 + 48));
         }
         # the winner's decision from dD samples back
+        var pw = dd + win * SDD;
         if (subfr > 0 || i >= dD) {
-            store64(pulses + (i - dD) * 8, silk_rshift_round(load64(_skdd(dd, win, _SKDD_Q + last)), 10));
-            store64(xq + (i - dD) * 8, silk_sat16(silk_rshift_round(_sk_smulww(load64(_skdd(dd, win, _SKDD_XQ + last)),
-              load64(dgain + last * 8)), 8)));
-            store64(nsq + _SKN_SLTP_SHP + (load64(nsq + _SKN_SHP_IDX) - dD) * 8, load64(_skdd(dd, win, _SKDD_SHAPE + last)));
-            store64(sLTP_Q15 + (load64(nsq + _SKN_SLTP_IDX) - dD) * 8, load64(_skdd(dd, win, _SKDD_PRED + last)));
+            store64(pulses + (i - dD) * 8, ((load64(pw + oQ + last * 8) + 512 + B62) >> 10) - B52);
+            v = ((load64(pw + oXQ + last * 8) * load64(dgain + last * 8) + B62) >> 16) - B46;
+            v = ((((v + H31) & W32) - H31 + 128 + B62) >> 8) - B54;
+            if (v > 32767) { v = 32767; }
+            if (v < 0 - 32768) { v = 0 - 32768; }
+            store64(xq + (i - dD) * 8, v);
+            store64(shpbuf + (sidx - dD) * 8, load64(pw + oSHAPE + last * 8));
+            store64(sLTP_Q15 + (lidx - dD) * 8, load64(pw + oPRED + last * 8));
         }
-        store64(nsq + _SKN_SHP_IDX, load64(nsq + _SKN_SHP_IDX) + 1);
-        store64(nsq + _SKN_SLTP_IDX, load64(nsq + _SKN_SLTP_IDX) + 1);
+        sidx = sidx + 1;
+        lidx = lidx + 1;
         # every state takes its first choice
         k = 0;
         while (k < nstates) {
-            var q = _skdd(dd, k, 0);
-            var s = _skss(ss, k, 0, 0);
-            store64(q + _SKDD_LF_AR * 8, load64(s + _SKSS_LF_AR * 8));
-            store64(q + _SKDD_DIFF * 8, load64(s + _SKSS_DIFF * 8));
-            store64(q + (_SKDD_LPC + 16 + i) * 8, load64(s + _SKSS_XQ * 8));
-            store64(q + (_SKDD_XQ + b) * 8, load64(s + _SKSS_XQ * 8));
-            store64(q + (_SKDD_Q + b) * 8, load64(s + _SKSS_Q * 8));
-            store64(q + (_SKDD_PRED + b) * 8, silk_sx32(load64(s + _SKSS_LPC_EXC * 8) << 1));
-            store64(q + (_SKDD_SHAPE + b) * 8, load64(s + _SKSS_SHP * 8));
-            var sd = silk_sx32(load64(q + _SKDD_SEED * 8) + silk_rshift_round(load64(s + _SKSS_Q * 8), 10));
-            store64(q + _SKDD_SEED * 8, sd);
-            store64(q + (_SKDD_RAND + b) * 8, sd);
-            store64(q + _SKDD_RD * 8, load64(s + _SKSS_RD * 8));
+            var q = dd + k * SDD;
+            var s = ss + (k * 2) * SSS;
+            store64(q + oLF, load64(s + 24));
+            store64(q + oDIFF, load64(s + 32));
+            store64(q + oLPC + (16 + i) * 8, load64(s + 16));
+            store64(q + oXQ + b * 8, load64(s + 16));
+            var qq = load64(s);
+            store64(q + oQ + b * 8, qq);
+            v = load64(s + 48) << 1;
+            store64(q + oPRED + b * 8, ((v + H31) & W32) - H31);
+            store64(q + oSHAPE + b * 8, load64(s + 40));
+            v = load64(q + oSEED) + ((qq + 512 + B62) >> 10) - B52;
+            var sd = ((v + H31) & W32) - H31;
+            store64(q + oSEED, sd);
+            store64(q + oRAND + b * 8, sd);
+            store64(q + oRD, load64(s + 8));
             k = k + 1;
         }
         store64(dgain + b * 8, gain_Q10);
         i = i + 1;
     }
+    store64(nsq + _SKN_SHP_IDX, sidx);
+    store64(nsq + _SKN_SLTP_IDX, lidx);
+    store64(sbi, bidx);
     k = 0;
     while (k < nstates) {
-        var pl = _skdd(dd, k, _SKDD_LPC);
+        var pl = dd + k * SDD + oLPC;
         _sk_copy_words(pl, pl + length * 8, 16);
         k = k + 1;
+    }
+    return 0;
+}
+
+# n words from src to dst (not overlapping), eight at a time.
+fn _sk_copy_words8(dst, src, n) {
+    var e = src + (n >> 3) * 64;
+    while (src < e) {
+        store64(dst, load64(src));
+        store64(dst + 8, load64(src + 8));
+        store64(dst + 16, load64(src + 16));
+        store64(dst + 24, load64(src + 24));
+        store64(dst + 32, load64(src + 32));
+        store64(dst + 40, load64(src + 40));
+        store64(dst + 48, load64(src + 48));
+        store64(dst + 56, load64(src + 56));
+        src = src + 64;
+        dst = dst + 64;
+    }
+    e = src + (n & 7) * 8;
+    while (src < e) {
+        store64(dst, load64(src));
+        src = src + 8;
+        dst = dst + 8;
     }
     return 0;
 }
