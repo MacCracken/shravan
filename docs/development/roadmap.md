@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.12.5.** Shipped history lives in `CHANGELOG.md`; this file holds where shravan stands and
+**Current: v2.12.6.** Shipped history lives in `CHANGELOG.md`; this file holds where shravan stands and
 what is left.
 
 ## Where we are
@@ -13,7 +13,7 @@ what is left.
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg, bit-exact |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB; ffmpeg exact on Layer III; mpg123 on Layer II |
 | AAC-LC | any channel layout (configurations 1–7 and 11–14, a PCE), all 13 rates, every LC tool | mono and stereo, all 13 rates: 3GPP psychoacoustics, block switching, TNS, M/S, intensity, PNS, a rate loop with a reservoir | Decode: ffmpeg, exact. Encode: ffmpeg and faad decode it, within 0.02 of ffmpeg's own encoder in correlation |
-| Opus | every TOC configuration; FEC, PLC, DTX, every mode, bandwidth, frame-size and channel switch; multistream (families 0, 1, 2, 255) | SILK (mono and stereo, 8–16 kHz internal from 8–48 kHz input, complexity 0–10, FEC, DTX); CELT (libopus's `celt_encode_with_ec`: every frame size, rate, complexity, rate control and stereo mode, the hybrid's start band); the Opus layer for `OPUS_APPLICATION_RESTRICTED_SILK` | libopus: decode exact (CELT concealment within 3 LSB); encode: `celt_encode_with_ec` byte for byte (in single precision, as libopus computes it); `silk_Encode` and `opus_encode_float` byte for byte on the suite's inputs (SILK's float stages in double precision, so hostile input can part at a near-tie); libopus's portable C build throughout |
+| Opus | every TOC configuration; FEC, PLC, DTX, every mode, bandwidth, frame-size and channel switch; multistream (families 0, 1, 2, 255) | SILK (mono and stereo, 8–16 kHz internal from 8–48 kHz input, complexity 0–10, FEC, DTX); CELT (libopus's `celt_encode_with_ec`: every frame size, rate, complexity, rate control and stereo mode, the hybrid's start band); the Opus layer for `OPUS_APPLICATION_RESTRICTED_SILK` | libopus: decode exact (CELT concealment within 3 LSB); encode: `celt_encode_with_ec` byte for byte (in single precision, as libopus computes it); `silk_Encode` and `opus_encode_float` byte for byte (SILK's float stages in libopus's single precision too, hostile input included); libopus's portable C build throughout |
 | MP4 | AAC and ALAC; any audio track; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, to the sample |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
@@ -58,10 +58,10 @@ Verify it the way the SILK and CELT encoders were verified:
 - The suite holds shravan to libopus's packets, with each stage's output stored as a hash.
 - The suite's string data is at 94% of the compiler's fixed 2 MB, so new vectors must be compact.
 
-Note on rounding: the float→fixed boundaries use `lrintf` (round half to **even**), which f64 code must
-reproduce deliberately. The only SILK packets that differ from libopus's are near-ties that its single
-precision rounds the other way. CELT's port computes in single precision itself, so it has no such
-ties.
+Note on rounding: the float→fixed boundaries use `lrintf` (round half to **even**). Both ports compute
+in libopus's single precision, each operation rounded as its float build rounds it, so new float code
+for the hybrid and the analysis must do the same. Code computing in double agrees only to within a
+near-tie, and a tie rounding the other way changes every packet after it.
 
 ## v3.0.0 — production-quality, interoperable, hardened suite · MAJOR
 

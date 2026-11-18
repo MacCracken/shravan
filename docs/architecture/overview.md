@@ -37,15 +37,13 @@ shravan/
                        resampler hand-over), silk_encoder_reset,
                        silk_encoder_new_channels / silk_encode / silk_encode_opus;
                        checked stage by stage against libopus, and whole packets byte
-                       for byte on the suite's inputs, voiced and unvoiced, mono and
-                       stereo (its float stages in double precision: hostile input can
-                       part from libopus's single precision at a near-tie)
+                       for byte, voiced and unvoiced, mono and stereo (its float stages
+                       in libopus's single precision since 2.12.6, hostile input too)
     opus_enc.cyr    -- the Opus encoder layer (libopus opus_encode, 2.12.3), application
                        OPUS_APPLICATION_RESTRICTED_SILK: the 3 Hz high-pass, the bit rate,
                        stereo/mono and bandwidth decisions, FEC by loss, DTX on silence,
                        10-120 ms packets (80-120 repacketised), CBR padding, PLC packets,
-                       libopus's ctls and getters; byte for byte libopus's on the
-                       suite's inputs
+                       libopus's ctls and getters; byte for byte libopus's
     celt_enc.cyr    -- libopus's CELT encoder (celt_encode_with_ec, 2.12.4) as its float build
                        computes it (typed f32 arithmetic, libopus's operation order): pre-emphasis,
                        tone and transient analysis, the pitch pre-filter, the forward MDCT (kiss

@@ -3,12 +3,15 @@
 # ================================================================
 #
 # A port of libopus's float SILK encoder (silk/float/*_FLP.c over the fixed
-# point silk/*.c it calls), in f64. Where libopus computes in single precision
-# shravan computes in double, so the float stages agree with libopus to float
-# precision, not to the bit; every float->fixed boundary rounds as libopus's
-# lrintf does (half to even, _sk_lrint), and the fixed-point stages are exact.
+# point silk/*.c it calls), computed as its float build computes it (2.12.6):
+# every value libopus keeps in a float is a float here (stored in an f64 word,
+# each operation rounded to single precision in C's order: _sk_f32, or typed
+# f32 arithmetic in the loops), and what libopus computes in double (the inner
+# products and energies, Schur, Burg, the warped autocorrelation, pow, sqrt,
+# exp, log10) in double. Every float->fixed boundary rounds as libopus's lrintf
+# does (half to even, _sk_lrint), and the fixed-point stages are exact.
 # src/silk_tests.cyr checks each stage against libopus on libopus's own inputs
-# (src/silk_enc_vectors.cyr, from scripts/gen-silk-vectors.py).
+# (src/silk_enc_vectors.cyr, from scripts/gen-silk-vectors.py), exactly.
 #
 # The quantisers and bitstream writers (gains, NLSF, indices, pulses) are in
 # src/silk.cyr since 2.8.0. Here, by release:
@@ -412,9 +415,10 @@ fn _skf(num, den) { return f32_to(f32_from(f64_div(f64_from(num), f64_from(den))
 # x rounded to single precision, where libopus stores a float.
 fn _sk_f32(x) { return f32_to(f32_from(x)); }
 
-# pGains_Q16[k] / 65536.0f, exactly: a quantised gain (silk_log2lin) has at
-# most 8 significant bits, so libopus's int32 -> float conversion never rounds.
-fn _sk_gain_q16_flp(q) { return f64_div(f64_from(q), f64_from(65536)); }
+# pGains_Q16[k] / 65536.0f as libopus computes it: the int32 converted to a
+# float (rounding past 24 significant bits, as a gain the rate loop's
+# multiplier scaled can have), then the division (exact, a power of two).
+fn _sk_gain_q16_flp(q) { return f64_div(_sk_f32(f64_from(q)), f64_from(65536)); }
 
 # lrintf: to the nearest integer, ties to even (the float->fixed conversion
 # silk_float2int uses throughout).
@@ -468,21 +472,55 @@ fn silk_inner_product_flp(x, y, n) {
 
 # silk_LPC_analysis_filter_FLP: r[i] = s[i] - sum_k a[k] s[i-1-k] for i >= order;
 # the first `order` outputs are zero.
+# Float scratch for the single-precision loops below, allocated once on first
+# use (bounded: the filter's longest signal is find_pitch_lags' 672 samples, the
+# cross-correlation's 80 + 65): taken from the frame arena, a 120 ms packet's
+# six frames outgrew its chunk.
+var _sk_fsig = 0;
+var _sk_fcoef = 0;
+var _sk_fx = 0;
+var _sk_fy = 0;
+fn _sk_fscratch() {
+    if (_sk_fsig != 0) { return 0; }
+    _sk_fsig = alloc(1024 * 4);
+    _sk_fcoef = alloc(32 * 4);
+    _sk_fx = alloc(256 * 4);
+    _sk_fy = alloc(512 * 4);
+    return 0;
+}
+
 fn silk_lpc_analysis_filter_flp(r, a, s, length, order) {
+    # in single precision, each product and sum a float, left to right as
+    # libopus's unrolled orders (6, 8, 10, 12, 16) sum; the signal and the
+    # coefficients converted to floats once (4-byte scratch) for the loop
+    _sk_fscratch();
+    var sf = _sk_fsig;
+    var af = _sk_fcoef;
     var i = 0;
-    while (i < order) { store64(r + i * 8, F64_ZERO); i = i + 1; }
+    while (i < length) { store32(sf + i * 4, f32_from(load64(s + i * 8))); i = i + 1; }
+    i = 0;
+    while (i < order) { store32(af + i * 4, f32_from(load64(a + i * 8))); i = i + 1; }
     var ix = order;
     while (ix < length) {
-        var sp = s + (ix - 1) * 8;
-        var pred = f64_mul(load64(sp), load64(a));
+        var sp = sf + (ix - 1) * 4;
+        var s0: f32 = load32(sp);
+        var a0: f32 = load32(af);
+        var pred: f32 = s0 * a0;
         var k = 1;
         while (k < order) {
-            pred = f64_add(pred, f64_mul(load64(sp - k * 8), load64(a + k * 8)));
+            var sk: f32 = load32(sp - k * 4);
+            var ak: f32 = load32(af + k * 4);
+            var pk: f32 = sk * ak;
+            pred = pred + pk;
             k = k + 1;
         }
-        store64(r + ix * 8, f64_sub(load64(sp + 8), pred));
+        var cur: f32 = load32(sp + 4);
+        var e: f32 = cur - pred;
+        store64(r + ix * 8, f32_to(e));
         ix = ix + 1;
     }
+    i = 0;
+    while (i < order) { store64(r + i * 8, F64_ZERO); i = i + 1; }
     return 0;
 }
 
@@ -532,8 +570,15 @@ fn silk_burg_modified_flp(A, x, minInvGain, subfr_length, nb_subfr, D) {
             while (k < n2) {
                 var xn = load64(xq + n2 * 8);
                 var xe = load64(xq + (subfr_length - n2 - 1) * 8);
-                store64(cfr + k * 8, f64_sub(load64(cfr + k * 8), f64_mul(xn, load64(xq + (n2 - k - 1) * 8))));
-                store64(clr + k * 8, f64_sub(load64(clr + k * 8), f64_mul(xe, load64(xq + (subfr_length - n2 + k) * 8))));
+                # x_ptr[n] * x_ptr[n - k - 1]: two floats, a float product (no cast)
+                var xa: f32 = f32_from(xn);
+                var xb: f32 = f32_from(load64(xq + (n2 - k - 1) * 8));
+                var pab: f32 = xa * xb;
+                store64(cfr + k * 8, f64_sub(load64(cfr + k * 8), f32_to(pab)));
+                var xc: f32 = f32_from(xe);
+                var xd: f32 = f32_from(load64(xq + (subfr_length - n2 + k) * 8));
+                var pcd: f32 = xc * xd;
+                store64(clr + k * 8, f64_sub(load64(clr + k * 8), f32_to(pcd)));
                 var at = load64(af + k * 8);
                 tmp1 = f64_add(tmp1, f64_mul(load64(xq + (n2 - k - 1) * 8), at));
                 tmp2 = f64_add(tmp2, f64_mul(load64(xq + (subfr_length - n2 + k) * 8), at));
@@ -607,7 +652,7 @@ fn silk_burg_modified_flp(A, x, minInvGain, subfr_length, nb_subfr, D) {
     var nrg = F64_ZERO;
     if (reached == 1) {
         k = 0;
-        while (k < D) { store64(A + k * 8, f64_neg(load64(af + k * 8))); k = k + 1; }
+        while (k < D) { store64(A + k * 8, _sk_f32(f64_neg(load64(af + k * 8)))); k = k + 1; }
         s = 0;
         while (s < nb_subfr) {
             C0 = f64_sub(C0, silk_energy_flp(x + s * subfr_length * 8, D));
@@ -622,12 +667,12 @@ fn silk_burg_modified_flp(A, x, minInvGain, subfr_length, nb_subfr, D) {
             var a4 = load64(af + k * 8);
             nrg = f64_add(nrg, f64_mul(load64(caf + (k + 1) * 8), a4));
             sq = f64_add(sq, f64_mul(a4, a4));
-            store64(A + k * 8, f64_neg(a4));
+            store64(A + k * 8, _sk_f32(f64_neg(a4)));
             k = k + 1;
         }
         nrg = f64_sub(nrg, f64_mul(f64_mul(cond, C0), sq));
     }
-    return nrg;
+    return _sk_f32(nrg);
 }
 
 # silk_A2NLSF_FLP: f64 prediction coefficients to Q15 NLSFs through the Q16
@@ -684,7 +729,7 @@ fn silk_find_lpc_flp(st, nlsf, x, minInvGain) {
         var a_tmp = _opus_tmp(16 * 8);
         # the optimum for the last 10 ms; its energy comes off here rather than
         # being added to every candidate's first half below
-        res_nrg = f64_sub(res_nrg, silk_burg_modified_flp(a_tmp, x + 2 * sfl * 8, minInvGain, sfl, 2, order));
+        res_nrg = _sk_f32(f64_sub(res_nrg, silk_burg_modified_flp(a_tmp, x + 2 * sfl * 8, minInvGain, sfl, 2, order)));
         silk_a2nlsf_flp(nlsf, a_tmp, order);
         var nlsf0 = _opus_tmp(16 * 8);
         var res = _opus_tmp(2 * sfl * 8);
@@ -695,7 +740,8 @@ fn silk_find_lpc_flp(st, nlsf, x, minInvGain) {
             silk_interpolate(nlsf0, st + _SKE_PREV_NLSF, nlsf, k, order);
             silk_nlsf2a_flp(a_tmp, nlsf0, order);
             silk_lpc_analysis_filter_flp(res, a_tmp, x, 2 * sfl, order);
-            var e = f64_add(silk_energy_flp(res + order * 8, sfl - order), silk_energy_flp(res + (order + sfl) * 8, sfl - order));
+            # (silk_float)(energy + energy): the two in double, the sum a float
+            var e = _sk_f32(f64_add(silk_energy_flp(res + order * 8, sfl - order), silk_energy_flp(res + (order + sfl) * 8, sfl - order)));
             var stop = 0;
             if (f64_lt(e, res_nrg) == 1) {
                 res_nrg = e;
@@ -771,20 +817,22 @@ fn silk_process_nlsfs_flp(st, ctrl, nlsf, prev_nlsf) {
 # silk_residual_energy_FLP: each subframe's LPC residual energy (the first half
 # through pred0, the second through pred1), times its gain squared.
 fn silk_residual_energy_flp(nrgs, x, pred0, pred1, gains, subfr_length, nb_subfr, order) {
+    # nrgs[k] = (silk_float)(gains[k] * gains[k] * silk_energy_FLP(...)): the
+    # gain squared a float product, times the energy in double, a float
     var shift = order + subfr_length;
     var res = _opus_tmp(2 * shift * 8);
     var rp = res + order * 8;
     silk_lpc_analysis_filter_flp(res, pred0, x, 2 * shift, order);
     var g0 = load64(gains);
     var g1 = load64(gains + 8);
-    store64(nrgs, f64_mul(f64_mul(g0, g0), silk_energy_flp(rp, subfr_length)));
-    store64(nrgs + 8, f64_mul(f64_mul(g1, g1), silk_energy_flp(rp + shift * 8, subfr_length)));
+    store64(nrgs, _sk_f32(f64_mul(_sk_f32(f64_mul(g0, g0)), silk_energy_flp(rp, subfr_length))));
+    store64(nrgs + 8, _sk_f32(f64_mul(_sk_f32(f64_mul(g1, g1)), silk_energy_flp(rp + shift * 8, subfr_length))));
     if (nb_subfr == 4) {
         silk_lpc_analysis_filter_flp(res, pred1, x + 2 * shift * 8, 2 * shift, order);
         var g2 = load64(gains + 16);
         var g3 = load64(gains + 24);
-        store64(nrgs + 16, f64_mul(f64_mul(g2, g2), silk_energy_flp(rp, subfr_length)));
-        store64(nrgs + 24, f64_mul(f64_mul(g3, g3), silk_energy_flp(rp + shift * 8, subfr_length)));
+        store64(nrgs + 16, _sk_f32(f64_mul(_sk_f32(f64_mul(g2, g2)), silk_energy_flp(rp, subfr_length))));
+        store64(nrgs + 24, _sk_f32(f64_mul(_sk_f32(f64_mul(g3, g3)), silk_energy_flp(rp + shift * 8, subfr_length))));
     }
     return 0;
 }
@@ -806,7 +854,7 @@ fn silk_find_pred_coefs_flp(st, ctrl, res_pitch, x, cond) {
     var inv = _opus_tmp(4 * 8);
     var i = 0;
     while (i < nb_subfr) {
-        store64(inv + i * 8, f64_div(F64_ONE, load64(ctrl + _SKC_GAINS + i * 8)));
+        store64(inv + i * 8, _sk_f32(f64_div(F64_ONE, load64(ctrl + _SKC_GAINS + i * 8))));
         i = i + 1;
     }
     var pre = _opus_tmp(nb_subfr * (sl + order) * 8);
@@ -825,7 +873,7 @@ fn silk_find_pred_coefs_flp(st, ctrl, res_pitch, x, cond) {
         while (i < nb_subfr) {
             var g = load64(inv + i * 8);
             var j = 0;
-            while (j < sl + order) { store64(pp + j * 8, f64_mul(g, load64(xp + j * 8))); j = j + 1; }
+            while (j < sl + order) { store64(pp + j * 8, _sk_f32(f64_mul(g, load64(xp + j * 8)))); j = j + 1; }
             pp = pp + (sl + order) * 8;
             xp = xp + sl * 8;
             i = i + 1;
@@ -865,29 +913,41 @@ fn silk_find_pred_coefs_flp(st, ctrl, res_pitch, x, cond) {
 # L long (x holds L + order - 1 samples): the diagonal recursively, then each
 # off-diagonal recursively from its first entry. Row-major, order x order.
 fn silk_corrmatrix_flp(x, L, order, XX) {
+    # corrMatrix_FLP.c: the energy a double, each entry stored as a float; the
+    # recursive updates' products and difference are floats (silk_float
+    # operands, no cast) added to the double
     var p1 = x + (order - 1) * 8;
     var e = silk_energy_flp(p1, L);
-    store64(XX, e);
+    store64(XX, _sk_f32(e));
     var j = 1;
     while (j < order) {
-        var a = load64(p1 - j * 8);
-        var b = load64(p1 + (L - j) * 8);
-        e = f64_add(e, f64_sub(f64_mul(a, a), f64_mul(b, b)));
-        store64(XX + (j * order + j) * 8, e);
+        var a: f32 = f32_from(load64(p1 - j * 8));
+        var b: f32 = f32_from(load64(p1 + (L - j) * 8));
+        var aa: f32 = a * a;
+        var bb: f32 = b * b;
+        var df: f32 = aa - bb;
+        e = f64_add(e, f32_to(df));
+        store64(XX + (j * order + j) * 8, _sk_f32(e));
         j = j + 1;
     }
     var p2 = x + (order - 2) * 8;
     var lag = 1;
     while (lag < order) {
         e = silk_inner_product_flp(p1, p2, L);
-        store64(XX + (lag * order) * 8, e);
-        store64(XX + lag * 8, e);
+        store64(XX + (lag * order) * 8, _sk_f32(e));
+        store64(XX + lag * 8, _sk_f32(e));
         j = 1;
         while (j < order - lag) {
-            e = f64_add(e, f64_sub(f64_mul(load64(p1 - j * 8), load64(p2 - j * 8)),
-              f64_mul(load64(p1 + (L - j) * 8), load64(p2 + (L - j) * 8))));
-            store64(XX + ((lag + j) * order + j) * 8, e);
-            store64(XX + (j * order + lag + j) * 8, e);
+            var c1: f32 = f32_from(load64(p1 - j * 8));
+            var c2: f32 = f32_from(load64(p2 - j * 8));
+            var d1: f32 = f32_from(load64(p1 + (L - j) * 8));
+            var d2: f32 = f32_from(load64(p2 + (L - j) * 8));
+            var cc: f32 = c1 * c2;
+            var dd: f32 = d1 * d2;
+            var df2: f32 = cc - dd;
+            e = f64_add(e, f32_to(df2));
+            store64(XX + ((lag + j) * order + j) * 8, _sk_f32(e));
+            store64(XX + (j * order + lag + j) * 8, _sk_f32(e));
             j = j + 1;
         }
         p2 = p2 - 8;
@@ -901,7 +961,7 @@ fn silk_corrvector_flp(x, t, L, order, Xt) {
     var p1 = x + (order - 1) * 8;
     var lag = 0;
     while (lag < order) {
-        store64(Xt + lag * 8, silk_inner_product_flp(p1, t, L));
+        store64(Xt + lag * 8, _sk_f32(silk_inner_product_flp(p1, t, L)));
         p1 = p1 - 8;
         lag = lag + 1;
     }
@@ -920,14 +980,17 @@ fn silk_find_ltp_flp(XX, xX, r, lag, sl, nb_subfr) {
         var lp = r - (load64(lag + k * 8) + 2) * 8;
         silk_corrmatrix_flp(lp, sl, 5, XXk);
         silk_corrvector_flp(lp, r, sl, 5, xXk);
-        var xx = silk_energy_flp(r, sl + 5);
-        var floor = f64_add(f64_mul(f64_mul(_skf(3, 100), F64_HALF), f64_add(load64(XXk), load64(XXk + 24 * 8))), F64_ONE);
+        # in single precision (find_LTP_FLP.c): xx = (silk_float)energy;
+        # temp = 1.0f / max(xx, 0.03f * 0.5f * (XX[0] + XX[24]) + 1.0f)
+        var xx = _sk_f32(silk_energy_flp(r, sl + 5));
+        var floor = _sk_f32(f64_mul(_sk_f32(f64_mul(_skf(3, 100), F64_HALF)), _sk_f32(f64_add(load64(XXk), load64(XXk + 24 * 8)))));
+        floor = _sk_f32(f64_add(floor, F64_ONE));
         if (f64_gt(xx, floor) == 1) { floor = xx; }
-        var temp = f64_div(F64_ONE, floor);
+        var temp: f32 = f32_from(_sk_f32(f64_div(F64_ONE, floor)));
         var i = 0;
-        while (i < 25) { store64(XXk + i * 8, f64_mul(load64(XXk + i * 8), temp)); i = i + 1; }
+        while (i < 25) { var xv: f32 = f32_from(load64(XXk + i * 8)); var sv: f32 = xv * temp; store64(XXk + i * 8, f32_to(sv)); i = i + 1; }
         i = 0;
-        while (i < 5) { store64(xXk + i * 8, f64_mul(load64(xXk + i * 8), temp)); i = i + 1; }
+        while (i < 5) { var yv: f32 = f32_from(load64(xXk + i * 8)); var tv: f32 = yv * temp; store64(xXk + i * 8, f32_to(tv)); i = i + 1; }
         r = r + sl * 8;
         k = k + 1;
     }
@@ -1112,22 +1175,40 @@ fn silk_ltp_scale_ctrl_flp(st, ctrl, cond) {
 # lag back, times the subframe's inverse gain, into LTP_res (subframes of
 # pre_length + subfr_length). x starts pre_length samples before the frame.
 fn silk_ltp_analysis_filter_flp(LTP_res, x, B, pitchL, invGains, sl, nb_subfr, pre_length) {
+    # in single precision (LTP_analysis_filter_FLP.c): res = x, less each
+    # tap's product in turn, times the inverse gain
     var xp = x;
     var rp = LTP_res;
     var k = 0;
     while (k < nb_subfr) {
         var lp = xp - load64(pitchL + k * 8) * 8;
-        var ig = load64(invGains + k * 8);
+        var ig: f32 = f32_from(load64(invGains + k * 8));
         var b = B + k * 5 * 8;
+        var b0: f32 = f32_from(load64(b));
+        var b1: f32 = f32_from(load64(b + 8));
+        var b2: f32 = f32_from(load64(b + 16));
+        var b3: f32 = f32_from(load64(b + 24));
+        var b4: f32 = f32_from(load64(b + 32));
         var i = 0;
         while (i < sl + pre_length) {
-            var v = load64(xp + i * 8);
-            var j = 0;
-            while (j < 5) {
-                v = f64_sub(v, f64_mul(load64(b + j * 8), load64(lp + (2 - j) * 8)));
-                j = j + 1;
-            }
-            store64(rp + i * 8, f64_mul(v, ig));
+            var v: f32 = f32_from(load64(xp + i * 8));
+            var l0: f32 = f32_from(load64(lp + 16));
+            var p0: f32 = b0 * l0;
+            v = v - p0;
+            var l1: f32 = f32_from(load64(lp + 8));
+            var p1: f32 = b1 * l1;
+            v = v - p1;
+            var l2: f32 = f32_from(load64(lp));
+            var p2: f32 = b2 * l2;
+            v = v - p2;
+            var l3: f32 = f32_from(load64(lp - 8));
+            var p3: f32 = b3 * l3;
+            v = v - p3;
+            var l4: f32 = f32_from(load64(lp - 16));
+            var p4: f32 = b4 * l4;
+            v = v - p4;
+            var r: f32 = v * ig;
+            store64(rp + i * 8, f32_to(r));
             lp = lp + 8;
             i = i + 1;
         }
@@ -1430,12 +1511,14 @@ fn silk_encode_do_vad(st, pIn, activity) {
 # ---------------------------------------------------------------- float helpers (2.11.1)
 
 # silk_sigmoid: 1 / (1 + e^-x)
-fn _sk_sigmoid(x) { return f64_div(F64_ONE, f64_add(F64_ONE, f64_exp(f64_neg(x)))); }
+# silk_sigmoid: (silk_float)(1.0 / (1.0 + exp(-x))), in double, the result a float.
+fn _sk_sigmoid(x) { return _sk_f32(f64_div(F64_ONE, f64_add(F64_ONE, f64_exp(f64_neg(x))))); }
 
 # silk_log2 (SigProc_FLP.h): 3.32192809488736 log10(x)
+# (silk_float)(3.32192809488736 * log10(x)): in double, the result a float.
 fn _sk_log2(x) {
     var c = f64_div(f64_from(332192809488736), f64_from(100000000000000));
-    return f64_mul(c, f64_div(f64_ln(x), f64_ln(f64_from(10))));
+    return _sk_f32(f64_mul(c, f64_div(f64_ln(x), f64_ln(f64_from(10)))));
 }
 
 # silk_autocorrelation_FLP: r[i] = sum x[n] x[n+i], i < count (and < n).
@@ -1443,7 +1526,8 @@ fn silk_autocorrelation_flp(r, x, n, count) {
     if (count > n) { count = n; }
     var i = 0;
     while (i < count) {
-        store64(r + i * 8, silk_inner_product_flp(x, x + i * 8, n - i));
+        # the inner product in double, the result a float
+        store64(r + i * 8, _sk_f32(silk_inner_product_flp(x, x + i * 8, n - i)));
         i = i + 1;
     }
     return 0;
@@ -1467,7 +1551,8 @@ fn silk_schur_flp(rc, ac, order) {
         # silk_max_float(C[0][1], 1e-9f): the floor unless C is above it (NaN too)
         if (f64_gt(den, floor) == 0) { den = floor; }
         var rt = f64_neg(f64_div(load64(c0 + (k + 1) * 8), den));
-        store64(rc + k * 8, rt);
+        # the reflection coefficient a float, its double kept for the update
+        store64(rc + k * 8, _sk_f32(rt));
         var n = 0;
         while (n < order - k) {
             var t1 = load64(c0 + (n + k + 1) * 8);
@@ -1478,23 +1563,29 @@ fn silk_schur_flp(rc, ac, order) {
         }
         k = k + 1;
     }
-    return load64(c1);
+    return _sk_f32(load64(c1));
 }
 
 # silk_k2a_FLP: reflection coefficients to prediction coefficients (step-up).
 fn silk_k2a_flp(A, rc, order) {
+    # in single precision (k2a_FLP.c)
     var k = 0;
     while (k < order) {
-        var rk = load64(rc + k * 8);
+        var rk: f32 = f32_from(load64(rc + k * 8));
         var n = 0;
         while (n < (k + 1) >> 1) {
-            var t1 = load64(A + n * 8);
-            var t2 = load64(A + (k - n - 1) * 8);
-            store64(A + n * 8, f64_add(t1, f64_mul(t2, rk)));
-            store64(A + (k - n - 1) * 8, f64_add(t2, f64_mul(t1, rk)));
+            var t1: f32 = f32_from(load64(A + n * 8));
+            var t2: f32 = f32_from(load64(A + (k - n - 1) * 8));
+            var u1: f32 = t2 * rk;
+            var v1: f32 = t1 + u1;
+            var u2: f32 = t1 * rk;
+            var v2: f32 = t2 + u2;
+            store64(A + n * 8, f32_to(v1));
+            store64(A + (k - n - 1) * 8, f32_to(v2));
             n = n + 1;
         }
-        store64(A + k * 8, f64_neg(rk));
+        var nrk: f32 = rk ^ 0x80000000;
+        store64(A + k * 8, f32_to(nrk));
         k = k + 1;
     }
     return 0;
@@ -1502,14 +1593,20 @@ fn silk_k2a_flp(A, rc, order) {
 
 # silk_bwexpander_FLP: a[i] *= chirp^(i+1).
 fn silk_bwexpander_flp(a, d, chirp) {
-    var cf = chirp;
+    # in single precision (bwexpander_FLP.c): chirp a float
+    var ch: f32 = f32_from(chirp);
+    var cf: f32 = ch;
     var i = 0;
     while (i < d - 1) {
-        store64(a + i * 8, f64_mul(load64(a + i * 8), cf));
-        cf = f64_mul(cf, chirp);
+        var ai: f32 = f32_from(load64(a + i * 8));
+        var v: f32 = ai * cf;
+        store64(a + i * 8, f32_to(v));
+        cf = cf * ch;
         i = i + 1;
     }
-    store64(a + (d - 1) * 8, f64_mul(load64(a + (d - 1) * 8), cf));
+    var al: f32 = f32_from(load64(a + (d - 1) * 8));
+    var vl: f32 = al * cf;
+    store64(a + (d - 1) * 8, f32_to(vl));
     return 0;
 }
 
@@ -1532,16 +1629,27 @@ fn silk_apply_sine_window_flp(w, x, win_type, length) {
         var half: f32 = f32_from(F64_HALF);
         S1 = half * c;
     }
+    var hf: f32 = f32_from(F64_HALF);
     var k = 0;
     while (k < length) {
         var s01: f32 = S0 + S1;
-        store64(w + k * 8, f64_mul(f64_mul(load64(x + k * 8), F64_HALF), f32_to(s01)));
-        store64(w + (k + 1) * 8, f64_mul(load64(x + (k + 1) * 8), f32_to(S1)));
+        var x0: f32 = f32_from(load64(x + k * 8));
+        var h0: f32 = x0 * hf;
+        var w0: f32 = h0 * s01;
+        store64(w + k * 8, f32_to(w0));
+        var x1: f32 = f32_from(load64(x + (k + 1) * 8));
+        var w1: f32 = x1 * S1;
+        store64(w + (k + 1) * 8, f32_to(w1));
         var cs1: f32 = c * S1;
         S0 = cs1 - S0;
         var s10: f32 = S1 + S0;
-        store64(w + (k + 2) * 8, f64_mul(f64_mul(load64(x + (k + 2) * 8), F64_HALF), f32_to(s10)));
-        store64(w + (k + 3) * 8, f64_mul(load64(x + (k + 3) * 8), f32_to(S0)));
+        var x2: f32 = f32_from(load64(x + (k + 2) * 8));
+        var h2: f32 = x2 * hf;
+        var w2: f32 = h2 * s10;
+        store64(w + (k + 2) * 8, f32_to(w2));
+        var x3: f32 = f32_from(load64(x + (k + 3) * 8));
+        var w3: f32 = x3 * S0;
+        store64(w + (k + 3) * 8, f32_to(w3));
         var cs0: f32 = c * S0;
         S1 = cs0 - S1;
         k = k + 4;
@@ -1573,21 +1681,30 @@ fn silk_warped_autocorrelation_flp(corr, x, warping, length, order) {
         store64(C + order * 8, f64_add(load64(C + order * 8), f64_mul(load64(stt), t1)));
         n = n + 1;
     }
+    # the correlations in double, the results floats
     i = 0;
-    while (i <= order) { store64(corr + i * 8, load64(C + i * 8)); i = i + 1; }
+    while (i <= order) { store64(corr + i * 8, _sk_f32(load64(C + i * 8))); i = i + 1; }
     return 0;
 }
 
 # warped_gain (noise_shape_analysis_FLP.c): the gain of a warped filter at DC.
 fn _sk_warped_gain(coefs, lambda, order) {
-    lambda = f64_neg(lambda);
-    var g = load64(coefs + (order - 1) * 8);
+    # in single precision (noise_shape_analysis_FLP.c warped_gain)
+    var lam: f32 = f32_from(lambda);
+    lam = lam ^ 0x80000000;
+    var g: f32 = f32_from(load64(coefs + (order - 1) * 8));
     var i = order - 2;
     while (i >= 0) {
-        g = f64_add(f64_mul(lambda, g), load64(coefs + i * 8));
+        var ci: f32 = f32_from(load64(coefs + i * 8));
+        var lg: f32 = lam * g;
+        g = lg + ci;
         i = i - 1;
     }
-    return f64_div(F64_ONE, f64_sub(F64_ONE, f64_mul(lambda, g)));
+    var one: f32 = f32_from(F64_ONE);
+    var lg2: f32 = lam * g;
+    var den: f32 = one - lg2;
+    var r: f32 = one / den;
+    return f32_to(r);
 }
 
 # The index and value of the largest |c[i]|, i < order (the first on ties).
@@ -1605,8 +1722,11 @@ fn _sk_maxabs(coefs, order, ind_ptr) {
 # The bandwidth expansion limit_coefs and warped_true2monic_coefs apply when a
 # coefficient exceeds `limit`: 0.99 - (0.8 + 0.1 iter)(maxabs - limit)/(maxabs (ind + 1)).
 fn _sk_limit_chirp(maxabs, limit, iter, ind) {
-    var num = f64_mul(f64_add(_skf(4, 5), f64_mul(_skf(1, 10), f64_from(iter))), f64_sub(maxabs, limit));
-    return f64_sub(_skf(99, 100), f64_div(num, f64_mul(maxabs, f64_from(ind + 1))));
+    # 0.99f - ((0.8f + 0.1f iter) (maxabs - limit)) / (maxabs (ind + 1)), each a float
+    var a = _sk_f32(f64_add(_skf(4, 5), _sk_f32(f64_mul(_skf(1, 10), f64_from(iter)))));
+    var num = _sk_f32(f64_mul(a, _sk_f32(f64_sub(maxabs, limit))));
+    var den = _sk_f32(f64_mul(maxabs, f64_from(ind + 1)));
+    return _sk_f32(f64_sub(_skf(99, 100), _sk_f32(f64_div(num, den))));
 }
 
 # limit_coefs: bandwidth-expand until every |coef| <= limit (at most 10 rounds).
@@ -1624,15 +1744,33 @@ fn _sk_limit_coefs(coefs, limit, order) {
 }
 
 fn _sk_to_monic(coefs, lambda, order) {
+    # in single precision: coefs[i-1] -= lambda coefs[i], then the gain
+    # (1 - lambda^2) / (1 + lambda coefs[0]) on every coefficient
+    var lam: f32 = f32_from(lambda);
     var i = order - 1;
     while (i > 0) {
-        store64(coefs + (i - 1) * 8, f64_sub(load64(coefs + (i - 1) * 8), f64_mul(lambda, load64(coefs + i * 8))));
+        var ci: f32 = f32_from(load64(coefs + i * 8));
+        var cp: f32 = f32_from(load64(coefs + (i - 1) * 8));
+        var lc: f32 = lam * ci;
+        cp = cp - lc;
+        store64(coefs + (i - 1) * 8, f32_to(cp));
         i = i - 1;
     }
-    var g = f64_div(f64_sub(F64_ONE, f64_mul(lambda, lambda)), f64_add(F64_ONE, f64_mul(lambda, load64(coefs))));
+    var one: f32 = f32_from(F64_ONE);
+    var ll: f32 = lam * lam;
+    var nm: f32 = one - ll;
+    var c0: f32 = f32_from(load64(coefs));
+    var lc0: f32 = lam * c0;
+    var dn: f32 = one + lc0;
+    var g: f32 = nm / dn;
     i = 0;
-    while (i < order) { store64(coefs + i * 8, f64_mul(load64(coefs + i * 8), g)); i = i + 1; }
-    return g;
+    while (i < order) {
+        var cv: f32 = f32_from(load64(coefs + i * 8));
+        var gv: f32 = cv * g;
+        store64(coefs + i * 8, f32_to(gv));
+        i = i + 1;
+    }
+    return f32_to(g);
 }
 
 # warped_true2monic_coefs: warped coefficients to monic pseudo-warped ones, with
@@ -1648,12 +1786,12 @@ fn _sk_warped_true2monic(coefs, lambda, limit, order) {
         # back to true warped coefficients, expand, and monic again
         var i = 1;
         while (i < order) {
-            store64(coefs + (i - 1) * 8, f64_add(load64(coefs + (i - 1) * 8), f64_mul(lambda, load64(coefs + i * 8))));
+            store64(coefs + (i - 1) * 8, _sk_f32(f64_add(load64(coefs + (i - 1) * 8), _sk_f32(f64_mul(lambda, load64(coefs + i * 8))))));
             i = i + 1;
         }
-        var ig = f64_div(F64_ONE, g);
+        var ig = _sk_f32(f64_div(F64_ONE, g));
         i = 0;
-        while (i < order) { store64(coefs + i * 8, f64_mul(load64(coefs + i * 8), ig)); i = i + 1; }
+        while (i < order) { store64(coefs + i * 8, _sk_f32(f64_mul(load64(coefs + i * 8), ig))); i = i + 1; }
         silk_bwexpander_flp(coefs, order, _sk_limit_chirp(m, limit, iter, load64(ip)));
         g = _sk_to_monic(coefs, lambda, order);
         iter = iter + 1;
@@ -1689,12 +1827,21 @@ fn silk_find_pitch_lags_flp(st, ctrl, res, x) {
     silk_apply_sine_window_flp(W + (la + mid) * 8, xp + (la + mid) * 8, 2, la);
     var ac = _opus_tmp(17 * 8);
     silk_autocorrelation_flp(ac, W, win, po + 1);
-    store64(ac, f64_add(load64(ac), f64_add(f64_mul(load64(ac), _skf(1, 1000)), F64_ONE)));
+    # auto_corr[0] += auto_corr[0] * 1e-3f + 1, in single precision
+    var a0: f32 = f32_from(load64(ac));
+    var kw: f32 = f32_from(_skf(1, 1000));
+    var one: f32 = f32_from(F64_ONE);
+    var wn: f32 = a0 * kw;
+    wn = wn + one;
+    a0 = a0 + wn;
+    store64(ac, f32_to(a0));
     var rc = _opus_tmp(16 * 8);
-    var rn = silk_schur_flp(rc, ac, po);
-    var floor = rn;
-    if (f64_lt(floor, F64_ONE) == 1) { floor = F64_ONE; }
-    store64(ctrl + _SKC_PRED_GAIN, f64_div(load64(ac), floor));
+    var rn: f32 = f32_from(silk_schur_flp(rc, ac, po));
+    # predGain = auto_corr[0] / silk_max_float(res_nrg, 1.0f), a float
+    var rfl: f32 = one;
+    if (rn > one) { rfl = rn; }
+    var pg: f32 = a0 / rfl;
+    store64(ctrl + _SKC_PRED_GAIN, f32_to(pg));
     var A = _opus_tmp(16 * 8);
     i = 0;
     while (i < 16) { store64(A + i * 8, F64_ZERO); i = i + 1; }
@@ -1874,13 +2021,30 @@ fn silk_resampler_down2_3(S, out, inp, inLen) {
 
 # celt_pitch_xcorr: xcorr[i] = sum x[j] y[i + j], j < len, for i < max_pitch.
 fn _sk_pitch_xcorr(x, y, xcorr, len, max_pitch) {
+    # celt_pitch_xcorr in the float build: each lag's sum a float, in order
+    # (xcorr_kernel's MAC16_16 and celt_inner_prod alike); x and y converted to
+    # floats once (4-byte scratch) for the loop
+    _sk_fscratch();
+    var xf = _sk_fx;
+    var ny = len + max_pitch;
+    var yf = _sk_fy;
+    var j = 0;
+    while (j < len) { store32(xf + j * 4, f32_from(load64(x + j * 8))); j = j + 1; }
+    j = 0;
+    while (j < ny) { store32(yf + j * 4, f32_from(load64(y + j * 8))); j = j + 1; }
     var i = 0;
     while (i < max_pitch) {
-        var acc = F64_ZERO;
-        var yp = y + i * 8;
-        var j = 0;
-        while (j < len) { acc = f64_add(acc, f64_mul(load64(x + j * 8), load64(yp + j * 8))); j = j + 1; }
-        store64(xcorr + i * 8, acc);
+        var acc: f32 = f32_from(F64_ZERO);
+        var yp = yf + i * 4;
+        j = 0;
+        while (j < len) {
+            var xj: f32 = load32(xf + j * 4);
+            var yj: f32 = load32(yp + j * 4);
+            var pj: f32 = xj * yj;
+            acc = acc + pj;
+            j = j + 1;
+        }
+        store64(xcorr + i * 8, f32_to(acc));
         i = i + 1;
     }
     return 0;
@@ -1984,7 +2148,7 @@ fn _sk_calc_energy_st3(en, frame, start_lag, sf_length, nb_subfr, complexity) {
         var lo = load64(rng + (k * 2) * 8);
         var bp = tp - (start_lag + lo) * 8;
         var e = f64_add(silk_energy_flp(bp, sf_length), f64_div(F64_ONE, f64_from(1000)));   # 1e-3, a double
-        store64(scratch, e);
+        store64(scratch, _sk_f32(e));
         var n = 1;
         var ld = load64(rng + (k * 2 + 1) * 8) - lo + 1;
         var i = 1;
@@ -1993,7 +2157,7 @@ fn _sk_calc_energy_st3(en, frame, start_lag, sf_length, nb_subfr, complexity) {
             e = f64_sub(e, f64_mul(a, a));
             var b = load64(bp - i * 8);
             e = f64_add(e, f64_mul(b, b));
-            store64(scratch + n * 8, e);
+            store64(scratch + n * 8, _sk_f32(e));
             n = n + 1;
             i = i + 1;
         }
@@ -2079,7 +2243,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
         _sk_pitch_xcorr(tp, tp - 72 * 8, xcorr, 40, 65);
         var cc = load64(xcorr + 64 * 8);
         var norm = f64_add(f64_add(silk_energy_flp(tp, 40), silk_energy_flp(bp, 40)), f64_from(160000));
-        store64(C + 8 * 8, f64_add(load64(C + 8 * 8), f64_div(f64_mul(F64_TWO, cc), norm)));
+        store64(C + 8 * 8, _sk_f32(f64_add(load64(C + 8 * 8), _sk_f32(f64_div(f64_mul(F64_TWO, cc), norm)))));
         var d = 9;
         while (d <= 72) {
             bp = bp - 8;
@@ -2087,7 +2251,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
             var b0 = load64(bp);
             var b1 = load64(bp + 40 * 8);
             norm = f64_add(norm, f64_sub(f64_mul(b0, b0), f64_mul(b1, b1)));
-            store64(C + d * 8, f64_add(load64(C + d * 8), f64_div(f64_mul(F64_TWO, cc), norm)));
+            store64(C + d * 8, _sk_f32(f64_add(load64(C + d * 8), _sk_f32(f64_div(f64_mul(F64_TWO, cc), norm)))));
             d = d + 1;
         }
         tp = tp + 40 * 8;
@@ -2097,7 +2261,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
     i = 72;
     while (i >= 8) {
         var c0 = load64(C + i * 8);
-        store64(C + i * 8, f64_sub(c0, f64_div(f64_mul(c0, f64_from(i)), f64_from(4096))));
+        store64(C + i * 8, _sk_f32(f64_sub(c0, _sk_f32(f64_div(_sk_f32(f64_mul(c0, f64_from(i))), f64_from(4096))))));
         i = i - 1;
     }
     var nsrch = 4 + 2 * complexity;
@@ -2105,7 +2269,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
     silk_insertion_sort_decreasing_flp(C + 8 * 8, d_srch, 65, nsrch);
     var Cmax = load64(C + 8 * 8);
     if (f64_lt(Cmax, _skf(1, 5)) == 1) { return _sk_pitch_unvoiced(pitch_out, out, LTPCorr); }
-    var threshold = f64_mul(thres1, Cmax);
+    var threshold = _sk_f32(f64_mul(thres1, Cmax));
     i = 0;
     var cut = 0;
     while (i < nsrch && cut == 0) {
@@ -2162,7 +2326,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
             var xc = silk_inner_product_flp(bq, tp, 40);
             if (f64_gt(xc, F64_ZERO) == 1) {
                 var en = silk_energy_flp(bq, 40);
-                store64(C + (k * 149 + dd) * 8, f64_div(f64_mul(F64_TWO, xc), f64_add(en, etmp)));
+                store64(C + (k * 149 + dd) * 8, _sk_f32(f64_div(f64_mul(F64_TWO, xc), f64_add(en, etmp))));
             } else {
                 store64(C + (k * 149 + dd) * 8, F64_ZERO);
             }
@@ -2201,7 +2365,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
             var acc = F64_ZERO;
             i = 0;
             while (i < nb_subfr) {
-                acc = f64_add(acc, load64(C + (i * 149 + d2 + load64(cbk + (i * cbs + j2) * 8)) * 8));
+                acc = _sk_f32(f64_add(acc, load64(C + (i * 149 + d2 + load64(cbk + (i * cbs + j2) * 8)) * 8)));
                 i = i + 1;
             }
             store64(CC + j2 * 8, acc);
@@ -2215,14 +2379,16 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
             i = i + 1;
         }
         var lag_log2 = _sk_f32(_sk_log2(f64_from(d2)));
-        var CCmax_new_b = f64_sub(CCmax_new, f64_mul(f64_mul(_skf(1, 5), nbsub), lag_log2));
+        # each a float, in C's order: CCmax_new - ((0.2f nb) lag_log2), and
+        # less (((0.2f nb) LTPCorr) d) / (d + 0.5f) for a previous lag
+        var CCmax_new_b = _sk_f32(f64_sub(CCmax_new, _sk_f32(f64_mul(_sk_f32(f64_mul(_skf(1, 5), nbsub)), lag_log2))));
         if (prevLag > 0) {
-            var dl = f64_sub(lag_log2, prevLag_log2);
-            dl = f64_mul(dl, dl);
-            CCmax_new_b = f64_sub(CCmax_new_b, f64_div(f64_mul(f64_mul(f64_mul(_skf(1, 5), nbsub), load64(LTPCorr)), dl),
-              f64_add(dl, F64_HALF)));
+            var dl = _sk_f32(f64_sub(lag_log2, prevLag_log2));
+            dl = _sk_f32(f64_mul(dl, dl));
+            var pb = _sk_f32(f64_mul(_sk_f32(f64_mul(_sk_f32(f64_mul(_skf(1, 5), nbsub)), load64(LTPCorr))), dl));
+            CCmax_new_b = _sk_f32(f64_sub(CCmax_new_b, _sk_f32(f64_div(pb, _sk_f32(f64_add(dl, F64_HALF))))));
         }
-        if (f64_gt(CCmax_new_b, CCmax_b) == 1 && f64_gt(CCmax_new, f64_mul(nbsub, thres2)) == 1) {
+        if (f64_gt(CCmax_new_b, CCmax_b) == 1 && f64_gt(CCmax_new, _sk_f32(f64_mul(nbsub, thres2))) == 1) {
             CCmax_b = CCmax_new_b;
             CCmax = CCmax_new;
             lag = d2;
@@ -2231,7 +2397,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
         k = k + 1;
     }
     if (lag == 0 - 1) { return _sk_pitch_unvoiced(pitch_out, out, LTPCorr); }
-    store64(LTPCorr, f64_div(CCmax, nbsub));
+    store64(LTPCorr, _sk_f32(f64_div(CCmax, nbsub)));
 
     if (Fs_kHz > 8) {
         # third stage, at the full rate around the lag
@@ -2249,7 +2415,7 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
         var ens = _opus_tmp(4 * 34 * 5 * 8);
         _sk_calc_corr_st3(ccs, frame, start_lag, sf_length, nb_subfr, complexity);
         _sk_calc_energy_st3(ens, frame, start_lag, sf_length, nb_subfr, complexity);
-        var contour_bias = f64_div(_skf(1, 20), f64_from(lag));
+        var contour_bias = _sk_f32(f64_div(_skf(1, 20), f64_from(lag)));
         var cb3 = _silk_cblags3;
         var cbs3 = 34;
         var nbc3 = _sk_st3_ncb(complexity);
@@ -2271,8 +2437,8 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
                 }
                 var cn = F64_ZERO;
                 if (f64_gt(xc3, F64_ZERO) == 1) {
-                    cn = f64_div(f64_mul(F64_TWO, xc3), e3);
-                    cn = f64_mul(cn, f64_sub(F64_ONE, f64_mul(contour_bias, f64_from(j3))));
+                    cn = _sk_f32(f64_div(f64_mul(F64_TWO, xc3), e3));
+                    cn = _sk_f32(f64_mul(cn, _sk_f32(f64_sub(F64_ONE, _sk_f32(f64_mul(contour_bias, f64_from(j3)))))));
                 }
                 # (libopus checks the reach with the 20 ms codebook's first row for both sizes)
                 if (f64_gt(cn, CCmax) == 1 && d3 + load64(_silk_cblags3 + j3 * 8) <= max_lag) {
@@ -2314,6 +2480,8 @@ fn silk_pitch_analysis_core_flp(frame, pitch_out, out, LTPCorr, prevLag, thres1,
 # pitch_res: the frame's LPC residual (silk_find_pitch_lags_flp's, from its
 # frame start); x: the frame, with la_shape samples valid before and after.
 fn silk_noise_shape_analysis_flp(st, ctrl, pitch_res, x) {
+    # every value libopus keeps in a float rounded to single precision, each
+    # operation in C's order (noise_shape_analysis_FLP.c); F = _sk_f32
     var fs = load64(st + _SKE_FS_KHZ);
     var nb = load64(st + _SKE_NB_SUBFR);
     var sl = load64(st + _SKE_SUBFR_LEN);
@@ -2322,23 +2490,36 @@ fn silk_noise_shape_analysis_flp(st, ctrl, pitch_res, x) {
     var swl = load64(st + _SKE_SHAPE_WIN);
     var wq16 = load64(st + _SKE_WARPING_Q16);
     var sig = _ske_idx(st, _SKI_SIGNAL_TYPE);
-    var speech = f64_div(f64_from(load64(st + _SKE_SPEECH_Q8)), f64_from(256));
-    var snr_db = f64_div(f64_from(load64(st + _SKE_SNR_Q7)), f64_from(128));
-    var snr_adj = snr_db;
-    var iq = f64_div(f64_mul(F64_HALF, f64_from(load64(st + _SKE_QUALITY) + load64(st + _SKE_QUALITY + 8))), f64_from(32768));
+    var q8 = f64_from(load64(st + _SKE_SPEECH_Q8));
+    var i256 = _skf(1, 256);
+    var i128 = _skf(1, 128);
+    var i32k = _skf(1, 32768);
+    var q7 = f64_from(load64(st + _SKE_SNR_Q7));
+    # SNR_adj_dB = SNR_dB_Q7 * (1 / 128.0f)
+    var snr_adj = _sk_f32(f64_mul(q7, i128));
+    # input_quality = 0.5f * (bands[0] + bands[1]) * (1.0f / 32768.0f)
+    var iq = _sk_f32(f64_mul(_sk_f32(f64_mul(F64_HALF, f64_from(load64(st + _SKE_QUALITY) + load64(st + _SKE_QUALITY + 8)))), i32k));
     store64(ctrl + _SKC_INPUT_QUALITY, iq);
-    var cq = _sk_sigmoid(f64_mul(_skf(1, 4), f64_sub(snr_adj, f64_from(20))));
+    # coding_quality = silk_sigmoid(0.25f * (SNR_adj_dB - 20.0f))
+    var cq = _sk_sigmoid(_sk_f32(f64_mul(_skf(1, 4), _sk_f32(f64_sub(snr_adj, f64_from(20))))));
     store64(ctrl + _SKC_CODING_QUALITY, cq);
     if (load64(st + _SKE_USE_CBR) == 0) {
-        # less SNR at low speech activity
-        var b = f64_sub(F64_ONE, speech);
-        snr_adj = f64_sub(snr_adj, f64_mul(f64_mul(f64_mul(f64_mul(F64_TWO, cq), f64_add(F64_HALF, f64_mul(F64_HALF, iq))), b), b));
+        # less SNR at low speech activity: b = 1.0f - Q8 * (1.0f / 256.0f);
+        # SNR -= 2.0f * cq * (0.5f + 0.5f * iq) * b * b, left to right
+        var b = _sk_f32(f64_sub(F64_ONE, _sk_f32(f64_mul(q8, i256))));
+        var t1 = _sk_f32(f64_mul(F64_TWO, cq));
+        t1 = _sk_f32(f64_mul(t1, _sk_f32(f64_add(F64_HALF, _sk_f32(f64_mul(F64_HALF, iq))))));
+        t1 = _sk_f32(f64_mul(t1, b));
+        t1 = _sk_f32(f64_mul(t1, b));
+        snr_adj = _sk_f32(f64_sub(snr_adj, t1));
     }
     if (sig == 2) {
-        snr_adj = f64_add(snr_adj, f64_mul(F64_TWO, load64(st + _SKE_LTP_CORR)));
+        snr_adj = _sk_f32(f64_add(snr_adj, _sk_f32(f64_mul(F64_TWO, load64(st + _SKE_LTP_CORR)))));
     } else {
-        var adj = f64_add(f64_mul(f64_neg(_skf(2, 5)), snr_db), f64_from(6));
-        snr_adj = f64_add(snr_adj, f64_mul(adj, f64_sub(F64_ONE, iq)));
+        # SNR += (-0.4f * SNR_dB_Q7 * (1 / 128.0f) + 6.0f) * (1.0f - iq)
+        var adj = _sk_f32(f64_mul(_sk_f32(f64_mul(f64_neg(_skf(2, 5)), q7)), i128));
+        adj = _sk_f32(f64_add(adj, f64_from(6)));
+        snr_adj = _sk_f32(f64_add(snr_adj, _sk_f32(f64_mul(adj, _sk_f32(f64_sub(F64_ONE, iq))))));
     }
     # the quantiser offset: from the energy's fluctuation over 2 ms segments
     if (sig == 2) {
@@ -2351,20 +2532,21 @@ fn silk_noise_shape_analysis_flp(st, ctrl, pitch_res, x) {
         var rp = pitch_res;
         var k = 0;
         while (k < nseg) {
-            var nrg = f64_add(f64_from(ns), silk_energy_flp(rp, ns));
+            # nrg = (silk_float)nSamples + (silk_float)silk_energy_FLP(...)
+            var nrg = _sk_f32(f64_add(f64_from(ns), _sk_f32(silk_energy_flp(rp, ns))));
             var le = _sk_log2(nrg);
-            if (k > 0) { ev = f64_add(ev, f64_abs(f64_sub(le, lprev))); }
+            if (k > 0) { ev = _sk_f32(f64_add(ev, f64_abs(_sk_f32(f64_sub(le, lprev))))); }
             lprev = le;
             rp = rp + ns * 8;
             k = k + 1;
         }
-        if (f64_gt(ev, f64_mul(_skf(3, 5), f64_from(nseg - 1))) == 1) { _ske_set_idx(st, _SKI_QUANT_OFFSET, 0); }
+        if (f64_gt(ev, _sk_f32(f64_mul(_skf(3, 5), f64_from(nseg - 1)))) == 1) { _ske_set_idx(st, _SKI_QUANT_OFFSET, 0); }
         else { _ske_set_idx(st, _SKI_QUANT_OFFSET, 1); }
     }
     # more bandwidth expansion at high prediction gain
-    var strength = f64_mul(_skf(1, 1000), load64(ctrl + _SKC_PRED_GAIN));
-    var bwexp = f64_div(_skf(47, 50), f64_add(F64_ONE, f64_mul(strength, strength)));
-    var warping = f64_add(f64_div(f64_from(wq16), f64_from(65536)), f64_mul(_skf(1, 100), cq));
+    var strength = _sk_f32(f64_mul(_skf(1, 1000), load64(ctrl + _SKC_PRED_GAIN)));
+    var bwexp = _sk_f32(f64_div(_skf(47, 50), _sk_f32(f64_add(F64_ONE, _sk_f32(f64_mul(strength, strength))))));
+    var warping = _sk_f32(f64_add(_sk_f32(f64_div(f64_from(wq16), f64_from(65536))), _sk_f32(f64_mul(_skf(1, 100), cq))));
     # each subframe's shaping filter and gain
     var flat = fs * 3;
     var slope = (swl - flat) / 2;
@@ -2381,46 +2563,62 @@ fn silk_noise_shape_analysis_flp(st, ctrl, pitch_res, x) {
         xp = xp + sl * 8;
         if (wq16 > 0) { silk_warped_autocorrelation_flp(ac, xw, warping, swl, so); }
         else { silk_autocorrelation_flp(ac, xw, swl, so + 1); }
-        store64(ac, f64_add(load64(ac), f64_add(f64_mul(load64(ac), _skf(3, 100000)), F64_ONE)));
+        # auto_corr[0] += auto_corr[0] * 3e-5f + 1.0f
+        var a0 = load64(ac);
+        store64(ac, _sk_f32(f64_add(a0, _sk_f32(f64_add(_sk_f32(f64_mul(a0, _skf(3, 100000))), F64_ONE)))));
         var nrg2 = silk_schur_flp(rc, ac, so);
         var ar = ctrl + _SKC_AR + k2 * 24 * 8;
         j = 0;
         while (j < 24) { store64(ar + j * 8, F64_ZERO); j = j + 1; }
         silk_k2a_flp(ar, rc, so);
-        var g = f64_sqrt(nrg2);
-        if (wq16 > 0) { g = f64_mul(g, _sk_warped_gain(ar, warping, so)); }
+        # Gains[k] = (silk_float)sqrt(nrg), in double
+        var g = _sk_f32(f64_sqrt(nrg2));
+        if (wq16 > 0) { g = _sk_f32(f64_mul(g, _sk_warped_gain(ar, warping, so))); }
         store64(ctrl + _SKC_GAINS + k2 * 8, g);
         silk_bwexpander_flp(ar, so, bwexp);
         if (wq16 > 0) { _sk_warped_true2monic(ar, warping, _skf(3999, 1000), so); }
         else { _sk_limit_coefs(ar, _skf(3999, 1000), so); }
         k2 = k2 + 1;
     }
-    # gains: up at low SNR, plus a floor
-    var gm = f64_pow(F64_TWO, f64_mul(f64_neg(_skf(4, 25)), snr_adj));
-    var ga = f64_pow(F64_TWO, f64_mul(_skf(4, 25), F64_TWO));          # 0.16 MIN_QGAIN_DB
+    # gains: up at low SNR, plus a floor: (silk_float)pow(2.0f, -0.16f * SNR) in
+    # double, and (silk_float)pow(2.0f, 0.16f * MIN_QGAIN_DB)
+    var gm = _sk_f32(f64_pow(F64_TWO, _sk_f32(f64_mul(f64_neg(_skf(4, 25)), snr_adj))));
+    var ga = _sk_f32(f64_pow(F64_TWO, _sk_f32(f64_mul(_skf(4, 25), F64_TWO))));
     k2 = 0;
     while (k2 < nb) {
-        store64(ctrl + _SKC_GAINS + k2 * 8, f64_add(f64_mul(load64(ctrl + _SKC_GAINS + k2 * 8), gm), ga));
+        var gk = _sk_f32(f64_mul(load64(ctrl + _SKC_GAINS + k2 * 8), gm));
+        store64(ctrl + _SKC_GAINS + k2 * 8, _sk_f32(f64_add(gk, ga)));
         k2 = k2 + 1;
     }
-    # low frequency shaping and tilt
-    var q0 = f64_div(f64_from(load64(st + _SKE_QUALITY)), f64_from(32768));
-    var lfs = f64_mul(f64_from(4), f64_add(F64_ONE, f64_mul(F64_HALF, f64_sub(q0, F64_ONE))));
-    lfs = f64_mul(lfs, speech);
+    # low-frequency shaping and tilt: strength = 4.0f * (1.0f + 0.5f *
+    # (bands[0] * (1.0f / 32768.0f) - 1.0f)); strength *= Q8 * (1.0f / 256.0f)
+    var q0 = _sk_f32(f64_mul(f64_from(load64(st + _SKE_QUALITY)), i32k));
+    var lfs = _sk_f32(f64_sub(q0, F64_ONE));
+    lfs = _sk_f32(f64_mul(F64_HALF, lfs));
+    lfs = _sk_f32(f64_add(F64_ONE, lfs));
+    lfs = _sk_f32(f64_mul(f64_from(4), lfs));
+    lfs = _sk_f32(f64_mul(lfs, _sk_f32(f64_mul(q8, i256))));
     var tilt = F64_ZERO;
     if (sig == 2) {
         k2 = 0;
         while (k2 < nb) {
-            var bv = f64_add(f64_div(_skf(1, 5), f64_from(fs)), f64_div(f64_from(3), f64_from(load64(ctrl + _SKC_PITCHL + k2 * 8))));
-            store64(ctrl + _SKC_LF_MA + k2 * 8, f64_add(f64_neg(F64_ONE), bv));
-            store64(ctrl + _SKC_LF_AR + k2 * 8, f64_sub(f64_sub(F64_ONE, bv), f64_mul(bv, lfs)));
+            # b = 0.2f / fs_kHz + 3.0f / pitchL[k]; MA = -1.0f + b; AR = 1.0f - b - b * strength
+            var bv = _sk_f32(f64_add(_sk_f32(f64_div(_skf(1, 5), f64_from(fs))),
+              _sk_f32(f64_div(f64_from(3), f64_from(load64(ctrl + _SKC_PITCHL + k2 * 8))))));
+            store64(ctrl + _SKC_LF_MA + k2 * 8, _sk_f32(f64_add(f64_neg(F64_ONE), bv)));
+            store64(ctrl + _SKC_LF_AR + k2 * 8, _sk_f32(f64_sub(_sk_f32(f64_sub(F64_ONE, bv)), _sk_f32(f64_mul(bv, lfs)))));
             k2 = k2 + 1;
         }
-        tilt = f64_sub(f64_neg(_skf(1, 4)), f64_mul(f64_mul(f64_sub(F64_ONE, _skf(1, 4)), _skf(7, 20)), speech));
+        # Tilt = -0.25f - (1 - 0.25f) * 0.35f * Q8 * (1.0f / 256.0f), left to right
+        var tt = _sk_f32(f64_mul(_sk_f32(f64_sub(F64_ONE, _skf(1, 4))), _skf(7, 20)));
+        tt = _sk_f32(f64_mul(tt, q8));
+        tt = _sk_f32(f64_mul(tt, i256));
+        tilt = _sk_f32(f64_sub(f64_neg(_skf(1, 4)), tt));
     } else {
-        var b1 = f64_div(_skf(13, 10), f64_from(fs));
-        var ma = f64_add(f64_neg(F64_ONE), b1);
-        var arv = f64_sub(f64_sub(F64_ONE, b1), f64_mul(f64_mul(b1, lfs), _skf(3, 5)));
+        # b = 1.3f / fs_kHz; MA = -1.0f + b; AR = 1.0f - b - b * strength * 0.6f
+        var b1 = _sk_f32(f64_div(_skf(13, 10), f64_from(fs)));
+        var ma = _sk_f32(f64_add(f64_neg(F64_ONE), b1));
+        var arv = _sk_f32(f64_sub(_sk_f32(f64_sub(F64_ONE, b1)), _sk_f32(f64_mul(_sk_f32(f64_mul(b1, lfs)), _skf(3, 5)))));
         k2 = 0;
         while (k2 < nb) {
             store64(ctrl + _SKC_LF_MA + k2 * 8, ma);
@@ -2429,22 +2627,24 @@ fn silk_noise_shape_analysis_flp(st, ctrl, pitch_res, x) {
         }
         tilt = f64_neg(_skf(1, 4));
     }
-    # harmonic shaping, voiced frames only
+    # harmonic shaping, voiced frames only: 0.3f + 0.2f * (1.0f - (1.0f - cq) * iq),
+    # times (silk_float)sqrt(LTPCorr)
     var harm = F64_ZERO;
     if (sig == 2) {
-        harm = f64_add(_skf(3, 10), f64_mul(_skf(1, 5), f64_sub(F64_ONE, f64_mul(f64_sub(F64_ONE, cq), iq))));
-        harm = f64_mul(harm, f64_sqrt(load64(st + _SKE_LTP_CORR)));
+        var hq = _sk_f32(f64_mul(_sk_f32(f64_sub(F64_ONE, cq)), iq));
+        harm = _sk_f32(f64_add(_skf(3, 10), _sk_f32(f64_mul(_skf(1, 5), _sk_f32(f64_sub(F64_ONE, hq))))));
+        harm = _sk_f32(f64_mul(harm, _sk_f32(f64_sqrt(load64(st + _SKE_LTP_CORR)))));
     }
-    # smoothed over subframes
+    # smoothed over subframes: smth += 0.4f * (target - smth)
     var sm = _skf(2, 5);
     k2 = 0;
     while (k2 < nb) {
         var hs = load64(st + _SKE_HARM_SMTH);
-        hs = f64_add(hs, f64_mul(sm, f64_sub(harm, hs)));
+        hs = _sk_f32(f64_add(hs, _sk_f32(f64_mul(sm, _sk_f32(f64_sub(harm, hs))))));
         store64(st + _SKE_HARM_SMTH, hs);
         store64(ctrl + _SKC_HARM + k2 * 8, hs);
         var ts = load64(st + _SKE_TILT_SMTH);
-        ts = f64_add(ts, f64_mul(sm, f64_sub(tilt, ts)));
+        ts = _sk_f32(f64_add(ts, _sk_f32(f64_mul(sm, _sk_f32(f64_sub(tilt, ts))))));
         store64(st + _SKE_TILT_SMTH, ts);
         store64(ctrl + _SKC_TILT + k2 * 8, ts);
         k2 = k2 + 1;
@@ -2460,18 +2660,25 @@ fn silk_process_gains_flp(st, ctrl, cond) {
     var nb = load64(st + _SKE_NB_SUBFR);
     var sig = _ske_idx(st, _SKI_SIGNAL_TYPE);
     var k = 0;
+    # in single precision as process_gains_FLP.c computes it (F = _sk_f32)
     if (sig == 2) {
-        var s = f64_sub(F64_ONE, f64_mul(F64_HALF, _sk_sigmoid(f64_mul(_skf(1, 4), f64_sub(load64(ctrl + _SKC_LTPRED_GAIN), f64_from(12))))));
+        # s = 1.0f - 0.5f * silk_sigmoid(0.25f * (LTPredCodGain - 12.0f))
+        var sx = _sk_f32(f64_mul(_skf(1, 4), _sk_f32(f64_sub(load64(ctrl + _SKC_LTPRED_GAIN), f64_from(12)))));
+        var s = _sk_f32(f64_sub(F64_ONE, _sk_f32(f64_mul(F64_HALF, _sk_sigmoid(sx)))));
         k = 0;
-        while (k < nb) { store64(ctrl + _SKC_GAINS + k * 8, f64_mul(load64(ctrl + _SKC_GAINS + k * 8), s)); k = k + 1; }
+        while (k < nb) { store64(ctrl + _SKC_GAINS + k * 8, _sk_f32(f64_mul(load64(ctrl + _SKC_GAINS + k * 8), s))); k = k + 1; }
     }
-    var snr_db = f64_div(f64_from(load64(st + _SKE_SNR_Q7)), f64_from(128));
-    var inv_max = f64_div(f64_pow(F64_TWO, f64_mul(_skf(33, 100), f64_sub(f64_from(21), snr_db))), f64_from(load64(st + _SKE_SUBFR_LEN)));
+    # InvMaxSqrVal = (silk_float)(pow(2.0f, 0.33f * (21.0f - SNR_dB_Q7 * (1 / 128.0f))) / subfr_length):
+    # the exponent a float, pow and the division in double
+    var snr_db = _sk_f32(f64_mul(f64_from(load64(st + _SKE_SNR_Q7)), _skf(1, 128)));
+    var ex = _sk_f32(f64_mul(_skf(33, 100), _sk_f32(f64_sub(f64_from(21), snr_db))));
+    var inv_max = _sk_f32(f64_div(f64_pow(F64_TWO, ex), f64_from(load64(st + _SKE_SUBFR_LEN))));
     var cap = f64_from(32767);
     k = 0;
     while (k < nb) {
+        # gain = (silk_float)sqrt(gain * gain + ResNrg[k] * InvMaxSqrVal), the sum's terms floats
         var g = load64(ctrl + _SKC_GAINS + k * 8);
-        g = f64_sqrt(f64_add(f64_mul(g, g), f64_mul(load64(ctrl + _SKC_RESNRG + k * 8), inv_max)));
+        g = _sk_f32(f64_sqrt(_sk_f32(f64_add(_sk_f32(f64_mul(g, g)), _sk_f32(f64_mul(load64(ctrl + _SKC_RESNRG + k * 8), inv_max))))));
         # silk_min_float(gain, 32767.0f): the cap unless the gain is below it (NaN too)
         if (f64_lt(g, cap) == 0) { g = cap; }
         store64(ctrl + _SKC_GAINS + k * 8, g);
@@ -2496,7 +2703,8 @@ fn silk_process_gains_flp(st, ctrl, cond) {
         k = k + 1;
     }
     if (sig == 2) {
-        var t = f64_add(load64(ctrl + _SKC_LTPRED_GAIN), f64_div(f64_from(load64(st + _SKE_TILT_Q15)), f64_from(32768)));
+        # LTPredCodGain + input_tilt_Q15 * (1.0f / 32768.0f) > 1.0f, in single precision
+        var t = _sk_f32(f64_add(load64(ctrl + _SKC_LTPRED_GAIN), _sk_f32(f64_mul(f64_from(load64(st + _SKE_TILT_Q15)), _skf(1, 32768)))));
         if (f64_gt(t, F64_ONE) == 1) { _ske_set_idx(st, _SKI_QUANT_OFFSET, 0); }
         else { _ske_set_idx(st, _SKI_QUANT_OFFSET, 1); }
     }

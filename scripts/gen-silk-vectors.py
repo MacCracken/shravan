@@ -226,9 +226,10 @@ def int_signal(kind, fs, n, seed, prm=COMB):
     3 the last 0.7 s of every second is silent (long enough for DTX to leave
     packets out, and to send one after 400 ms of them). A comb on
     white noise is as periodic as speech to the pitch estimator but flat within
-    the LPC orders, so the float stages round as shravan's double ones do (a
-    pulse train through formants is so ill-conditioned there that libopus's
-    float input to them parts from shravan's doubles within a frame). Kind 7
+    the LPC orders. (Until 2.12.6 shravan's float stages ran in double, and a
+    pulse train through formants was so ill-conditioned that libopus's float
+    input to them parted from shravan's doubles within a frame; they now run in
+    libopus's single precision, and kind 4's sharp resonance is exact.) Kind 7
     repeats the noise's first period at prm[0] Hz, at -18 dB, under the noise
     itself prm[1] bits down: periodic from the first sample, so that the first
     frame is voiced to a pitch estimator that ran on it."""
@@ -372,12 +373,12 @@ def read_packets(path):
 # a CBR budget over frames; VBR in a small buffer (k11, k12) takes the 25%
 # margin, Lambda's floor, and the 3/5, 2/5 and 3/4 shares of multi-frame
 # packets; k14's reservoir pushes the target under 5 kbit/s; k13's first frame
-# holds the prediction gain to 100 (only 200 ms of it: on a resonance this
-# sharp Burg is ill-conditioned, and libopus's float input to it soon parts
-# from shravan's doubles). The seeds are ones for which libopus codes every
-# frame unvoiced and its float stages round as shravan's double ones do (about
-# one frame in 500 rounds a shaping coefficient the other way, and the pulses
-# can follow).
+# holds the prediction gain to 100 (200 ms of it: with the float stages in
+# double until 2.12.6, Burg on a resonance this sharp soon parted from
+# libopus's floats). The seeds are ones for which libopus codes every frame
+# unvoiced, and were chosen when shravan's float stages rounded as libopus's
+# only to within a near-tie; since 2.12.6 they compute in its single
+# precision, and any seed is exact.
 # 2.12.0, voiced (kind 6): every bandwidth, 10 to 60 ms, complexity 0 (the
 # pitch estimator's lowest settings) and 1, VBR and CBR (the rate loop on
 # voiced frames, conditionally coded ones among them); k20's pitch jumps make
@@ -577,10 +578,11 @@ def rate_list(spec):
 # length, bytes, final range, and the getters after it (bandwidth, in-DTX,
 # bit rate), as u32le words. name, kind, seed, rate, channels, seconds,
 # opusenc's keys, extra (prm, and stereo_signal's rkind, rseed, rg, rsh, rq).
-# Each config's seed is one whose packets are libopus's exactly; total= keeps
-# the long runs to their exact start (shravan's float stages round as
-# libopus's single precision ones only to within a near-tie, and a tie
-# rounding the other way changes the packets after it).
+# Each config's seed is one whose packets were libopus's exactly, and total=
+# keeps the long runs to that exact start: until 2.12.6 shravan's float stages
+# rounded as libopus's single precision ones only to within a near-tie, and a
+# tie rounding the other way changed the packets after it. Since 2.12.6 they
+# compute in libopus's single precision, and any seed and length is exact.
 #   o_bw: wideband down to mediumband through the 5 s low-pass transition
 #   (switchReady, opusCanSwitch) and back up (the transition from the other
 #   side); o_st, o_st60, o_chans, o_force1: stereo to mono (toMono's two
@@ -730,6 +732,15 @@ OPUS = [
     ("o_win1", 1, 2, 16000, 1, 1.0, ["cx=5", "bitrate=24000", "ms=40"], {}),
     ("o_win2", 1, 1, 24000, 1, 1.0, ["cx=8", "bitrate=32000", "ms=60"], {}),
     ("o_win3", 6, 8, 12000, 2, 1.0, ["cx=5", "bitrate=48000", "ms=40"], {}),
+    # 2.12.6: every float stage in libopus's single precision. A sharp resonance
+    # (kind 4, 25 dB of prediction gain) is as ill-conditioned as SILK's
+    # analysis gets: with its float stages in double, shravan parted from
+    # libopus on these from the first or second packet; now they are exact.
+    ("o_res1", 4, 8, 12000, 1, 1.0, ["cx=2", "bitrate=48000", "ms=60"], {}),
+    ("o_res2", 4, 3, 24000, 1, 1.0, ["cx=8", "bitrate=48000", "ms=60"], {}),
+    ("o_res3", 4, 4, 48000, 1, 1.0, ["cx=0", "bitrate=16000", "ms=60"], {}),
+    ("o_res4", 4, 9, 12000, 2, 1.0, ["cx=8", "bitrate=24000", "ms=40"], {}),
+    ("o_res5", 4, 9, 24000, 2, 1.0, ["cx=8", "bitrate=24000", "ms=10"], {}),
 ]
 
 OPUS_UNSET = -99999

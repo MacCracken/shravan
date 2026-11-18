@@ -11033,9 +11033,10 @@ fn test_silk_encode_bitstream_roundtrip() {
 # 10 and 20 ms, complexity 1 and 5, both unvoiced signal types, every NLSF
 # interpolation index), the VAD, noise shaping, gains and quantiser (2.11.x),
 # pitch estimation, long-term prediction and the variable high-pass (2.12.0),
-# and whole packets. Each shravan stage gets libopus's inputs. Its float stages
-# run in f64 where libopus runs in single precision, so they agree to float
-# precision; the fixed-point stages, and everything they feed, agree exactly.
+# and whole packets. Each shravan stage gets libopus's inputs, and every stage
+# agrees exactly: the fixed-point ones by construction, the float ones since
+# 2.12.6, which compute in libopus's single precision (each operation rounded
+# as its float build rounds it, double where libopus has double).
 
 # A vector field (scripts/gen-silk-vectors.py) is one zlib stream in base64:
 # the segment count, each segment's length (u32), then the segments, one a
@@ -11097,11 +11098,12 @@ fn _skv_loadf(s, k, out) {
     return n;
 }
 
-# 1 when |a - b| <= tol * max(1, |b|).
-fn _skv_close(a, b, tol) {
-    var m = f64_abs(b);
-    if (f64_lt(m, F64_ONE) == 1) { m = F64_ONE; }
-    if (f64_le(f64_abs(f64_sub(a, b)), f64_mul(tol, m)) == 1) { return 1; }
+# 1 when a and b are the same value (2.12.6: the float stages compute in
+# libopus's single precision, each operation rounded as its float build rounds
+# it, so libopus's values are matched exactly, not to a tolerance).
+fn _skv_same(a, b) {
+    if (a == b) { return 1; }
+    if (f64_eq(a, b) == 1) { return 1; }
     return 0;
 }
 
@@ -11117,7 +11119,6 @@ fn _skv_state(hdr) {
 
 fn test_silk_enc_lpc_vs_libopus() {
     syscall(1, 1, "=== silk encode: LPC analysis vs libopus ===\n", 45);
-    var tol = f64_div(F64_ONE, f64_from(1000000));          # 1e-6: libopus works in floats
     var hdr = alloc(16 * 8);
     var pre = alloc(512 * 8);
     var x = alloc(512 * 8);
@@ -11151,10 +11152,10 @@ fn test_silk_enc_lpc_vs_libopus() {
             var nbb = nb;
             if (b == 1) { xin = pre + 2 * sfl * 8; nbb = 2; }
             var e = silk_burg_modified_flp(A, xin, mig, sfl, nbb, ord);
-            var ok = _skv_close(e, load64(w + b * 8), tol);
+            var ok = _skv_same(e, load64(w + b * 8));
             var k = 0;
             while (k < ord) {
-                ok = ok & _skv_close(load64(A + k * 8), load64(ba + (b * ord + k) * 8), tol);
+                ok = ok & _skv_same(load64(A + k * 8), load64(ba + (b * ord + k) * 8));
                 k = k + 1;
             }
             assert(ok == 1, "burg: coefficients and residual energy as libopus's");
@@ -11169,21 +11170,20 @@ fn test_silk_enc_lpc_vs_libopus() {
         var k2 = 0;
         while (k2 < ord) { if (load64(nl + k2 * 8) != load64(v + k2 * 8)) { same = 0; } k2 = k2 + 1; }
         assert(same == 1, "A2NLSF: libopus's NLSFs exactly");
-        # find_LPC: NLSFs within one step (Burg's f64 against float can round
-        # one coefficient across a step), the interpolation index exactly
+        # find_LPC: libopus's NLSFs and interpolation index, exactly (within
+        # one step until 2.12.6, when Burg ran in f64 against libopus's floats)
         var st = _skv_state(hdr);
         _skv_load(_SKV_PREV, f, prev);
         var i = 0;
         while (i < ord) { store64(st + _SKE_PREV_NLSF + i * 8, load64(prev + i * 8)); i = i + 1; }
         silk_find_lpc_flp(st, nl, pre, mig);
-        var near = 1;
+        var same_nlsf = 1;
         k2 = 0;
         while (k2 < ord) {
-            var d = load64(nl + k2 * 8) - load64(v + k2 * 8);
-            if (d > 1 || d < 0 - 1) { near = 0; }
+            if (load64(nl + k2 * 8) != load64(v + k2 * 8)) { same_nlsf = 0; }
             k2 = k2 + 1;
         }
-        assert(near == 1, "find_LPC: NLSFs within one step of libopus's");
+        assert(same_nlsf == 1, "find_LPC: libopus's NLSFs");
         assert_eq(_ske_idx(st, _SKI_NLSF_INTERP), interp, "find_LPC: libopus's interpolation index");
         # process_NLSFs on libopus's NLSFs: quantised NLSFs, indices and filters exactly
         _ske_set_idx(st, _SKI_NLSF_INTERP, interp);
@@ -11219,7 +11219,7 @@ fn test_silk_enc_lpc_vs_libopus() {
         _skv_loadf(_SKV_RESNRG, f, w);
         var okr = 1;
         k2 = 0;
-        while (k2 < nb) { okr = okr & _skv_close(load64(nrgs + k2 * 8), load64(w + k2 * 8), tol); k2 = k2 + 1; }
+        while (k2 < nb) { okr = okr & _skv_same(load64(nrgs + k2 * 8), load64(w + k2 * 8)); k2 = k2 + 1; }
         assert(okr == 1, "residual_energy: libopus's subframe energies");
         # the whole unvoiced find_pred_coefs from the frame's input
         var st2 = _skv_state(hdr);
@@ -11231,7 +11231,7 @@ fn test_silk_enc_lpc_vs_libopus() {
         store64(c2 + _SKC_CODING_QUALITY, load64(v));
         _skv_loadf(_SKV_X, f, x);
         var m2 = silk_find_pred_coefs_flp(st2, c2, 0, x + ord * 8, 0);
-        assert(_skv_close(m2, mig, tol) == 1, "find_pred_coefs: libopus's prediction gain limit");
+        assert(_skv_same(m2, mig) == 1, "find_pred_coefs: libopus's prediction gain limit");
         assert_eq(_ske_idx(st2, _SKI_NLSF_INTERP), interp, "find_pred_coefs: libopus's interpolation index");
         _skv_load(_SKV_NLSFIDX, f, v);
         same = 1;
@@ -11241,26 +11241,21 @@ fn test_silk_enc_lpc_vs_libopus() {
         _skv_loadf(_SKV_RESNRG, f, w);
         okr = 1;
         k2 = 0;
-        while (k2 < nb) { okr = okr & _skv_close(load64(c2 + _SKC_RESNRG + k2 * 8), load64(w + k2 * 8), tol); k2 = k2 + 1; }
+        while (k2 < nb) { okr = okr & _skv_same(load64(c2 + _SKC_RESNRG + k2 * 8), load64(w + k2 * 8)); k2 = k2 + 1; }
         assert(okr == 1, "find_pred_coefs: libopus's residual energies");
         f = f + 1;
     }
     return 0;
 }
 
-# Largest |a - b| over n values, relative to max(1, max |b|).
-fn _skv_peakerr(a, b, n) {
-    var m = F64_ONE;
+# 1 when the n values at a and b are all the same (as _skv_same).
+fn _skv_all_same(a, b, n) {
     var i = 0;
-    while (i < n) { var t = f64_abs(load64(b + i * 8)); if (f64_gt(t, m) == 1) { m = t; } i = i + 1; }
-    var w = F64_ZERO;
-    i = 0;
     while (i < n) {
-        var e = f64_abs(f64_sub(load64(a + i * 8), load64(b + i * 8)));
-        if (f64_gt(e, w) == 1) { w = e; }
+        if (_skv_same(load64(a + i * 8), load64(b + i * 8)) == 0) { return 0; }
         i = i + 1;
     }
-    return f64_div(w, m);
+    return 1;
 }
 
 # The VAD, fixed point, frame after frame from a fresh encoder as libopus ran it:
@@ -11308,10 +11303,6 @@ fn test_silk_enc_vad_vs_libopus() {
 # gains 9.5e-4); every decision (quantiser offset, gain indices) is exact.
 fn test_silk_enc_shape_vs_libopus() {
     syscall(1, 1, "=== silk encode: noise shaping and gains vs libopus ===\n", 56);
-    var t_pitch = f64_div(F64_ONE, f64_from(1000));
-    var t_shape = f64_div(f64_from(3), f64_from(1000));
-    var t_fine = f64_div(F64_ONE, f64_from(100000));
-    var t_lam = f64_div(F64_ONE, f64_from(1000000));
     var h = alloc(64 * 8);
     var a = alloc(1024 * 8);
     var b = alloc(1024 * 8);
@@ -11330,8 +11321,8 @@ fn test_silk_enc_shape_vs_libopus() {
         var ctrl = silk_enc_ctrl_new();
         silk_find_pitch_lags_flp(st, ctrl, c, a + lm * 8);
         _skv_loadf(_SKS_FPL_OUT, f, b);
-        assert(_skv_close(load64(ctrl + _SKC_PRED_GAIN), load64(b), t_pitch) == 1, "pitch front end: libopus's prediction gain");
-        assert(f64_le(_skv_peakerr(c, b + 8, n), t_pitch) == 1, "pitch front end: libopus's LPC residual");
+        assert(_skv_same(load64(ctrl + _SKC_PRED_GAIN), load64(b)) == 1, "pitch front end: libopus's prediction gain");
+        assert(_skv_all_same(c, b + 8, n) == 1, "pitch front end: libopus's LPC residual");
         # noise shaping analysis
         _skv_load(_SKS_NSA_HDR, f, h);
         var nb = load64(h + 40);
@@ -11356,18 +11347,18 @@ fn test_silk_enc_shape_vs_libopus() {
         _skv_load(_SKS_NSA_QOFF, f, v);
         assert_eq(_ske_idx(s2, _SKI_QUANT_OFFSET), load64(v), "noise shaping: libopus's quantiser offset");
         _skv_loadf(_SKS_NSA_OUT, f, v);
-        var ok = _skv_close(load64(c2 + _SKC_INPUT_QUALITY), load64(v), t_fine);
-        ok = ok & _skv_close(load64(c2 + _SKC_CODING_QUALITY), load64(v + 8), t_fine);
-        ok = ok & _skv_close(load64(s2 + _SKE_HARM_SMTH), load64(v + 16), t_fine);
-        ok = ok & _skv_close(load64(s2 + _SKE_TILT_SMTH), load64(v + 24), t_fine);
+        var ok = _skv_same(load64(c2 + _SKC_INPUT_QUALITY), load64(v));
+        ok = ok & _skv_same(load64(c2 + _SKC_CODING_QUALITY), load64(v + 8));
+        ok = ok & _skv_same(load64(s2 + _SKE_HARM_SMTH), load64(v + 16));
+        ok = ok & _skv_same(load64(s2 + _SKE_TILT_SMTH), load64(v + 24));
         var og = 0;
         k = 0;
         while (k < nb) {
-            og = og | (1 - _skv_close(load64(c2 + _SKC_GAINS + k * 8), load64(v + (4 + k) * 8), t_shape));
-            ok = ok & _skv_close(load64(c2 + _SKC_LF_MA + k * 8), load64(v + (4 + nb + k) * 8), t_fine);
-            ok = ok & _skv_close(load64(c2 + _SKC_LF_AR + k * 8), load64(v + (4 + 2 * nb + k) * 8), t_fine);
-            ok = ok & _skv_close(load64(c2 + _SKC_TILT + k * 8), load64(v + (4 + 3 * nb + k) * 8), t_fine);
-            ok = ok & _skv_close(load64(c2 + _SKC_HARM + k * 8), load64(v + (4 + 4 * nb + k) * 8), t_fine);
+            og = og | (1 - _skv_same(load64(c2 + _SKC_GAINS + k * 8), load64(v + (4 + k) * 8)));
+            ok = ok & _skv_same(load64(c2 + _SKC_LF_MA + k * 8), load64(v + (4 + nb + k) * 8));
+            ok = ok & _skv_same(load64(c2 + _SKC_LF_AR + k * 8), load64(v + (4 + 2 * nb + k) * 8));
+            ok = ok & _skv_same(load64(c2 + _SKC_TILT + k * 8), load64(v + (4 + 3 * nb + k) * 8));
+            ok = ok & _skv_same(load64(c2 + _SKC_HARM + k * 8), load64(v + (4 + 4 * nb + k) * 8));
             k = k + 1;
         }
         assert(ok == 1, "noise shaping: libopus's qualities, low-frequency shaping, tilt and harmonic shaping");
@@ -11376,7 +11367,7 @@ fn test_silk_enc_shape_vs_libopus() {
         var oa = 1;
         k = 0;
         while (k < nb) {
-            if (f64_gt(_skv_peakerr(c2 + _SKC_AR + k * 24 * 8, b + k * 24 * 8, so), t_shape) == 1) { oa = 0; }
+            if (_skv_all_same(c2 + _SKC_AR + k * 24 * 8, b + k * 24 * 8, so) == 0) { oa = 0; }
             k = k + 1;
         }
         assert(oa == 1, "noise shaping: libopus's shaping filters");
@@ -11406,22 +11397,20 @@ fn test_silk_enc_shape_vs_libopus() {
         while (k < nb3) {
             if (_ske_idx(s3, _SKI_GAINS + k) != load64(v + k * 8)) { oi = 0; }
             var want = load64(v + (nb3 + 1 + k) * 8);
-            var d = load64(c3 + _SKC_GAINS_UNQ + k * 8) - want;
-            if (d < 0) { d = 0 - d; }
-            if (d > 2 + want / 1000000) { ou = 0; }
+            if (load64(c3 + _SKC_GAINS_UNQ + k * 8) != want) { ou = 0; }
             k = k + 1;
         }
         if (load64(s3 + _SKE_LAST_GAIN) != load64(v + nb3 * 8)) { oi = 0; }
         if (load64(c3 + _SKC_LAST_GAIN_PREV) != load64(v + (2 * nb3 + 1) * 8)) { oi = 0; }
         if (_ske_idx(s3, _SKI_QUANT_OFFSET) != load64(v + (2 * nb3 + 2) * 8)) { oi = 0; }
         assert(oi == 1, "process gains: libopus's gain indices, last index and quantiser offset");
-        assert(ou == 1, "process gains: libopus's unquantised Q16 gains, to float rounding");
+        assert(ou == 1, "process gains: libopus's unquantised Q16 gains");
         _skv_loadf(_SKS_PG_FOUT, f, v);
         var oq = 1;
         k = 0;
         while (k < nb3) { if (load64(c3 + _SKC_GAINS + k * 8) != load64(v + k * 8)) { oq = 0; } k = k + 1; }
         assert(oq == 1, "process gains: libopus's quantised gains exactly");
-        assert(_skv_close(load64(c3 + _SKC_LAMBDA), load64(v + nb3 * 8), t_lam) == 1, "process gains: libopus's Lambda");
+        assert(_skv_same(load64(c3 + _SKC_LAMBDA), load64(v + nb3 * 8)) == 1, "process gains: libopus's Lambda");
         f = f + 1;
     }
     # The unquantised Q16 gains truncate, as libopus's (opus_int32) cast does: a
@@ -11830,7 +11819,7 @@ fn _skk_pcm(x, p, spp, pcm) {
 # 2.12.0: the pitch estimator on libopus's own residual, each rate, frame
 # size and estimator complexity: the 8 and 4 kHz decimations exactly, the
 # voicing decision, lag and contour indices and per-subframe lags exactly, and
-# LTPCorr to float precision; the voicing threshold from the state; and the
+# LTPCorr (exactly since 2.12.6); the voicing threshold from the state; and the
 # estimator's settings at the frame's encoder complexity.
 fn test_silk_enc_pitch_vs_libopus() {
     syscall(1, 1, "=== silk encode: pitch estimation vs libopus ===\n", 49);
@@ -11846,7 +11835,6 @@ fn test_silk_enc_pitch_vs_libopus() {
     var po = alloc(4 * 8);
     var li = alloc(2 * 8);
     var lc = alloc(8);
-    var tol = f64_div(F64_ONE, f64_from(100000));
     var voiced = 0;
     var f = 0;
     while (f < _SKT_N) {
@@ -11890,7 +11878,7 @@ fn test_silk_enc_pitch_vs_libopus() {
         store64(st + _SKE_SPEECH_Q8, load64(h + 48));
         store64(st + _SKE_PREV_SIGNAL, load64(h + 40));
         store64(st + _SKE_TILT_Q15, load64(h + 56));
-        assert(_skv_close(_sk_pitch_threshold(st), load64(fin), f64_div(F64_ONE, f64_from(1000000))) == 1,
+        assert(_skv_same(_sk_pitch_threshold(st), load64(fin)) == 1,
           "pitch: libopus's voicing threshold");
         # the estimator
         store64(lc, load64(fin + 8));
@@ -11904,7 +11892,7 @@ fn test_silk_enc_pitch_vs_libopus() {
         k = 0;
         while (k < nb) { if (load64(po + k * 8) != load64(o + (3 + k) * 8)) { same = 0; } k = k + 1; }
         assert(same == 1, "pitch: libopus's subframe lags");
-        assert(_skv_close(load64(lc), load64(fin + 16), tol) == 1, "pitch: libopus's LTPCorr");
+        assert(_skv_same(load64(lc), load64(fin + 16)) == 1, "pitch: libopus's LTPCorr");
         _opus_frame_end();
         f = f + 1;
     }
@@ -11913,12 +11901,12 @@ fn test_silk_enc_pitch_vs_libopus() {
 }
 
 # 2.12.0: the long-term predictor on libopus's inputs: the correlations
-# (silk_find_LTP_FLP, to float precision), the gain quantiser, its codebook
-# choice and the carried log gain (exactly), the LTP scaling under each loss
-# (exactly), and the LTP residual (to float precision); on the comb's frames
-# the whole voiced prediction analysis (silk_find_pred_coefs_FLP) from the
-# pitch residual and the input: the same quantised LTP, NLSFs and
-# interpolation, residual energies to float precision.
+# (silk_find_LTP_FLP), the gain quantiser, its codebook choice and the carried
+# log gain, the LTP scaling under each loss, and the LTP residual; on the
+# comb's frames the whole voiced prediction analysis (silk_find_pred_coefs_FLP)
+# from the pitch residual and the input: the same quantised LTP, NLSFs and
+# interpolation, and residual energies. All exactly (the float stages since
+# 2.12.6).
 fn test_silk_enc_ltp_vs_libopus() {
     syscall(1, 1, "=== silk encode: long-term prediction vs libopus ===\n", 53);
     var h = alloc(32 * 8);
@@ -11940,9 +11928,6 @@ fn test_silk_enc_ltp_vs_libopus() {
     var mpg = alloc(8);
     var mpre = alloc(500 * 8);
     var inv = alloc(4 * 8);
-    var t_corr = f64_div(F64_ONE, f64_from(100000));
-    var t_res = f64_div(F64_ONE, f64_from(1000000));
-    var t_nrg = f64_div(F64_ONE, f64_from(1000));
     var wholes = 0;
     var f = 0;
     while (f < _SKL_N) {
@@ -11968,9 +11953,9 @@ fn test_silk_enc_ltp_vs_libopus() {
         silk_find_ltp_flp(mXX, mxX, res + lm * 8, pl, sl, nb);
         var ok = 1;
         var k = 0;
-        while (k < nb * 25) { ok = ok & _skv_close(load64(mXX + k * 8), load64(XX + k * 8), t_corr); k = k + 1; }
+        while (k < nb * 25) { ok = ok & _skv_same(load64(mXX + k * 8), load64(XX + k * 8)); k = k + 1; }
         k = 0;
-        while (k < nb * 5) { ok = ok & _skv_close(load64(mxX + k * 8), load64(xX + k * 8), t_corr); k = k + 1; }
+        while (k < nb * 5) { ok = ok & _skv_same(load64(mxX + k * 8), load64(xX + k * 8)); k = k + 1; }
         assert(ok == 1, "LTP: libopus's correlation matrices and vectors");
         # the gain quantiser on libopus's correlations
         store64(mslg, load64(h + 32));
@@ -12001,7 +11986,7 @@ fn test_silk_enc_ltp_vs_libopus() {
         k = 0;
         while (k < nb) { store64(inv + k * 8, f64_div(F64_ONE, load64(fv + (4 + k) * 8))); k = k + 1; }
         silk_ltp_analysis_filter_flp(mpre, x + (lm - ord) * 8, B, pl, inv, sl, nb, ord);
-        assert(f64_le(_skv_peakerr(mpre, pre, npre), t_res) == 1, "LTP: libopus's LTP residual");
+        assert(_skv_all_same(mpre, pre, npre) == 1, "LTP: libopus's LTP residual");
         if (load64(h + 168) == 1) {
             # the whole voiced prediction analysis
             wholes = wholes + 1;
@@ -12026,7 +12011,7 @@ fn test_silk_enc_ltp_vs_libopus() {
             }
             store64(c2 + _SKC_CODING_QUALITY, load64(fv + 24));
             var mig = silk_find_pred_coefs_flp(s2, c2, res + lm * 8, x + lm * 8, cond);
-            assert(_skv_close(mig, load64(fv + 16), t_corr) == 1, "find_pred_coefs (voiced): libopus's prediction gain limit");
+            assert(_skv_same(mig, load64(fv + 16)) == 1, "find_pred_coefs (voiced): libopus's prediction gain limit");
             assert_eq(_ske_idx(s2, _SKI_PER), load64(idx), "find_pred_coefs (voiced): libopus's periodicity index");
             assert_eq(_ske_idx(s2, _SKI_LTP_SCALE), load64(h + 160), "find_pred_coefs (voiced): libopus's scaling index");
             same = 1;
@@ -12040,7 +12025,7 @@ fn test_silk_enc_ltp_vs_libopus() {
             assert(same == 1, "find_pred_coefs (voiced): libopus's NLSF indices");
             ok = 1;
             k = 0;
-            while (k < nb) { ok = ok & _skv_close(load64(c2 + _SKC_RESNRG + k * 8), load64(rn + k * 8), t_nrg); k = k + 1; }
+            while (k < nb) { ok = ok & _skv_same(load64(c2 + _SKC_RESNRG + k * 8), load64(rn + k * 8)); k = k + 1; }
             assert(ok == 1, "find_pred_coefs (voiced): libopus's residual energies");
         }
         _opus_frame_end();

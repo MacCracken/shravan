@@ -2357,7 +2357,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.12.5 — audio codecs for AGNOS (Cyrius)\n", 52);
+syscall(1, 1, "shravan v2.12.6 — audio codecs for AGNOS (Cyrius)\n", 52);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 

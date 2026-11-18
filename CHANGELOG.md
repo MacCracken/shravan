@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.6] - 2026-11-18
+
+**SILK's float stages in libopus's single precision.** Until now the SILK encoder computed libopus's float stages in double. They agreed with libopus to float precision, not to the bit. Whole packets matched on the suite's inputs, whose seeds had been chosen to match, but hostile input parted at a float near-tie. After 2.12.5's window fix, a random sweep lost 16 of 240 configurations to libopus; random `opus_encode` calls on 2.12.5 lost 612 packets in 9,480.
+
+Every float stage now computes as libopus's float build computes it:
+- Every value libopus keeps in a float is a float, each operation rounded to single precision in C's order.
+- What libopus computes in double stays in double: the inner products and energies, Schur, Burg, the warped autocorrelation, `pow`, `sqrt`, `exp` and `log10`.
+
+The stage tests now demand exactness instead of tolerances. The sweeps lose nothing:
+- 0 of 1,440 random SILK configurations;
+- 0 of 9,480 random `opus_encode` packets;
+- 0 of 600 cold runs.
+
+A sharp resonance, once too ill-conditioned for any comparison, now encodes byte for byte. 18,193 assertions (was 18,178).
+
+### Changed
+
+- **The SILK encoder** (`src/silk_enc.cyr`), stage by stage against libopus 1.6.1's `silk/float`:
+  - **The LPC analysis filter:** each product and sum a float, left to right, as libopus's unrolled orders sum.
+  - **The autocorrelation:** the inner product in double, the results floats.
+  - **Schur:** its reflection coefficients and residual energy floats.
+  - **`k2a` and `bwexpander`:** in single precision.
+  - **The window:** its products floats.
+  - **The pitch front end:** the white-noise term and the prediction gain.
+  - **The pitch core (`silk_pitch_analysis_core_FLP`):**
+    - `celt_pitch_xcorr`'s float sums;
+    - every correlation stored as a float, and the first stage's float accumulation;
+    - the short-lag, previous-lag and contour biases in C's order;
+    - LTPCorr, and the stage-3 energies.
+  - **Noise shaping:**
+    - the SNR adjustment, input and coding quality, sparseness, bandwidth expansion and warping;
+    - the shaping gains (`sqrt` in double), the warped gain, and the conversion to monic coefficients and back;
+    - the coefficient limiter's chirp, the gain floor (`pow` in double);
+    - the low-frequency shaping, tilt and harmonic shaping, and their smoothing.
+
+    The warped autocorrelation stays in double, with floats out, as libopus's does. `silk_sigmoid` and `silk_log2` return floats.
+  - **The LTP correlation matrix:** its recursive updates' products and difference are floats, because libopus's operands are uncast floats. The entries, the correlation vector and `find_LTP`'s normalisation are floats.
+  - **The LTP analysis filter:** floats.
+  - **Burg:** the row updates' products are floats (again uncast), and the coefficients and residual energy are floats.
+  - **`find_LPC`:** the interpolation search's energies are floats.
+  - **`find_pred_coefs`:** the inverse gains and the scaled copy are floats.
+  - **The residual energies:** each gain squared is a float product.
+  - **Process gains:** the voiced reduction, `InvMaxSqrVal`, the soft limit, and the quantiser-offset test.
+  - **Q16 gains back to floats:** converted as libopus converts them, which rounds past 24 significant bits. A gain the rate loop's multiplier scaled can have that many.
+- **Speed:** the loops convert their inputs once into fixed 4-byte float scratch buffers, allocated on first use. Taking them from the frame arena per call would grow memory inside 120 ms packets.
+- **Tests:**
+  - The SILK stage tests compare exactly: `_skv_same` and `_skv_all_same` replace the tolerance helpers.
+  - `find_LPC`'s NLSFs must match exactly (before, within one step), and so must the unquantised Q16 gains (before, within two units).
+- **The `opus_encode` vectors:** five sharp-resonance configurations (`o_res1` to `o_res5`; kind 4, 25 dB of prediction gain), mono and stereo, at 12, 24 and 48 kHz. With the float stages in double, shravan parted from libopus on them within the first packets. That makes 6,630 packets in 104 configurations.
+- **Docs:** the SILK and Opus-layer byte-for-byte claims no longer need 2.12.5's "on the suite's inputs". The generator's notes on near-ties and hand-picked seeds are now history, and the roadmap's rounding note is now guidance for the hybrid and the analysis.
+
+### Verified
+
+- **The stage tests at zero tolerance:**
+  - With 2.12.5's SILK encoder, the new suite fails 313 assertions: Burg, the pitch core, the residual energies, the LTP correlations and residual, the pitch front end, noise shaping, process gains, and the five resonance configurations.
+  - With this release, it fails none.
+- **The SILK vectors regenerated:** shravan's packets are libopus's in every set, and the generator's coverage holds.
+- **Hostile SILK input against libopus's portable build** (`silk_Encode`, raw payloads, two seconds each).
+  - The signals: combs at both lag limits, loud, clipped, quiet, with DC and gated; clipped and ±1-LSB noise.
+  - The configurations: every internal and input rate, 10–60 ms, complexity 0–10, 5–80 kbit/s, CBR, loss 0–100, FEC and DTX.
+  - Results: 0 of 240 configurations differ (2.12.5: 16; 2.12.4: 57), and 0 of 1,200 more at three seconds each.
+- **`opus_encode` against libopus's `opus_encode_float`** (portable build):
+  - 600 cold runs: 0 differ (2.12.5: 5).
+  - 40 runs of 400 random calls, covering eight rates and channel counts, every frame size, the ctls and resets: 0 of 9,480 packets differ (2.12.5: 612).
+- **Fuzzing** (`fuzz/run.sh 90000`, normal and under the allocator's poison mode): 90,234 calls of `fuzz_decode`, 90,000 of `fuzz_opus` and 810,000 of `fuzz_codecs`, with 2,000 and 200 cold starts, and no crash.
+- **Interop** (`scripts/interop.sh`, the opus, silk and opusenc groups, against a default libopus 1.6.1 build): 284 of 284.
+
+### Performance
+
+- **The cost of exactness**, measured A/B against 2.12.5 in one session on one pinned core (medians, ABBA twice):
+  - **SILK encodes:** 0.948 to 0.970 of 2.12.5's speed.
+  - **The Opus layer:** 0.977 to 0.985.
+  - **CELT, AAC, FLAC and the decoders:** unchanged. Untouched benches swing ±4% in the same run, which is this machine's code-layout noise.
+- **Where the cost sits:** stage timers over a second of voiced input put it in the pitch front end (+11%, its LPC filter and `celt_pitch_xcorr`) and in `find_pred_coefs` (+4%, Burg and the LPC filter).
+- **Why it can't be made cheaper here:** Cyrius's typed `f32` arithmetic is slower than its `f64` builtins in tight loops. The LPC analysis filter takes 37 µs against 27.6 µs for 672 samples at order 16. Unrolling with the coefficients in registers did not help, and rounding `f64` results inline is slower still (73 µs). A second of wideband voiced input now encodes in 26.7 ms (37× real time).
+
 ## [2.12.5] - 2026-11-18
 
 **A review pass over the 2.11–2.12.4 encoders.** Five independent reviews covered:
