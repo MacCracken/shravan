@@ -99,21 +99,25 @@ var _OE_SIZE = 344;
 # libopus's defaults: bit rate OPUS_AUTO, VBR, complexity 9, every bandwidth,
 # channels and signal automatic, 24-bit input, no FEC, loss 0, no DTX.
 # Returns the encoder, or ERR_INVALID_RATE / ERR_INVALID_CHANNELS /
-# ERR_UNSUPPORTED_FMT.
+# ERR_UNSUPPORTED_FMT, or ERR_ENCODE when memory runs out.
 fn opus_encoder_new(fs, channels, application) {
     if (fs != 8000 && fs != 12000 && fs != 16000 && fs != 24000 && fs != 48000) { return err(ERR_INVALID_RATE); }
     if (channels != 1 && channels != 2) { return err(ERR_INVALID_CHANNELS); }
     if (application != OPUS_APPLICATION_RESTRICTED_SILK) { return err(ERR_UNSUPPORTED_FMT); }
     var st = alloc(_OE_SIZE);
+    if (st == 0) { return err(ERR_ENCODE); }
     _sk_zero(st, _OE_SIZE);
     store64(st + _OE_FS, fs);
     store64(st + _OE_CH, channels);
     store64(st + _OE_APP, application);
     var sfs = fs;
     if (sfs > 16000) { sfs = 16000; }
-    store64(st + _OE_SILK, silk_encoder_new_channels(fs, sfs, channels, 20, 25000, 9, 0));
+    var silk = silk_encoder_new_channels(fs, sfs, channels, 20, 25000, 9, 0);
+    if (silk <= 0) { return err(ERR_ENCODE); }
+    store64(st + _OE_SILK, silk);
     store64(st + _OE_PCMBUF, alloc(fs / 1000 * 120 * channels * 8));
     store64(st + _OE_FRAMES, alloc(6 * 1280));
+    if (load64(st + _OE_PCMBUF) == 0 || load64(st + _OE_FRAMES) == 0) { return err(ERR_ENCODE); }
     _oe_defaults(st);
     return st;
 }
@@ -397,7 +401,8 @@ fn _oe_is_silence(pcm, n, lsb) {
 }
 
 # decide_dtx_mode: after 200 ms without activity, frames are DTX for up to
-# 400 ms at a time. cnt: the encoder's nb_no_activity_ms_Q1 field.
+# 400 ms at a time. ms_q1: the frame's duration in half milliseconds, added to
+# the encoder's nb_no_activity_ms_Q1 (_OE_NO_ACT_MS).
 fn _oe_decide_dtx(activity, st, ms_q1) {
     if (activity == 0) {
         var c = load64(st + _OE_NO_ACT_MS) + ms_q1;
@@ -539,8 +544,12 @@ var _oe_bw_music = 0;
 # opus_encode (opus_encode_float, opus_encode_native): one packet of n samples
 # a channel (2.5 to 120 ms at fs; 10 ms up for RESTRICTED_SILK) from pcm into
 # out, at most max bytes. Returns the packet's length, or ERR_ENCODE for a bad
-# frame size, buffer or internal failure.
+# frame size, buffer or internal failure. The final range is 0 after any
+# failure, a bad frame size included (opus_encode_native clears it first).
 fn opus_encode(st, pcm, n, out, max) {
+    if (st == 0) { return err(ERR_ENCODE); }
+    store64(st + _OE_RANGE_FINAL, 0);
+    if (pcm == 0 || out == 0) { return err(ERR_ENCODE); }
     var fs = load64(st + _OE_FS);
     var ch = load64(st + _OE_CH);
     var fsz = _oe_frame_size_select(load64(st + _OE_APP), n, load64(st + _OE_VAR_DUR), fs);
@@ -741,6 +750,9 @@ fn _oe_encode_native(st, pcm, n, data, out_max) {
         var frames = load64(st + _OE_FRAMES);
         var lens = _opus_tmp(nbf * 8);
         var bak = load64(st + _OE_TO_MONO);
+        # a move to mono inside a packet past 60 ms forces mono from here on, as
+        # libopus's does (opus_encoder.c sets force_channels and never restores
+        # it): it holds until the caller sets OPUS_SET_FORCE_CHANNELS again
         if (bak == 1) { store64(st + _OE_FORCE_CH, 1); }
         else { store64(st + _OE_PREV_CH, sch); }
         var tot = 0;
@@ -857,7 +869,8 @@ fn _oe_encode_frame(st, inp, n, data, orig_max, silence, equiv, silk_dtx) {
     var buf = load64(st + _OE_PCMBUF);
     _oe_dc_reject(st, inp, buf, n, ch);
     # NaN and absurd input: the frame cleared (the energy summed in single
-    # precision, as celt_inner_prod)
+    # precision in order, as celt_inner_prod_c in libopus's portable build;
+    # its x86 SSE build sums four lanes, which can differ at the threshold)
     var sum = F64_ZERO;
     var i = 0;
     while (i < n * ch) { var v = load64(buf + i * 8); sum = _sk_f32(f64_add(sum, _sk_f32(f64_mul(v, v)))); i = i + 1; }

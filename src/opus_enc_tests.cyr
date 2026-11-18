@@ -147,8 +147,8 @@ fn test_opus_enc_vs_libopus() {
         packets = packets + npk;
         c = c + 1;
     }
-    assert(_SKO_N >= 50, "opus encode: the configs");
-    assert(packets >= 3700, "opus encode: the packets");
+    assert(_SKO_N >= 90, "opus encode: the configs");
+    assert(packets >= 6000, "opus encode: the packets");
     return 0;
 }
 
@@ -531,9 +531,42 @@ fn test_opus_enc_hostile() {
     return 0;
 }
 
+# 2.12.5's review: what the vectors never reach. The final range is 0 after a
+# refused frame size, as opus_encode_native clears it before its checks; no
+# samples, no output and no encoder are refused (they read or wrote address 0);
+# and a range decoder inside a frame takes the frame arena's memory, not a new
+# allocation for every packet a decoder reads.
+fn test_opus_enc_contracts() {
+    syscall(1, 1, "=== opus encode: contracts the vectors never reach ===\n", 55);
+    var EE = err(ERR_ENCODE);
+    var e = opus_encoder_new(48000, 1, OPUS_APPLICATION_RESTRICTED_SILK);
+    var pcm = alloc(960 * 8);
+    var w = alloc(960 * 8);
+    _skk_signal(1, 48000, 960, 7, w, alloc(40));
+    var i = 0;
+    while (i < 960) { store64(pcm + i * 8, f64_div(f64_from(load64(w + i * 8)), f64_from(32768))); i = i + 1; }
+    var buf = alloc(1500);
+    assert(opus_encode(e, pcm, 960, buf, 1500) > 0, "opus contracts: a packet");
+    assert(opus_encoder_final_range(e) != 0, "opus contracts: its final range");
+    assert_eq(opus_encode(e, pcm, 961, buf, 1500), EE, "opus contracts: 961 samples are no frame");
+    assert_eq(opus_encoder_final_range(e), 0, "opus contracts: the final range is 0 after the refused frame");
+    assert_eq(opus_encode(e, 0, 960, buf, 1500), EE, "opus contracts: no samples");
+    assert_eq(opus_encode(e, pcm, 960, 0, 1500), EE, "opus contracts: no output");
+    assert_eq(opus_encode(0, pcm, 960, buf, 1500), EE, "opus contracts: no encoder");
+    assert(opus_encode(e, pcm, 960, buf, 1500) > 0, "opus contracts: the encoder codes after them");
+    _opus_frame_begin();
+    var before = alloc_used();
+    i = 0;
+    while (i < 200) { ec_dec_new(buf, 100); i = i + 1; }
+    assert_eq(alloc_used() - before, 0, "opus contracts: range decoders in a frame allocate nothing");
+    _opus_frame_end();
+    return 0;
+}
+
 fn test_opus_enc_all() {
     test_opus_enc_vs_libopus();
     test_opus_enc_api();
     test_opus_enc_hostile();
+    test_opus_enc_contracts();
     return 0;
 }

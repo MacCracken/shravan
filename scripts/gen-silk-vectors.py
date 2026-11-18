@@ -595,7 +595,7 @@ def rate_list(spec):
 OPUS = [
     ("o_bw", 6, 1, 48000, 1, 10.0, ["cx=1", "rates=20000*50,8000*250,20000*200", "total=470"], {}),
     ("o_st", 6, 1, 48000, 2, 4.0, ["cx=1", "rates=40000*50,12000*50,40000*50,12000*50"], {}),
-    ("o_st60", 6, 1, 24000, 2, 4.08, ["cx=1", "ms=60", "rates=40000*17,12000*17,40000*17,12000*17"], {}),
+    ("o_st60", 6, 2, 24000, 2, 4.08, ["cx=1", "ms=60", "rates=40000*17,12000*17,40000*17,12000*17"], {}),
     ("o_chans", 6, 1, 48000, 2, 3.0, ["cx=1", "bitrate=40000", "chans=aaaa1111222aaa"], {}),
     ("o_force1", 6, 2, 48000, 2, 1.0, ["cx=1", "bitrate=40000", "force=1"], {}),
     ("o_fec", 6, 5, 48000, 1, 2.0, ["cx=1", "bitrate=24000", "fec=1", "loss=10", "total=75"], {}),
@@ -603,7 +603,7 @@ OPUS = [
     ("o_fecsw", 6, 2, 16000, 1, 4.0, ["cx=1", "fec=2", "loss=4", "rates=24000*50,15000*50,24000*50,15000*50"], {}),
     ("o_dtx", 6, 3, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "dtx=1"], dict(prm=(14000, 100, 180, 3, 0))),
     ("o_sdtx", 6, 1, 16000, 1, 3.0, ["cx=1", "bitrate=16000", "dtx=1"], dict(prm=(14000, 100, 180, 1, 0))),
-    ("o_f10", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "ms=10"], {}),
+    ("o_f10", 6, 2, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "ms=10"], {}),
     ("o_f40", 6, 2, 48000, 2, 2.0, ["cx=1", "bitrate=36000", "ms=40"], {}),
     ("o_f60", 6, 1, 12000, 1, 2.04, ["cx=1", "bitrate=14000", "ms=60"], {}),
     ("o_f80", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=20000", "ms=80"], {}),
@@ -722,6 +722,14 @@ OPUS = [
     ("o_plc1k", 6, 1, 48000, 1, 0.4, ["cx=1", "bitrate=1000"], {}),
     ("o_plc2k2", 6, 1, 48000, 1, 0.6, ["cx=1", "ms=60", "bitrate=2200"], {}),
     ("o_bwvoice", 6, 1, 48000, 1, 0.4, ["cx=1", "signal=voice", "bitrate=12160"], {}),
+    # 2.12.5: the analysis window's slope as libopus's floats compute it (PI a
+    # float, the recursion in single precision). With the slope in double these
+    # part from libopus within the first packets (loud white noise and a voiced
+    # stereo comb), and a random sweep of hostile input lost 57 configurations
+    # in 240 to libopus where it now loses 16.
+    ("o_win1", 1, 2, 16000, 1, 1.0, ["cx=5", "bitrate=24000", "ms=40"], {}),
+    ("o_win2", 1, 1, 24000, 1, 1.0, ["cx=8", "bitrate=32000", "ms=60"], {}),
+    ("o_win3", 6, 8, 12000, 2, 1.0, ["cx=5", "bitrate=48000", "ms=40"], {}),
 ]
 
 OPUS_UNSET = -99999

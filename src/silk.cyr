@@ -2514,19 +2514,17 @@ fn silk_encode_pulses(ec, signalType, quantOffsetType, pulses, frame_length) {
         if (nr == 0) {
             ec_enc_icdf(ec, load64(sum_pulses + i * 8), cdf, 8);
         } else {
+            # as libopus's encoder (encode_pulses.c:164-169): every further
+            # escape and the sum with the last rate level's table (the
+            # decoder's table offset at 10 shifts is for damaged streams; the
+            # quantiser's pulses never need 10)
             ec_enc_icdf(ec, 17, cdf, 8);
             var k3 = 1;
             while (k3 < nr) {
-                # After 10 shifts the escape symbol is no longer representable,
-                # so the table shifts by one -- mirror the decoder exactly.
-                var ex = 0;
-                if (k3 == 10) { ex = 1; }
-                ec_enc_icdf(ec, 17, esc + ex, 8);
+                ec_enc_icdf(ec, 17, esc, 8);
                 k3 = k3 + 1;
             }
-            var exl = 0;
-            if (nr == 10) { exl = 1; }
-            ec_enc_icdf(ec, load64(sum_pulses + i * 8), esc + exl, 8);
+            ec_enc_icdf(ec, load64(sum_pulses + i * 8), esc, 8);
         }
         i = i + 1;
     }

@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.5] - 2026-11-18
+
+**A review pass over the 2.11–2.12.4 encoders.** Five independent reviews covered:
+- the SILK encoder, in two halves;
+- the CELT encoder, in two halves;
+- the Opus encoder layer with the range coder and SILK's writers.
+
+Each read the code against libopus 1.6.1's sources and built harnesses to confirm what it found.
+
+On the paths the vectors reach they found no error. The bugs sit at contracts the vectors never reach: ctl combinations, a caller's range coder, hostile analysis info and null pointers. They also found one precision gap. SILK's analysis window computed its slope in double, where libopus computes it in single precision. On hostile input that parted 57 of 240 random two-second configurations from libopus. With libopus's floats, 16 part.
+
+Every fix is proven by reverting it and watching a test fail. The roadmap now holds only what is left. 18,178 assertions (was 18,074).
+
+### Fixed
+
+- **The CELT encoder** (`src/celt_enc.cyr`):
+  - **Analysis floats:** `celt_encoder_set_analysis` refuses any float that is not finite in single precision (NaN, an infinity, a value past FLT_MAX). It returns `ERR_ENCODE` and keeps the info it had.
+    - A NaN or infinite `max_pitch_ratio` made the pre-filter's gain 0 × NaN, a NaN no threshold rejects. The pre-filter was then coded where it is off:
+      - in the hybrid, where the decoder reads it only from band 0, so the frame desynchronised;
+      - under `CELT_SET_PREDICTION` 0;
+      - past a 2-byte frame's budget.
+    - libopus's own analysis never produces such a value.
+  - **Start band 19:** the hybrid folding copied 4M floats past `norm`.
+    - `norm` was sized to band 20, as libopus's is (bands.c:1638). That crashed mono at 10 and 20 ms and corrupted every 5 ms frame. It is now sized to band 21.
+  - **The caller's coder in `celt_encoder_encode_ec`:** checked against `max`.
+    - A coder smaller than min(`max`, 1,275) bytes is refused. A 20-byte coder with `max` 1,275 had taken a 382-byte frame, writing 360 bytes past its buffer.
+    - A coder holding more bits than those bytes is refused too. Raw bits at its end had been moved to before the buffer.
+    - A larger coder is shrunk to those bytes first. A 4,000-byte one had overrun the theta search's 1,280 saved bytes and crashed stereo at complexity 8 and up.
+    - libopus's Opus layer always hands its CELT encoder a coder of exactly the frame's bytes.
+  - **Frame arguments:** no samples (`pcm` 0) and no output (`out` 0) are refused; both used to read or write address 0.
+    - A frame size above 960 is refused before it is scaled by the upsampling factor. At 12 kHz, 2^62 + 240 had wrapped to 960, and the input copy looped 2^62 times.
+  - **Start band at or past the end band:** refused at the frame. The ctls set each band alone, as libopus's do.
+    - start == end divided temporal VBR's sum by 0, which left NaN in its running average until a reset.
+    - start > end indexed the allocation's tables below 0.
+  - **End bands 1 and 2:** `dynalloc_analysis`'s follower read bands below `bandLogE3` and wrote `follower[-1]`.
+    - libopus's celt_encoder.c:1160 and :1220 do the same; that is undefined behaviour in C.
+    - With fewer than three bands, those two medians are now left out.
+  - **Bands from the end band up to 13:** now zero rather than left over from earlier frames or a reset. `stereo_analysis` reads 13 bands and `alloc_trim_analysis` 8, whatever the end band. (libopus reads its uninitialised stack there.) A reset now equals a new encoder at any end band.
+  - **Allocation failure:** `celt_encoder_new` checks its allocations. When memory runs out it returns `ERR_ENCODE` rather than writing near address 0.
+- **The SILK encoder** (`src/silk_enc.cyr`):
+  - **The analysis window's slope** (`silk_apply_sine_window_FLP`) is now libopus's float values. PI is the float 3.1415926536f, and freq, c and the recursion's S0 and S1 are floats, computed in typed `f32` arithmetic.
+    - In double, the slope parted shravan from libopus's portable build on loud and clipped input.
+    - A random sweep of hostile input lost 57 of 240 two-second configurations; now 16. The signals were combs at both lag limits, loud, clipped, quiet, with DC and gated, plus clipped and ±1-LSB noise. The configurations covered every internal and input rate, 10–60 ms, complexity 0–10, VBR and CBR, loss, FEC and DTX.
+  - **The side channel's reset**, when side coding resumes after mid-only frames, now clears the transition low-pass's state too, as libopus's does (enc_API.c:457).
+  - **NaN, as libopus's `silk_max_float` and `silk_min_float` take it:** the Schur recursion's floor and the gains' cap of 32,767 now take the constant when the value is NaN. A NaN gain had become INT64_MIN in `GainsUnq_Q16`.
+  - **Single precision in libopus's operation order:** the voicing threshold, Lambda and `minInvGain`. No packet in the suite or the sweep changed.
+  - **Arguments and allocation:** `silk_encode` and `silk_encode_opus` refuse no samples and no output, and the constructors check their allocations.
+- **The Opus encoder layer** (`src/opus_enc.cyr`):
+  - The final range is 0 after any refused call, a bad frame size included. libopus's `opus_encode_native` clears it before its checks.
+  - No samples, no output and no encoder are refused.
+  - `opus_encoder_new` checks its allocations.
+- **The range decoder:** `ec_dec_new` (`src/opus.cyr`) takes its 96 bytes from the frame arena when inside a frame.
+  - The decoders allocated one for every SILK packet, hybrid packet and CELT frame, and never freed it.
+  - That came to about 17 MB an hour of 20 ms packets.
+- **SILK's pulse writer** codes every escape with the last rate level's table, as libopus's encoder does (encode_pulses.c:164-169).
+  - It had mirrored the decoder's table offset at ten shifts. That would have read past the table at eleven, though the quantiser's pulses never need ten.
+
+### Changed
+
+- **The `opus_encode` vectors:**
+  - `o_st60` and `o_f10` move to seed 2. With the exact window, seed 1 meets a float near-tie at packets 43 and 75; seeds 2 to 12 are all exact.
+  - Three configurations cover the window (`o_win1` to `o_win3`). The double-precision slope parts them from libopus within their first packets.
+  - That makes 6,457 packets in 99 configurations.
+- **Removed:**
+  - the unreachable fallbacks in both quantisers' `scale_states`. The gain ratio is always in [0, 2^31): two reviews proved it independently;
+  - the CELT state's unused `_CE_SCR` and `_CE_BAND` slots.
+- `CELT_TRACE` builds take their trace scratch from the frame arena.
+- **Docs:**
+  - SECURITY.md lists the three fuzz harnesses as they are.
+  - The README, CLAUDE.md and the overview say Opus decode covers every TOC configuration; they had said 10/20 ms.
+  - The SILK and Opus-layer byte-for-byte claims are scoped to the suite's inputs, since SILK's float stages run in double precision.
+  - The roadmap drops the work it had completed.
+
+### Verified
+
+- **Reverts:** every fix with an effect a test can see was reverted in a scratch copy and the suite run. Of the fourteen reverts:
+  - eight failed their new assertions, one of them crashing afterwards;
+  - six crashed or died on SIGFPE.
+
+  Some fixes have no observable effect and were checked by reading against libopus instead:
+  - the end-band guard: its stray write landed in a word that is overwritten afterwards, and the review showed it with a sentinel word;
+  - the Schur floor's NaN: no input reaches it;
+  - the single-precision voicing threshold, Lambda and `minInvGain`: no packet changed;
+  - the pulse writer: the branch is unreachable;
+  - the allocation checks.
+- **New tests** (`celt`, `silk` and `opus` contracts): one per fix. The SILK and Opus vector suites now assert each set's size, because a truncated set passed vacuously before. Emptying one in a scratch copy proved the check.
+- **The SILK vectors:** regenerated. In every set shravan's packets are libopus's, and the generator's coverage requirements hold.
+- **What the reviews checked and found clean:**
+  - **Sizes and growth:** buffer sizes at every extreme (stereo, 960 samples, 1,275 bytes, 60 ms at 48 kHz, four delayed-decision states); no allocation on any per-frame path.
+  - **The inlined fixed-point identities:** every product shifted through 2^62 stays under it.
+  - **Shifts:** every logical shift is applied to a non-negative value.
+  - **Reset and ctls:** reset is libopus's `OPUS_RESET_STATE`, and every ctl's bounds are libopus's.
+  - **Cold starts:** clean.
+  - **Against the reference:** 16,000 random `opus_encode` calls matched libopus at the decision level (TOC, refusals, getters), with nothing written past `max`.
+- **Fuzzing** (`fuzz/run.sh 90000`, normal and under the allocator's poison mode): 90,234 calls of `fuzz_decode`, 90,000 of `fuzz_opus` and 810,000 of `fuzz_codecs`, with 2,000 and 200 cold starts, and no crash. The CELT target now also feeds:
+  - analysis info with a non-finite float, which must be refused;
+  - start bands at or past the end band, which must be refused;
+  - coders larger than `max`, which are shrunk, and smaller ones, which are refused.
+
+  The harness now also accepts the refusal libopus makes when pre-written bits overflow the frame (`OPUS_INTERNAL_ERROR` on the coder's error). The harness's new random stream reached that case for the first time.
+- **Interop** (`scripts/interop.sh`, the opus, silk, opusenc and celt groups, against a default libopus 1.6.1 build): 428 of 428.
+
+### Performance
+
+- **Against 2.12.4**, measured A/B in one session on one pinned core (medians, ABBA twice):
+  - **SILK encoder and Opus layer:** at parity, 0.995 to 1.003 of 2.12.4's speed.
+  - **CELT encoder:** 0.987 to 0.993. Its per-frame additions are a few comparisons, and this machine's code-layout swings are of that size.
+  - **Decoders:** 0.996 to 1.001.
+- **The window's slope:** its first form rounded each operation through a helper call. That cost noise shaping 10% and whole SILK encodes 1–3%. Cyrius's typed `f32` arithmetic does the same rounding natively and costs nothing.
+
 ## [2.12.4] - 2026-11-17
 
 **Opus encode: libopus's CELT encoder.** `src/celt_enc.cyr` is libopus 1.6.1's `celt_encode_with_ec`,

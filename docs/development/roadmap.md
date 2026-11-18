@@ -1,29 +1,26 @@
 # Development Roadmap
 
-**Current: v2.12.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.12.5.** Shipped history lives in `CHANGELOG.md`; this file holds where shravan stands and
+what is left.
 
 ## Where we are
 
 | Codec | Decode | Encode | Checked against |
 |-------|--------|--------|-----------------|
-| WAV | PCM 1–32-bit (whole-byte containers), float 32/64, EXTENSIBLE, piped (unknown sizes) | PCM 8/16/24/32, float 32/64 | ffmpeg: every rate × depth × channel case exact, one-shot and streamed; float 32 encode rounds as ffmpeg does |
-| AIFF | PCM 1–32-bit; AIFF-C NONE/twos/sowt/fl32/fl64 | PCM | ffmpeg: exact, one-shot and streamed |
-| FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | levels 0–8 as `flac -0` to `-8`: LPC to order 12, partitioned Rice, stereo decorrelation, wasted bits, seek table | `flac`: 79 decode sweep cases exact (to 32-bit, 8 channels, 16384-sample blocks). Encode: within 0.06% of `flac -L`'s size at every level on 5.5 minutes of real recordings; libFLAC (`flac -t`, `flac -d`) and ffmpeg decode 1,125 hostile cases exactly (4–32 bits, 1–8 channels, 1 Hz–1 MHz) |
-| ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
-| MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
-| AAC-LC | channel configurations 1–7 and 11–14 and any PCE layout (to 22.2), in ffmpeg's channel order; all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact, every layout its encoder writes (ADTS and MP4); PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
-| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT as libopus's `celt_encode_with_ec` encodes it: mono, stereo and stereo coded mono, 2.5–20 ms, 8–48 kHz input, complexity 0–10, CBR, VBR and constrained VBR, the transient, pitch pre-filter, dynalloc, TF, spreading, trim, intensity and dual-stereo decisions, the hybrid's start band, LFE, the surround energy mask; SILK mono and stereo (mid/side, mid-only, stereo input coded mono, moves between them) at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–10, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX, internal-rate switching; the Opus encoder layer with `OPUS_APPLICATION_RESTRICTED_SILK` (bandwidth, channel and FEC decisions, DTX on silence, 10–120 ms packets, CBR padding, libopus's ctls) | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX, mono and stereo (2,537 mono and 2,724 stereo packets in the suite); on real speech and stereo music libopus decodes them as well as its own encoder's (within 0.003 in correlation mono, 0.001 stereo), and recovers lost packets from their FEC. Opus encode (RESTRICTED_SILK): libopus's `opus_encode_float` packets, final ranges and getters byte for byte (6,391 packets in 96 configurations). CELT encode: libopus's `celt_encode_with_ec` frames, final ranges and stage decisions byte for byte (16,162 frames in 260 configurations in the suite; 1,386 development cases, real speech and music among them), libopus's portable C build |
-| MP4 | AAC (any channel layout, a PCE in the AudioSpecificConfig) and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
+| WAV | PCM 1–32-bit (whole-byte containers), float 32/64, EXTENSIBLE, piped (unknown sizes) | PCM 8/16/24/32, float 32/64 | ffmpeg, exact, one-shot and streamed |
+| AIFF | PCM 1–32-bit; AIFF-C NONE/twos/sowt/fl32/fl64 | PCM | ffmpeg, exact, one-shot and streamed |
+| FLAC | all subframe types to 32-bit, seek-table range decode, MD5 verify | levels 0–8, as `flac -0` to `-8` | `flac`, exact; the encoder within 0.06% of `flac -L`'s size, its output decoded exactly by libFLAC and ffmpeg |
+| ALAC | full, in MP4 and QuickTime | none | ffmpeg, bit-exact |
+| MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB; ffmpeg exact on Layer III; mpg123 on Layer II |
+| AAC-LC | any channel layout (configurations 1–7 and 11–14, a PCE), all 13 rates, every LC tool | mono and stereo, all 13 rates: 3GPP psychoacoustics, block switching, TNS, M/S, intensity, PNS, a rate loop with a reservoir | Decode: ffmpeg, exact. Encode: ffmpeg and faad decode it, within 0.02 of ffmpeg's own encoder in correlation |
+| Opus | every TOC configuration; FEC, PLC, DTX, every mode, bandwidth, frame-size and channel switch; multistream (families 0, 1, 2, 255) | SILK (mono and stereo, 8–16 kHz internal from 8–48 kHz input, complexity 0–10, FEC, DTX); CELT (libopus's `celt_encode_with_ec`: every frame size, rate, complexity, rate control and stereo mode, the hybrid's start band); the Opus layer for `OPUS_APPLICATION_RESTRICTED_SILK` | libopus: decode exact (CELT concealment within 3 LSB); encode: `celt_encode_with_ec` byte for byte (in single precision, as libopus computes it); `silk_Encode` and `opus_encode_float` byte for byte on the suite's inputs (SILK's float stages in double precision, so hostile input can part at a near-tie); libopus's portable C build throughout |
+| MP4 | AAC and ALAC; any audio track; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, to the sample |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
-for sample however the input is split, hold only one unfinished chunk or frame, and have no length
-ceiling. One-shot decodes stop at `shravan_set_max_samples` (2^26 interleaved samples by default) with
-`ERR_TOO_LARGE`.
-
-Real encoder output with reference decodes is part of the suite (`src/interop_fixtures.cyr`,
-regenerated by `scripts/gen-interop-fixtures.py`), and `scripts/interop.sh` sweeps rate × depth ×
-channels against ffmpeg, flac, mpg123 and libopus in CI. Every fix since 2.9.2 was proven by reverting
-it and watching a test fail.
+for sample however the input is split, and have no length ceiling. One-shot decodes stop at
+`shravan_set_max_samples` (2^26 interleaved samples by default) with `ERR_TOO_LARGE`. Real encoder
+output with reference decodes is part of the suite (`src/interop_fixtures.cyr`), and
+`scripts/interop.sh` sweeps every codec against ffmpeg, flac, mpg123 and libopus in CI.
 
 ### Paths no reference has reached
 
@@ -39,39 +36,32 @@ Open until a reference file or decoder exists for each.
   element placement and channel order are checked against ffmpeg's source (`ff_aac_get_che`,
   `sniff_channel_order`), not against a file.
 
-The remaining distance to **3.0.0** is the rest of the Opus encoder: hybrid, the mode decision and
-the applications that use CELT. The FLAC encoder is real since 2.10.0, the AAC encoder since 2.10.1,
-multichannel AAC and Opus decode since 2.10.3, the SILK encoder since 2.11.3 (voiced frames since
-2.12.0, complexity 2–10 since 2.12.3), libopus's Opus encoder layer for SILK since 2.12.3, and
-libopus's CELT encoder since 2.12.4.
+## Next — v2.12.x: hybrid encode and the mode decision · large
 
-## v2.12.x — hybrid encode and the Opus encoder layer · large
-
-Since 2.12.3 shravan has libopus's `opus_encode` for `OPUS_APPLICATION_RESTRICTED_SILK`
-(`src/opus_enc.cyr`) over a SILK encoder complete at every complexity, byte for byte libopus's. Since
-2.12.4 it has libopus's CELT encoder too (`src/celt_enc.cyr`, `celt_encode_with_ec` as libopus's float
-build computes it, every float operation rounded as libopus rounds it): every frame size, input rate,
-complexity and rate control, mono, stereo and stereo coded mono, the hybrid's start band after SILK's
-bits, the tonality analysis's info, LFE and the surround energy mask, frame for frame libopus's
-portable C build's. Verify the way 2.11–2.12.4 did: `scripts/gen-silk-vectors.py` and
-`scripts/gen-celt-vectors.py` record libopus (`scripts/silkref/`, its dump hooks), and the suite holds
-shravan to it, packets and stages as hashes. The suite's string data is at 94% of the compiler's
-fixed 2 MB.
-- `feat(opus): hybrid encode and the mode decision`: SILK's low band and CELT's high band over one
-  range coder (the hybrid's SILK rate split, CELT from band 17 with `celt_encoder_set_silk_info` and
-  `celt_encoder_encode_ec`, the stereo width CELT takes from `silk_encoder_stereo_width`), the mode
-  decision by rate, signal and bandwidth (SILK, hybrid, CELT, with hysteresis), switches between modes
-  (redundancy frames, `silk_Encode`'s prefill, CELT's pre-roll), and the applications that need them:
-  `OPUS_APPLICATION_VOIP` (with its variable high-pass, `hp_cutoff`, reading the smoother
-  `silk_hp_variable_cutoff` keeps), `_AUDIO`, `_RESTRICTED_LOWDELAY`, `_RESTRICTED_CELT`.
-  `opus_encoder_new` refuses them until then.
+What stands between shravan and **3.0.0** is the rest of the Opus encoder.
+- `feat(opus): hybrid encode and the mode decision`:
+  - SILK's low band and CELT's high band over one range coder: the hybrid's SILK rate split, CELT
+    from band 17 with `celt_encoder_set_silk_info` and `celt_encoder_encode_ec`, and the stereo width
+    CELT takes from `silk_encoder_stereo_width`.
+  - The mode decision by rate, signal and bandwidth (SILK, hybrid, CELT, with hysteresis).
+  - Switches between modes: redundancy frames, `silk_Encode`'s prefill, CELT's pre-roll.
+  - The applications that need them: `OPUS_APPLICATION_VOIP` (with its variable high-pass,
+    `hp_cutoff`, reading the smoother `silk_hp_variable_cutoff` keeps), `_AUDIO`,
+    `_RESTRICTED_LOWDELAY` and `_RESTRICTED_CELT`. `opus_encoder_new` refuses them until then.
 - The tonality analysis (`run_analysis`), which libopus runs from complexity 7 for those
-  applications: its voice estimate and bandwidth detection feed the mode and bandwidth decisions, and
-  its `AnalysisInfo` the CELT encoder (`celt_encoder_set_analysis` takes it already).
-- Note: the float→fixed boundaries use `lrintf` (round half to **even**), which f64 code must reproduce
-  deliberately; the near-ties libopus's single precision rounds the other way are the only SILK
-  packets that differ, and each one traced so far is one. CELT's port computes in single precision
-  itself, so it has no such ties.
+  applications. Its voice estimate and bandwidth detection feed the mode and bandwidth decisions, and
+  its `AnalysisInfo` feeds the CELT encoder (`celt_encoder_set_analysis` takes it already).
+
+Verify it the way the SILK and CELT encoders were verified:
+- `scripts/gen-silk-vectors.py` and `scripts/gen-celt-vectors.py` record the instrumented libopus
+  (`scripts/silkref/`, its dump hooks).
+- The suite holds shravan to libopus's packets, with each stage's output stored as a hash.
+- The suite's string data is at 94% of the compiler's fixed 2 MB, so new vectors must be compact.
+
+Note on rounding: the float→fixed boundaries use `lrintf` (round half to **even**), which f64 code must
+reproduce deliberately. The only SILK packets that differ from libopus's are near-ties that its single
+precision rounds the other way. CELT's port computes in single precision itself, so it has no such
+ties.
 
 ## v3.0.0 — production-quality, interoperable, hardened suite · MAJOR
 
@@ -79,15 +69,16 @@ The major bump: every codec value-verified end to end in both directions, fully 
 hostile input, no known correctness bugs.
 
 **Gate:**
-- Opus encodes *and* decodes every config, interop-verified with libopus both ways.
-- FLAC LPC encoder real. (Since 2.10.0: levels 0–8, within 0.1% of `flac`'s sizes.)
-- All decoders fuzzed to 0 crashes, Opus included. (Since 2.9.3: `./fuzz/run.sh 90000`, cold starts
-  and poison mode included.)
-- Reference comparison running in CI, not a scratchpad. (Since 2.9.3: the `interop` CI job.)
-- Benchmarks tracked in the CSV history.
+- Opus encodes *and* decodes every configuration, interop-verified with libopus both ways. Still open:
+  hybrid, the mode decision and the applications above.
 - Zero known correctness bugs.
+- Met, and kept as regression checks in CI:
+  - the FLAC LPC encoder;
+  - every decoder fuzzed to 0 crashes (`./fuzz/run.sh 90000`, with its cold starts and poison mode);
+  - the reference comparison (the `interop` job);
+  - benchmarks in the CSV history.
 
-**Backlog:** items that need the major bump or wait on the gate.
+**Backlog:** items that need the major bump.
 - Remove the `detect_format` wrapper. `shravan_detect_format` replaced it in 2.9.2 and no consumer calls
   it, but it is public API, and removing it is what clears the last duplicate-function warning.
   `scripts/check-collisions.sh` allows it by name until then.
@@ -95,13 +86,17 @@ hostile input, no known correctness bugs.
 ## Post-3.0
 
 - `feat: DSD64/128/256 + DoP (1-bit sigma-delta path)`: new format, additive.
-- `feat(aac): HE-AAC (SBR, PS)`. MP4 reports these as unsupported since 2.9.2 rather than playing the
-  core at half rate.
+- `feat(aac): HE-AAC (SBR, PS)`. MP4 reports these as unsupported rather than playing the core at half
+  rate.
 
 ## Working discipline (unchanged)
 
-Every change lands as a small verified bite: build clean, all assertions pass, new tests + benchmarks for
-new code, decode stays bit-exact through any shared-code refactor. A round-trip through shravan's own
-encoder proves nothing: judge decoders by maximum sample error against a reference, per frame, on real
-encoder output, and encoders by what that reference does with their output. Never claim a stage done
-until it is value-verified against something other than shravan.
+Every change lands as a small verified bite:
+- The build is clean and all assertions pass.
+- New code comes with new tests and benchmarks.
+- Decode stays bit-exact through any shared-code refactor.
+
+A round-trip through shravan's own encoder proves nothing. Judge decoders by maximum sample error
+against a reference, per frame, on real encoder output. Judge encoders by what that reference does
+with their output. Never claim a stage done until it is value-verified against something other than
+shravan. Prove every fix by reverting it and watching a test fail.

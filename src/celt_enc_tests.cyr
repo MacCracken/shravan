@@ -630,9 +630,177 @@ fn test_celt_enc_hostile() {
     return 0;
 }
 
+# A tone pair with a period of 15 samples (3.2 kHz and its octave) in every
+# channel: periodic enough that the pre-filter would code it.
+fn _cek_tone15(pcm, n, ch) {
+    var k = 0;
+    while (k < n * ch) {
+        var ph = f64_div(f64_mul(f64_from(2 * ((k / ch) % 15)), 0x400921FB54442D18), f64_from(15));
+        store64(pcm + k * 8, f64_add(f64_mul(0.25, f64_sin(ph)), f64_mul(0.125, f64_sin(f64_mul(f64_from(2), ph)))));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# Two encoders' next nfr frames of x (n a channel, at most 1,275 bytes)
+# identical, final ranges too.
+fn _cek_same_run(a, b, x, ch, n, nfr, bytes) {
+    var ba = alloc(1280);
+    var bb = alloc(1280);
+    var k = 0;
+    while (k < nfr) {
+        var ra = celt_encoder_encode(a, x + k * n * ch * 8, n, ba, bytes);
+        var rb = celt_encoder_encode(b, x + k * n * ch * 8, n, bb, bytes);
+        if (ra != rb || ra < 0 || _cek_same(ba, bb, ra) == 0) { return 0; }
+        if (celt_encoder_final_range(a) != celt_encoder_final_range(b)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# 2.12.5's review: the contracts the vectors never reach, each a call that
+# corrupted memory or the bitstream before. Analysis floats that are not finite
+# refused (a NaN max_pitch_ratio coded a pre-filter in the hybrid); end bands 1
+# and 2 inside the follower's arrays, and the bands above the end that
+# stereo_analysis reads zero, not left from earlier frames; start band 19 (its
+# folding past norm); the caller's coder against max (a 20-byte coder took 382
+# bytes, a 4,000-byte one overran the theta search's saved bytes, raw bits past
+# max were written before the buffer); no samples, no output; a frame size that
+# wrapped to 960; start at or past the end band (NaN left in temporal VBR).
+fn test_celt_enc_contracts() {
+    syscall(1, 1, "=== celt encode: contracts the vectors never reach ===\n", 55);
+    var EE = err(ERR_ENCODE);
+    var pcm = alloc(2 * 960 * 8);
+    var out = alloc(4096);
+    var info = alloc(_CEA_SIZE);
+    _cek_tone15(pcm, 960, 1);
+    # analysis floats not finite in single precision: refused, the info before kept
+    var e = celt_encoder_new(48000, 1);
+    assert_eq(celt_encoder_set_start_band(e, 17), 0, "celt contracts: the hybrid's start band");
+    memset(info, 0, _CEA_SIZE);
+    store64(info + _CEA_VALID, 1);
+    store64(info + _CEA_TONALITY, 0.5);
+    store64(info + _CEA_MAX_PITCH_RATIO, 0x7FF8000000000000);
+    assert_eq(celt_encoder_set_analysis(e, info), EE, "celt contracts: a NaN max_pitch_ratio is refused");
+    store64(info + _CEA_MAX_PITCH_RATIO, 0x7FF0000000000000);
+    assert_eq(celt_encoder_set_analysis(e, info), EE, "celt contracts: an infinite one");
+    store64(info + _CEA_MAX_PITCH_RATIO, 0x47F074F8C4D3CD7B);
+    assert_eq(celt_encoder_set_analysis(e, info), EE, "celt contracts: one past FLT_MAX (an infinite float)");
+    store64(info + _CEA_MAX_PITCH_RATIO, F64_ONE);
+    store64(info + _CEA_ACTIVITY, 0x7FF8000000000000);
+    assert_eq(celt_encoder_set_analysis(e, info), EE, "celt contracts: a NaN activity");
+    var pf = 0;
+    var k = 0;
+    while (k < 6) {
+        assert(celt_encoder_encode(e, pcm, 960, out, 160) > 0, "celt contracts: the hybrid frame");
+        pf = pf + load64(e + _CE_FR_PF);
+        k = k + 1;
+    }
+    assert_eq(pf, 0, "celt contracts: the hybrid codes no pre-filter after the refused info");
+    store64(info + _CEA_ACTIVITY, 0.5);
+    assert_eq(celt_encoder_set_analysis(e, info), 0, "celt contracts: finite info is taken");
+    # end bands 1 and 2, and the bands above the end below 13 zero after a frame
+    var noise = _cek_input(2, 960, 8, 21);
+    var eb = 1;
+    while (eb <= 2) {
+        var m = celt_encoder_new(48000, 1);
+        celt_encoder_set_complexity(m, 10);
+        celt_encoder_set_end_band(m, eb);
+        k = 0;
+        while (k < 3) {
+            assert(celt_encoder_encode(m, pcm, 960, out, 1275) > 0, "celt contracts: end band 1 or 2, a tone");
+            assert(celt_encoder_encode(m, noise + k * 960 * 8, 960, out, 1275) > 0, "celt contracts: end band 1 or 2, noise");
+            k = k + 1;
+        }
+        eb = eb + 1;
+    }
+    var sx = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(sx, 10);
+    k = 0;
+    while (k < 4) { celt_encoder_encode(sx, noise + k * 2 * 960 * 8, 960, out, 300); k = k + 1; }
+    celt_encoder_set_end_band(sx, 4);
+    celt_encoder_encode(sx, noise + 4 * 2 * 960 * 8, 960, out, 300);
+    var X = load64(sx + _CE_XN);
+    var stale = 0;
+    var c = 0;
+    while (c < 2) {
+        var j = _ce_eb(4) << 3;
+        while (j < (_ce_eb(13) << 3)) { if (load32(X + (c * 960 + j) * 4) != 0) { stale = stale + 1; } j = j + 1; }
+        c = c + 1;
+    }
+    assert_eq(stale, 0, "celt contracts: above end band 4, the bands stereo_analysis reads are zero, not the last frame's");
+    # start band 19: the hybrid folding inside norm
+    var ch = 1;
+    while (ch <= 2) {
+        var n = 960;
+        while (n >= 240) {
+            var h = celt_encoder_new(48000, ch);
+            celt_encoder_set_start_band(h, 19);
+            celt_encoder_set_complexity(h, 10);
+            k = 0;
+            while (k < 4) {
+                assert(celt_encoder_encode(h, noise + k * n * ch * 8, n, out, 400) > 0, "celt contracts: start band 19");
+                k = k + 1;
+            }
+            n = n / 4;
+        }
+        ch = ch + 1;
+    }
+    # the caller's coder against max
+    var v = celt_encoder_new(48000, 1);
+    celt_encoder_set_vbr(v, 1);
+    celt_encoder_set_bitrate(v, 128000);
+    assert_eq(celt_encoder_encode_ec(v, noise, 960, 1275, ec_enc_new(out, 20)), EE,
+      "celt contracts: a coder smaller than max is refused");
+    var ecr = ec_enc_new(out, 100);
+    k = 0;
+    while (k < 4) { ec_enc_bits(ecr, 0x5A5A, 16); k = k + 1; }
+    assert_eq(celt_encoder_encode_ec(v, noise, 960, 4, ecr), EE, "celt contracts: raw bits past max are refused");
+    var s1 = celt_encoder_new(48000, 2);
+    var s2 = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(s1, 10);
+    celt_encoder_set_complexity(s2, 10);
+    var big = alloc(4096);
+    var fit = alloc(1280);
+    var same = 1;
+    k = 0;
+    while (k < 4) {
+        var rb = celt_encoder_encode_ec(s1, noise + k * 2 * 960 * 8, 960, 1275, ec_enc_new(big, 4000));
+        var rf = celt_encoder_encode_ec(s2, noise + k * 2 * 960 * 8, 960, 1275, ec_enc_new(fit, 1275));
+        if (rb != rf || rb != 1275 || _cek_same(big, fit, rf) == 0) { same = 0; }
+        if (celt_encoder_final_range(s1) != celt_encoder_final_range(s2)) { same = 0; }
+        k = k + 1;
+    }
+    assert_eq(same, 1, "celt contracts: a 4,000-byte coder makes the 1,275-byte coder's frames");
+    # no samples, no output, frame sizes that are not one
+    var z = celt_encoder_new(48000, 1);
+    assert_eq(celt_encoder_encode(z, 0, 960, out, 100), EE, "celt contracts: no samples");
+    assert_eq(celt_encoder_encode(z, pcm, 960, 0, 100), EE, "celt contracts: no output");
+    assert_eq(celt_encoder_encode_ec(z, 0, 960, 100, ec_enc_new(out, 100)), EE, "celt contracts: no samples into a coder");
+    var q = celt_encoder_new(12000, 1);
+    assert_eq(celt_encoder_encode(q, pcm, (1 << 62) + 240, out, 100), EE, "celt contracts: a frame size that wraps to 960");
+    assert_eq(celt_encoder_encode(q, pcm, 961, out, 100), EE, "celt contracts: past 960 samples");
+    assert(celt_encoder_encode(q, pcm, 240, out, 100) > 0, "celt contracts: 20 ms at 12 kHz");
+    # start at or past the end band: refused, the state untouched
+    var r1 = celt_encoder_new(48000, 1);
+    var r2 = celt_encoder_new(48000, 1);
+    celt_encoder_set_vbr(r1, 1);
+    celt_encoder_set_vbr(r2, 1);
+    celt_encoder_set_start_band(r1, 13);
+    celt_encoder_set_end_band(r1, 13);
+    assert_eq(celt_encoder_encode(r1, noise, 960, out, 200), EE, "celt contracts: start == end is refused");
+    celt_encoder_set_end_band(r1, 12);
+    assert_eq(celt_encoder_encode(r1, noise, 960, out, 200), EE, "celt contracts: start > end is refused");
+    celt_encoder_set_start_band(r1, 0);
+    celt_encoder_set_end_band(r1, 21);
+    assert_eq(_cek_same_run(r1, r2, noise, 1, 960, 8, 200), 1, "celt contracts: after the refused frames, a new encoder's frames");
+    return 0;
+}
+
 fn test_celt_enc_all() {
     test_celt_enc_vs_libopus();
     test_celt_enc_api();
     test_celt_enc_hostile();
+    test_celt_enc_contracts();
     return 0;
 }

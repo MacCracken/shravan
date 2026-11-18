@@ -94,7 +94,7 @@ var _CE_STEREO_SAVING = 552;  # f32
 var _CE_INTENSITY = 560;
 var _CE_EMASK = 568;          # energy_mask: C x 21 f64 (ptr), or 0
 var _CE_SPEC_AVG = 576;       # f32
-var _CE_RESET_WORDS = 73;     # words from _CE_RNG up to here
+var _CE_RESET_WORDS = 73;     # words from _CE_RNG to _CE_IN_MEM: the fields to here, and unused words
 var _CE_IN_MEM = 720;         # [CC x 120] f32 (ptr): the overlap
 var _CE_PF_MEM = 728;         # [CC x 1024] f32: prefilter_mem
 var _CE_OLDBANDE = 736;       # [CC x 21] f32
@@ -122,8 +122,7 @@ var _CE_CM = 896;             # [2 x 21] bytes: collapse_masks
 var _CE_SDYN = 904;           # [2 x 21] f32: surround_dynalloc
 var _CE_ECS = 912;            # the range coder when the caller passes none (96 bytes)
 var _CE_PRE = 920;            # [2 x 1984] f32: run_prefilter's pre[]
-var _CE_SCR = 928;            # [8192] f32 scratch
-var _CE_BAND = 936;           # quant_all_bands' buffers (ptr, _CEB_ layout)
+# 928 and 936: unused
 # the frame's decisions, for the tests
 var _CE_FR_TRANS = 944;       # isTransient
 var _CE_FR_SHORT = 952;       # shortBlocks
@@ -1546,7 +1545,8 @@ fn _ce_remove_doubling(x, maxperiod, minperiod, N, T0p, prev_period, prev_gain: 
 
 # comb_filter (celt.c, float): y = x through the pitch comb, crossfading over
 # the window's overlap from (T0, g0, tapset0) to (T1, g1, tapset1). x reaches
-# back 1024 + 2 samples.
+# back T + 2 samples: at most 1,024, the history pre[] holds, because every
+# pitch_index (and so prefilter_period) is capped at 1,022.
 fn _ce_comb_filter(y, x, T0, T1, N, g0: f32, g1: f32, tapset0, tapset1, overlap) {
     if (g0 == _CEF_ZERO && g1 == _CEF_ZERO) {
         if (x != y) { _ce_copy32(y, x, N); }
@@ -2077,18 +2077,24 @@ fn _ce_dynalloc(st, bandLogE, bandLogE2, oldBandE, start, end, C, offsets, isTra
                 store32(f + i * 4, _cef_max(f5, mdo));
                 i = i + 1;
             }
-            var m3: f32 = _ce_median3(le3);
-            var tmp: f32 = m3 - off;
-            var fa: f32 = load32(f);
-            var fb: f32 = load32(f + 4);
-            store32(f, _cef_max(fa, tmp));
-            store32(f + 4, _cef_max(fb, tmp));
-            var m3b: f32 = _ce_median3(le3 + (end - 3) * 4);
-            tmp = m3b - off;
-            var fc: f32 = load32(f + (end - 2) * 4);
-            var fd: f32 = load32(f + (end - 1) * 4);
-            store32(f + (end - 2) * 4, _cef_max(fc, tmp));
-            store32(f + (end - 1) * 4, _cef_max(fd, tmp));
+            # the medians of the first and last three bands need three
+            # (libopus reads outside bandLogE3 and writes follower[-1] when
+            # end is 1 or 2, undefined behaviour; with fewer bands they are
+            # left out)
+            if (end >= 3) {
+                var m3: f32 = _ce_median3(le3);
+                var tmp: f32 = m3 - off;
+                var fa: f32 = load32(f);
+                var fb: f32 = load32(f + 4);
+                store32(f, _cef_max(fa, tmp));
+                store32(f + 4, _cef_max(fb, tmp));
+                var m3b: f32 = _ce_median3(le3 + (end - 3) * 4);
+                tmp = m3b - off;
+                var fc: f32 = load32(f + (end - 2) * 4);
+                var fd: f32 = load32(f + (end - 1) * 4);
+                store32(f + (end - 2) * 4, _cef_max(fc, tmp));
+                store32(f + (end - 1) * 4, _cef_max(fd, tmp));
+            }
             i = 0;
             while (i < end) {
                 var fe: f32 = load32(f + i * 4);
@@ -2186,9 +2192,11 @@ fn _ce_dynalloc(st, bandLogE, bandLogE2, oldBandE, start, end, C, offsets, isTra
                 var fl1: f32 = load32(follower + (end - 1) * 4);
                 fl1 = fl1 + two;
                 store32(follower + (end - 1) * 4, fl1);
-                var fl2: f32 = load32(follower + (end - 2) * 4);
-                fl2 = fl2 + one;
-                store32(follower + (end - 2) * 4, fl2);
+                if (end >= 2) {
+                    var fl2: f32 = load32(follower + (end - 2) * 4);
+                    fl2 = fl2 + one;
+                    store32(follower + (end - 2) * 4, fl2);
+                }
             }
         }
         if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
@@ -3902,7 +3910,10 @@ fn _ce_quant_all_bands(st, start, end, X_, Y_, collapse_masks, bandE, pulses, sh
     var theta_rdo = 0;
     if (Y_ != 0 && dual_stereo == 0 && complexity >= 8) { theta_rdo = 1; }
     var resynth = theta_rdo;
-    var nlen = M * _ce_eb(20) - norm_offset;
+    # to band 21, not libopus's 20 (bands.c:1638): at start band 19
+    # special_hybrid_folding copies norm[n1..n2) = [18M, 22M) past an 18M
+    # buffer (libopus's Opus layer never starts there; CELT_SET_START_BAND can)
+    var nlen = M * _ce_eb(21) - norm_offset;
     var norm = _opus_tmp(C * nlen * 4 + 8);
     var norm2 = norm + nlen * 4;
     var ra = M * (_ce_eb(21) - _ce_eb(20));
@@ -4154,7 +4165,7 @@ fn _ce_tr_u8(tag, p, n) {
 }
 fn _ce_tr_vals(tag, n, a, b, c, d, e, f, g, h, k, l, m, o) {
     if (_ce_trace_fd == 0) { return 0; }
-    var w = alloc(12 * 8);
+    var w = _opus_tmp(12 * 8);
     store64(w, a); store64(w + 8, b); store64(w + 16, c); store64(w + 24, d); store64(w + 32, e); store64(w + 40, f);
     store64(w + 48, g); store64(w + 56, h); store64(w + 64, k); store64(w + 72, l); store64(w + 80, m); store64(w + 88, o);
     _ce_tr_i(tag, w, n);
@@ -4162,7 +4173,7 @@ fn _ce_tr_vals(tag, n, a, b, c, d, e, f, g, h, k, l, m, o) {
 }
 fn _ce_tr_flts(tag, n, a, b, c, d) {
     if (_ce_trace_fd == 0) { return 0; }
-    var w = alloc(16);
+    var w = _opus_tmp(16);
     store32(w, a); store32(w + 4, b); store32(w + 8, c); store32(w + 12, d);
     _ce_tr_f(tag, w, n);
     return 0;
@@ -4623,6 +4634,16 @@ fn _ce_encode_with_ec(st, pcm, frame_size, compressed, nbCompressedBytes, enc) {
     if (LM > 0 && ec_tell(enc) + 3 <= total_bits) { ec_enc_bit_logp(enc, isTransient, 3); }
     var X = load64(st + _CE_XN);
     _ce_normalise(freq, X, bandE, effEnd, C, M);
+    # stereo_analysis reads 13 bands and alloc_trim 8 whatever the end band:
+    # below 13 those above effEnd are zero rather than left from earlier frames
+    # or a reset (libopus reads its uninitialised stack there)
+    if (effEnd < 13) {
+        var zc = 0;
+        while (zc < C) {
+            _ce_zero32(X + (zc * N + (_ce_eb(effEnd) << LM)) * 4, (_ce_eb(13) - _ce_eb(effEnd)) << LM);
+            zc = zc + 1;
+        }
+    }
     var enable_tf = 0;
     var k98: f32 = 0.98;
     if (effectiveBytes >= 15 * C && hybrid == 0 && cx >= 2 && lfe == 0 && toneishness < k98) { enable_tf = 1; }
@@ -5006,6 +5027,7 @@ fn celt_encoder_new(fs, channels) {
     if (channels < 1 || channels > 2) { return err(ERR_INVALID_CHANNELS); }
     if (_ce_ready == 0) { _ce_init(); }
     var st = alloc(_CE_SIZE);
+    if (st == 0) { return err(ERR_ENCODE); }
     memset(st, 0, _CE_SIZE);
     var CC = channels;
     store64(st + _CE_IN_MEM, alloc(CC * 120 * 4 + 8));
@@ -5034,6 +5056,12 @@ fn celt_encoder_new(fs, channels) {
     store64(st + _CE_SDYN, alloc(2 * 21 * 4));
     store64(st + _CE_ECS, alloc(96));
     store64(st + _CE_PRE, alloc(2 * (960 + 1024) * 4 + 8));
+    # alloc gives 0 when memory runs out: no encoder rather than writes to 0
+    var ak = _CE_IN_MEM;
+    while (ak <= _CE_PRE) {
+        if (load64(st + ak) == 0) { return err(ERR_ENCODE); }
+        ak = ak + 8;
+    }
     memset(load64(st + _CE_PCM), 0, 2 * 960 * 4 + 8);
     memset(load64(st + _CE_IN), 0, 2 * 1080 * 4 + 8);
     memset(load64(st + _CE_FREQ), 0, 2 * 960 * 4 + 8);
@@ -5158,12 +5186,23 @@ fn celt_encoder_set_lfe(st, v) { store64(st + _CE_LFE, v); return 0; }
 fn celt_encoder_set_energy_mask(st, mask) { store64(st + _CE_EMASK, mask); return 0; }
 
 # CELT_SET_ANALYSIS: the tonality analysis's AnalysisInfo, as 8-byte words
-# at the _CEA_ offsets, its floats as f64 (taken as floats).
+# at the _CEA_ offsets, its floats as f64 (taken as floats). A float that is
+# not finite in single precision (NaN, an infinity, past FLT_MAX) is refused
+# and the info before it kept: libopus's own analysis never makes one, and a
+# NaN max_pitch_ratio turns 0 * ratio into NaN, which no gain threshold
+# rejects, so the pre-filter would be coded where it is off (the hybrid, CELT_SET_PREDICTION 0, a 2-byte frame).
 fn celt_encoder_set_analysis(st, info) {
     if (info == 0) { return 0; }
+    var k = _CEA_TONALITY;
+    while (k <= _CEA_MAX_PITCH_RATIO) {
+        if (k != _CEA_BANDWIDTH) {
+            if ((f32_from(load64(info + k)) & 0x7F800000) == 0x7F800000) { return err(ERR_ENCODE); }
+        }
+        k = k + 8;
+    }
     var a = st + _CE_ANA;
     store64(a + _CEA_VALID, load64(info + _CEA_VALID));
-    var k = _CEA_TONALITY;
+    k = _CEA_TONALITY;
     while (k <= _CEA_MUSIC_PROB_MAX) { store64(a + k, f32_from(load64(info + k))); k = k + 8; }
     store64(a + _CEA_BANDWIDTH, load64(info + _CEA_BANDWIDTH));
     store64(a + _CEA_ACTIVITY_PROB, f32_from(load64(info + _CEA_ACTIVITY_PROB)));
@@ -5200,10 +5239,15 @@ fn _ce_take_pcm(st, pcm, frame_size) {
     return dst;
 }
 
-fn _ce_frame_ok(st, frame_size) {
-    var up = load64(st + _CE_UPSAMPLE);
-    var n = frame_size * up;
-    if (frame_size <= 0) { return 0; }
+# The frame's arguments: a frame size of 2.5, 5, 10 or 20 ms at the encoder's
+# rate (checked before it is scaled, so a huge one cannot wrap to 960), the
+# samples there, and a start band below the end band (the ctls set each alone,
+# as libopus's do; start == end divides temporal VBR's sum by 0 and leaves NaN
+# in its average, start > end indexes the allocation's tables below 0).
+fn _ce_frame_ok(st, pcm, frame_size) {
+    if (pcm == 0 || frame_size <= 0 || frame_size > 960) { return 0; }
+    if (load64(st + _CE_START) >= load64(st + _CE_END)) { return 0; }
+    var n = frame_size * load64(st + _CE_UPSAMPLE);
     if (n == 120 || n == 240 || n == 480 || n == 960) { return 1; }
     return 0;
 }
@@ -5212,7 +5256,7 @@ fn _ce_frame_ok(st, frame_size) {
 # or 20 ms at the encoder's rate) into out, max bytes at most (2 to 1275).
 # The frame's length back, or ERR_ENCODE.
 fn celt_encoder_encode(st, pcm, frame_size, out, max) {
-    if (_ce_frame_ok(st, frame_size) == 0 || max < 2) { return err(ERR_ENCODE); }
+    if (_ce_frame_ok(st, pcm, frame_size) == 0 || out == 0 || max < 2) { return err(ERR_ENCODE); }
     var outer = _opus_in_frame;
     if (outer == 0) { _opus_frame_begin(); }
     var p = _ce_take_pcm(st, pcm, frame_size);
@@ -5224,8 +5268,17 @@ fn celt_encoder_encode(st, pcm, frame_size, out, max) {
 # celt_encoder_encode_ec: as celt_encode_with_ec with a range coder: the
 # frame after the bits already in ec (a hybrid frame's SILK), max the
 # packet's bytes. The coder is finished (ec_enc_done); the bytes back.
+# libopus's Opus layer always hands its CELT encoder a coder of exactly the
+# frame's bytes; here the coder must hold min(max, 1,275) bytes, the bits
+# already in it (from the start and raw from the end) must fit them, and a
+# larger coder is shrunk to them first (as ec_enc_shrink would), so nothing
+# is written past the caller's buffer or the theta search's saved bytes.
 fn celt_encoder_encode_ec(st, pcm, frame_size, max, ec) {
-    if (_ce_frame_ok(st, frame_size) == 0 || max < 2 || ec == 0) { return err(ERR_ENCODE); }
+    if (_ce_frame_ok(st, pcm, frame_size) == 0 || max < 2 || ec == 0) { return err(ERR_ENCODE); }
+    var nb = _ce_imin(max, 1275);
+    if (load64(ec + 8) < nb || load64(ec + 48) + load64(ec + 16) > nb) { return err(ERR_ENCODE); }
+    if (load64(ec + 8) > nb) { _ce_ec_shrink(ec, nb); }
+    max = nb;
     var outer = _opus_in_frame;
     if (outer == 0) { _opus_frame_begin(); }
     var p = _ce_take_pcm(st, pcm, frame_size);

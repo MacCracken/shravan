@@ -2,15 +2,17 @@
 
 **shravan** (Sanskrit: hearing / perception) -- Audio codecs for the AGNOS ecosystem.
 
-WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, AAC-LC, and MP4/M4A. Full **Opus decode** (CELT + SILK +
-hybrid, mono/stereo, 10/20 ms, all bandwidths, bit-exact vs libopus), libopus's **CELT encoder**
+WAV, FLAC, AIFF, ALAC, Ogg/Opus, MP3, AAC-LC, and MP4/M4A. Full **Opus decode** (CELT + SILK + hybrid,
+mono/stereo, every TOC configuration: CELT frames of 2.5–20 ms, SILK and hybrid of 10 and 20 ms,
+packets to 120 ms, all bandwidths, bit-exact vs libopus), libopus's **CELT encoder**
 (`celt_encode_with_ec` computed as libopus's float build computes it: its frames byte for byte, every
-frame size, rate, complexity and stereo mode), a **SILK encoder** (libopus's own packets, byte for
-byte, voiced and unvoiced, mono and stereo, complexity 0–10) and libopus's **Opus encoder layer**
-around it (`opus_encode` with `OPUS_APPLICATION_RESTRICTED_SILK`: bandwidth and channel decisions,
-FEC, DTX, 10–120 ms packets, byte for byte libopus's). PCM sample format conversion,
-sinc resampling, FFT/MDCT, dithering, streaming decoders, and audio metadata tags. Pure Cyrius:
-the Cyrius stdlib plus two first-party libraries, sankoch (compression) and bayan-json.
+frame size, rate, complexity and stereo mode), a **SILK encoder** (voiced and unvoiced, mono and
+stereo, complexity 0–10) and libopus's **Opus encoder layer** around it (`opus_encode` with
+`OPUS_APPLICATION_RESTRICTED_SILK`: bandwidth and channel decisions, FEC, DTX, 10–120 ms packets),
+both libopus's packets byte for byte on the suite's inputs (SILK's float stages run in double
+precision, so on hostile input a near-tie can part them from libopus's single precision). PCM sample
+format conversion, sinc resampling, FFT/MDCT, dithering, streaming decoders, and audio metadata tags.
+Pure Cyrius: the Cyrius stdlib plus two first-party libraries, sankoch (compression) and bayan-json.
 
 Every decoder is checked against a reference (ffmpeg, flac, mpg123, libopus, the ISO MPEG
 conformance vectors) on real encoder output, in the suite and in a CI sweep.
@@ -18,7 +20,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (18,074 assertions)
+# Build + run the test suite (18,178 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -41,8 +43,8 @@ cyrius build src/bench.cyr build/bench
 | **aiff** | AIFF/AIFF-C encoder/decoder (big-endian, 80-bit extended sample rate; AIFF-C sowt, fl32, fl64) |
 | **alac** | Apple Lossless decoder (SCE/CPE/LFE, Rice coding, LPC prediction) |
 | **ogg** | Ogg container parser/muxer (CRC-32, page/packet extraction) |
-| **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo and multistream (surround and ambisonics, RFC 7845 families 1, 2, 255), every frame size and bandwidth, FEC, packet-loss concealment, DTX, matching libopus; libopus's CELT encoder (`celt_encoder_new`, `celt_encoder_encode`, its ctls; frames byte for byte libopus's); header parsing (output gain applied). The Opus encoder (`opus_encoder_new`, `opus_encode`, libopus's ctls and getters) with `OPUS_APPLICATION_RESTRICTED_SILK`: libopus's packets, final ranges and getters byte for byte |
-| **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus; SILK encoder (mono and stereo, 8/12/16 kHz from an 8–48 kHz input, 10–60 ms packets, VBR and CBR, complexity 0–10 (the delayed-decision quantiser from 2); internal-rate switching through libopus's low-pass transition; pitch estimation and long-term prediction for voiced frames; LTP scaled by `silk_encoder_set_packet_loss`; in-band FEC and DTX; stereo as mid and side with the side predicted from the mid, mid-only frames at low rates, stereo input coded mono, moves between them packet by packet), libopus's `silk_Encode` packets byte for byte |
+| **opus** | Opus decode — CELT + SILK + hybrid, mono/stereo and multistream (surround and ambisonics, RFC 7845 families 1, 2, 255), every frame size and bandwidth, FEC, packet-loss concealment, DTX, matching libopus; libopus's CELT encoder (`celt_encoder_new`, `celt_encoder_encode`, its ctls; frames byte for byte libopus's); header parsing (output gain applied). The Opus encoder (`opus_encoder_new`, `opus_encode`, libopus's ctls and getters) with `OPUS_APPLICATION_RESTRICTED_SILK`: libopus's packets, final ranges and getters byte for byte on the suite's inputs |
+| **silk** | Opus SILK-mode decoder (NLSF/LTP/LPC synthesis + resampler), bit-exact vs libopus; SILK encoder (mono and stereo, 8/12/16 kHz from an 8–48 kHz input, 10–60 ms packets, VBR and CBR, complexity 0–10 (the delayed-decision quantiser from 2); internal-rate switching through libopus's low-pass transition; pitch estimation and long-term prediction for voiced frames; LTP scaled by `silk_encoder_set_packet_loss`; in-band FEC and DTX; stereo as mid and side with the side predicted from the mid, mid-only frames at low rates, stereo input coded mono, moves between them packet by packet), libopus's `silk_Encode` packets byte for byte on the suite's inputs (its float stages in double precision: hostile input can part at a near-tie) |
 | **mp3** | MP3 decoder to PCM (MPEG-1/2/2.5 Layer I/II/III — reservoir, Huffman, requant, IMDCT, polyphase synthesis, intensity stereo, free format); ID3v2 tag skipping; gapless from the LAME tag |
 | **aac** | AAC-LC decoder (any channel layout, to 22.2, in ffmpeg's channel order; all 13 sample rates, TNS, short windows, M/S, intensity, PNS), encoder (ADTS, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, rate loop with a bit reservoir) |
 | **mp4** | MP4/M4A and QuickTime demux (box tree, sample table, esds and its channel layout, AAC and ALAC access units to their decoders); every audio track by index, the default as ffmpeg picks it; gapless (sample durations, edit lists, iTunSMPB) |

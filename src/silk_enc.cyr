@@ -43,6 +43,14 @@
 #           after mid-only frames, moves between mono and stereo, stereo input
 #           coded mono); silk_encoder_new_channels and the channel, toMono and
 #           bit rate setters.
+#   2.12.3  The delayed-decision quantiser (silk_NSQ_del_dec, complexity 2-10),
+#           the per-packet control (silk_control_audio_bandwidth, the low-pass
+#           transition, the resamplers' hand-over, packet-size changes) and
+#           silk_encoder_reset.
+#   2.12.5  The window's slope, the voicing threshold, Lambda and minInvGain
+#           in single precision, each operation rounded as libopus's float build
+#           rounds it; NaN taken as libopus's float min/max take it; the
+#           side's low-pass state reset with the rest after mid-only frames.
 
 # ---------------------------------------------------------------- encoder state
 #
@@ -143,8 +151,10 @@ fn _sk_zero(p, n) {
 # silk_enc_state_alloc (2.12.3): a state with its buffers at their largest
 # (16 kHz, 20 ms frames), as silk_init_encoder leaves it: internal rate 0,
 # set by the first silk_control_encoder.
+# 0 when memory runs out (alloc gives 0).
 fn silk_enc_state_alloc() {
     var st = alloc(_SKE_SIZE);
+    if (st == 0) { return 0; }
     _sk_zero(st, _SKE_SIZE);
     store64(st + _SKE_VAD, alloc(_SKD_SIZE));
     store64(st + _SKE_NSQ, alloc(_SKN_SIZE));
@@ -159,14 +169,21 @@ fn silk_enc_state_alloc() {
     store64(st + _SKE_LBRR_IDX, alloc(3 * 64 * 8));
     store64(st + _SKE_LBRR_PULSES, alloc(3 * 320 * 8));
     store64(st + _SKE_LBRR_NSQ, alloc(_SKN_SIZE));
+    if (load64(st + _SKE_VAD) == 0 || load64(st + _SKE_NSQ) == 0 || load64(st + _SKE_PULSES) == 0
+        || load64(st + _SKE_XBUF) == 0 || load64(st + _SKE_RES_PITCH) == 0 || load64(st + _SKE_NSQ_COPY) == 0
+        || load64(st + _SKE_NSQ_COPY + 8) == 0 || load64(st + _SKE_EC_COPY) == 0 || load64(st + _SKE_EC_COPY + 8) == 0
+        || load64(st + _SKE_EC_BUF_COPY) == 0 || load64(st + _SKE_LBRR_IDX) == 0 || load64(st + _SKE_LBRR_PULSES) == 0
+        || load64(st + _SKE_LBRR_NSQ) == 0) { return 0; }
     silk_enc_state_reset(st);
     return st;
 }
+
 
 # A state set up at fs_kHz with nb_subfr subframes (4: 20 ms, 2: 10 ms) and
 # complexity 1, as the first packet's control would leave it.
 fn silk_enc_state_new(fs_kHz, nb_subfr) {
     var st = silk_enc_state_alloc();
+    if (st == 0) { return 0; }
     var ms = 20;
     if (nb_subfr == 2) { ms = 10; }
     _sk_setup_fs(st, fs_kHz, ms);
@@ -263,8 +280,8 @@ fn _sk_setup_fs(st, fs, ms) {
 
 # silk_setup_complexity (control_codec.c): the analysis orders, lookahead,
 # delayed-decision states, NLSF survivors, interpolation and warping of each
-# complexity 0-10. shravan's quantiser is silk_NSQ, the one libopus uses at
-# complexity 0 and 1; higher settings need silk_NSQ_del_dec.
+# complexity 0-10: silk_NSQ at 0 and 1, silk_NSQ_del_dec (two to four states)
+# from 2, as _sk_nsq_wrapper picks them.
 fn silk_enc_setup_complexity(st, c) {
     var fs = load64(st + _SKE_FS_KHZ);
     var po = 16;
@@ -333,6 +350,7 @@ var _sk_snr_wb = 0;
 
 fn _sk_bytes(csv, n) {
     var t = alloc(n + 8);
+    if (t == 0) { return 0; }
     var p = 0;
     var i = 0;
     while (i < n) {
@@ -381,6 +399,7 @@ var _SKC_SIZE = 1496;
 
 fn silk_enc_ctrl_new() {
     var c = alloc(_SKC_SIZE);
+    if (c == 0) { return 0; }
     memset(c, 0, _SKC_SIZE);
     return c;
 }
@@ -816,13 +835,17 @@ fn silk_find_pred_coefs_flp(st, ctrl, res_pitch, x, cond) {
         store64(ctrl + _SKC_LTPRED_GAIN, F64_ZERO);
         store64(st + _SKE_SUM_LOG_GAIN, 0);
     }
+    # in single precision as find_pred_coefs_FLP.c:98-101 computes it (pow in
+    # double, its argument and result floats)
     var minInvGain = 0;
     if (load64(st + _SKE_FIRST) == 1) {
-        minInvGain = f64_div(F64_ONE, f64_from(100));
+        minInvGain = _skf(1, 100);
     } else {
         # 2^(LTPredCodGain/3) / 1e4, over 0.25 + 0.75 coding_quality
-        minInvGain = f64_div(f64_pow(F64_TWO, f64_div(load64(ctrl + _SKC_LTPRED_GAIN), f64_from(3))), f64_from(10000));
-        minInvGain = f64_div(minInvGain, f64_add(_skf(1, 4), f64_mul(_skf(3, 4), load64(ctrl + _SKC_CODING_QUALITY))));
+        var e3 = _sk_f32(f64_div(_sk_f32(load64(ctrl + _SKC_LTPRED_GAIN)), f64_from(3)));
+        minInvGain = _sk_f32(f64_div(_sk_f32(f64_pow(F64_TWO, e3)), f64_from(10000)));
+        var cq = _sk_f32(f64_add(_skf(1, 4), _sk_f32(f64_mul(_skf(3, 4), _sk_f32(load64(ctrl + _SKC_CODING_QUALITY))))));
+        minInvGain = _sk_f32(f64_div(minInvGain, cq));
     }
     var nlsf = _opus_tmp(16 * 8);
     i = 0;
@@ -1441,7 +1464,8 @@ fn silk_schur_flp(rc, ac, order) {
     k = 0;
     while (k < order) {
         var den = load64(c1);
-        if (f64_lt(den, floor) == 1) { den = floor; }
+        # silk_max_float(C[0][1], 1e-9f): the floor unless C is above it (NaN too)
+        if (f64_gt(den, floor) == 0) { den = floor; }
         var rt = f64_neg(f64_div(load64(c0 + (k + 1) * 8), den));
         store64(rc + k * 8, rt);
         var n = 0;
@@ -1491,23 +1515,35 @@ fn silk_bwexpander_flp(a, d, chirp) {
 
 # silk_apply_sine_window_FLP: x times a rising (1) or falling (2) sine slope,
 # by libopus's recursion (length a multiple of 4).
+# The slope is libopus's floats exactly: PI is the float 3.1415926536f, and
+# freq, c and the recursion's S0 and S1 are floats, in typed f32 arithmetic
+# (native single precision, each operation rounded); x stays f64.
 fn silk_apply_sine_window_flp(w, x, win_type, length) {
-    var freq = f64_div(F64_PI, f64_from(length + 1));
-    var c = f64_sub(F64_TWO, f64_mul(freq, freq));
-    var S0 = F64_ZERO;
-    var S1 = freq;
+    var pif: f32 = f32_from(F64_PI);
+    var lenf: f32 = f32_from(f64_from(length + 1));
+    var freq: f32 = pif / lenf;
+    var two: f32 = f32_from(F64_TWO);
+    var ff: f32 = freq * freq;
+    var c: f32 = two - ff;
+    var S0: f32 = f32_from(F64_ZERO);
+    var S1: f32 = freq;
     if (win_type >= 2) {
-        S0 = F64_ONE;
-        S1 = f64_mul(F64_HALF, c);
+        S0 = f32_from(F64_ONE);
+        var half: f32 = f32_from(F64_HALF);
+        S1 = half * c;
     }
     var k = 0;
     while (k < length) {
-        store64(w + k * 8, f64_mul(f64_mul(load64(x + k * 8), F64_HALF), f64_add(S0, S1)));
-        store64(w + (k + 1) * 8, f64_mul(load64(x + (k + 1) * 8), S1));
-        S0 = f64_sub(f64_mul(c, S1), S0);
-        store64(w + (k + 2) * 8, f64_mul(f64_mul(load64(x + (k + 2) * 8), F64_HALF), f64_add(S1, S0)));
-        store64(w + (k + 3) * 8, f64_mul(load64(x + (k + 3) * 8), S0));
-        S1 = f64_sub(f64_mul(c, S0), S1);
+        var s01: f32 = S0 + S1;
+        store64(w + k * 8, f64_mul(f64_mul(load64(x + k * 8), F64_HALF), f32_to(s01)));
+        store64(w + (k + 1) * 8, f64_mul(load64(x + (k + 1) * 8), f32_to(S1)));
+        var cs1: f32 = c * S1;
+        S0 = cs1 - S0;
+        var s10: f32 = S1 + S0;
+        store64(w + (k + 2) * 8, f64_mul(f64_mul(load64(x + (k + 2) * 8), F64_HALF), f32_to(s10)));
+        store64(w + (k + 3) * 8, f64_mul(load64(x + (k + 3) * 8), f32_to(S0)));
+        var cs0: f32 = c * S0;
+        S1 = cs0 - S1;
         k = k + 4;
     }
     return 0;
@@ -1687,12 +1723,14 @@ fn silk_find_pitch_lags_flp(st, ctrl, res, x) {
 # The voicing threshold: the normalised correlation a voiced frame needs, 0.6
 # less 0.004 an analysis order, 0.1 at full speech activity, 0.15 after a voiced
 # frame and 0.1 of the input's tilt.
+# Its inputs are integers, so this is libopus's float value exactly
+# (find_pitch_lags_FLP.c:109-113, each operation rounded to single precision).
 fn _sk_pitch_threshold(st) {
     var thr = _skf(3, 5);
-    thr = f64_sub(thr, f64_mul(_skf(1, 250), f64_from(load64(st + _SKE_PITCH_ORDER))));
-    thr = f64_sub(thr, f64_mul(f64_mul(_skf(1, 10), f64_from(load64(st + _SKE_SPEECH_Q8))), _skf(1, 256)));
-    thr = f64_sub(thr, f64_mul(_skf(3, 20), f64_from(load64(st + _SKE_PREV_SIGNAL) >> 1)));
-    thr = f64_sub(thr, f64_mul(f64_mul(_skf(1, 10), f64_from(load64(st + _SKE_TILT_Q15))), _skf(1, 32768)));
+    thr = _sk_f32(f64_sub(thr, _sk_f32(f64_mul(_skf(1, 250), f64_from(load64(st + _SKE_PITCH_ORDER))))));
+    thr = _sk_f32(f64_sub(thr, _sk_f32(f64_mul(_sk_f32(f64_mul(_skf(1, 10), f64_from(load64(st + _SKE_SPEECH_Q8)))), _skf(1, 256)))));
+    thr = _sk_f32(f64_sub(thr, _sk_f32(f64_mul(_skf(3, 20), f64_from(load64(st + _SKE_PREV_SIGNAL) >> 1)))));
+    thr = _sk_f32(f64_sub(thr, _sk_f32(f64_mul(_sk_f32(f64_mul(_skf(1, 10), f64_from(load64(st + _SKE_TILT_Q15)))), _skf(1, 32768)))));
     return thr;
 }
 
@@ -2434,7 +2472,8 @@ fn silk_process_gains_flp(st, ctrl, cond) {
     while (k < nb) {
         var g = load64(ctrl + _SKC_GAINS + k * 8);
         g = f64_sqrt(f64_add(f64_mul(g, g), f64_mul(load64(ctrl + _SKC_RESNRG + k * 8), inv_max)));
-        if (f64_gt(g, cap) == 1) { g = cap; }
+        # silk_min_float(gain, 32767.0f): the cap unless the gain is below it (NaN too)
+        if (f64_lt(g, cap) == 0) { g = cap; }
         store64(ctrl + _SKC_GAINS + k * 8, g);
         k = k + 1;
     }
@@ -2462,12 +2501,15 @@ fn silk_process_gains_flp(st, ctrl, cond) {
         else { _ske_set_idx(st, _SKI_QUANT_OFFSET, 1); }
     }
     var qo = f64_div(f64_from(silk_quant_offset(sig, _ske_idx(st, _SKI_QUANT_OFFSET))), f64_from(1024));
+    # each term and sum rounded to single precision in libopus's order
+    # (process_gains_FLP.c:94-99), the qualities as the floats libopus keeps
     var lam = _skf(6, 5);
-    lam = f64_add(lam, f64_mul(f64_neg(_skf(1, 20)), f64_from(load64(st + _SKE_NSTATES))));
-    lam = f64_add(lam, f64_mul(f64_neg(_skf(1, 5)), f64_div(f64_from(load64(st + _SKE_SPEECH_Q8)), f64_from(256))));
-    lam = f64_add(lam, f64_mul(f64_neg(_skf(1, 10)), load64(ctrl + _SKC_INPUT_QUALITY)));
-    lam = f64_add(lam, f64_mul(f64_neg(_skf(1, 5)), load64(ctrl + _SKC_CODING_QUALITY)));
-    lam = f64_add(lam, f64_mul(_skf(4, 5), qo));
+    lam = _sk_f32(f64_add(lam, _sk_f32(f64_mul(f64_neg(_skf(1, 20)), f64_from(load64(st + _SKE_NSTATES))))));
+    var sa = _sk_f32(f64_mul(f64_neg(_skf(1, 5)), f64_from(load64(st + _SKE_SPEECH_Q8))));
+    lam = _sk_f32(f64_add(lam, _sk_f32(f64_mul(sa, _skf(1, 256)))));
+    lam = _sk_f32(f64_add(lam, _sk_f32(f64_mul(f64_neg(_skf(1, 10)), _sk_f32(load64(ctrl + _SKC_INPUT_QUALITY))))));
+    lam = _sk_f32(f64_add(lam, _sk_f32(f64_mul(f64_neg(_skf(1, 5)), _sk_f32(load64(ctrl + _SKC_CODING_QUALITY))))));
+    lam = _sk_f32(f64_add(lam, _sk_f32(f64_mul(_skf(4, 5), qo))));
     store64(ctrl + _SKC_LAMBDA, lam);
     return 0;
 }
@@ -2514,8 +2556,7 @@ fn _sk_rand(seed) { return silk_sx32(907633515 + seed * 196314165); }
 # silk_nsq_scale_states: the input over the subframe's gain (Q10), the
 # re-whitened LTP state scaled to it, and every filter state rescaled when the
 # gain changes. silk_SMULWW and silk_SMULWB inline (2.12.3), as in
-# _sk_nsq_dd_scale_states: products under 2^62 shifted through the 2^62 bias, a
-# gain ratio outside (0, 2^31) taking the helper.
+# _sk_nsq_dd_scale_states: products under 2^62 shifted through the 2^62 bias.
 fn _sk_nsq_scale_states(st, nsq, x16, x_sc, sLTP, sLTP_Q15, subfr, LTP_scale_Q14, gains, pitchL, sig) {
     var B62 = 4611686018427387904;
     var B46 = 70368744177664;
@@ -2548,66 +2589,42 @@ fn _sk_nsq_scale_states(st, nsq, x16, x_sc, sLTP, sLTP_Q15, subfr, LTP_scale_Q14
     if (g != load64(nsq + _SKN_PREV_GAIN)) {
         var adj = silk_div32_varq(load64(nsq + _SKN_PREV_GAIN), g, 16);
         var sidx = load64(nsq + _SKN_SHP_IDX);
-        if (adj >= 0 && adj < H31) {
-            var a = nsq + _SKN_SLTP_SHP + (sidx - lm) * 8;
-            var ae = nsq + _SKN_SLTP_SHP + sidx * 8;
+        # adj is in [0, 2^31): silk_DIV32_varQ saturates to int32 and both gains
+        # are positive (the previous at least 1, a dequantised one at least
+        # silk_log2lin(2090)), so every product here is under 2^62
+        var a = nsq + _SKN_SLTP_SHP + (sidx - lm) * 8;
+        var ae = nsq + _SKN_SLTP_SHP + sidx * 8;
+        while (a < ae) {
+            v = ((adj * load64(a) + B62) >> 16) - B46;
+            store64(a, ((v + H31) & W32) - H31);
+            a = a + 8;
+        }
+        if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
+            a = sLTP_Q15 + (lidx - lag - 2) * 8;
+            ae = sLTP_Q15 + lidx * 8;
             while (a < ae) {
                 v = ((adj * load64(a) + B62) >> 16) - B46;
                 store64(a, ((v + H31) & W32) - H31);
                 a = a + 8;
             }
-            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
-                a = sLTP_Q15 + (lidx - lag - 2) * 8;
-                ae = sLTP_Q15 + lidx * 8;
-                while (a < ae) {
-                    v = ((adj * load64(a) + B62) >> 16) - B46;
-                    store64(a, ((v + H31) & W32) - H31);
-                    a = a + 8;
-                }
-            }
-            v = ((adj * load64(nsq + _SKN_SLF_AR) + B62) >> 16) - B46;
-            store64(nsq + _SKN_SLF_AR, ((v + H31) & W32) - H31);
-            v = ((adj * load64(nsq + _SKN_SDIFF) + B62) >> 16) - B46;
-            store64(nsq + _SKN_SDIFF, ((v + H31) & W32) - H31);
-            a = nsq + _SKN_SLPC;
-            ae = a + 16 * 8;
-            while (a < ae) {
-                v = ((adj * load64(a) + B62) >> 16) - B46;
-                store64(a, ((v + H31) & W32) - H31);
-                a = a + 8;
-            }
-            a = nsq + _SKN_SAR2;
-            ae = a + 24 * 8;
-            while (a < ae) {
-                v = ((adj * load64(a) + B62) >> 16) - B46;
-                store64(a, ((v + H31) & W32) - H31);
-                a = a + 8;
-            }
-        } else {
-            i = sidx - lm;
-            while (i < sidx) {
-                store64(nsq + _SKN_SLTP_SHP + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SLTP_SHP + i * 8)));
-                i = i + 1;
-            }
-            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
-                i = lidx - lag - 2;
-                while (i < lidx) {
-                    store64(sLTP_Q15 + i * 8, _sk_smulww(adj, load64(sLTP_Q15 + i * 8)));
-                    i = i + 1;
-                }
-            }
-            store64(nsq + _SKN_SLF_AR, _sk_smulww(adj, load64(nsq + _SKN_SLF_AR)));
-            store64(nsq + _SKN_SDIFF, _sk_smulww(adj, load64(nsq + _SKN_SDIFF)));
-            i = 0;
-            while (i < 16) {
-                store64(nsq + _SKN_SLPC + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SLPC + i * 8)));
-                i = i + 1;
-            }
-            i = 0;
-            while (i < 24) {
-                store64(nsq + _SKN_SAR2 + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SAR2 + i * 8)));
-                i = i + 1;
-            }
+        }
+        v = ((adj * load64(nsq + _SKN_SLF_AR) + B62) >> 16) - B46;
+        store64(nsq + _SKN_SLF_AR, ((v + H31) & W32) - H31);
+        v = ((adj * load64(nsq + _SKN_SDIFF) + B62) >> 16) - B46;
+        store64(nsq + _SKN_SDIFF, ((v + H31) & W32) - H31);
+        a = nsq + _SKN_SLPC;
+        ae = a + 16 * 8;
+        while (a < ae) {
+            v = ((adj * load64(a) + B62) >> 16) - B46;
+            store64(a, ((v + H31) & W32) - H31);
+            a = a + 8;
+        }
+        a = nsq + _SKN_SAR2;
+        ae = a + 24 * 8;
+        while (a < ae) {
+            v = ((adj * load64(a) + B62) >> 16) - B46;
+            store64(a, ((v + H31) & W32) - H31);
+            a = a + 8;
         }
         store64(nsq + _SKN_PREV_GAIN, g);
     }
@@ -2925,9 +2942,8 @@ fn _skss(ss, k, j, f) { return ss + ((k * 2 + j) * _SKSS_WORDS + f) * 8; }
 # filter memories and delayed values rescaled when the gain changes, and the
 # LTP state only up to the decision delay. silk_SMULWW and silk_SMULWB are
 # inline (2.12.3): the input by inv26 (under 2^26), the LTP state by inv31
-# (int16 operand), and the states by the gain ratio adj (positive, under 2^31:
-# every product under 2^62, shifted through the 2^62 bias); a ratio outside
-# that range takes the helper.
+# (int16 operand), and the states by the gain ratio adj (in [0, 2^31): every
+# product under 2^62, shifted through the 2^62 bias).
 fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstates, LTP_scale_Q14, gains, pitchL, sig, dD) {
     var B62 = 4611686018427387904;
     var B46 = 70368744177664;
@@ -2960,89 +2976,60 @@ fn _sk_nsq_dd_scale_states(st, nsq, dd, x16, x_sc, sLTP, sLTP_Q15, subfr, nstate
     if (g != load64(nsq + _SKN_PREV_GAIN)) {
         var adj = silk_div32_varq(load64(nsq + _SKN_PREV_GAIN), g, 16);
         var sidx = load64(nsq + _SKN_SHP_IDX);
-        if (adj >= 0 && adj < H31) {
-            var a = nsq + _SKN_SLTP_SHP + (sidx - lm) * 8;
-            var ae = nsq + _SKN_SLTP_SHP + sidx * 8;
+        # adj is in [0, 2^31): silk_DIV32_varQ saturates to int32 and both gains
+        # are positive (the previous at least 1, a dequantised one at least
+        # silk_log2lin(2090)), so every product here is under 2^62
+        var a = nsq + _SKN_SLTP_SHP + (sidx - lm) * 8;
+        var ae = nsq + _SKN_SLTP_SHP + sidx * 8;
+        while (a < ae) {
+            v = ((adj * load64(a) + B62) >> 16) - B46;
+            store64(a, ((v + H31) & W32) - H31);
+            a = a + 8;
+        }
+        if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
+            a = sLTP_Q15 + (lidx - lag - 2) * 8;
+            ae = sLTP_Q15 + (lidx - dD) * 8;
             while (a < ae) {
                 v = ((adj * load64(a) + B62) >> 16) - B46;
                 store64(a, ((v + H31) & W32) - H31);
                 a = a + 8;
             }
-            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
-                a = sLTP_Q15 + (lidx - lag - 2) * 8;
-                ae = sLTP_Q15 + (lidx - dD) * 8;
-                while (a < ae) {
-                    v = ((adj * load64(a) + B62) >> 16) - B46;
-                    store64(a, ((v + H31) & W32) - H31);
-                    a = a + 8;
-                }
+        }
+        var k = 0;
+        while (k < nstates) {
+            var p = _skdd(dd, k, 0);
+            # LF_AR and DIFF (words 320, 321), sLPC_Q14's 16 newest, sAR2,
+            # and the delayed Pred and Shape
+            v = ((adj * load64(p + _SKDD_LF_AR * 8) + B62) >> 16) - B46;
+            store64(p + _SKDD_LF_AR * 8, ((v + H31) & W32) - H31);
+            v = ((adj * load64(p + _SKDD_DIFF * 8) + B62) >> 16) - B46;
+            store64(p + _SKDD_DIFF * 8, ((v + H31) & W32) - H31);
+            a = p + _SKDD_LPC * 8;
+            ae = a + 16 * 8;
+            while (a < ae) {
+                v = ((adj * load64(a) + B62) >> 16) - B46;
+                store64(a, ((v + H31) & W32) - H31);
+                a = a + 8;
             }
-            var k = 0;
-            while (k < nstates) {
-                var p = _skdd(dd, k, 0);
-                # LF_AR and DIFF (words 320, 321), sLPC_Q14's 16 newest, sAR2,
-                # and the delayed Pred and Shape
-                v = ((adj * load64(p + _SKDD_LF_AR * 8) + B62) >> 16) - B46;
-                store64(p + _SKDD_LF_AR * 8, ((v + H31) & W32) - H31);
-                v = ((adj * load64(p + _SKDD_DIFF * 8) + B62) >> 16) - B46;
-                store64(p + _SKDD_DIFF * 8, ((v + H31) & W32) - H31);
-                a = p + _SKDD_LPC * 8;
-                ae = a + 16 * 8;
-                while (a < ae) {
-                    v = ((adj * load64(a) + B62) >> 16) - B46;
-                    store64(a, ((v + H31) & W32) - H31);
-                    a = a + 8;
-                }
-                a = p + _SKDD_AR2 * 8;
-                ae = a + 24 * 8;
-                while (a < ae) {
-                    v = ((adj * load64(a) + B62) >> 16) - B46;
-                    store64(a, ((v + H31) & W32) - H31);
-                    a = a + 8;
-                }
-                a = p + _SKDD_PRED * 8;
-                ae = a + 40 * 8;
-                var a2 = p + _SKDD_SHAPE * 8;
-                while (a < ae) {
-                    v = ((adj * load64(a) + B62) >> 16) - B46;
-                    store64(a, ((v + H31) & W32) - H31);
-                    v = ((adj * load64(a2) + B62) >> 16) - B46;
-                    store64(a2, ((v + H31) & W32) - H31);
-                    a = a + 8;
-                    a2 = a2 + 8;
-                }
-                k = k + 1;
+            a = p + _SKDD_AR2 * 8;
+            ae = a + 24 * 8;
+            while (a < ae) {
+                v = ((adj * load64(a) + B62) >> 16) - B46;
+                store64(a, ((v + H31) & W32) - H31);
+                a = a + 8;
             }
-        } else {
-            i = sidx - lm;
-            while (i < sidx) {
-                store64(nsq + _SKN_SLTP_SHP + i * 8, _sk_smulww(adj, load64(nsq + _SKN_SLTP_SHP + i * 8)));
-                i = i + 1;
+            a = p + _SKDD_PRED * 8;
+            ae = a + 40 * 8;
+            var a2 = p + _SKDD_SHAPE * 8;
+            while (a < ae) {
+                v = ((adj * load64(a) + B62) >> 16) - B46;
+                store64(a, ((v + H31) & W32) - H31);
+                v = ((adj * load64(a2) + B62) >> 16) - B46;
+                store64(a2, ((v + H31) & W32) - H31);
+                a = a + 8;
+                a2 = a2 + 8;
             }
-            if (sig == 2 && load64(nsq + _SKN_REWHITE) == 0) {
-                i = lidx - lag - 2;
-                while (i < lidx - dD) {
-                    store64(sLTP_Q15 + i * 8, _sk_smulww(adj, load64(sLTP_Q15 + i * 8)));
-                    i = i + 1;
-                }
-            }
-            var k2 = 0;
-            while (k2 < nstates) {
-                var p2 = _skdd(dd, k2, 0);
-                store64(p2 + _SKDD_LF_AR * 8, _sk_smulww(adj, load64(p2 + _SKDD_LF_AR * 8)));
-                store64(p2 + _SKDD_DIFF * 8, _sk_smulww(adj, load64(p2 + _SKDD_DIFF * 8)));
-                i = 0;
-                while (i < 16) { store64(p2 + (_SKDD_LPC + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_LPC + i) * 8))); i = i + 1; }
-                i = 0;
-                while (i < 24) { store64(p2 + (_SKDD_AR2 + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_AR2 + i) * 8))); i = i + 1; }
-                i = 0;
-                while (i < 40) {
-                    store64(p2 + (_SKDD_PRED + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_PRED + i) * 8)));
-                    store64(p2 + (_SKDD_SHAPE + i) * 8, _sk_smulww(adj, load64(p2 + (_SKDD_SHAPE + i) * 8)));
-                    i = i + 1;
-                }
-                k2 = k2 + 1;
-            }
+            k = k + 1;
         }
         store64(nsq + _SKN_PREV_GAIN, g);
     }
@@ -4272,6 +4259,7 @@ var _SKST_SIZE = 256;
 # and the width.
 fn silk_stereo_enc_state_new() {
     var t = alloc(_SKST_SIZE);
+    if (t == 0) { return 0; }
     memset(t, 0, _SKST_SIZE);
     return t;
 }
@@ -4654,10 +4642,9 @@ var _SKX_SIZE = 376;
 # silk_encoder_new: a mono SILK encoder. fs_hz: 8000, 12000 or 16000, both the
 # input rate and the coded bandwidth (narrow, medium, wide); packet_ms 10, 20,
 # 40 or 60; bitrate 1 to 1,000,000 bit/s (the coder itself holds a frame to at
-# least 5 kbit/s); complexity 0 or 1 (libopus's settings for them: higher ones
-# select silk_NSQ_del_dec, which shravan does not have); cbr nonzero for
-# constant bit rate. Returns the encoder, or ERR_INVALID_RATE / ERR_ENCODE /
-# ERR_UNSUPPORTED_FMT.
+# least 5 kbit/s); complexity 0 to 10 (libopus's settings for each, the
+# delayed-decision quantiser from 2); cbr nonzero for constant bit rate.
+# Returns the encoder, or ERR_INVALID_RATE / ERR_ENCODE.
 fn silk_encoder_new(fs_hz, packet_ms, bitrate, complexity, cbr) {
     return silk_encoder_new_api(fs_hz, fs_hz, packet_ms, bitrate, complexity, cbr);
 }
@@ -4689,6 +4676,7 @@ fn silk_encoder_new_channels(api_hz, fs_hz, channels, packet_ms, bitrate, comple
     var c = 0;
     if (cbr != 0) { c = 1; }
     var e = alloc(_SKX_SIZE);
+    if (e == 0) { return err(ERR_ENCODE); }
     _sk_zero(e, _SKX_SIZE);
     # the states as silk_InitEncoder leaves them: the first packet's control
     # sets the rate (the desired one, fs_hz) and the packet length
@@ -4706,11 +4694,13 @@ fn silk_encoder_new_channels(api_hz, fs_hz, channels, packet_ms, bitrate, comple
     store64(e + _SKX_DESIRED_INT_HZ, fs_hz);
     store64(e + _SKX_ACTIVITY, 0 - 1);
     var ib = alloc(322 * 8);
+    var icdf = alloc(8);
+    if (ib == 0 || icdf == 0) { return err(ERR_ENCODE); }
     _sk_zero(ib, 322 * 8);
     store64(e + _SKX_INBUF, ib);
     store64(e + _SKX_RS, alloc(_SKRS_SIZE));
-    store64(e + _SKX_ICDF, alloc(8));
-    store8(load64(e + _SKX_ICDF) + 1, 0);
+    store64(e + _SKX_ICDF, icdf);
+    store8(icdf + 1, 0);
     store64(e + _SKX_LBRR_ICDF2, _sk_bytes("203,150,0", 3));
     store64(e + _SKX_LBRR_ICDF3, _sk_bytes("215,195,166,125,110,82,0", 7));
     store64(e + _SKX_X16, alloc(api_hz / 1000 * 60 * 8));
@@ -4718,14 +4708,22 @@ fn silk_encoder_new_channels(api_hz, fs_hz, channels, packet_ms, bitrate, comple
     store64(e + _SKX_CH_API, channels);
     store64(e + _SKX_CH_INT, channels);
     store64(e + _SKX_CUR_CH_INT, 1);
+    if (load64(e + _SKX_ST) == 0 || load64(e + _SKX_CTRL) == 0 || load64(e + _SKX_RS) == 0 || load64(e + _SKX_X16) == 0
+        || load64(e + _SKX_EC) == 0 || load64(e + _SKX_LBRR_ICDF2) == 0 || load64(e + _SKX_LBRR_ICDF3) == 0) {
+        return err(ERR_ENCODE);
+    }
     if (channels == 2) {
         store64(e + _SKX_ST1, silk_enc_state_alloc());
         var ib1 = alloc(322 * 8);
+        if (ib1 == 0) { return err(ERR_ENCODE); }
         _sk_zero(ib1, 322 * 8);
         store64(e + _SKX_INBUF1, ib1);
         store64(e + _SKX_RS1, alloc(_SKRS_SIZE));
         store64(e + _SKX_STEREO, silk_stereo_enc_state_new());
         store64(e + _SKX_X16B, alloc(api_hz / 1000 * 60 * 8));
+        if (load64(e + _SKX_ST1) == 0 || load64(e + _SKX_RS1) == 0 || load64(e + _SKX_STEREO) == 0 || load64(e + _SKX_X16B) == 0) {
+            return err(ERR_ENCODE);
+        }
     }
     return e;
 }
@@ -5079,6 +5077,7 @@ fn _sk_side_reset(st) {
     store64(st + _SKE_TILT_SMTH, F64_ZERO);
     _sk_nsq_init(load64(st + _SKE_NSQ));
     memset(st + _SKE_PREV_NLSF, 0, 16 * 8);
+    _sk_zero(st + _SKE_LP_STATE, 2 * 8);
     store64(st + _SKE_PREV_LAG, 100);
     store64(st + _SKE_PREV_SIGNAL, 0);
     store64(st + _SKE_FIRST, 1);
@@ -5425,6 +5424,7 @@ fn _silk_encode_coded(e, pcm, buf, storage, maxBits, rate) {
 # the payload's length, or ERR_ENCODE when it does not fit in cap (nothing is
 # written past cap; the encoder has moved on, and the next packet can follow).
 fn silk_encode(e, pcm, out, cap) {
+    if (e == 0 || pcm == 0 || out == 0) { return err(ERR_ENCODE); }
     var storage = cap;
     if (storage > 1275) { storage = 1275; }
     if (storage < 1) { return err(ERR_ENCODE); }
@@ -5497,6 +5497,7 @@ fn _silk_opus_pad(out, toc, fr, size) {
 # alone, under CBR too. Returns the packet's length, or ERR_ENCODE for a cap of
 # 0.
 fn silk_encode_opus(e, pcm, out, cap) {
+    if (e == 0 || pcm == 0 || out == 0) { return err(ERR_ENCODE); }
     if (cap < 1) { return err(ERR_ENCODE); }
     var size = cap;
     if (size > 1276) { size = 1276; }

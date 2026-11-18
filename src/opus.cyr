@@ -467,8 +467,10 @@ fn ec_dec_normalize(ec) {
 }
 
 # Allocate + initialize a decoder over buf[0..len).
+# Its 96 bytes come from the frame arena inside a frame (the decoders open one
+# per packet): a long decode allocates nothing a packet.
 fn ec_dec_new(buf, len) {
-    var ec = alloc(96);
+    var ec = _opus_tmp(96);
     memset(ec, 0, 96);
     store64(ec, buf);
     store64(ec + 8, len);

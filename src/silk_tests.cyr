@@ -12095,6 +12095,7 @@ fn test_silk_enc_packets_vs_libopus() {
     var pcm = alloc(2880 * 8);
     var buf = alloc(1280);
     var ref = alloc(65536);
+    var total = 0;
     var c = 0;
     while (c < _SKK_N) {
         # kind, seed, rate, ms, complexity, bit rate, CBR, samples, packets,
@@ -12137,8 +12138,12 @@ fn test_silk_enc_packets_vs_libopus() {
         assert_eq(same, npk, "silk encode: libopus's packets, byte for byte");
         assert_eq(load64(load64(e + _SKX_ST) + _SKE_HP_SMTH1), load64(h + 144),
           "silk encode: libopus's pitch-tracking high-pass after the last frame");
+        total = total + npk;
         c = c + 1;
     }
+    # the vectors are all there (a truncated set would pass the loop vacuously)
+    assert(_SKK_N >= 45, "silk encode: the whole-packet configurations");
+    assert(total >= 2500, "silk encode: the whole packets");
     return 0;
 }
 
@@ -12456,6 +12461,7 @@ fn test_silk_enc_stereo_vs_libopus() {
     var pkw = alloc(3 * 512 * 8);
     var pcm = alloc(5760 * 8);
     var buf = alloc(1280);
+    var total = 0;
     var c = 0;
     while (c < _SKM_N) {
         # kind, seed, rate, ms, complexity, bit rate, CBR, samples a channel,
@@ -12512,8 +12518,11 @@ fn test_silk_enc_stereo_vs_libopus() {
         assert_eq(same, npk, "silk stereo: libopus's packets, length and hash");
         assert_eq(load64(load64(e + _SKX_ST) + _SKE_HP_SMTH1), load64(h + 216),
           "silk stereo: libopus's pitch-tracking high-pass after the last frame");
+        total = total + npk;
         c = c + 1;
     }
+    assert(_SKM_N >= 30, "silk stereo: the configurations");
+    assert(total >= 2700, "silk stereo: the packets");
     return 0;
 }
 
@@ -12984,6 +12993,98 @@ fn test_silk_enc_hostile() {
     return 0;
 }
 
+# 2.12.5's review: what the vectors never reach. The side channel's reset
+# when side coding resumes after mid-only frames clears everything libopus's
+# does (enc_API.c:451-462), the transition low-pass's state too; a NaN gain is
+# capped as silk_min_float caps it (32767, not the NaN, which became INT64_MIN
+# in GainsUnq_Q16); no samples or no output are refused (they read or wrote
+# address 0).
+fn test_silk_enc_contracts() {
+    syscall(1, 1, "=== silk encode: contracts the vectors never reach ===\n", 55);
+    var st = silk_enc_state_new(16, 4);
+    store64(st + _SKE_LAST_GAIN, 33);
+    store64(st + _SKE_HARM_SMTH, F64_HALF);
+    store64(st + _SKE_TILT_SMTH, F64_HALF);
+    var i = 0;
+    while (i < 16) { store64(st + _SKE_PREV_NLSF + i * 8, 1000 + i); i = i + 1; }
+    store64(st + _SKE_LP_STATE, 7);
+    store64(st + _SKE_LP_STATE + 8, 7);
+    store64(st + _SKE_PREV_LAG, 50);
+    store64(st + _SKE_PREV_SIGNAL, 2);
+    store64(st + _SKE_FIRST, 0);
+    var nsq = load64(st + _SKE_NSQ);
+    store64(nsq + _SKN_LAG_PREV, 77);
+    store64(nsq + _SKN_PREV_GAIN, 1234);
+    _sk_side_reset(st);
+    var nz = 0;
+    i = 0;
+    while (i < 16) { if (load64(st + _SKE_PREV_NLSF + i * 8) != 0) { nz = nz + 1; } i = i + 1; }
+    assert_eq(nz, 0, "silk contracts: the side's reset clears its NLSF history");
+    assert_eq(load64(st + _SKE_LP_STATE) | load64(st + _SKE_LP_STATE + 8), 0,
+      "silk contracts: and the transition low-pass's state (enc_API.c:457)");
+    assert_eq(load64(st + _SKE_LAST_GAIN), 10, "silk contracts: LastGainIndex 10");
+    assert(f64_eq(load64(st + _SKE_HARM_SMTH), F64_ZERO) == 1 && f64_eq(load64(st + _SKE_TILT_SMTH), F64_ZERO) == 1,
+      "silk contracts: the shaping state");
+    assert_eq(load64(st + _SKE_PREV_LAG), 100, "silk contracts: prevLag 100");
+    assert_eq(load64(st + _SKE_PREV_SIGNAL), 0, "silk contracts: no voice activity before");
+    assert_eq(load64(st + _SKE_FIRST), 1, "silk contracts: a first frame");
+    assert_eq(load64(nsq + _SKN_LAG_PREV), 100, "silk contracts: the quantiser's lagPrev 100");
+    assert_eq(load64(nsq + _SKN_PREV_GAIN), 65536, "silk contracts: the quantiser's prev_gain_Q16 65536");
+    var a = silk_enc_state_new(16, 4);
+    var b = silk_enc_state_new(16, 4);
+    var ca = silk_enc_ctrl_new();
+    var cb = silk_enc_ctrl_new();
+    var k = 0;
+    while (k < 4) {
+        store64(ca + _SKC_GAINS + k * 8, 0x7FF8000000000000);
+        store64(cb + _SKC_GAINS + k * 8, f64_from(1000000));
+        store64(ca + _SKC_RESNRG + k * 8, F64_ONE);
+        store64(cb + _SKC_RESNRG + k * 8, F64_ONE);
+        k = k + 1;
+    }
+    silk_process_gains_flp(a, ca, 0);
+    silk_process_gains_flp(b, cb, 0);
+    var same = 1;
+    k = 0;
+    while (k < 4) {
+        if (load64(ca + _SKC_GAINS_UNQ + k * 8) != load64(cb + _SKC_GAINS_UNQ + k * 8)) { same = 0; }
+        if (_ske_idx(a, _SKI_GAINS + k) != _ske_idx(b, _SKI_GAINS + k)) { same = 0; }
+        k = k + 1;
+    }
+    assert_eq(same, 1, "silk contracts: a NaN gain is capped at 32767, as a huge one is");
+    var e = silk_encoder_new(16000, 20, 20000, 1, 0);
+    var pcm = alloc(320 * 8);
+    memset(pcm, 0, 320 * 8);
+    var buf = alloc(1280);
+    var EE = err(ERR_ENCODE);
+    assert_eq(silk_encode(e, 0, buf, 100), EE, "silk contracts: no samples");
+    assert_eq(silk_encode(e, pcm, 0, 100), EE, "silk contracts: no output");
+    assert_eq(silk_encode_opus(e, 0, buf, 100), EE, "silk contracts: no samples for an Opus packet");
+    assert_eq(silk_encode_opus(e, pcm, 0, 100), EE, "silk contracts: no output for one");
+    assert(silk_encode(e, pcm, buf, 100) >= 0, "silk contracts: the encoder codes after them");
+    return 0;
+}
+
+# Every vector set libopus recorded is there: a set that came out short or
+# empty would let its test's loop pass without comparing anything.
+fn test_silk_enc_vectors_whole() {
+    syscall(1, 1, "=== silk encode: the vector sets are whole ===\n", 47);
+    assert(_SKV_N >= 30, "silk vectors: LPC analysis frames");
+    assert(_SKA_NSEQ >= 2, "silk vectors: VAD sequences");
+    assert(_SKS_N >= 18, "silk vectors: noise shaping analysis frames");
+    assert(_SKD_N >= 6, "silk vectors: delayed-decision calls");
+    assert(_SKQ_NSEQ >= 2 && _SKQ_N >= 56, "silk vectors: quantiser sequences and calls");
+    assert(_SKR_N >= 11, "silk vectors: quantiser calls on the rate/distortion branch");
+    assert(_SKW_N >= 14, "silk vectors: NSQ wrapper frames");
+    assert(_SKT_N >= 55, "silk vectors: pitch frames");
+    assert(_SKL_N >= 26, "silk vectors: LTP frames");
+    assert(_SKH_N >= 397, "silk vectors: high-pass frames");
+    assert(_SKK_N >= 48, "silk vectors: whole-packet configurations");
+    assert(_SKM_N >= 33, "silk vectors: stereo configurations");
+    assert(_SKB_N >= 15, "silk vectors: stereo stage frames");
+    return 0;
+}
+
 fn test_silk_all() {
     fft_init();
     if (_celt_band_edges == 0) { _opus_init_bands(); }
@@ -12995,6 +13096,7 @@ fn test_silk_all() {
     test_opus_silk10_rfc();
     test_silk_encode_quantisation();
     test_silk_encode_bitstream_roundtrip();
+    test_silk_enc_vectors_whole();
     test_silk_enc_lpc_vs_libopus();
     test_silk_enc_vad_vs_libopus();
     test_silk_enc_shape_vs_libopus();
@@ -13010,5 +13112,6 @@ fn test_silk_all() {
     test_silk_enc_stereo_stage_vs_libopus();
     test_silk_enc_stereo_api();
     test_silk_enc_hostile();
+    test_silk_enc_contracts();
     return 0;
 }

@@ -1228,7 +1228,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.12.4 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.5 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();

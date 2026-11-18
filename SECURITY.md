@@ -40,24 +40,30 @@ All shravan-authored code is auditable in `src/*.cyr`; `lib/*.cyr` is vendored u
 
 ## Fuzzing
 
-Two harnesses, both gated in CI and run in full before each release:
+Three harnesses, all gated in CI and run in full before each release:
 
 | Harness | Reaches | Strategy |
 |---------|---------|----------|
 | `fuzz/fuzz_codecs.cyr` | FLAC metadata, Ogg pages, MP3 frame scan, ID3v2 | random bytes behind the format magic |
-| `fuzz/fuzz_decode.cyr` | `codec_open`, WAV, AIFF, ALAC, FLAC (+range), MP3, Ogg, MP4, AAC, Vorbis comments | random-behind-magic **and** valid files built by shravan's own encoders with N bytes corrupted |
+| `fuzz/fuzz_decode.cyr` | decode: `codec_open`, WAV, AIFF, ALAC, FLAC (+range), MP3, Ogg, MP4, AAC, the streaming decoders, ID3v2 (compressed, grouped, encrypted frames), Vorbis comments, Opus on libopus packets; encode: FLAC, AAC, SILK, `opus_encode`, the CELT encoder | random-behind-magic, valid files with N bytes corrupted, and for the encoders hostile f64 input (NaN, infinities, huge, denormal), every ctl in and out of its bounds, and buffers from none to past the largest frame |
+| `fuzz/fuzz_opus.cyr` | the RFC 6716 Opus decoder | the suite's libopus packets damaged at random (bytes flipped, cut short, lost, replaced) behind a hostile OpusHead |
 
 The corrupted-valid-file strategy is what reaches deep decode paths; random bytes rarely survive
-header validation long enough to get there. Seeds include real ffmpeg, flac and lame output, because
-shravan's own encoders never write FLAC LPC, ALAC, TNS, short blocks or an esds.
+header validation long enough to get there. Seeds include real ffmpeg, flac, lame and libopus
+output, because shravan's own encoders never write FLAC LPC, ALAC, TNS, short blocks or an esds.
 
 ```sh
-./fuzz/run.sh 90000     # current gate: 914,764 calls, 0 crashes
+./fuzz/run.sh 90000            # the gate: >= 90,000 calls per harness, plus cold starts
+./fuzz/run.sh 90000 --poison   # the same under the allocator's poison mode (redzones)
 ```
 
-`alloc()` is a bump allocator that never frees, so `fuzz_decode` is swept across several seeded
-processes rather than run as one — a fixed seed keeps any failure reproducible, and a failing
-batch prints the seed that reproduces it.
+The gate's last run made 990,234 calls (810,000, 90,234 and 90,000) with 2,200 cold starts and no
+crash, in both modes. A cold start is one call in a fresh process. It catches a table read before
+its lazy initialiser runs, which a warm process hides.
+
+`alloc()` is a bump allocator that never frees, so `fuzz_decode` and `fuzz_opus` are swept across
+several seeded processes rather than run as one. A fixed seed keeps any failure reproducible, and a
+failing batch prints the command that reproduces it.
 
 Untrusted input is bounded rather than trusted: decoders cap total decoded samples, allocation
 sizes are checked against a 256 MB policy ceiling, and every chunk body is required to be inside
