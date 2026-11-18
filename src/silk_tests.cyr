@@ -11477,6 +11477,87 @@ fn _skq_hash(hw, at) {
     return ((load64(hw + (at + 1) * 8) & 0xFFFFFFFF) << 32) | (load64(hw + at * 8) & 0xFFFFFFFF);
 }
 
+# 2.12.3: one of libopus's silk_NSQ_del_dec calls (_SKD_, scripts/silkref/
+# nsqprobe.c) through silk_nsq_del_dec: its states and warping from the
+# header, the indices' seed replaced by the winner's.
+fn _skq_run_dd(k, st, nsq, pulses) {
+    var h = alloc(20 * 8);
+    _skv_load(_SKD_HDR, k, h);
+    var nb = load64(h + 24);
+    var so = load64(h + 32);
+    store64(st + _SKE_SHAPE_ORDER, so);
+    store64(st + _SKE_NSTATES, load64(h + 104));
+    store64(st + _SKE_WARPING_Q16, load64(h + 112));
+    _ske_set_idx(st, _SKI_SEED, load64(h + 48));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, load64(h + 56));
+    _ske_set_idx(st, _SKI_QUANT_OFFSET, load64(h + 64));
+    _ske_set_idx(st, _SKI_NLSF_INTERP, load64(h + 72));
+    var x = alloc(320 * 8);
+    _skv_load(_SKD_X16, k, x);
+    var par = alloc(128 * 8);
+    _skv_load(_SKD_PAR, k, par);
+    var arc = alloc(96 * 8);
+    _skv_load(_SKD_AR, k, arc);
+    var ar = alloc(96 * 8);
+    _sk_zero(ar, 96 * 8);
+    var i = 0;
+    while (i < nb) {
+        var j = 0;
+        while (j < so) { store64(ar + (i * 24 + j) * 8, load64(arc + (i * so + j) * 8)); j = j + 1; }
+        i = i + 1;
+    }
+    var o = 32 + nb * 5;
+    _opus_frame_begin();
+    silk_nsq_del_dec(st, nsq, st + _SKE_IDX, x, pulses, par, par + 32 * 8, ar, par + o * 8, par + (o + nb) * 8,
+      par + (o + 2 * nb) * 8, par + (o + 3 * nb) * 8, par + (o + 4 * nb) * 8, load64(h + 80), load64(h + 88));
+    _opus_frame_end();
+    return load64(h + 120);
+}
+
+# 2.12.3: the delayed-decision quantiser on libopus's own calls (nsqprobe),
+# each from a fresh state: two to four states, the shaping filter warped or
+# not, shaping orders 14 to 24, voiced (LTP, re-whitening, the decisions reset
+# at the third subframe without NLSF interpolation, at the first with it) and
+# unvoiced, the rate/distortion branch (Lambda_Q10 over 2048), and residuals
+# past both of the quantiser's limits (-31 and +30 levels). libopus's pulses,
+# the winning state's seed, and its whole state after the call, exactly.
+fn test_silk_enc_nsq_dd_vs_libopus() {
+    syscall(1, 1, "=== silk encode: delayed-decision quantiser vs libopus ===\n", 59);
+    var h = alloc(20 * 8);
+    var hw = alloc(8 * 8);
+    var pulses = alloc(320 * 8);
+    var want = alloc(320 * 8);
+    var ok_in = 0;
+    var ok_p = 0;
+    var ok_seed = 0;
+    var ok_st = 0;
+    var k = 0;
+    while (k < _SKD_N) {
+        _skv_load(_SKD_HDR, k, h);
+        var fl = load64(h + 8);
+        var nb = load64(h + 24);
+        var st = silk_enc_state_new(fl / (5 * nb), nb);
+        var nsq = load64(st + _SKE_NSQ);
+        _skv_load(_SKD_HASH, k, hw);
+        if (_sk_nsq_hash(nsq) == _skq_hash(hw, 0)) { ok_in = ok_in + 1; }
+        var seed_want = _skq_run_dd(k, st, nsq, pulses);
+        _skv_load(_SKD_PULSES, k, want);
+        var same = 1;
+        var j = 0;
+        while (j < fl) { if (load64(pulses + j * 8) != load64(want + j * 8)) { same = 0; } j = j + 1; }
+        ok_p = ok_p + same;
+        if (_ske_idx(st, _SKI_SEED) == seed_want) { ok_seed = ok_seed + 1; }
+        if (_sk_nsq_hash(nsq) == _skq_hash(hw, 2)) { ok_st = ok_st + 1; }
+        k = k + 1;
+    }
+    assert(_SKD_N >= 6, "NSQ del_dec: the probe calls");
+    assert_eq(ok_in, _SKD_N, "NSQ del_dec: a fresh state is libopus's");
+    assert_eq(ok_p, _SKD_N, "NSQ del_dec: libopus's pulses");
+    assert_eq(ok_seed, _SKD_N, "NSQ del_dec: libopus's winning seed");
+    assert_eq(ok_st, _SKD_N, "NSQ del_dec: libopus's state after the call");
+    return 0;
+}
+
 # The noise shaping quantiser, fixed point: libopus's pulses, and its whole
 # state (by hash) after every call.
 fn test_silk_enc_nsq_vs_libopus() {
@@ -12711,7 +12792,8 @@ fn test_silk_enc_hostile() {
     assert_eq(silk_encoder_new(44100, 20, 20000, 1, 0), err(ERR_INVALID_RATE), "silk encode: 44.1 kHz is not an internal rate");
     assert_eq(silk_encoder_new(16000, 30, 20000, 1, 0), err(ERR_ENCODE), "silk encode: no 30 ms packets");
     assert_eq(silk_encoder_new(16000, 20, 0, 1, 0), err(ERR_ENCODE), "silk encode: a bit rate of 0");
-    assert_eq(silk_encoder_new(16000, 20, 20000, 2, 0), err(ERR_UNSUPPORTED_FMT), "silk encode: complexity 2 needs silk_NSQ_del_dec");
+    assert_eq(silk_encoder_new(16000, 20, 20000, 11, 0), err(ERR_ENCODE), "silk encode: complexity 0 to 10");
+    assert_eq(silk_encoder_new(16000, 20, 20000, 0 - 1, 0), err(ERR_ENCODE), "silk encode: no negative complexity");
     var pcm = alloc(960 * 8);
     var buf = alloc(1280);
     var nan = f64_div(F64_ZERO, F64_ZERO);
@@ -12917,6 +12999,7 @@ fn test_silk_all() {
     test_silk_enc_vad_vs_libopus();
     test_silk_enc_shape_vs_libopus();
     test_silk_enc_nsq_vs_libopus();
+    test_silk_enc_nsq_dd_vs_libopus();
     test_silk_enc_pitch_vs_libopus();
     test_silk_enc_ltp_vs_libopus();
     test_silk_enc_hp_vs_libopus();

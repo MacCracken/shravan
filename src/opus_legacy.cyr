@@ -1325,7 +1325,7 @@ fn test_opus_vbr_encode() {
         i = i + 1;
     }
     var out = alloc(131072);
-    var nb = opus_encode_vbr(samples, 48000, 1, 64000, out);
+    var nb = opus_legacy_encode_vbr(samples, 48000, 1, 64000, out);
     assert(is_err(nb) == 0, "vbr encode ok");
     assert(nb > 0, "produced bytes");
     assert_eq(load8(out), 0x4F, "OggS[0] = 'O'");
@@ -2071,8 +2071,8 @@ fn _opus_frame_complexity(samples, n, ch) {
 # Opus encoder (Ogg container output)
 # ================================================================
 #
-# opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)  -- CBR
-# opus_encode_vbr(...)                                               -- constrained VBR
+# opus_legacy_encode(samples_vec, sample_rate, channels, bitrate, out_buf)  -- CBR
+# opus_legacy_encode_vbr(...)                                               -- constrained VBR
 #   samples_vec: vec of f64 bit patterns (interleaved)
 #   sample_rate: must be 48000; channels: 1 or 2; bitrate: 32000..256000
 #   out_buf: pointer to output buffer (must be large enough)
@@ -2191,13 +2191,13 @@ fn _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, mode, out_buf)
 }
 
 # CBR: fixed-size packets (nominal bytes every frame). Unchanged public behavior.
-fn opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
+fn opus_legacy_encode(samples_vec, sample_rate, channels, bitrate, out_buf) {
     return _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, RATE_CBR, out_buf);
 }
 
 # Constrained VBR: packet size follows per-frame complexity via the bit reservoir,
 # without exceeding the target bitrate on average.
-fn opus_encode_vbr(samples_vec, sample_rate, channels, bitrate, out_buf) {
+fn opus_legacy_encode_vbr(samples_vec, sample_rate, channels, bitrate, out_buf) {
     return _opus_encode_impl(samples_vec, sample_rate, channels, bitrate, RATE_CVBR, out_buf);
 }
 
@@ -2205,7 +2205,7 @@ fn opus_encode_vbr(samples_vec, sample_rate, channels, bitrate, out_buf) {
 # Opus encoder framework (2.4.4 — opening work)
 # Config/state + mode/bandwidth selection + TOC byte + frame dispatch.
 # Wraps the existing CELT encoder; SILK/HYBRID are documented 2.5.x seams.
-# Additive: the existing opus_encode() Ogg path is unchanged.
+# Additive: the existing opus_legacy_encode() Ogg path is unchanged.
 # CLEANUP (2.5.x): _opus_encode_celt_frame hardcodes TOC config 30 (= CELT/FB
 # 10ms) but its frames are 20ms (= config 31, what opus_toc_byte computes here).
 # Left as-is to keep this release purely additive; swap to opus_toc_byte(...)
@@ -2216,7 +2216,7 @@ fn opus_encode_vbr(samples_vec, sample_rate, channels, bitrate, out_buf) {
 enum OpusMode      { OPUS_MODE_SILK = 0; OPUS_MODE_HYBRID = 1; OPUS_MODE_CELT = 2; }
 # Audio bandwidth, ordered NB<MB<WB<SWB<FB so numeric clamping works.
 enum OpusBandwidth { OPUS_BW_NB = 0; OPUS_BW_MB = 1; OPUS_BW_WB = 2; OPUS_BW_SWB = 3; OPUS_BW_FB = 4; }
-enum OpusSignal    { OPUS_SIGNAL_AUTO = 0; OPUS_SIGNAL_VOICE = 1; OPUS_SIGNAL_MUSIC = 2; }
+enum OpusSignal    { OPUS_LEGACY_SIGNAL_AUTO = 0; OPUS_LEGACY_SIGNAL_VOICE = 1; OPUS_LEGACY_SIGNAL_MUSIC = 2; }
 enum OpusApp       { OPUS_APP_VOIP = 2048; OPUS_APP_AUDIO = 2049; OPUS_APP_LOWDELAY = 2051; }
 
 # OpusEncoder state struct (heap; store64/load64 at fixed offsets).
@@ -2231,15 +2231,15 @@ var OPUS_ENC_OFF_SAMPLE_RATE = 48;
 var OPUS_ENC_OFF_SIGNAL      = 56;
 var OPUS_ENC_OFF_APP         = 64;
 
-fn opus_encoder_mode(e)        { return load64(e + OPUS_ENC_OFF_MODE); }
-fn opus_encoder_bandwidth(e)   { return load64(e + OPUS_ENC_OFF_BANDWIDTH); }
-fn opus_encoder_frame_size(e)  { return load64(e + OPUS_ENC_OFF_FRAME_SIZE); }
-fn opus_encoder_bitrate(e)     { return load64(e + OPUS_ENC_OFF_BITRATE); }
-fn opus_encoder_vbr(e)         { return load64(e + OPUS_ENC_OFF_VBR); }
-fn opus_encoder_channels(e)    { return load64(e + OPUS_ENC_OFF_CHANNELS); }
-fn opus_encoder_sample_rate(e) { return load64(e + OPUS_ENC_OFF_SAMPLE_RATE); }
-fn opus_encoder_signal(e)      { return load64(e + OPUS_ENC_OFF_SIGNAL); }
-fn opus_encoder_app(e)         { return load64(e + OPUS_ENC_OFF_APP); }
+fn opus_legacy_encoder_mode(e)        { return load64(e + OPUS_ENC_OFF_MODE); }
+fn opus_legacy_encoder_bandwidth(e)   { return load64(e + OPUS_ENC_OFF_BANDWIDTH); }
+fn opus_legacy_encoder_frame_size(e)  { return load64(e + OPUS_ENC_OFF_FRAME_SIZE); }
+fn opus_legacy_encoder_bitrate(e)     { return load64(e + OPUS_ENC_OFF_BITRATE); }
+fn opus_legacy_encoder_vbr(e)         { return load64(e + OPUS_ENC_OFF_VBR); }
+fn opus_legacy_encoder_channels(e)    { return load64(e + OPUS_ENC_OFF_CHANNELS); }
+fn opus_legacy_encoder_sample_rate(e) { return load64(e + OPUS_ENC_OFF_SAMPLE_RATE); }
+fn opus_legacy_encoder_signal(e)      { return load64(e + OPUS_ENC_OFF_SIGNAL); }
+fn opus_legacy_encoder_app(e)         { return load64(e + OPUS_ENC_OFF_APP); }
 
 # Widest bandwidth a sample rate can carry (RFC 6716 Table 1).
 fn opus_bandwidth_cap(sample_rate) {
@@ -2268,7 +2268,7 @@ fn opus_select_bandwidth(bitrate, sample_rate) {
 # SWB/FB-capable rate -> HYBRID; music or high rate -> CELT.
 fn opus_select_mode(bitrate, sample_rate, signal_type) {
     if (bitrate <= 0) { return err(ERR_ENCODE); }
-    if (signal_type == OPUS_SIGNAL_MUSIC) { return OPUS_MODE_CELT; }
+    if (signal_type == OPUS_LEGACY_SIGNAL_MUSIC) { return OPUS_MODE_CELT; }
     if (bitrate < 16000) { return OPUS_MODE_SILK; }
     if (bitrate < 24000) {
         if (sample_rate >= 24000) { return OPUS_MODE_HYBRID; }
@@ -2277,8 +2277,8 @@ fn opus_select_mode(bitrate, sample_rate, signal_type) {
     return OPUS_MODE_CELT;
 }
 
-fn opus_encoder_new(sample_rate, channels, application) {
-    if (sample_rate != 48000) { return err(ERR_INVALID_RATE); }   # scaffold: 48k only (matches opus_encode)
+fn opus_legacy_encoder_new(sample_rate, channels, application) {
+    if (sample_rate != 48000) { return err(ERR_INVALID_RATE); }   # scaffold: 48k only (matches opus_legacy_encode)
     if (channels < 1)         { return err(ERR_INVALID_CHANNELS); }
     if (channels > 2)         { return err(ERR_INVALID_CHANNELS); }
 
@@ -2288,9 +2288,9 @@ fn opus_encoder_new(sample_rate, channels, application) {
     var br = 64000;
     if (channels == 2) { br = 96000; }
 
-    var sig = OPUS_SIGNAL_AUTO;
-    if (application == OPUS_APP_VOIP)  { sig = OPUS_SIGNAL_VOICE; }
-    if (application == OPUS_APP_AUDIO) { sig = OPUS_SIGNAL_MUSIC; }
+    var sig = OPUS_LEGACY_SIGNAL_AUTO;
+    if (application == OPUS_APP_VOIP)  { sig = OPUS_LEGACY_SIGNAL_VOICE; }
+    if (application == OPUS_APP_AUDIO) { sig = OPUS_LEGACY_SIGNAL_MUSIC; }
 
     store64(e + OPUS_ENC_OFF_SAMPLE_RATE, sample_rate);
     store64(e + OPUS_ENC_OFF_CHANNELS,    channels);
@@ -2304,7 +2304,7 @@ fn opus_encoder_new(sample_rate, channels, application) {
     return e;
 }
 
-fn opus_encoder_set_bitrate(e, bitrate) {
+fn opus_legacy_encoder_set_bitrate(e, bitrate) {
     if (bitrate < 6000)   { return err(ERR_ENCODE); }
     if (bitrate > 510000) { return err(ERR_ENCODE); }
     store64(e + OPUS_ENC_OFF_BITRATE, bitrate);
@@ -2315,20 +2315,20 @@ fn opus_encoder_set_bitrate(e, bitrate) {
     return 0;
 }
 
-fn opus_encoder_set_vbr(e, on) {
+fn opus_legacy_encoder_set_vbr(e, on) {
     var v = 0; if (on != 0) { v = 1; }
     store64(e + OPUS_ENC_OFF_VBR, v);
     return 0;
 }
 
-fn opus_encoder_set_bandwidth(e, bw) {          # manual override of auto-selection
+fn opus_legacy_encoder_set_bandwidth(e, bw) {          # manual override of auto-selection
     if (bw < OPUS_BW_NB) { return err(ERR_ENCODE); }
     if (bw > OPUS_BW_FB) { return err(ERR_ENCODE); }
     store64(e + OPUS_ENC_OFF_BANDWIDTH, bw);
     return 0;
 }
 
-fn opus_encoder_set_mode(e, mode) {             # force a mode (CELT = guaranteed output today)
+fn opus_legacy_encoder_set_mode(e, mode) {             # force a mode (CELT = guaranteed output today)
     if (mode < OPUS_MODE_SILK) { return err(ERR_ENCODE); }
     if (mode > OPUS_MODE_CELT) { return err(ERR_ENCODE); }
     store64(e + OPUS_ENC_OFF_MODE, mode);
@@ -2386,7 +2386,7 @@ fn opus_toc_byte(mode, bandwidth, frame_size, stereo) {
 
 # Encode ONE frame into a bare packet in out_buf; returns bytes written.
 # CELT delegates to the existing _opus_encode_celt_frame; SILK/HYBRID are 2.5.x.
-fn opus_encode_frame(e, samples, frame_size, out_buf) {
+fn opus_legacy_encode_frame(e, samples, frame_size, out_buf) {
     var mode = load64(e + OPUS_ENC_OFF_MODE);
     if (mode == OPUS_MODE_SILK)   { return err(ERR_UNSUPPORTED_FMT); }   # 2.5.7
     if (mode == OPUS_MODE_HYBRID) { return err(ERR_UNSUPPORTED_FMT); }   # 2.5.8
@@ -2394,7 +2394,7 @@ fn opus_encode_frame(e, samples, frame_size, out_buf) {
     var ch = load64(e + OPUS_ENC_OFF_CHANNELS);
     var sr = load64(e + OPUS_ENC_OFF_SAMPLE_RATE);
     var br = load64(e + OPUS_ENC_OFF_BITRATE);
-    var target = (br / 8) * frame_size / sr;      # matches opus_encode's bytes_per_frame at 960/48k
+    var target = (br / 8) * frame_size / sr;      # matches opus_legacy_encode's bytes_per_frame at 960/48k
     if (target < 10) { target = 10; }
     var pkt = _opus_encode_celt_frame(samples, frame_size, ch, target);
     var n = str_len(pkt);
@@ -2406,28 +2406,28 @@ fn opus_encode_frame(e, samples, frame_size, out_buf) {
 
 fn test_opus_encoder_config() {
     syscall(1, 1, "test: opus encoder config\n", 26);
-    var e = opus_encoder_new(48000, 1, OPUS_APP_AUDIO);
+    var e = opus_legacy_encoder_new(48000, 1, OPUS_APP_AUDIO);
     assert(is_err(e) == 0, "encoder_new ok");
-    assert_eq(opus_encoder_sample_rate(e), 48000, "cfg sample_rate");
-    assert_eq(opus_encoder_channels(e), 1, "cfg channels");
-    assert_eq(opus_encoder_app(e), OPUS_APP_AUDIO, "cfg app");
-    assert_eq(opus_encoder_signal(e), OPUS_SIGNAL_MUSIC, "cfg signal music");
-    assert_eq(opus_encoder_vbr(e), 1, "cfg vbr default on");
-    assert_eq(opus_encoder_frame_size(e), 960, "cfg frame_size 20ms");
-    assert_eq(opus_encoder_mode(e), OPUS_MODE_CELT, "cfg mode celt (music)");
-    assert_eq(opus_encoder_set_bitrate(e, 12000), 0, "set_bitrate ok");
-    assert_eq(opus_encoder_bitrate(e), 12000, "bitrate updated");
-    assert_eq(opus_encoder_set_vbr(e, 0), 0, "set_vbr ok");
-    assert_eq(opus_encoder_vbr(e), 0, "vbr off");
-    assert_eq(opus_encoder_set_bandwidth(e, OPUS_BW_WB), 0, "set_bandwidth ok");
-    assert_eq(opus_encoder_bandwidth(e), OPUS_BW_WB, "bandwidth updated");
-    assert_eq(opus_encoder_set_mode(e, OPUS_MODE_CELT), 0, "set_mode ok");
-    assert(is_err(opus_encoder_new(44100, 1, OPUS_APP_AUDIO)) == 1, "reject 44100");
-    assert(is_err(opus_encoder_new(48000, 0, OPUS_APP_AUDIO)) == 1, "reject 0 channels");
-    assert(is_err(opus_encoder_new(48000, 3, OPUS_APP_AUDIO)) == 1, "reject 3 channels");
-    assert(is_err(opus_encoder_set_bitrate(e, 1000)) == 1, "reject low bitrate");
-    assert(is_err(opus_encoder_set_bandwidth(e, 9)) == 1, "reject bad bandwidth");
-    assert(is_err(opus_encoder_set_mode(e, 9)) == 1, "reject bad mode");
+    assert_eq(opus_legacy_encoder_sample_rate(e), 48000, "cfg sample_rate");
+    assert_eq(opus_legacy_encoder_channels(e), 1, "cfg channels");
+    assert_eq(opus_legacy_encoder_app(e), OPUS_APP_AUDIO, "cfg app");
+    assert_eq(opus_legacy_encoder_signal(e), OPUS_LEGACY_SIGNAL_MUSIC, "cfg signal music");
+    assert_eq(opus_legacy_encoder_vbr(e), 1, "cfg vbr default on");
+    assert_eq(opus_legacy_encoder_frame_size(e), 960, "cfg frame_size 20ms");
+    assert_eq(opus_legacy_encoder_mode(e), OPUS_MODE_CELT, "cfg mode celt (music)");
+    assert_eq(opus_legacy_encoder_set_bitrate(e, 12000), 0, "set_bitrate ok");
+    assert_eq(opus_legacy_encoder_bitrate(e), 12000, "bitrate updated");
+    assert_eq(opus_legacy_encoder_set_vbr(e, 0), 0, "set_vbr ok");
+    assert_eq(opus_legacy_encoder_vbr(e), 0, "vbr off");
+    assert_eq(opus_legacy_encoder_set_bandwidth(e, OPUS_BW_WB), 0, "set_bandwidth ok");
+    assert_eq(opus_legacy_encoder_bandwidth(e), OPUS_BW_WB, "bandwidth updated");
+    assert_eq(opus_legacy_encoder_set_mode(e, OPUS_MODE_CELT), 0, "set_mode ok");
+    assert(is_err(opus_legacy_encoder_new(44100, 1, OPUS_APP_AUDIO)) == 1, "reject 44100");
+    assert(is_err(opus_legacy_encoder_new(48000, 0, OPUS_APP_AUDIO)) == 1, "reject 0 channels");
+    assert(is_err(opus_legacy_encoder_new(48000, 3, OPUS_APP_AUDIO)) == 1, "reject 3 channels");
+    assert(is_err(opus_legacy_encoder_set_bitrate(e, 1000)) == 1, "reject low bitrate");
+    assert(is_err(opus_legacy_encoder_set_bandwidth(e, 9)) == 1, "reject bad bandwidth");
+    assert(is_err(opus_legacy_encoder_set_mode(e, 9)) == 1, "reject bad mode");
     return 0;
 }
 
@@ -2446,12 +2446,12 @@ fn test_opus_select_bandwidth() {
 
 fn test_opus_select_mode() {
     syscall(1, 1, "test: opus mode selection\n", 26);
-    assert_eq(opus_select_mode(12000, 48000, OPUS_SIGNAL_VOICE), OPUS_MODE_SILK, "voice low = SILK");
-    assert_eq(opus_select_mode(20000, 48000, OPUS_SIGNAL_VOICE), OPUS_MODE_HYBRID, "voice mid FB = HYBRID");
-    assert_eq(opus_select_mode(32000, 48000, OPUS_SIGNAL_VOICE), OPUS_MODE_CELT, "voice high = CELT");
-    assert_eq(opus_select_mode(12000, 48000, OPUS_SIGNAL_MUSIC), OPUS_MODE_CELT, "music = CELT");
-    assert_eq(opus_select_mode(20000, 16000, OPUS_SIGNAL_VOICE), OPUS_MODE_SILK, "voice mid low-sr = SILK");
-    assert(is_err(opus_select_mode(0, 48000, OPUS_SIGNAL_VOICE)) == 1, "reject bitrate 0");
+    assert_eq(opus_select_mode(12000, 48000, OPUS_LEGACY_SIGNAL_VOICE), OPUS_MODE_SILK, "voice low = SILK");
+    assert_eq(opus_select_mode(20000, 48000, OPUS_LEGACY_SIGNAL_VOICE), OPUS_MODE_HYBRID, "voice mid FB = HYBRID");
+    assert_eq(opus_select_mode(32000, 48000, OPUS_LEGACY_SIGNAL_VOICE), OPUS_MODE_CELT, "voice high = CELT");
+    assert_eq(opus_select_mode(12000, 48000, OPUS_LEGACY_SIGNAL_MUSIC), OPUS_MODE_CELT, "music = CELT");
+    assert_eq(opus_select_mode(20000, 16000, OPUS_LEGACY_SIGNAL_VOICE), OPUS_MODE_SILK, "voice mid low-sr = SILK");
+    assert(is_err(opus_select_mode(0, 48000, OPUS_LEGACY_SIGNAL_VOICE)) == 1, "reject bitrate 0");
     return 0;
 }
 
@@ -2470,17 +2470,17 @@ fn test_opus_toc_byte() {
 
 fn test_opus_encode_frame_dispatch() {
     syscall(1, 1, "test: opus encode_frame dispatch\n", 33);
-    var e = opus_encoder_new(48000, 1, OPUS_APP_AUDIO);
-    opus_encoder_set_mode(e, OPUS_MODE_CELT);
+    var e = opus_legacy_encoder_new(48000, 1, OPUS_APP_AUDIO);
+    opus_legacy_encoder_set_mode(e, OPUS_MODE_CELT);
     var samples = alloc(OPUS_FRAME_SIZE * 8);
     memset(samples, 0, OPUS_FRAME_SIZE * 8);
     var out = alloc(4096);
-    var n = opus_encode_frame(e, samples, OPUS_FRAME_SIZE, out);
+    var n = opus_legacy_encode_frame(e, samples, OPUS_FRAME_SIZE, out);
     assert(res_ok(n) == 1, "CELT dispatch ok");
     assert(n > 0, "CELT dispatch wrote bytes");
-    opus_encoder_set_mode(e, OPUS_MODE_SILK);
-    assert(is_err(opus_encode_frame(e, samples, OPUS_FRAME_SIZE, out)) == 1, "SILK stub errors");
-    opus_encoder_set_mode(e, OPUS_MODE_HYBRID);
-    assert(is_err(opus_encode_frame(e, samples, OPUS_FRAME_SIZE, out)) == 1, "HYBRID stub errors");
+    opus_legacy_encoder_set_mode(e, OPUS_MODE_SILK);
+    assert(is_err(opus_legacy_encode_frame(e, samples, OPUS_FRAME_SIZE, out)) == 1, "SILK stub errors");
+    opus_legacy_encoder_set_mode(e, OPUS_MODE_HYBRID);
+    assert(is_err(opus_legacy_encode_frame(e, samples, OPUS_FRAME_SIZE, out)) == 1, "HYBRID stub errors");
     return 0;
 }

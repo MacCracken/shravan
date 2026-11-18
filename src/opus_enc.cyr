@@ -1,0 +1,964 @@
+# ================================================================
+# opus_enc.cyr -- the Opus encoder layer (libopus opus_encoder.c), 2.12.3
+# ================================================================
+#
+# libopus's opus_encode around its codecs: the input high-pass, the bit rate
+# per frame, the stereo/mono decision, the bandwidth decision with its
+# hysteresis, in-band FEC by rate and loss (decide_fec), DTX on digital
+# silence (decide_dtx_mode), packets of 10 to 120 ms (80, 100 and 120 ms as
+# 2 x 40, 5 x 20 and 2 x 60 joined by the repacketizer), the TOC, CBR padding.
+#
+# 2.12.3 has the application libopus keeps for SILK alone,
+# OPUS_APPLICATION_RESTRICTED_SILK: every frame SILK, at the internal rate
+# the bandwidth decision and silk_Encode's own switching settle on, no CELT,
+# no redundancy frames, no tonality analysis (which libopus runs from
+# complexity 7, for the other applications only). The others need the CELT
+# encoder ported as libopus's (celt_encode_with_ec) and are refused until then.
+# Byte for byte libopus's opus_encode_float with that application.
+#
+# Provides:
+#   opus_encoder_new(fs, channels, application)    -- 8, 12, 16, 24 or 48 kHz; 1 or 2 channels
+#   opus_encode(enc, pcm, frame_size, out, max)    -- pcm: frame_size f64 samples a channel,
+#                                                     interleaved, in [-1, 1] (libopus's float API)
+#   opus_encoder_set_bitrate / _vbr / _vbr_constraint / _complexity / _max_bandwidth /
+#     _bandwidth / _force_channels / _signal / _dtx / _inband_fec / _packet_loss /
+#     _lsb_depth / _expert_frame_duration / _prediction_disabled, opus_encoder_reset
+#     (the ctls libopus takes, with its bounds)
+#   opus_encoder_final_range / _lookahead / _bandwidth / _bitrate / _in_dtx (its getters)
+#
+# Requires: silk_enc.cyr (silk_Encode, the range coder), alloc, f64.
+
+# libopus's constants (opus_defines.h)
+var OPUS_AUTO = 0 - 1000;
+var OPUS_BITRATE_MAX = 0 - 1;
+var OPUS_APPLICATION_VOIP = 2048;
+var OPUS_APPLICATION_AUDIO = 2049;
+var OPUS_APPLICATION_RESTRICTED_LOWDELAY = 2051;
+var OPUS_APPLICATION_RESTRICTED_SILK = 2052;
+var OPUS_APPLICATION_RESTRICTED_CELT = 2053;
+var OPUS_SIGNAL_VOICE = 3001;
+var OPUS_SIGNAL_MUSIC = 3002;
+var OPUS_BANDWIDTH_NARROWBAND = 1101;
+var OPUS_BANDWIDTH_MEDIUMBAND = 1102;
+var OPUS_BANDWIDTH_WIDEBAND = 1103;
+var OPUS_BANDWIDTH_SUPERWIDEBAND = 1104;
+var OPUS_BANDWIDTH_FULLBAND = 1105;
+var OPUS_FRAMESIZE_ARG = 5000;
+var OPUS_FRAMESIZE_2_5_MS = 5001;
+var OPUS_FRAMESIZE_120_MS = 5009;
+var _OE_MODE_SILK = 1000;     # MODE_SILK_ONLY
+var _OE_MODE_HYBRID = 1001;
+var _OE_MODE_CELT = 1002;
+
+# The encoder, 8-byte words at fixed offsets.
+var _OE_FS = 0;
+var _OE_CH = 8;
+var _OE_APP = 16;
+var _OE_SILK = 24;            # silk_encoder_new_channels (_SKX_, ptr)
+var _OE_USE_VBR = 32;
+var _OE_VBR_CONSTRAINT = 40;
+var _OE_USER_BITRATE = 48;    # OPUS_AUTO, OPUS_BITRATE_MAX or bit/s
+var _OE_BITRATE = 56;         # bitrate_bps, this packet's
+var _OE_SIGNAL = 64;
+var _OE_USER_BW = 72;
+var _OE_MAX_BW = 80;
+var _OE_FORCE_CH = 88;
+var _OE_LSB = 96;
+var _OE_VAR_DUR = 104;        # variable_duration (OPUS_SET_EXPERT_FRAME_DURATION)
+var _OE_FEC_CONFIG = 112;
+var _OE_USE_INBAND_FEC = 120;
+var _OE_LOSS = 128;
+var _OE_DTX = 136;            # use_dtx
+var _OE_COMPLEXITY = 144;
+var _OE_REDUCED_DEP = 152;
+var _OE_STREAM_CH = 160;
+var _OE_PREV_CH = 168;
+var _OE_MODE = 176;
+var _OE_PREV_MODE = 184;
+var _OE_BW = 192;
+var _OE_AUTO_BW = 200;
+var _OE_FIRST = 208;
+var _OE_HP_MEM = 216;         # [4] f32 values as f64
+var _OE_HP_SMTH2 = 248;       # variable_HP_smth2_Q15
+var _OE_NO_ACT_MS = 256;      # nb_no_activity_ms_Q1
+var _OE_VOICE_RATIO = 264;
+var _OE_LBRR_CODED = 272;     # silk_mode.LBRR_coded, decide_fec's last decision
+var _OE_TO_MONO = 280;        # silk_mode.toMono
+var _OE_BW_SWITCH = 288;      # silk_bw_switch
+var _OE_PREV_FRAMESIZE = 296;
+var _OE_RANGE_FINAL = 304;
+var _OE_NONFINAL = 312;       # nonfinal_frame: a frame not the last of its packet
+var _OE_CAN_SWITCH = 320;     # silk_mode.opusCanSwitch, from the frame before
+var _OE_PCMBUF = 328;         # [120 ms x channels] the frame after the high-pass (ptr)
+var _OE_FRAMES = 336;         # [6 x 1276] a packet's frames before the repacketizer (ptr)
+var _OE_SIZE = 344;
+
+# opus_encoder_new (libopus opus_encoder_create): fs 8000, 12000, 16000,
+# 24000 or 48000; channels 1 or 2; application OPUS_APPLICATION_RESTRICTED_SILK
+# (the others are refused, ERR_UNSUPPORTED_FMT, until the CELT encoder is in).
+# libopus's defaults: bit rate OPUS_AUTO, VBR, complexity 9, every bandwidth,
+# channels and signal automatic, 24-bit input, no FEC, loss 0, no DTX.
+# Returns the encoder, or ERR_INVALID_RATE / ERR_INVALID_CHANNELS /
+# ERR_UNSUPPORTED_FMT.
+fn opus_encoder_new(fs, channels, application) {
+    if (fs != 8000 && fs != 12000 && fs != 16000 && fs != 24000 && fs != 48000) { return err(ERR_INVALID_RATE); }
+    if (channels != 1 && channels != 2) { return err(ERR_INVALID_CHANNELS); }
+    if (application != OPUS_APPLICATION_RESTRICTED_SILK) { return err(ERR_UNSUPPORTED_FMT); }
+    var st = alloc(_OE_SIZE);
+    _sk_zero(st, _OE_SIZE);
+    store64(st + _OE_FS, fs);
+    store64(st + _OE_CH, channels);
+    store64(st + _OE_APP, application);
+    var sfs = fs;
+    if (sfs > 16000) { sfs = 16000; }
+    store64(st + _OE_SILK, silk_encoder_new_channels(fs, sfs, channels, 20, 25000, 9, 0));
+    store64(st + _OE_PCMBUF, alloc(fs / 1000 * 120 * channels * 8));
+    store64(st + _OE_FRAMES, alloc(6 * 1280));
+    _oe_defaults(st);
+    return st;
+}
+
+# opus_encoder_init's settings, and the state OPUS_RESET_STATE clears.
+fn _oe_defaults(st) {
+    store64(st + _OE_USE_VBR, 1);
+    store64(st + _OE_VBR_CONSTRAINT, 1);
+    store64(st + _OE_USER_BITRATE, OPUS_AUTO);
+    store64(st + _OE_BITRATE, 3000 + load64(st + _OE_FS) * load64(st + _OE_CH));
+    store64(st + _OE_SIGNAL, OPUS_AUTO);
+    store64(st + _OE_USER_BW, OPUS_AUTO);
+    store64(st + _OE_MAX_BW, OPUS_BANDWIDTH_FULLBAND);
+    store64(st + _OE_FORCE_CH, OPUS_AUTO);
+    store64(st + _OE_LSB, 24);
+    store64(st + _OE_VAR_DUR, OPUS_FRAMESIZE_ARG);
+    store64(st + _OE_COMPLEXITY, 9);
+    store64(st + _OE_VOICE_RATIO, 0 - 1);
+    _oe_reset_state(st);
+    return 0;
+}
+
+# The fields after libopus's OPUS_ENCODER_RESET_START. Its silk_mode (FEC's
+# last decision, toMono, opusCanSwitch) and voice_ratio stay as they were.
+fn _oe_reset_state(st) {
+    store64(st + _OE_STREAM_CH, load64(st + _OE_CH));
+    store64(st + _OE_PREV_CH, 0);
+    store64(st + _OE_MODE, _OE_MODE_HYBRID);
+    store64(st + _OE_PREV_MODE, 0);
+    store64(st + _OE_BW, OPUS_BANDWIDTH_FULLBAND);
+    store64(st + _OE_AUTO_BW, 0);
+    store64(st + _OE_FIRST, 1);
+    _sk_zero(st + _OE_HP_MEM, 4 * 8);
+    store64(st + _OE_HP_SMTH2, silk_lin2log(60) << 8);                 # VARIABLE_HP_MIN_CUTOFF_HZ
+    store64(st + _OE_NO_ACT_MS, 0);
+    store64(st + _OE_BW_SWITCH, 0);
+    store64(st + _OE_PREV_FRAMESIZE, 0);
+    store64(st + _OE_RANGE_FINAL, 0);
+    store64(st + _OE_NONFINAL, 0);
+    return 0;
+}
+
+# OPUS_RESET_STATE: the encoder's state as created, its settings kept, the
+# SILK encoder re-initialised in place (silk_InitEncoder); nothing allocated.
+fn opus_encoder_reset(st) {
+    _oe_reset_state(st);
+    silk_encoder_reset(load64(st + _OE_SILK));
+    return 0;
+}
+
+# The ctls, each with libopus's bounds; ERR_ENCODE for a value out of them.
+fn opus_encoder_set_bitrate(st, v) {
+    if (v != OPUS_AUTO && v != OPUS_BITRATE_MAX) {
+        if (v <= 0) { return err(ERR_ENCODE); }
+        if (v <= 500) { v = 500; }
+        if (v > 750000 * load64(st + _OE_CH)) { v = 750000 * load64(st + _OE_CH); }
+    }
+    store64(st + _OE_USER_BITRATE, v);
+    return 0;
+}
+fn opus_encoder_set_vbr(st, v) {
+    if (v < 0 || v > 1) { return err(ERR_ENCODE); }
+    store64(st + _OE_USE_VBR, v);
+    return 0;
+}
+# (libopus constrains VBR for hybrid and CELT frames only: SILK's are as without it.)
+fn opus_encoder_set_vbr_constraint(st, v) {
+    if (v < 0 || v > 1) { return err(ERR_ENCODE); }
+    store64(st + _OE_VBR_CONSTRAINT, v);
+    return 0;
+}
+fn opus_encoder_set_complexity(st, v) {
+    if (v < 0 || v > 10) { return err(ERR_ENCODE); }
+    store64(st + _OE_COMPLEXITY, v);
+    return 0;
+}
+# (libopus also sets silk_mode.maxInternalSampleRate from these two, which
+# every frame then sets again before SILK reads it.)
+fn opus_encoder_set_max_bandwidth(st, v) {
+    if (v < OPUS_BANDWIDTH_NARROWBAND || v > OPUS_BANDWIDTH_FULLBAND) { return err(ERR_ENCODE); }
+    store64(st + _OE_MAX_BW, v);
+    return 0;
+}
+fn opus_encoder_set_bandwidth(st, v) {
+    if ((v < OPUS_BANDWIDTH_NARROWBAND || v > OPUS_BANDWIDTH_FULLBAND) && v != OPUS_AUTO) { return err(ERR_ENCODE); }
+    store64(st + _OE_USER_BW, v);
+    return 0;
+}
+fn opus_encoder_set_force_channels(st, v) {
+    if ((v < 1 || v > load64(st + _OE_CH)) && v != OPUS_AUTO) { return err(ERR_ENCODE); }
+    store64(st + _OE_FORCE_CH, v);
+    return 0;
+}
+fn opus_encoder_set_signal(st, v) {
+    if (v != OPUS_AUTO && v != OPUS_SIGNAL_VOICE && v != OPUS_SIGNAL_MUSIC) { return err(ERR_ENCODE); }
+    store64(st + _OE_SIGNAL, v);
+    return 0;
+}
+fn opus_encoder_set_dtx(st, v) {
+    if (v < 0 || v > 1) { return err(ERR_ENCODE); }
+    store64(st + _OE_DTX, v);
+    return 0;
+}
+# 0 off, 1 on, 2 on but not switching music to SILK for it (libopus's fec_config)
+fn opus_encoder_set_inband_fec(st, v) {
+    if (v < 0 || v > 2) { return err(ERR_ENCODE); }
+    store64(st + _OE_FEC_CONFIG, v);
+    var on = 0;
+    if (v != 0) { on = 1; }
+    store64(st + _OE_USE_INBAND_FEC, on);
+    return 0;
+}
+fn opus_encoder_set_packet_loss(st, v) {
+    if (v < 0 || v > 100) { return err(ERR_ENCODE); }
+    store64(st + _OE_LOSS, v);
+    return 0;
+}
+fn opus_encoder_set_lsb_depth(st, v) {
+    if (v < 8 || v > 24) { return err(ERR_ENCODE); }
+    store64(st + _OE_LSB, v);
+    return 0;
+}
+fn opus_encoder_set_expert_frame_duration(st, v) {
+    if (v != OPUS_FRAMESIZE_ARG && (v < OPUS_FRAMESIZE_2_5_MS || v > OPUS_FRAMESIZE_120_MS)) { return err(ERR_ENCODE); }
+    store64(st + _OE_VAR_DUR, v);
+    return 0;
+}
+fn opus_encoder_set_prediction_disabled(st, v) {
+    if (v < 0 || v > 1) { return err(ERR_ENCODE); }
+    store64(st + _OE_REDUCED_DEP, v);
+    return 0;
+}
+# OPUS_GET_FINAL_RANGE: the range coder's final state, for conformance checks.
+fn opus_encoder_final_range(st) { return load64(st + _OE_RANGE_FINAL); }
+# OPUS_GET_LOOKAHEAD: the samples a decoder skips (an Ogg Opus pre-skip):
+# 2.5 ms and the 4 ms delay compensation libopus counts for this application too.
+fn opus_encoder_lookahead(st) { return load64(st + _OE_FS) / 400 + load64(st + _OE_FS) / 250; }
+# OPUS_GET_BANDWIDTH: the last packet's bandwidth decision (OPUS_BANDWIDTH_*).
+fn opus_encoder_bandwidth(st) { return load64(st + _OE_BW); }
+# OPUS_GET_BITRATE: the rate the settings give at the last packet's length.
+fn opus_encoder_bitrate(st) { return _oe_user_bitrate(st, load64(st + _OE_PREV_FRAMESIZE), 1276); }
+# OPUS_GET_IN_DTX: 1 while frames are left out, by SILK's DTX (its channels'
+# inactive frame counts) or by this layer's on silence.
+fn opus_encoder_in_dtx(st) {
+    var e = load64(st + _OE_SILK);
+    if (load64(e + _SKX_DTX) == 1 && load64(st + _OE_PREV_MODE) == _OE_MODE_SILK) {
+        var v = 0;
+        if (load64(load64(e + _SKX_ST) + _SKE_NOSPEECH) >= 10) { v = 1; }       # NB_SPEECH_FRAMES_BEFORE_DTX
+        if (v == 1 && load64(e + _SKX_CH_INT) == 2 && load64(e + _SKX_PREV_MID_ONLY) == 0) {
+            v = 0;
+            if (load64(load64(e + _SKX_ST1) + _SKE_NOSPEECH) >= 10) { v = 1; }
+        }
+        return v;
+    }
+    if (load64(st + _OE_DTX) == 1) {
+        if (load64(st + _OE_NO_ACT_MS) >= 10 * 20 * 2) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------- helpers
+
+fn _oe_bits_to_bitrate(bits, fs, n) { return bits * (6 * fs / n) / 6; }
+fn _oe_bitrate_to_bits(rate, fs, n) { return rate * 6 / (6 * fs / n); }
+
+fn _oe_user_bitrate(st, n, max_bytes) {
+    var fs = load64(st + _OE_FS);
+    if (n == 0) { n = fs / 400; }
+    var mx = _oe_bits_to_bitrate(max_bytes * 8, fs, n);
+    var u = load64(st + _OE_USER_BITRATE);
+    var r = u;
+    if (u == OPUS_AUTO) { r = 60 * fs / n + fs * load64(st + _OE_CH); }
+    if (u == OPUS_BITRATE_MAX) { r = 1500000; }
+    if (mx < r) { r = mx; }
+    return r;
+}
+
+# frame_size_select: the frame the call codes, or -1.
+fn _oe_frame_size_select(app, n, vd, fs) {
+    if (n < fs / 400) { return 0 - 1; }
+    var ns = n;
+    if (vd != OPUS_FRAMESIZE_ARG) {
+        if (vd >= OPUS_FRAMESIZE_2_5_MS && vd <= OPUS_FRAMESIZE_120_MS) {
+            if (vd <= 5005) { ns = (fs / 400) << (vd - OPUS_FRAMESIZE_2_5_MS); }         # up to 40 ms
+            else { ns = (vd - OPUS_FRAMESIZE_2_5_MS - 2) * fs / 50; }
+        } else { return 0 - 1; }
+    }
+    if (ns > n) { return 0 - 1; }
+    if (400 * ns != fs && 200 * ns != fs && 100 * ns != fs && 50 * ns != fs && 25 * ns != fs && 50 * ns != 3 * fs
+      && 50 * ns != 4 * fs && 50 * ns != 5 * fs && 50 * ns != 6 * fs) { return 0 - 1; }
+    if (app == OPUS_APPLICATION_RESTRICTED_SILK && ns < fs / 100) { return 0 - 1; }
+    return ns;
+}
+
+# compute_equiv_rate: the 20 ms, complexity 10 VBR equivalent of a rate.
+fn _oe_equiv_rate(rate, ch, fr, vbr, mode, cx, loss) {
+    var eq = rate;
+    if (fr > 50) { eq = eq - (40 * ch + 20) * (fr - 50); }
+    if (vbr == 0) { eq = eq - eq / 12; }
+    eq = eq * (90 + cx) / 100;
+    if (mode == _OE_MODE_SILK || mode == _OE_MODE_HYBRID) {
+        if (cx < 2) { eq = eq * 4 / 5; }
+        eq = eq - eq * loss / (6 * loss + 10);
+    } else {
+        if (mode == _OE_MODE_CELT) {
+            if (cx < 5) { eq = eq * 9 / 10; }
+        } else {
+            eq = eq - eq * loss / (12 * loss + 20);
+        }
+    }
+    return eq;
+}
+
+# decide_fec: in-band FEC where the rate covers it at the bandwidth; above 5%
+# loss the bandwidth comes down until it does (or stays, without FEC). bwp: a
+# cell holding the bandwidth.
+var _oe_fec_thr = 0;
+fn _oe_decide_fec(use_fec, loss, last, mode, bwp, rate) {
+    if (use_fec == 0 || loss == 0 || mode == _OE_MODE_CELT) { return 0; }
+    if (_oe_fec_thr == 0) { _oe_fec_thr = _sk_ints("12000,1000,14000,1000,16000,1000,20000,1000,22000,1000", 10); }
+    var orig = load64(bwp);
+    while (1) {
+        var b = load64(bwp) - OPUS_BANDWIDTH_NARROWBAND;
+        var thr = load64(_oe_fec_thr + 2 * b * 8);
+        var hy = load64(_oe_fec_thr + (2 * b + 1) * 8);
+        if (last == 1) { thr = thr - hy; }
+        if (last == 0) { thr = thr + hy; }
+        var l = loss;
+        if (l > 25) { l = 25; }
+        thr = silk_smulwb(silk_mul(thr, 125 - l), 655);                       # SILK_FIX_CONST(0.01, 16)
+        if (rate > thr) { return 1; }
+        if (loss <= 5) { return 0; }
+        if (load64(bwp) > OPUS_BANDWIDTH_NARROWBAND) { store64(bwp, load64(bwp) - 1); }
+        else {
+            store64(bwp, orig);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+# gen_toc
+fn _oe_gen_toc(mode, fr, bw, ch) {
+    var period = 0;
+    while (fr < 400) { fr = fr << 1; period = period + 1; }
+    var toc = 0;
+    if (mode == _OE_MODE_SILK) {
+        toc = ((bw - OPUS_BANDWIDTH_NARROWBAND) << 5) | ((period - 2) << 3);
+    } else {
+        if (mode == _OE_MODE_CELT) {
+            var t = bw - OPUS_BANDWIDTH_MEDIUMBAND;
+            if (t < 0) { t = 0; }
+            toc = 0x80 | (t << 5) | (period << 3);
+        } else {
+            toc = 0x60 | ((bw - OPUS_BANDWIDTH_SUPERWIDEBAND) << 4) | ((period - 2) << 3);
+        }
+    }
+    if (ch == 2) { toc = toc | 4; }
+    return toc & 0xFF;
+}
+
+# is_digital_silence for float input: the peak as celt_maxabs16 finds it
+# (MAX16/MIN16, which a NaN passes through and the next sample replaces) at
+# most 2^-lsb_depth.
+fn _oe_is_silence(pcm, n, lsb) {
+    var mx = F64_ZERO;
+    var mn = F64_ZERO;
+    var i = 0;
+    while (i < n) {
+        var x = load64(pcm + i * 8);
+        if (f64_gt(mx, x) == 0) { mx = x; }
+        if (f64_lt(mn, x) == 0) { mn = x; }
+        i = i + 1;
+    }
+    var nm = f64_neg(mn);
+    var m = nm;
+    if (f64_gt(mx, nm) == 1) { m = mx; }
+    if (f64_le(m, f64_div(F64_ONE, f64_from(1 << lsb))) == 1) { return 1; }
+    return 0;
+}
+
+# decide_dtx_mode: after 200 ms without activity, frames are DTX for up to
+# 400 ms at a time. cnt: the encoder's nb_no_activity_ms_Q1 field.
+fn _oe_decide_dtx(activity, st, ms_q1) {
+    if (activity == 0) {
+        var c = load64(st + _OE_NO_ACT_MS) + ms_q1;
+        store64(st + _OE_NO_ACT_MS, c);
+        if (c > 10 * 20 * 2) {                                          # NB_SPEECH_FRAMES_BEFORE_DTX
+            if (c <= (10 + 20) * 20 * 2) { return 1; }                  # + MAX_CONSECUTIVE_DTX
+            store64(st + _OE_NO_ACT_MS, 10 * 20 * 2);
+        }
+    } else {
+        store64(st + _OE_NO_ACT_MS, 0);
+    }
+    return 0;
+}
+
+# dc_reject, the float version: a one-pole high-pass at 3 Hz, each operation
+# rounded to single precision as libopus's floats are (coef 6.3 x 3 / fs).
+fn _oe_dc_reject(st, inp, out, n, ch) {
+    var fs = load64(st + _OE_FS);
+    var coef = _sk_f32(f64_div(_sk_f32(f64_mul(_sk_f32(f64_div(f64_from(63), f64_from(10))), f64_from(3))), f64_from(fs)));
+    var coef2 = _sk_f32(f64_sub(F64_ONE, coef));
+    var tiny = _sk_f32(f64_div(F64_ONE, f64_pow(f64_from(10), f64_from(30))));   # VERY_SMALL 1e-30f
+    var c = 0;
+    while (c < ch) {
+        var m = load64(st + _OE_HP_MEM + 2 * c * 8);
+        var i = 0;
+        while (i < n) {
+            var x = load64(inp + (ch * i + c) * 8);
+            store64(out + (ch * i + c) * 8, _sk_f32(f64_sub(x, m)));
+            m = _sk_f32(f64_add(_sk_f32(f64_add(_sk_f32(f64_mul(coef, x)), tiny)), _sk_f32(f64_mul(coef2, m))));
+            i = i + 1;
+        }
+        store64(st + _OE_HP_MEM + 2 * c * 8, m);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# The repacketizer's output (opus_repacketizer_out_range_impl, no extensions,
+# not self-delimited): count frames (fr: count x 1280 bytes, lens their
+# lengths) under one TOC as code 0, 1 (two equal), 2 (two) or 3 (more, or
+# padded), padded to maxlen with zeros when pad. Returns the length, or
+# ERR_ENCODE where it does not fit.
+fn _oe_size_bytes(len, p) {
+    if (len < 252) { store8(p, len); return 1; }
+    var b0 = 252 + (len & 3);
+    store8(p, b0);
+    store8(p + 1, (len - b0) >> 2);
+    return 2;
+}
+
+fn _oe_repacketize(out, toc, fr, lens, count, maxlen, pad) {
+    var tot = 0;
+    var p = out;
+    var l0 = load64(lens);
+    if (count == 1) {
+        tot = l0 + 1;
+        if (tot > maxlen) { return err(ERR_ENCODE); }
+        store8(p, toc & 0xFC);
+        p = p + 1;
+    }
+    if (count == 2) {
+        var l1 = load64(lens + 8);
+        if (l1 == l0) {
+            tot = 2 * l0 + 1;
+            if (tot > maxlen) { return err(ERR_ENCODE); }
+            store8(p, (toc & 0xFC) | 1);
+            p = p + 1;
+        } else {
+            tot = l0 + l1 + 2;
+            if (l0 >= 252) { tot = tot + 1; }
+            if (tot > maxlen) { return err(ERR_ENCODE); }
+            store8(p, (toc & 0xFC) | 2);
+            p = p + 1;
+            p = p + _oe_size_bytes(l0, p);
+        }
+    }
+    if (count > 2 || (pad == 1 && tot < maxlen)) {
+        p = out;
+        tot = 0;
+        var vbr = 0;
+        var i = 1;
+        while (i < count) { if (load64(lens + i * 8) != l0) { vbr = 1; } i = i + 1; }
+        if (vbr == 1) {
+            tot = 2;
+            i = 0;
+            while (i < count - 1) {
+                var li = load64(lens + i * 8);
+                tot = tot + 1 + li;
+                if (li >= 252) { tot = tot + 1; }
+                i = i + 1;
+            }
+            tot = tot + load64(lens + (count - 1) * 8);
+            if (tot > maxlen) { return err(ERR_ENCODE); }
+            store8(p, (toc & 0xFC) | 3);
+            store8(p + 1, count | 0x80);
+        } else {
+            tot = count * l0 + 2;
+            if (tot > maxlen) { return err(ERR_ENCODE); }
+            store8(p, (toc & 0xFC) | 3);
+            store8(p + 1, count);
+        }
+        p = p + 2;
+        var pad_amount = 0;
+        if (pad == 1) { pad_amount = maxlen - tot; }
+        if (pad_amount != 0) {
+            store8(out + 1, load8(out + 1) | 0x40);
+            var n255 = (pad_amount - 1) / 255;
+            if (tot + n255 + 1 > maxlen) { return err(ERR_ENCODE); }
+            i = 0;
+            while (i < n255) { store8(p, 255); p = p + 1; i = i + 1; }
+            store8(p, pad_amount - 255 * n255 - 1);
+            p = p + 1;
+            tot = tot + pad_amount;
+        }
+        if (vbr == 1) {
+            i = 0;
+            while (i < count - 1) { p = p + _oe_size_bytes(load64(lens + i * 8), p); i = i + 1; }
+        }
+    }
+    var k = 0;
+    while (k < count) {
+        var lk = load64(lens + k * 8);
+        var q = 0;
+        while (q < lk) { store8(p + q, load8(fr + k * 1280 + q)); q = q + 1; }
+        p = p + lk;
+        k = k + 1;
+    }
+    if (pad == 1) {
+        while (p < out + maxlen) { store8(p, 0); p = p + 1; }
+    }
+    return tot;
+}
+
+# ---------------------------------------------------------------- opus_encode
+
+var _oe_bw_voice = 0;
+var _oe_bw_music = 0;
+
+# opus_encode (opus_encode_float, opus_encode_native): one packet of n samples
+# a channel (2.5 to 120 ms at fs; 10 ms up for RESTRICTED_SILK) from pcm into
+# out, at most max bytes. Returns the packet's length, or ERR_ENCODE for a bad
+# frame size, buffer or internal failure.
+fn opus_encode(st, pcm, n, out, max) {
+    var fs = load64(st + _OE_FS);
+    var ch = load64(st + _OE_CH);
+    var fsz = _oe_frame_size_select(load64(st + _OE_APP), n, load64(st + _OE_VAR_DUR), fs);
+    if (fsz <= 0) { return err(ERR_ENCODE); }
+    n = fsz;
+    var outer = _opus_in_frame;
+    if (outer == 0) { _opus_frame_begin(); }
+    var r = _oe_encode_native(st, pcm, n, out, max);
+    if (outer == 0) { _opus_frame_end(); }
+    return r;
+}
+
+fn _oe_encode_native(st, pcm, n, data, out_max) {
+    var fs = load64(st + _OE_FS);
+    var ch = load64(st + _OE_CH);
+    var e = load64(st + _OE_SILK);
+    var max_data = out_max;
+    if (max_data > 1276 * 6) { max_data = 1276 * 6; }
+    store64(st + _OE_RANGE_FINAL, 0);
+    if (n <= 0 || max_data <= 0) { return err(ERR_ENCODE); }
+    if (max_data == 1 && fs == n * 10) { return err(ERR_ENCODE); }
+    # the input as libopus's floats
+    var inp = _opus_tmp(n * ch * 8);
+    var i = 0;
+    while (i < n * ch) { store64(inp + i * 8, _sk_f32(load64(pcm + i * 8))); i = i + 1; }
+    var lsb = 24;
+    if (load64(st + _OE_LSB) < lsb) { lsb = load64(st + _OE_LSB); }
+    var silence = _oe_is_silence(inp, n * ch, lsb);
+    if (silence == 0) { store64(st + _OE_VOICE_RATIO, 0 - 1); }
+    store64(st + _OE_BITRATE, _oe_user_bitrate(st, n, max_data));
+    var fr = fs / n;
+    var vbr = load64(st + _OE_USE_VBR);
+    var cbr_bytes = 0 - 1;
+    if (vbr == 0) {
+        cbr_bytes = (_oe_bitrate_to_bits(load64(st + _OE_BITRATE), fs, n) + 4) / 8;
+        if (max_data < cbr_bytes) { cbr_bytes = max_data; }
+        store64(st + _OE_BITRATE, _oe_bits_to_bitrate(cbr_bytes * 8, fs, n));
+        max_data = cbr_bytes;
+        if (max_data < 1) { max_data = 1; }
+    }
+    var br = load64(st + _OE_BITRATE);
+    if (max_data < 3 || br < 3 * fr * 8 || (fr < 50 && (max_data * fr < 300 || br < 2400))) {
+        # no room to code anything: a 'PLC' packet, which decoders conceal
+        var tocmode = load64(st + _OE_MODE);
+        var bw = load64(st + _OE_BW);
+        if (bw == 0) { bw = OPUS_BANDWIDTH_NARROWBAND; }
+        var code = 0;
+        var nmf = 0;
+        if (tocmode == 0) { tocmode = _OE_MODE_SILK; }
+        if (fr > 100) { tocmode = _OE_MODE_CELT; }
+        if (fr == 25 && tocmode != _OE_MODE_SILK) { fr = 50; code = 1; }
+        if (fr <= 16) {
+            if (out_max == 1 || (tocmode == _OE_MODE_SILK && fr != 10)) {
+                tocmode = _OE_MODE_SILK;
+                if (fr <= 12) { code = 1; }
+                if (fr == 12) { fr = 25; } else { fr = 16; }
+            } else {
+                nmf = 50 / fr;
+                fr = 50;
+                code = 3;
+            }
+        }
+        if (tocmode == _OE_MODE_SILK && bw > OPUS_BANDWIDTH_WIDEBAND) { bw = OPUS_BANDWIDTH_WIDEBAND; }
+        else {
+            if (tocmode == _OE_MODE_CELT && bw == OPUS_BANDWIDTH_MEDIUMBAND) { bw = OPUS_BANDWIDTH_NARROWBAND; }
+            else { if (tocmode == _OE_MODE_HYBRID && bw <= OPUS_BANDWIDTH_SUPERWIDEBAND) { bw = OPUS_BANDWIDTH_SUPERWIDEBAND; } }
+        }
+        store8(data, _oe_gen_toc(tocmode, fr, bw, load64(st + _OE_STREAM_CH)) | code);
+        var ret = 1;
+        if (code > 1) { ret = 2; }
+        if (max_data < ret) { max_data = ret; }
+        if (code == 3) { store8(data + 1, nmf); }
+        if (vbr == 0) {
+            # opus_packet_pad: the packet's (empty) frames, 1, 2 or nmf of them
+            if (ret == max_data) { return ret; }
+            var cnt = 1;
+            if (code == 1) { cnt = 2; }
+            if (code == 3) { cnt = nmf; }
+            var ln = _opus_tmp(cnt * 8);
+            _sk_zero(ln, cnt * 8);
+            var pr = _oe_repacketize(data, load8(data), _opus_tmp(8), ln, cnt, max_data, 1);
+            if (is_err(pr) == 1) { return err(ERR_ENCODE); }
+            return max_data;
+        }
+        return ret;
+    }
+    var max_rate = _oe_bits_to_bitrate(max_data * 8, fs, n);
+    var cx = load64(st + _OE_COMPLEXITY);
+    var loss = load64(st + _OE_LOSS);
+    var equiv = _oe_equiv_rate(br, ch, fr, vbr, 0, cx, loss);
+    var voice_est = 48;
+    var sig = load64(st + _OE_SIGNAL);
+    if (sig == OPUS_SIGNAL_VOICE) { voice_est = 127; }
+    else {
+        if (sig == OPUS_SIGNAL_MUSIC) { voice_est = 0; }
+        else {
+            var vr = load64(st + _OE_VOICE_RATIO);
+            if (vr >= 0) {
+                voice_est = (vr * 327) >> 8;
+                if (load64(st + _OE_APP) == OPUS_APPLICATION_AUDIO && voice_est > 115) { voice_est = 115; }
+            } else {
+                if (load64(st + _OE_APP) == OPUS_APPLICATION_VOIP) { voice_est = 115; }
+            }
+        }
+    }
+    # mono or stereo
+    var force = load64(st + _OE_FORCE_CH);
+    if (force != OPUS_AUTO && ch == 2) {
+        store64(st + _OE_STREAM_CH, force);
+    } else {
+        if (ch == 2) {
+            var sthr = 17000 + ((voice_est * voice_est * 2000) >> 14);          # music 17000, voice 19000
+            if (load64(st + _OE_STREAM_CH) == 2) { sthr = sthr - 1000; } else { sthr = sthr + 1000; }
+            var sc = 1;
+            if (equiv > sthr) { sc = 2; }
+            store64(st + _OE_STREAM_CH, sc);
+        } else {
+            store64(st + _OE_STREAM_CH, ch);
+        }
+    }
+    equiv = _oe_equiv_rate(br, load64(st + _OE_STREAM_CH), fr, vbr, 0, cx, loss);
+    # SILK's DTX where the generalised one cannot run (not on silence)
+    var silk_dtx = 0;
+    if (load64(st + _OE_DTX) == 1 && silence == 0) { silk_dtx = 1; }
+    # the mode: SILK alone for RESTRICTED_SILK
+    store64(st + _OE_MODE, _OE_MODE_SILK);
+    # stereo to mono: two frames' delay for SILK's smooth downmix
+    if (load64(st + _OE_STREAM_CH) == 1 && load64(st + _OE_PREV_CH) == 2 && load64(st + _OE_TO_MONO) == 0
+      && load64(st + _OE_PREV_MODE) != _OE_MODE_CELT) {
+        store64(st + _OE_TO_MONO, 1);
+        store64(st + _OE_STREAM_CH, 2);
+    } else {
+        store64(st + _OE_TO_MONO, 0);
+    }
+    var sch = load64(st + _OE_STREAM_CH);
+    equiv = _oe_equiv_rate(br, sch, fr, vbr, _OE_MODE_SILK, cx, loss);
+    # the bandwidth, by rate, where it may change
+    if (load64(st + _OE_FIRST) == 1 || load64(e + _SKX_ALLOW_SWITCH) == 1) {
+        var bwt = _opus_tmp(8 * 8);
+        if (_oe_bw_voice == 0) {
+            # {mono,stereo}_{voice,music}_bandwidth_thresholds (mono and stereo are equal)
+            _oe_bw_voice = _sk_ints("9000,700,9000,700,13500,1000,14000,2000", 8);
+            _oe_bw_music = _sk_ints("9000,700,9000,700,11000,1000,12000,2000", 8);
+        }
+        var vtab = _oe_bw_voice;
+        var mtab = _oe_bw_music;
+        i = 0;
+        while (i < 8) {
+            var mv = load64(mtab + i * 8);
+            store64(bwt + i * 8, mv + sar(voice_est * voice_est * (load64(vtab + i * 8) - mv), 14));
+            i = i + 1;
+        }
+        var bwd = OPUS_BANDWIDTH_FULLBAND;
+        var going = 1;
+        while (going == 1) {
+            var thr = load64(bwt + (2 * (bwd - OPUS_BANDWIDTH_MEDIUMBAND)) * 8);
+            var hys = load64(bwt + (2 * (bwd - OPUS_BANDWIDTH_MEDIUMBAND) + 1) * 8);
+            if (load64(st + _OE_FIRST) == 0) {
+                if (load64(st + _OE_AUTO_BW) >= bwd) { thr = thr - hys; } else { thr = thr + hys; }
+            }
+            if (equiv >= thr) { going = 0; }
+            else {
+                bwd = bwd - 1;
+                if (bwd <= OPUS_BANDWIDTH_NARROWBAND) { going = 0; }
+            }
+        }
+        if (bwd == OPUS_BANDWIDTH_MEDIUMBAND) { bwd = OPUS_BANDWIDTH_WIDEBAND; }
+        store64(st + _OE_BW, bwd);
+        store64(st + _OE_AUTO_BW, bwd);
+        if (load64(st + _OE_FIRST) == 0 && _oe_in_wb_without_lp(e) == 0 && bwd > OPUS_BANDWIDTH_WIDEBAND) {
+            store64(st + _OE_BW, OPUS_BANDWIDTH_WIDEBAND);
+        }
+    }
+    if (load64(st + _OE_BW) > load64(st + _OE_MAX_BW)) { store64(st + _OE_BW, load64(st + _OE_MAX_BW)); }
+    if (load64(st + _OE_USER_BW) != OPUS_AUTO) { store64(st + _OE_BW, load64(st + _OE_USER_BW)); }
+    if (max_rate < 15000 && load64(st + _OE_BW) > OPUS_BANDWIDTH_WIDEBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_WIDEBAND); }
+    if (fs <= 24000 && load64(st + _OE_BW) > OPUS_BANDWIDTH_SUPERWIDEBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_SUPERWIDEBAND); }
+    if (fs <= 16000 && load64(st + _OE_BW) > OPUS_BANDWIDTH_WIDEBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_WIDEBAND); }
+    if (fs <= 12000 && load64(st + _OE_BW) > OPUS_BANDWIDTH_MEDIUMBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_MEDIUMBAND); }
+    if (fs <= 8000 && load64(st + _OE_BW) > OPUS_BANDWIDTH_NARROWBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_NARROWBAND); }
+    store64(st + _OE_LBRR_CODED, _oe_decide_fec(load64(st + _OE_USE_INBAND_FEC), loss, load64(st + _OE_LBRR_CODED),
+      _OE_MODE_SILK, st + _OE_BW, equiv));
+    if (load64(st + _OE_BW) > OPUS_BANDWIDTH_WIDEBAND) { store64(st + _OE_BW, OPUS_BANDWIDTH_WIDEBAND); }
+    # more than 60 ms: frames of 40 (80 ms), 60 (120) or 20 (100), repacketised
+    if (n > 3 * fs / 50) {
+        var enc_n = fs / 50;
+        if (n == 2 * fs / 25) { enc_n = fs / 25; }
+        if (n == 3 * fs / 25) { enc_n = 3 * fs / 50; }
+        var nbf = n / enc_n;
+        var max_hdr = 2 + (nbf - 1) * 2;
+        if (nbf == 2) { max_hdr = 3; }
+        var rep_len = out_max;
+        if (vbr == 0 && load64(st + _OE_USER_BITRATE) != OPUS_BITRATE_MAX) {
+            rep_len = cbr_bytes;
+            if (out_max < rep_len) { rep_len = out_max; }
+        }
+        var max_sum = nbf + rep_len - max_hdr;
+        var frames = load64(st + _OE_FRAMES);
+        var lens = _opus_tmp(nbf * 8);
+        var bak = load64(st + _OE_TO_MONO);
+        if (bak == 1) { store64(st + _OE_FORCE_CH, 1); }
+        else { store64(st + _OE_PREV_CH, sch); }
+        var tot = 0;
+        var dtxc = 0;
+        var toc0 = 0;
+        var k = 0;
+        while (k < nbf) {
+            store64(st + _OE_TO_MONO, 0);
+            var nonfinal = 0;
+            if (k < nbf - 1) { nonfinal = 1; }
+            store64(st + _OE_NONFINAL, nonfinal);
+            var cm = _oe_bitrate_to_bits(br, fs, enc_n) / 8;
+            if (max_sum / nbf < cm) { cm = max_sum / nbf; }
+            if (max_sum - tot < cm) { cm = max_sum - tot; }
+            var sub = inp + k * ch * enc_n * 8;
+            var sil = _oe_is_silence(sub, enc_n * ch, lsb);
+            # the frame's buffer holds its whole budget: its range coder takes cm - 1
+            # bytes of storage, as libopus's does, and clears all of them at the end
+            # (cm is at most 1.5 Mbit/s's share of 60 ms, 11,250 bytes)
+            var tb = cm;
+            if (tb < 1280) { tb = 1280; }
+            var tmpb = _opus_tmp(tb + 16);
+            var tl = _oe_encode_frame(st, sub, enc_n, tmpb, cm, sil, equiv, silk_dtx);
+            if (is_err(tl) == 1 || tl < 0) {
+                store64(st + _OE_TO_MONO, bak);
+                return err(ERR_ENCODE);
+            }
+            if (tl == 1) { dtxc = dtxc + 1; }
+            # the sub-packet's frame (cat: the TOC alone is an empty frame)
+            if (k == 0) { toc0 = load8(tmpb); }
+            else {
+                if ((load8(tmpb) & 0xFC) != (toc0 & 0xFC)) {
+                    store64(st + _OE_TO_MONO, bak);
+                    return err(ERR_ENCODE);
+                }
+            }
+            var fl0 = _oe_frame_of(tmpb, tl, frames + k * 1280);
+            store64(lens + k * 8, fl0);
+            tot = tot + tl;
+            k = k + 1;
+        }
+        var padr = 0;
+        if (vbr == 0 && dtxc != nbf) { padr = 1; }
+        var rr = _oe_repacketize(data, toc0, frames, lens, nbf, rep_len, padr);
+        store64(st + _OE_TO_MONO, bak);
+        if (is_err(rr) == 1) { return err(ERR_ENCODE); }
+        return rr;
+    }
+    store64(st + _OE_NONFINAL, 0);
+    return _oe_encode_frame(st, inp, n, data, max_data, silence, equiv, silk_dtx);
+}
+
+# The frame of a single-frame packet (code 0, or code 3 padded by CBR) into fr;
+# returns its length.
+fn _oe_frame_of(pk, len, fr) {
+    if (len <= 1) { return 0; }
+    var code = load8(pk) & 3;
+    var start = 1;
+    var flen = len - 1;
+    if (code == 3) {
+        var cnt = load8(pk + 1);
+        start = 2;
+        var padl = 0;
+        if ((cnt & 0x40) != 0) {
+            var b = 255;
+            while (b == 255) {
+                b = load8(pk + start);
+                start = start + 1;
+                padl = padl + b;
+                if (b == 255) { padl = padl - 1; }
+            }
+        }
+        flen = len - start - padl;
+    }
+    var i = 0;
+    while (i < flen) { store8(fr + i, load8(pk + start + i)); i = i + 1; }
+    return flen;
+}
+
+# silk_Encode's inWBmodeWithoutVariableLP: wideband, no transition running.
+fn _oe_in_wb_without_lp(e) {
+    var s0 = load64(e + _SKX_ST);
+    if (load64(s0 + _SKE_FS_KHZ) == 16 && load64(s0 + _SKE_LP_MODE) == 0) { return 1; }
+    return 0;
+}
+
+# opus_encode_frame_native for a SILK frame: the high-pass, SILK's rate and
+# rates, silk_Encode, the TOC, DTX on silence, the trailing zeros, padding.
+fn _oe_encode_frame(st, inp, n, data, orig_max, silence, equiv, silk_dtx) {
+    var fs = load64(st + _OE_FS);
+    var ch = load64(st + _OE_CH);
+    var e = load64(st + _OE_SILK);
+    var max_data = orig_max;
+    if (max_data > 1276) { max_data = 1276; }
+    store64(st + _OE_RANGE_FINAL, 0);
+    var curr_bw = load64(st + _OE_BW);
+    var fr = fs / n;
+    var activity = 0 - 1;                                               # VAD_NO_DECISION
+    if (silence == 1) { activity = 0; }
+    # a new SILK bandwidth: libopus's redundancy and prefill, which
+    # RESTRICTED_SILK does without
+    if (load64(st + _OE_BW_SWITCH) == 1) { store64(st + _OE_BW_SWITCH, 0); }
+    var br = load64(st + _OE_BITRATE);
+    var bits_target = 8 * max_data;
+    var bb = _oe_bitrate_to_bits(br, fs, n);
+    if (bb < bits_target) { bits_target = bb; }
+    bits_target = bits_target - 8;
+    # the high-pass: SILK's pitch-tracking cutoff smoothed (VOIP's), and the
+    # 3 Hz DC rejection the other applications use
+    var s0 = load64(e + _SKX_ST);
+    var smth1 = load64(s0 + _SKE_HP_SMTH1);
+    var sm2 = load64(st + _OE_HP_SMTH2);
+    store64(st + _OE_HP_SMTH2, silk_smlawb(sm2, smth1 - sm2, 983));       # VARIABLE_HP_SMTH_COEF2 0.015
+    var buf = load64(st + _OE_PCMBUF);
+    _oe_dc_reject(st, inp, buf, n, ch);
+    # NaN and absurd input: the frame cleared (the energy summed in single
+    # precision, as celt_inner_prod)
+    var sum = F64_ZERO;
+    var i = 0;
+    while (i < n * ch) { var v = load64(buf + i * 8); sum = _sk_f32(f64_add(sum, _sk_f32(f64_mul(v, v)))); i = i + 1; }
+    if (f64_lt(sum, f64_from(1000000000)) == 0) {
+        _sk_zero(buf, n * ch * 8);
+        _sk_zero(st + _OE_HP_MEM, 4 * 8);
+    }
+    # SILK's control for the frame
+    var silk_rate = _oe_bits_to_bitrate(bits_target, fs, n);
+    var ms = 1000 * n / fs;
+    var desired = 16000;
+    if (curr_bw == OPUS_BANDWIDTH_NARROWBAND) { desired = 8000; }
+    if (curr_bw == OPUS_BANDWIDTH_MEDIUMBAND) { desired = 12000; }
+    var maxint = 16000;
+    var emr = _oe_bits_to_bitrate(max_data * 8, fs, n);
+    if (fr > 50) { emr = emr * 2 / 3; }
+    if (emr < 8000) {
+        maxint = 12000;
+        if (desired > 12000) { desired = 12000; }
+    }
+    if (emr < 7000) {
+        maxint = 8000;
+        if (desired > 8000) { desired = 8000; }
+    }
+    store64(e + _SKX_MS, ms);
+    store64(e + _SKX_CH_INT, load64(st + _OE_STREAM_CH));
+    store64(e + _SKX_TO_MONO, load64(st + _OE_TO_MONO));
+    store64(e + _SKX_BITRATE, silk_rate);
+    var cbr = 0;
+    if (load64(st + _OE_USE_VBR) == 0) { cbr = 1; }
+    store64(e + _SKX_CBR, cbr);
+    store64(e + _SKX_COMPLEXITY, load64(st + _OE_COMPLEXITY));
+    store64(e + _SKX_LOSS, load64(st + _OE_LOSS));
+    store64(e + _SKX_FEC, load64(st + _OE_LBRR_CODED));
+    store64(e + _SKX_DTX, silk_dtx);
+    store64(e + _SKX_REDUCED_DEP, load64(st + _OE_REDUCED_DEP));
+    store64(e + _SKX_MAX_INT_HZ, maxint);
+    store64(e + _SKX_MIN_INT_HZ, 8000);
+    store64(e + _SKX_DESIRED_INT_HZ, desired);
+    store64(e + _SKX_CAN_SWITCH, load64(st + _OE_CAN_SWITCH));
+    store64(e + _SKX_ACTIVITY, activity);
+    var maxbits = (max_data - 1) * 8;
+    # silk_Encode into the payload after the TOC
+    var ec = ec_enc_init(load64(e + _SKX_EC), data + 1, orig_max - 1);
+    var nbytes = _silk_encode_packet(e, buf, ec, maxbits, silk_rate);
+    var fsk = load64(s0 + _SKE_FS_KHZ);
+    curr_bw = OPUS_BANDWIDTH_WIDEBAND;
+    if (fsk == 8) { curr_bw = OPUS_BANDWIDTH_NARROWBAND; }
+    if (fsk == 12) { curr_bw = OPUS_BANDWIDTH_MEDIUMBAND; }
+    var can = 0;
+    if (load64(e + _SKX_SWITCH_READY) == 1 && load64(st + _OE_NONFINAL) == 0) { can = 1; }
+    store64(st + _OE_CAN_SWITCH, can);
+    if (activity == 0 - 1) {
+        activity = 0;
+        if (load64(s0 + _SKE_IDX + _SKI_SIGNAL_TYPE * 8) != 0) { activity = 1; }
+    }
+    var sch = load64(st + _OE_STREAM_CH);
+    if (nbytes == 0) {
+        store8(data, _oe_gen_toc(_OE_MODE_SILK, fr, curr_bw, sch));
+        return 1;
+    }
+    # opusCanSwitch would set silk_bw_switch for a redundancy frame, which
+    # RESTRICTED_SILK does without, and clears it at once: it stays 0
+    var ret = (ec_tell(ec) + 7) >> 3;
+    ec_enc_done(ec);
+    store64(st + _OE_RANGE_FINAL, load64(ec + 56) & 0xFFFFFFFF);
+    store8(data, _oe_gen_toc(_OE_MODE_SILK, fr, curr_bw, sch));
+    store64(st + _OE_PREV_MODE, _OE_MODE_SILK);
+    store64(st + _OE_PREV_CH, sch);
+    store64(st + _OE_PREV_FRAMESIZE, n);
+    store64(st + _OE_FIRST, 0);
+    # DTX on silence, which SILK's own DTX leaves to this layer
+    if (load64(st + _OE_DTX) == 1 && silk_dtx == 0) {
+        if (_oe_decide_dtx(activity, st, 2 * 1000 * n / fs) == 1) {
+            store64(st + _OE_RANGE_FINAL, 0);
+            store8(data, _oe_gen_toc(_OE_MODE_SILK, fr, curr_bw, sch));
+            return 1;
+        }
+    } else {
+        store64(st + _OE_NO_ACT_MS, 0);
+    }
+    if (ec_tell(ec) > (max_data - 1) * 8 || load64(ec + 88) != 0) {
+        # SILK busted its budget: tell the decoder to conceal
+        if (max_data < 2) { return err(ERR_ENCODE); }
+        store8(data + 1, 0);
+        ret = 1;
+        store64(st + _OE_RANGE_FINAL, 0);
+    } else {
+        while (ret > 2 && load8(data + ret) == 0) { ret = ret - 1; }
+    }
+    ret = ret + 1;
+    if (load64(st + _OE_USE_VBR) == 0) {
+        if (ret == orig_max) { return ret; }
+        var fr0 = _opus_tmp(1280);
+        var ln = _opus_tmp(8);
+        store64(ln, ret - 1);
+        i = 0;
+        while (i < ret - 1) { store8(fr0 + i, load8(data + 1 + i)); i = i + 1; }
+        var pr = _oe_repacketize(data, load8(data), fr0, ln, 1, orig_max, 1);
+        if (is_err(pr) == 1) { return err(ERR_ENCODE); }
+        return orig_max;
+    }
+    return ret;
+}

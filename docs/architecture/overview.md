@@ -22,19 +22,27 @@ shravan/
                        RFC-6716 CELT encode (mono 20 ms, interop-verified); OpusHead/OpusTags parsing
     silk.cyr        -- Opus SILK-mode decode (NLSF/LTP/LPC synthesis, resampler, stereo);
                        the encoder's quantisers and bitstream writers
-    silk_enc.cyr    -- SILK encoder (2.11.x, 2.12.0-2.12.2): input resampling (8-48 kHz to
+    silk_enc.cyr    -- SILK encoder (2.11.x, 2.12.0-2.12.3): input resampling (8-48 kHz to
                        the internal rate), VAD, pitch estimation (decimation,
                        three stages, the voicing decision), noise shaping, gains, LPC
                        analysis (Burg, NLSF interpolation search and quantisation),
                        long-term prediction (correlations, gain VQ, scaling by loss),
-                       the noise shaping quantiser (NSQ), the frame and its rate loop,
+                       the noise shaping quantiser (NSQ) and its delayed-decision form
+                       (complexity 2-10), the frame and its rate loop,
                        stereo (left/right to mid/side, the side's predictor, the rate
                        split and width, mid-only frames), the packet (one or two
                        channels, in-band FEC's LBRR frames, DTX, mono/stereo moves),
-                       the pitch-tracking high-pass smoother,
+                       the pitch-tracking high-pass smoother, the per-packet control
+                       (internal rate switching through the low-pass transition, the
+                       resampler hand-over), silk_encoder_reset,
                        silk_encoder_new_channels / silk_encode / silk_encode_opus;
                        checked stage by stage against libopus, and whole packets byte
                        for byte, voiced and unvoiced, mono and stereo
+    opus_enc.cyr    -- the Opus encoder layer (libopus opus_encode, 2.12.3), application
+                       OPUS_APPLICATION_RESTRICTED_SILK: the 3 Hz high-pass, the bit rate,
+                       stereo/mono and bandwidth decisions, FEC by loss, DTX on silence,
+                       10-120 ms packets (80-120 repacketised), CBR padding, PLC packets,
+                       libopus's ctls and getters; byte for byte libopus's
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows;
                        decode: any channel layout, configurations or a PCE, in ffmpeg's order;
@@ -48,13 +56,14 @@ shravan/
                        buffer bounded to one chunk or frame, no length ceiling
     serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo/... (bayan, #derive(Serialize))
     main.cyr        -- the test harness, every suite                    -> build/shravan
-    *_tests.cyr     -- test suites (opus_rfc/opus_encoder/silk/interop) + opus_test_helpers;
+    *_tests.cyr     -- test suites (opus_rfc/opus_encoder/silk/opus_enc/interop) + opus_test_helpers;
                        NOT in [lib]
     interop_fixtures.cyr -- real ffmpeg/flac/lame/libopus output + reference decodes (generated
                        by scripts/gen-interop-fixtures.py); NOT in [lib]
     bench.cyr       -- benchmarks (clock_gettime timing), built on the library itself
   scripts/interop.sh, interop.py, interop/ -- reference sweep (CI job): interop-cli drives
-                       shravan's decoders and encoders, opusref.c drives libopus
+                       shravan's decoders and encoders, opusref.c drives libopus, and
+                       silkref/opusenc.c libopus's opus_encode (build/opusenc-ref)
   scripts/check-collisions.sh -- compiles dist/shravan.cyr beside its deps, the pinned stdlib
                        snapshot and abaco's newest tag; fails on a shared name (CI step)
   fuzz/             -- fuzz_codecs (stubbed lib), fuzz_decode, fuzz_opus; run.sh (seeded
@@ -94,7 +103,10 @@ f64 samples --> wav_encode()   --> RIFF WAVE bytes
 f64 samples --> flac_encode_level() --> FLAC bitstream, levels 0-8 as `flac -0..-8` (LPC,
                partitioned Rice, stereo decorrelation, wasted bits, seek table, CRC, MD5)
 f64 samples --> aiff_encode()  --> AIFF bytes (big-endian)
-f64 samples --> opus_encode()  --> Ogg/Opus bitstream (CELT mode)
+f64 samples --> opus_encode()  --> Opus packets (OPUS_APPLICATION_RESTRICTED_SILK): 3 Hz
+               high-pass, then per packet the rate, channels, bandwidth and FEC decisions,
+               silk_Encode (silk_enc.cyr) at the internal rate they settle on, the TOC,
+               DTX on silence, 80-120 ms as 2-5 frames repacketised, CBR padding
 f64 samples --> aac_encode()   --> ADTS/AAC-LC bitstream: per frame, attack detection (one frame
                ahead) picks LONG / LONG_START / EIGHT_SHORT / LONG_STOP; MDCT; 3GPP TS 26.403
                thresholds (spreading, ATH, pre-echo control, tonality from a 2048-point FFT);

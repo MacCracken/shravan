@@ -4,7 +4,11 @@
  * Unvoiced and voiced (LTP, re-whitening), wideband 20 ms. Run with
  * SILKDUMP=<file>: patch.py's hooks in silk_NSQ_c record each call. The gains
  * put the residuals at a few pulses: much larger ones saturate at the limit of
- * 31 pulses, where any bias picks the same level. */
+ * 31 pulses, where any bias picks the same level.
+ * 2.12.3: then silk_NSQ_del_dec_c, each call from a fresh state: two to four
+ * states, warped shaping or not, shaping orders 14 to 24; residuals of a few
+ * pulses at Lambda_Q10 above 2048 (its rate/distortion branch), and residuals
+ * past both of its limits (-31 and +30 levels) from tiny gains. */
 #include <stdio.h>
 #include <string.h>
 #include "main.h"
@@ -44,6 +48,33 @@ int main(void) {
         silk_NSQ_c(&enc, &nsq, &ind, x16, pulses, pred, ltp, ar, harm, tilt, lf, gains, pitchL,
                    call == 1 ? 6000 : (call == 3 ? 3000 : 2300), call >= 2 ? 12288 : 0);
     }
-    printf("4 calls\n");
+    /* the delayed-decision quantiser */
+    for (call = 0; call < 6; call++) {
+        static const int nst[6] = {4, 3, 4, 2, 4, 3}, warp[6] = {0, 15728, 15728, 0, 15728, 0};
+        static const int order[6] = {14, 16, 24, 20, 16, 14}, lambda[6] = {2300, 6000, 3000, 2300, 1000, 1500};
+        int voiced = call == 2 || call == 3 || call == 5, tiny = call >= 4;
+        memset(&enc, 0, sizeof enc);
+        memset(&ind, 0, sizeof ind);
+        memset(&nsq, 0, sizeof nsq);
+        nsq.lagPrev = 100; nsq.prev_gain_Q16 = 65536;
+        enc.ltp_mem_length = 320; enc.frame_length = 320; enc.subfr_length = 80; enc.nb_subfr = 4;
+        enc.shapingLPCOrder = order[call]; enc.predictLPCOrder = 16; enc.frameCounter = call;
+        enc.nStatesDelayedDecision = nst[call]; enc.warping_Q16 = warp[call];
+        ind.Seed = (call + 1) & 3; ind.signalType = voiced ? TYPE_VOICED : TYPE_UNVOICED;
+        ind.quantOffsetType = call & 1; ind.NLSFInterpCoef_Q2 = call == 3 ? 1 : 4;
+        for (i = 0; i < 320; i++) x16[i] = (opus_int16)rnd(tiny ? 30000 : 20000);
+        for (i = 0; i < 2 * MAX_LPC_ORDER; i++) pred[i] = (opus_int16)(i % MAX_LPC_ORDER < 16 ? rnd(600) : 0);
+        for (i = 0; i < LTP_ORDER * MAX_NB_SUBFR; i++) ltp[i] = (opus_int16)(voiced ? (i % 5 == 2 ? 9000 : rnd(1500)) : 0);
+        for (i = 0; i < MAX_NB_SUBFR * MAX_SHAPE_LPC_ORDER; i++) ar[i] = (opus_int16)rnd(1500);
+        for (k = 0; k < 4; k++) {
+            harm[k] = voiced ? 4000 : 0; tilt[k] = -4096;
+            lf[k] = (opus_int32)((opus_uint32)(14000) << 16 | (opus_uint16)(-15000));
+            gains[k] = tiny ? (40 + 10 * k) << 16 : (2500 + 700 * k) << 16;
+            pitchL[k] = voiced ? 90 + 3 * k : 0;
+        }
+        silk_NSQ_del_dec_c(&enc, &nsq, &ind, x16, pulses, pred, ltp, ar, harm, tilt, lf, gains, pitchL,
+                           lambda[call], voiced ? 12288 : 0);
+    }
+    printf("10 calls\n");
     return 0;
 }

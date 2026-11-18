@@ -1,0 +1,539 @@
+# opus_enc_tests.cyr -- tests for the Opus encoder layer (src/opus_enc.cyr), 2.12.3.
+# Not in [lib]: the test harness (src/main.cyr) includes it after
+# src/silk_tests.cyr, whose vector helpers (_skv_*, _skk_*) it uses.
+
+var _OET_UNSET = 0 - 99999;     # the generator's OPUS_UNSET: a ctl not given
+
+# FNV-1a over v's four bytes, little-endian, continuing from h.
+fn _oet_fnv_u32(h, v) {
+    var i = 0;
+    while (i < 4) { h = (h ^ ((v >> (8 * i)) & 0xFF)) * 1099511628211; i = i + 1; }
+    return h;
+}
+
+# The generator's opus_hash: FNV-1a over the packet's length, its bytes, the
+# final range and the getters after it (bandwidth, in-DTX, bit rate).
+fn _oet_packet_hash(enc, buf, len) {
+    var h = _oet_fnv_u32(1469598103934665603, len);
+    var i = 0;
+    while (i < len) { h = (h ^ load8(buf + i)) * 1099511628211; i = i + 1; }
+    h = _oet_fnv_u32(h, opus_encoder_final_range(enc));
+    h = _oet_fnv_u32(h, opus_encoder_bandwidth(enc));
+    h = _oet_fnv_u32(h, opus_encoder_in_dtx(enc));
+    h = _oet_fnv_u32(h, opus_encoder_bitrate(enc));
+    return h & 0xFFFFFFFF;
+}
+
+# The ctls a config gives (opusenc's keys in OPUS_KEYS order: bit rate, VBR,
+# complexity, max bandwidth, bandwidth, forced channels, signal, DTX, FEC, loss,
+# LSB depth, prediction disabled, VBR constraint, expert frame duration), each
+# accepted. w: the 14 words.
+fn _oet_apply(enc, w) {
+    var ok = 1;
+    var i = 0;
+    while (i < 14) {
+        var v = load64(w + i * 8);
+        if (v != _OET_UNSET) {
+            var r = 0;
+            if (i == 0) { r = opus_encoder_set_bitrate(enc, v); }
+            if (i == 1) { r = opus_encoder_set_vbr(enc, v); }
+            if (i == 2) { r = opus_encoder_set_complexity(enc, v); }
+            if (i == 3) { r = opus_encoder_set_max_bandwidth(enc, v); }
+            if (i == 4) { r = opus_encoder_set_bandwidth(enc, v); }
+            if (i == 5) { r = opus_encoder_set_force_channels(enc, v); }
+            if (i == 6) { r = opus_encoder_set_signal(enc, v); }
+            if (i == 7) { r = opus_encoder_set_dtx(enc, v); }
+            if (i == 8) { r = opus_encoder_set_inband_fec(enc, v); }
+            if (i == 9) { r = opus_encoder_set_packet_loss(enc, v); }
+            if (i == 10) { r = opus_encoder_set_lsb_depth(enc, v); }
+            if (i == 11) { r = opus_encoder_set_prediction_disabled(enc, v); }
+            if (i == 12) { r = opus_encoder_set_vbr_constraint(enc, v); }
+            if (i == 13) { r = opus_encoder_set_expert_frame_duration(enc, v); }
+            if (r != 0) { ok = 0; }
+        }
+        i = i + 1;
+    }
+    return ok;
+}
+
+# n samples a channel from x (int16 words, interleaved) at sample pos, as f64
+# in -1..1.
+fn _oet_pcm(x, pos, n, ch, pcm) {
+    var i = 0;
+    while (i < n * ch) {
+        store64(pcm + i * 8, f64_div(f64_from(load64(x + (pos * ch + i) * 8)), f64_from(32768)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# opus_encode (RESTRICTED_SILK) against libopus's opus_encode_float with that
+# application, packet for packet (each packet's length, bytes, final range and
+# the getters after it, by hash), on inputs built here: bandwidth switching
+# down through the low-pass transition and back up, stereo to mono (toMono)
+# and back by rate and forced, FEC by rate and loss with the bandwidth lowered
+# for it, DTX on digital silence and SILK's, every frame size from 10 to 120 ms
+# (80 to 120 repacketised: codes 1, 2 and 3, CBR padding), the expert frame
+# duration, the PLC packets, OPUS_RESET_STATE, every complexity (the
+# delayed-decision quantiser from 2), every input rate, the bandwidth ctls,
+# the signal type, LSB depth, prediction disabled, bit rate auto and max.
+fn test_opus_enc_vs_libopus() {
+    syscall(1, 1, "=== opus encode: packets vs libopus ===\n", 40);
+    var h = alloc(48 * 8);
+    var frl = alloc(64 * 8);
+    var rts = alloc(64 * 8);
+    var chl = alloc(64 * 8);
+    var pkw = alloc(1024 * 8);
+    var pcm = alloc(5760 * 2 * 8);
+    var buf = alloc(9216);                  # o_maxbig pads to 9000 bytes
+    var packets = 0;
+    var c = 0;
+    while (c < _SKO_N) {
+        # kind, seed, rate, channels, samples a channel, packets, the input's
+        # hash (2 words), kind 6's parameters (5), the right channel's kind,
+        # seed, gain, shift and fade, then the 14 ctls, the buffer, frame ms
+        # and reset period
+        _skv_load(_SKO_HDR, c, h);
+        var fs = load64(h + 16);
+        var ch = load64(h + 24);
+        var n = load64(h + 32);
+        var npk = load64(h + 40);
+        var x = alloc(ch * n * 8);
+        var hx = 0;
+        if (ch == 1) { hx = _skk_signal(load64(h), fs, n, load64(h + 8), x, h + 64); }
+        else {
+            hx = _skk_stereo(load64(h), fs, n, load64(h + 8), h + 64, load64(h + 104), load64(h + 112), load64(h + 120),
+              load64(h + 128), load64(h + 136), x);
+        }
+        assert(hx == _skk_u64(load64(h + 48), load64(h + 56)), "opus encode: the suite's input is the generator's");
+        var enc = opus_encoder_new(fs, ch, OPUS_APPLICATION_RESTRICTED_SILK);
+        assert(_oet_apply(enc, h + 144) == 1, "opus encode: the config's ctls are accepted");
+        var maxbytes = load64(h + 256);
+        var ms = load64(h + 264);
+        var reset = load64(h + 272);
+        var nf = _skv_load(_SKO_FRAMES, c, frl);
+        var nr = _skv_load(_SKO_RATES, c, rts);
+        var nc = _skv_load(_SKO_CHANS, c, chl);
+        _skv_load(_SKO_PK, c, pkw);
+        var period = 0;
+        var k = 1;
+        while (k < nr) { period = period + load64(rts + k * 8); k = k + 2; }
+        var bad = 0 - 1;
+        var pos = 0;
+        var p = 0;
+        while (p < npk) {
+            var fms = ms;
+            if (nf > 0) { fms = load64(frl + (p % nf) * 8); }
+            var ns = fs / 1000 * fms;
+            if (reset > 0 && p > 0 && p % reset == 0) { opus_encoder_reset(enc); }
+            if (period > 0) {
+                var q = p % period;
+                k = 0;
+                while (q >= load64(rts + (k + 1) * 8)) { q = q - load64(rts + (k + 1) * 8); k = k + 2; }
+                opus_encoder_set_bitrate(enc, load64(rts + k * 8));
+            }
+            if (nc > 0) { opus_encoder_set_force_channels(enc, load64(chl + (p % nc) * 8)); }
+            _oet_pcm(x, pos, ns, ch, pcm);
+            var r = opus_encode(enc, pcm, ns, buf, maxbytes);
+            if (bad < 0) {
+                if (r < 0) { bad = p; }
+                else { if (_oet_packet_hash(enc, buf, r) != (load64(pkw + p * 8) & 0xFFFFFFFF)) { bad = p; } }
+            }
+            pos = pos + ns;
+            p = p + 1;
+        }
+        # on failure, the first packet that differs
+        assert_eq(bad, 0 - 1, "opus encode: libopus's packets, final ranges and getters");
+        packets = packets + npk;
+        c = c + 1;
+    }
+    assert(_SKO_N >= 50, "opus encode: the configs");
+    assert(packets >= 3700, "opus encode: the packets");
+    return 0;
+}
+
+# Encode npk packets of ms from x into a decodable vector (OpusHead, OpusTags,
+# the packets); returns 1 when every packet came out within max.
+fn _oet_head(ch, fs) {
+    var head = alloc(19);
+    memset(head, 0, 19);
+    memcpy(head, "OpusHead", 8);
+    store8(head + 8, 1);
+    store8(head + 9, ch);
+    write_u32_le(head, 12, fs);
+    return head;
+}
+
+fn _oet_stream(ch, fs) {
+    var v = vec_new();
+    vec_push(v, str_from_buf(_oet_head(ch, fs), 19));
+    var tags = alloc(16);
+    memset(tags, 0, 16);
+    memcpy(tags, "OpusTags", 8);
+    vec_push(v, str_from_buf(tags, 16));
+    return v;
+}
+
+# 1 when a decode came out as n finite samples.
+fn _oet_decodes(v, n) {
+    var r = opus_decode_from_packets(v, 0, 0);
+    if (is_err(r) == 1) { return 0; }
+    var smp = decode_result_samples(r);
+    if (vec_len(smp) != n) { return 0; }
+    var i = 0;
+    while (i < vec_len(smp)) {
+        if (((vec_get(smp, i) >> 52) & 0x7FF) == 0x7FF) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The API: what opus_encoder_new takes, each ctl's bounds (libopus's), the
+# getters, the frame sizes and buffers opus_encode takes, OPUS_RESET_STATE
+# (in place, and the packets after it as a new encoder's), memory flat over a
+# long encode, and every frame size decoding back to its length.
+fn test_opus_enc_api() {
+    syscall(1, 1, "=== opus encode: API ===\n", 25);
+    var RS = OPUS_APPLICATION_RESTRICTED_SILK;
+    assert_eq(opus_encoder_new(44100, 1, RS), err(ERR_INVALID_RATE), "opus encode: 44.1 kHz is not an Opus rate");
+    assert_eq(opus_encoder_new(96000, 1, RS), err(ERR_INVALID_RATE), "opus encode: nor 96 kHz");
+    assert_eq(opus_encoder_new(48000, 0, RS), err(ERR_INVALID_CHANNELS), "opus encode: no zero channels");
+    assert_eq(opus_encoder_new(48000, 3, RS), err(ERR_INVALID_CHANNELS), "opus encode: at most two channels");
+    assert_eq(opus_encoder_new(48000, 1, OPUS_APPLICATION_VOIP), err(ERR_UNSUPPORTED_FMT), "opus encode: VOIP needs CELT");
+    assert_eq(opus_encoder_new(48000, 1, OPUS_APPLICATION_AUDIO), err(ERR_UNSUPPORTED_FMT), "opus encode: AUDIO needs CELT");
+    assert_eq(opus_encoder_new(48000, 1, OPUS_APPLICATION_RESTRICTED_LOWDELAY), err(ERR_UNSUPPORTED_FMT),
+      "opus encode: LOWDELAY is CELT");
+    assert_eq(opus_encoder_new(48000, 1, OPUS_APPLICATION_RESTRICTED_CELT), err(ERR_UNSUPPORTED_FMT),
+      "opus encode: RESTRICTED_CELT is CELT");
+    assert_eq(opus_encoder_new(48000, 1, 0), err(ERR_UNSUPPORTED_FMT), "opus encode: no application 0");
+    var e = opus_encoder_new(48000, 1, RS);
+    var s = opus_encoder_new(48000, 2, RS);
+    assert(is_err(e) == 0 && is_err(s) == 0, "opus encode: mono and stereo at 48 kHz");
+    var EE = err(ERR_ENCODE);
+    # the bit rate: auto, max, at least 500, at most 750 kbit/s a channel
+    assert_eq(opus_encoder_bitrate(e), 72000, "opus encode: the automatic rate, 2.5 ms framing (libopus's GET_BITRATE)");
+    assert_eq(opus_encoder_set_bitrate(e, 0), EE, "opus encode: a bit rate of 0");
+    assert_eq(opus_encoder_set_bitrate(e, 0 - 5), EE, "opus encode: a negative bit rate");
+    assert_eq(opus_encoder_set_bitrate(e, 300), 0, "opus encode: a bit rate under 500");
+    assert_eq(opus_encoder_bitrate(e), 500, "opus encode: raised to 500");
+    assert_eq(opus_encoder_set_bitrate(e, 1000000000), 0, "opus encode: a bit rate over the top");
+    assert_eq(opus_encoder_bitrate(e), 750000, "opus encode: cut to 750 kbit/s a channel");
+    assert_eq(opus_encoder_set_bitrate(s, 1000000000), 0, "opus encode: stereo too");
+    assert_eq(opus_encoder_bitrate(s), 1500000, "opus encode: cut to 750 kbit/s a channel, two");
+    assert_eq(opus_encoder_set_bitrate(e, OPUS_BITRATE_MAX), 0, "opus encode: OPUS_BITRATE_MAX");
+    assert_eq(opus_encoder_bitrate(e), 1500000, "opus encode: the most a packet holds, at most 1.5 Mbit/s");
+    assert_eq(opus_encoder_set_bitrate(e, OPUS_AUTO), 0, "opus encode: OPUS_AUTO");
+    # the others
+    assert_eq(opus_encoder_set_vbr(e, 2), EE, "opus encode: VBR 0 or 1");
+    assert_eq(opus_encoder_set_vbr(e, 0 - 1), EE, "opus encode: VBR not negative");
+    assert_eq(opus_encoder_set_vbr_constraint(e, 2), EE, "opus encode: VBR constraint 0 or 1");
+    assert_eq(opus_encoder_set_complexity(e, 11), EE, "opus encode: complexity at most 10");
+    assert_eq(opus_encoder_set_complexity(e, 0 - 1), EE, "opus encode: complexity at least 0");
+    assert_eq(opus_encoder_set_max_bandwidth(e, OPUS_BANDWIDTH_NARROWBAND - 1), EE, "opus encode: max bandwidth below NB");
+    assert_eq(opus_encoder_set_max_bandwidth(e, OPUS_BANDWIDTH_FULLBAND + 1), EE, "opus encode: max bandwidth above FB");
+    assert_eq(opus_encoder_set_max_bandwidth(e, OPUS_AUTO), EE, "opus encode: max bandwidth not auto");
+    assert_eq(opus_encoder_set_bandwidth(e, OPUS_BANDWIDTH_FULLBAND + 1), EE, "opus encode: bandwidth above FB");
+    assert_eq(opus_encoder_set_bandwidth(e, OPUS_AUTO), 0, "opus encode: bandwidth auto");
+    assert_eq(opus_encoder_set_force_channels(e, 2), EE, "opus encode: mono forced to two channels");
+    assert_eq(opus_encoder_set_force_channels(s, 3), EE, "opus encode: stereo forced to three");
+    assert_eq(opus_encoder_set_force_channels(s, 0), EE, "opus encode: forced to none");
+    assert_eq(opus_encoder_set_force_channels(s, OPUS_AUTO), 0, "opus encode: channels auto");
+    assert_eq(opus_encoder_set_signal(e, 3000), EE, "opus encode: signal voice, music or auto");
+    assert_eq(opus_encoder_set_dtx(e, 2), EE, "opus encode: DTX 0 or 1");
+    assert_eq(opus_encoder_set_inband_fec(e, 3), EE, "opus encode: FEC 0 to 2");
+    assert_eq(opus_encoder_set_packet_loss(e, 101), EE, "opus encode: loss at most 100");
+    assert_eq(opus_encoder_set_packet_loss(e, 0 - 1), EE, "opus encode: loss at least 0");
+    assert_eq(opus_encoder_set_lsb_depth(e, 7), EE, "opus encode: LSB depth at least 8");
+    assert_eq(opus_encoder_set_lsb_depth(e, 25), EE, "opus encode: LSB depth at most 24");
+    assert_eq(opus_encoder_set_expert_frame_duration(e, OPUS_FRAMESIZE_ARG - 1), EE, "opus encode: frame duration below ARG");
+    assert_eq(opus_encoder_set_expert_frame_duration(e, OPUS_FRAMESIZE_120_MS + 1), EE, "opus encode: frame duration above 120");
+    assert_eq(opus_encoder_set_prediction_disabled(e, 2), EE, "opus encode: prediction disabled 0 or 1");
+    assert_eq(opus_encoder_lookahead(e), 312, "opus encode: lookahead 6.5 ms at 48 kHz (libopus's)");
+    assert_eq(opus_encoder_lookahead(opus_encoder_new(16000, 1, RS)), 104, "opus encode: and at 16 kHz");
+    assert_eq(opus_encoder_bandwidth(e), OPUS_BANDWIDTH_FULLBAND, "opus encode: the bandwidth before a packet");
+    # digital silence as libopus's celt_maxabs16 finds it: MAX16 and MIN16 keep
+    # the running value only where it compares greater (less), so a NaN replaces
+    # it, and the next sample replaces the NaN: a NaN last in the frame makes it
+    # not silent, one before a sample is forgotten. The bound, 2^-lsb, is in.
+    var nan = f64_div(F64_ZERO, F64_ZERO);
+    var sb = alloc(8 * 8);
+    _sk_zero(sb, 8 * 8);
+    assert_eq(_oe_is_silence(sb, 8, 24), 1, "opus encode: zeros are digital silence");
+    store64(sb + 56, nan);
+    assert_eq(_oe_is_silence(sb, 8, 24), 0, "opus encode: a NaN last is not silence (libopus's MAX16)");
+    store64(sb + 56, F64_ZERO);
+    store64(sb, nan);
+    assert_eq(_oe_is_silence(sb, 8, 24), 1, "opus encode: a NaN before a sample is forgotten");
+    store64(sb, f64_div(F64_ONE, f64_from(256)));
+    assert_eq(_oe_is_silence(sb, 8, 8), 1, "opus encode: a peak of 2^-lsb is silence");
+    store64(sb, f64_neg(f64_div(F64_ONE, f64_from(256))));
+    assert_eq(_oe_is_silence(sb, 8, 8), 1, "opus encode: a negative one too");
+    store64(sb, f64_div(f64_from(257), f64_from(65536)));
+    assert_eq(_oe_is_silence(sb, 8, 8), 0, "opus encode: above it is not");
+    assert_eq(opus_encoder_in_dtx(e), 0, "opus encode: not in DTX before a packet");
+    # frame sizes and buffers
+    var pcm = alloc(5760 * 2 * 8 + 64);
+    _sk_zero(pcm, 5760 * 2 * 8 + 64);
+    var buf = alloc(7680);
+    assert_eq(opus_encode(e, pcm, 0, buf, 1500), EE, "opus encode: no empty frame");
+    assert_eq(opus_encode(e, pcm, 0 - 960, buf, 1500), EE, "opus encode: no negative frame");
+    assert_eq(opus_encode(e, pcm, 120, buf, 1500), EE, "opus encode: no 2.5 ms SILK frame");
+    assert_eq(opus_encode(e, pcm, 240, buf, 1500), EE, "opus encode: no 5 ms SILK frame");
+    assert_eq(opus_encode(e, pcm, 1440, buf, 1500), EE, "opus encode: no 30 ms frame");
+    assert_eq(opus_encode(e, pcm, 961, buf, 1500), EE, "opus encode: no 961-sample frame");
+    assert_eq(opus_encode(e, pcm, 6240, buf, 1500), EE, "opus encode: nothing over 120 ms");
+    assert_eq(opus_encode(e, pcm, 960, buf, 0), EE, "opus encode: no empty buffer");
+    assert_eq(opus_encode(e, pcm, 960, buf, 0 - 1), EE, "opus encode: no negative buffer");
+    assert_eq(opus_encode(e, pcm, 4800, buf, 1), EE, "opus encode: 100 ms cannot fit one byte");
+    assert_eq(opus_encode(e, pcm, 960, buf, 1), 1, "opus encode: 20 ms in one byte, the PLC TOC");
+    assert_eq(opus_encoder_set_expert_frame_duration(e, OPUS_FRAMESIZE_120_MS), 0, "opus encode: a 120 ms frame duration");
+    assert_eq(opus_encode(e, pcm, 960, buf, 1500), EE, "opus encode: more than the input holds");
+    assert_eq(opus_encoder_set_expert_frame_duration(e, 5003), 0, "opus encode: a 10 ms frame duration");
+    var r10 = opus_encode(e, pcm, 2880, buf, 1500);
+    assert(r10 >= 1 && (load8(buf) & 0x18) == 0, "opus encode: 10 ms coded of a 60 ms input");
+    assert_eq(opus_encoder_set_expert_frame_duration(e, OPUS_FRAMESIZE_ARG), 0, "opus encode: the frame duration back");
+    # a frame of digital silence in DTX: the TOC alone, after 200 ms
+    var d = opus_encoder_new(16000, 1, RS);
+    opus_encoder_set_dtx(d, 1);
+    var dk = 0;
+    var dlen = 0;
+    while (dk < 12) { dlen = opus_encode(d, pcm, 320, buf, 1500); dk = dk + 1; }
+    assert_eq(dlen, 1, "opus encode: silence in DTX is the TOC alone");
+    assert_eq(opus_encoder_in_dtx(d), 1, "opus encode: and in DTX");
+    assert_eq(opus_encoder_final_range(d), 0, "opus encode: with no range");
+    # a signal to code
+    var n = 48000 * 2;
+    var x = alloc(2 * n * 8);
+    _skk_stereo(6, 48000, n, 3, _sk_ints("14000,100,180,0,0", 5), 0, 5, 8192, 1, 0, x);
+    # OPUS_RESET_STATE in place: nothing allocated, and the packets after it
+    # are a new encoder's (no FEC, whose last decision libopus keeps)
+    var a = opus_encoder_new(48000, 2, RS);
+    var b = opus_encoder_new(48000, 2, RS);
+    opus_encoder_set_bitrate(a, 32000);
+    opus_encoder_set_bitrate(b, 32000);
+    var ha = alloc(100 * 8);
+    var p = 0;
+    while (p < 50) {
+        _oet_pcm(x, p * 960, 960, 2, pcm);
+        var ra = opus_encode(a, pcm, 960, buf, 1500);
+        store64(ha + p * 8, _oet_packet_hash(a, buf, ra));
+        p = p + 1;
+    }
+    var before = alloc_used();
+    var rk = 0;
+    while (rk < 100) { opus_encoder_reset(a); rk = rk + 1; }
+    assert_eq(alloc_used() - before, 0, "opus encode: OPUS_RESET_STATE allocates nothing");
+    var same = 0;
+    p = 0;
+    while (p < 50) {
+        _oet_pcm(x, p * 960, 960, 2, pcm);
+        var r1 = opus_encode(a, pcm, 960, buf, 1500);
+        if (_oet_packet_hash(a, buf, r1) == load64(ha + p * 8)) { same = same + 1; }
+        p = p + 1;
+    }
+    assert_eq(same, 50, "opus encode: after OPUS_RESET_STATE, a new encoder's packets");
+    # NaN or absurd input (energy of 1e9 or more): libopus clears the frame and
+    # the high-pass memory, so a frame of NaN and one of 1e6 give the same
+    # packets, then and after
+    var na = opus_encoder_new(48000, 1, RS);
+    var nh = opus_encoder_new(48000, 1, RS);
+    opus_encoder_set_bitrate(na, 24000);
+    opus_encoder_set_bitrate(nh, 24000);
+    var nsame = 0;
+    p = 0;
+    while (p < 20) {
+        var q = 0;
+        while (q < 960) {
+            var xv = f64_div(f64_from(load64(x + 2 * (p * 960 + q) * 8)), f64_from(32768));
+            store64(pcm + q * 8, xv);
+            store64(pcm + (960 + q) * 8, xv);
+            if (p == 3) {
+                store64(pcm + q * 8, nan);
+                store64(pcm + (960 + q) * 8, f64_from(1000000));
+            }
+            q = q + 1;
+        }
+        var ra2 = opus_encode(na, pcm, 960, buf, 1500);
+        var ha2 = _oet_packet_hash(na, buf, ra2);
+        var rb2 = opus_encode(nh, pcm + 960 * 8, 960, buf, 1500);
+        if (_oet_packet_hash(nh, buf, rb2) == ha2) { nsame = nsame + 1; }
+        p = p + 1;
+    }
+    assert_eq(nsame, 20, "opus encode: a NaN frame and a 1e6 one both cleared (libopus's energy guard)");
+    # the input is libopus's floats: doubles with more precision give the
+    # packets of their single-precision roundings
+    var fa = opus_encoder_new(48000, 1, RS);
+    var fb = opus_encoder_new(48000, 1, RS);
+    var fsame = 0;
+    p = 0;
+    while (p < 25) {
+        var q2 = 0;
+        while (q2 < 960) {
+            var xr = f64_add(f64_div(f64_from(load64(x + 2 * (p * 960 + q2) * 8)), f64_from(32768)),
+              f64_div(f64_from((q2 * 7919) % 13 - 6), f64_from(1000000000)));
+            store64(pcm + q2 * 8, xr);
+            store64(pcm + (960 + q2) * 8, _sk_f32(xr));
+            q2 = q2 + 1;
+        }
+        var rf = opus_encode(fa, pcm, 960, buf, 1500);
+        var hf = _oet_packet_hash(fa, buf, rf);
+        var rg = opus_encode(fb, pcm + 960 * 8, 960, buf, 1500);
+        if (_oet_packet_hash(fb, buf, rg) == hf) { fsame = fsame + 1; }
+        p = p + 1;
+    }
+    assert_eq(fsame, 25, "opus encode: f64 input coded as its f32 rounding (libopus's float API)");
+    # memory: nothing kept per packet (the arena), over 2 s of each frame size,
+    # FEC and DTX on, stereo, CBR
+    var fsz = _sk_ints("480,960,1920,2880,3840,4800,5760", 7);
+    var grows = 0;
+    var fi = 0;
+    while (fi < 7) {
+        var m = opus_encoder_new(48000, 2, RS);
+        opus_encoder_set_inband_fec(m, 1);
+        opus_encoder_set_packet_loss(m, 10);
+        opus_encoder_set_dtx(m, 1);
+        opus_encoder_set_vbr(m, fi & 1);
+        opus_encoder_set_complexity(m, 10);
+        var fsn = load64(fsz + fi * 8);
+        var np = n / fsn;
+        var used = 0;
+        p = 0;
+        while (p < np) {
+            if (p == 2) { used = alloc_used(); }
+            _oet_pcm(x, p * fsn, fsn, 2, pcm);
+            opus_encode(m, pcm, fsn, buf, 1500);
+            p = p + 1;
+        }
+        if (alloc_used() != used) { grows = grows + 1; }
+        fi = fi + 1;
+    }
+    assert_eq(grows, 0, "opus encode: memory flat over 2 s of every frame size");
+    # every frame size, mono and stereo, VBR and CBR, decodes back to its length
+    var dec = 1;
+    var ch = 1;
+    while (ch <= 2) {
+        var cb = 0;
+        while (cb < 2) {
+            fi = 0;
+            while (fi < 7) {
+                var t = opus_encoder_new(48000, ch, RS);
+                opus_encoder_set_vbr(t, 1 - cb);
+                opus_encoder_set_bitrate(t, 24000 * ch);
+                var fsn = load64(fsz + fi * 8);
+                var v = _oet_stream(ch, 48000);
+                var np = 48000 / fsn;
+                p = 0;
+                while (p < np) {
+                    var xi = 0;
+                    while (xi < fsn * ch) {
+                        var src = (p * fsn * 2) + xi;
+                        if (ch == 1) { src = 2 * (p * fsn + xi); }
+                        store64(pcm + xi * 8, f64_div(f64_from(load64(x + src * 8)), f64_from(32768)));
+                        xi = xi + 1;
+                    }
+                    var rr = opus_encode(t, pcm, fsn, buf, 1500);
+                    if (rr < 1 || rr > 1500) { dec = 0; }
+                    else { vec_push(v, str_from_buf(buf, rr)); }
+                    p = p + 1;
+                }
+                if (_oet_decodes(v, np * fsn * ch) == 0) { dec = 0; }
+                fi = fi + 1;
+            }
+            cb = cb + 1;
+        }
+        ch = ch + 1;
+    }
+    assert(dec == 1, "opus encode: every frame size, mono and stereo, VBR and CBR, decodes to its length");
+    return 0;
+}
+
+# Hostile input and settings: NaN, infinities, huge, denormal, DC and
+# full-scale square input, and every ctl changing at random packet by packet
+# (rate, complexity, bandwidths, channels, frame size, buffer, VBR, FEC, loss,
+# DTX, resets): every packet within its buffer, and the stream decoding to
+# finite audio of its length.
+fn test_opus_enc_hostile() {
+    syscall(1, 1, "=== opus encode: hostile input ===\n", 35);
+    var RS = OPUS_APPLICATION_RESTRICTED_SILK;
+    var pcm = alloc(5760 * 2 * 8);
+    var buf = alloc(7680);
+    var nan = f64_div(F64_ZERO, F64_ZERO);
+    var inf = f64_div(F64_ONE, F64_ZERO);
+    var huge = f64_pow(f64_from(10), f64_from(30));
+    var tiny = f64_div(F64_ONE, f64_pow(F64_TWO, f64_from(1060)));
+    var fsz = _sk_ints("10,20,40,60,80,100,120", 7);
+    var fits = 1;
+    var dec = 1;
+    var seed = 12345;
+    var ch = 1;
+    while (ch <= 2) {
+        var kind = 0;
+        while (kind < 8) {
+            var t = opus_encoder_new(48000, ch, RS);
+            var v = _oet_stream(ch, 48000);
+            var total = 0;
+            var p = 0;
+            while (p < 40) {
+                seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+                var rnd = seed >> 8;
+                opus_encoder_set_bitrate(t, 500 + rnd % 200000);
+                opus_encoder_set_complexity(t, rnd % 11);
+                opus_encoder_set_vbr(t, (rnd >> 4) & 1);
+                opus_encoder_set_max_bandwidth(t, OPUS_BANDWIDTH_NARROWBAND + (rnd >> 5) % 5);
+                if (((rnd >> 8) & 3) == 0) { opus_encoder_set_bandwidth(t, OPUS_BANDWIDTH_NARROWBAND + (rnd >> 10) % 5); }
+                else { opus_encoder_set_bandwidth(t, OPUS_AUTO); }
+                if (ch == 2) {
+                    var fc = OPUS_AUTO;
+                    if (((rnd >> 12) & 3) == 1) { fc = 1; }
+                    if (((rnd >> 12) & 3) == 2) { fc = 2; }
+                    opus_encoder_set_force_channels(t, fc);
+                }
+                opus_encoder_set_inband_fec(t, (rnd >> 14) % 3);
+                opus_encoder_set_packet_loss(t, (rnd >> 3) % 101);
+                opus_encoder_set_dtx(t, (rnd >> 16) & 1);
+                if (((rnd >> 17) & 15) == 0) { opus_encoder_reset(t); }
+                var fsn = 48 * load64(fsz + ((rnd >> 6) % 7) * 8);
+                var mx = 1 + (rnd >> 2) % 1500;
+                if (fsn == 4800 && mx == 1) { mx = 2; }
+                var i = 0;
+                while (i < fsn * ch) {
+                    var val = F64_ZERO;
+                    if (kind == 0) { val = nan; }
+                    if (kind == 1) { val = inf; if ((i & 1) == 1) { val = f64_neg(inf); } }
+                    if (kind == 2) { val = huge; if ((i & 3) == 1) { val = f64_neg(huge); } }
+                    if (kind == 3) { val = tiny; }
+                    if (kind == 4) { val = F64_ONE; }
+                    if (kind == 5) { val = F64_ONE; if (((i / ch / 24) & 1) == 1) { val = f64_neg(F64_ONE); } }
+                    if (kind == 6) { val = f64_from(4); if (((i / ch / 7) & 1) == 1) { val = f64_from(0 - 4); } }
+                    if (kind == 7) {
+                        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
+                        val = f64_div(f64_from((seed >> 8) % 65536 - 32768), f64_from(32768));
+                        if (((seed >> 3) & 63) == 0) { val = nan; }
+                    }
+                    store64(pcm + i * 8, val);
+                    i = i + 1;
+                }
+                var r = opus_encode(t, pcm, fsn, buf, mx);
+                if (r < 1 || r > mx) { fits = 0; }
+                else {
+                    vec_push(v, str_from_buf(buf, r));
+                    total = total + fsn;
+                }
+                p = p + 1;
+            }
+            if (_oet_decodes(v, total * ch) == 0) { dec = 0; }
+            kind = kind + 1;
+        }
+        ch = ch + 1;
+    }
+    assert(fits == 1, "opus encode: hostile input and settings give packets within their buffers");
+    assert(dec == 1, "opus encode: and decode to finite audio of their length");
+    return 0;
+}
+
+fn test_opus_enc_all() {
+    test_opus_enc_vs_libopus();
+    test_opus_enc_api();
+    test_opus_enc_hostile();
+    return 0;
+}

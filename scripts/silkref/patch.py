@@ -232,6 +232,60 @@ patch("silk/NSQ.c", [
     sd_i8("nsq.pulses", pulses - psEncC->frame_length, psEncC->frame_length);
 """ + NSQ_HASH % "nsq.hash_out" + """    RESTORE_STACK;"""),
 ])
+# 2.12.3: the delayed-decision quantiser, recorded as the plain one is (its
+# winning seed replaces the indices' at the end).
+NSQ_IN = """    {
+        int hd[13], i, j, nb = psEncC->nb_subfr, so = psEncC->shapingLPCOrder;
+        short ar[ MAX_NB_SUBFR * MAX_SHAPE_LPC_ORDER ];
+        hd[0] = psEncC->ltp_mem_length; hd[1] = psEncC->frame_length; hd[2] = psEncC->subfr_length;
+        hd[3] = nb; hd[4] = so; hd[5] = psEncC->predictLPCOrder; hd[6] = psIndices->Seed;
+        hd[7] = psIndices->signalType; hd[8] = psIndices->quantOffsetType; hd[9] = psIndices->NLSFInterpCoef_Q2;
+        hd[10] = Lambda_Q10; hd[11] = LTP_scale_Q14; hd[12] = psEncC->frameCounter;
+        sd_i32("nsq.hdr", hd, 13);
+        { int dh[2]; dh[0] = psEncC->nStatesDelayedDecision; dh[1] = psEncC->warping_Q16; sd_i32("nsq.dd", dh, 2); }
+        sd_i16("nsq.x16", x16, psEncC->frame_length);
+        sd_i16("nsq.pred", PredCoef_Q12, 2 * MAX_LPC_ORDER);
+        sd_i16("nsq.ltp", LTPCoef_Q14, nb * LTP_ORDER);
+        for (i = 0; i < nb; i++) for (j = 0; j < so; j++) ar[i * so + j] = AR_Q13[i * MAX_SHAPE_LPC_ORDER + j];
+        sd_i16("nsq.ar", ar, nb * so);
+        sd_i32("nsq.harm", HarmShapeGain_Q14, nb); sd_i32("nsq.tilt", Tilt_Q14, nb);
+        sd_i32("nsq.lf", LF_shp_Q14, nb); sd_i32("nsq.gains", Gains_Q16, nb); sd_i32("nsq.pitchL", pitchL, nb);
+    }
+"""
+patch("silk/NSQ_del_dec.c", [
+    ("""    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;""", NSQ_IN + NSQ_HASH % "nsq.hash_in" + """    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;"""),
+    ("""    silk_memmove( NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[ psEncC->frame_length ], psEncC->ltp_mem_length * sizeof( opus_int32 ) );
+    RESTORE_STACK;""", """    silk_memmove( NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[ psEncC->frame_length ], psEncC->ltp_mem_length * sizeof( opus_int32 ) );
+    sd_i8("nsq.pulses", pulses - psEncC->frame_length, psEncC->frame_length);
+    sd_int("nsq.seed_out", psIndices->Seed);
+""" + NSQ_HASH % "nsq.hash_out" + """    RESTORE_STACK;"""),
+])
+# libopus runs the SSE4.1 build of it where the CPU has SSE4.1 (bit-exact with
+# the C one, which OPUS_CHECK_ASM asserts): recorded the same way.
+patch("silk/x86/NSQ_del_dec_sse4_1.c", [
+    ("""    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;""", NSQ_IN + NSQ_HASH % "nsq.hash_in" + """    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;"""),
+    ("""    silk_memmove( NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[ psEncC->frame_length ], psEncC->ltp_mem_length * sizeof( opus_int32 ) );
+""", """    silk_memmove( NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[ psEncC->frame_length ], psEncC->ltp_mem_length * sizeof( opus_int32 ) );
+    sd_i8("nsq.pulses", pulses - psEncC->frame_length, psEncC->frame_length);
+    sd_int("nsq.seed_out", psIndices->Seed);
+""" + NSQ_HASH % "nsq.hash_out"),
+])
+# and the AVX2 build where the CPU has AVX2 (falling back to the C one for
+# settings it does not handle)
+patch("silk/x86/NSQ_del_dec_avx2.c", [
+    ("""    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;""", NSQ_IN + NSQ_HASH % "nsq.hash_in" + """    /* Set unvoiced lag to the previous one, overwrite later for voiced */
+    lag = NSQ->lagPrev;"""),
+    ("""    silk_memmove(NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[psEncC->frame_length], psEncC->ltp_mem_length * sizeof(opus_int32));
+""", """    silk_memmove(NSQ->sLTP_shp_Q14, &NSQ->sLTP_shp_Q14[psEncC->frame_length], psEncC->ltp_mem_length * sizeof(opus_int32));
+    sd_i8("nsq.pulses", pulses - psEncC->frame_length, psEncC->frame_length);
+    sd_int("nsq.seed_out", psIndices->Seed);
+""" + NSQ_HASH % "nsq.hash_out"),
+])
 patch("silk/float/wrappers_FLP.c", [
     ("""    /* Convert control struct to fix control struct */""", """    {
         int hd[6], i, j, nb = psEnc->sCmn.nb_subfr, so = psEnc->sCmn.shapingLPCOrder, po = psEnc->sCmn.predictLPCOrder;

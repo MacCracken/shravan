@@ -5,6 +5,210 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.3] - 2026-11-17
+
+**Opus encode: libopus's encoder layer for SILK, and SILK at every complexity.** `opus_encode` arrives
+(`src/opus_enc.cyr`): libopus's `opus_encode` for `OPUS_APPLICATION_RESTRICTED_SILK`, with the
+high-pass, the bit rate, the stereo/mono and bandwidth decisions, FEC by rate and loss, DTX on digital
+silence, 10 to 120 ms packets, CBR padding, the PLC packets, and libopus's ctls and getters. Under it the
+SILK encoder runs at every complexity (libopus's delayed-decision quantiser from 2) and switches its
+internal rate packet by packet through libopus's low-pass transition. shravan's packets, final ranges
+and getters are libopus's `opus_encode_float`'s, packet for packet: 6,391 in 96 configurations in the
+suite. On real speech and music libopus decodes them within 0.003 of its own encoder's correlation.
+15,929 assertions (was 15,550).
+
+### Added
+
+- **The Opus encoder** (`src/opus_enc.cyr`, libopus `opus_encoder.c`):
+  - `opus_encoder_new(fs, channels, application)`: 8, 12, 16, 24 or 48 kHz, one or two channels,
+    `OPUS_APPLICATION_RESTRICTED_SILK`. The other applications need libopus's CELT encoder and are
+    refused (`ERR_UNSUPPORTED_FMT`) until 2.12.x brings it.
+  - `opus_encode(enc, pcm, frame_size, out, max)`: 10, 20, 40, 60, 80, 100 or 120 ms of f64 samples,
+    interleaved, taken as libopus's floats; returns the packet's length.
+  - Per packet:
+    - the energy guard (NaN, or energy of 1e9 or more, clears the frame and the high-pass memory);
+    - digital silence as libopus's `celt_maxabs16` finds it, a trailing NaN included;
+    - the bit rate (`user_bitrate_to_bitrate`, CBR's whole bytes);
+    - the PLC packets where too few bytes or bits are left: the TOC alone, codes 1 and 3 for 40 to
+      120 ms, CBR-padded, hybrid or SILK as the mode before;
+    - the equivalent rate (`compute_equiv_rate`);
+    - stereo or mono by rate, with its hysteresis and the voice estimate (`OPUS_SET_SIGNAL`), and
+      `toMono`'s two-frame delay;
+    - the bandwidth by rate (voice and music thresholds interpolated, with hysteresis), wideband
+      at most while SILK's transition runs, the user and maximum bandwidths, the input's rate;
+    - `decide_fec`: FEC where the rate affords it for the loss, the bandwidth lowered to afford it
+      above 5% loss and restored where none does;
+    - 80, 100 and 120 ms as 2 × 40, 5 × 20 and 2 × 60 ms frames, repacketised (`_oe_repacketize`:
+      codes 1, 2 and 3, VBR and CBR, padding), libopus's `force_channels` left at 1 after a
+      multi-frame packet's `toMono` included.
+  - Per frame: `dc_reject` at 3 Hz in single precision; SILK's control (its rate from the frame's
+    budget, the internal rate capped by the effective maximum rate, the desired one from the
+    bandwidth, `opusCanSwitch`); `silk_Encode` into the payload behind the TOC, whose bandwidth
+    follows SILK's internal rate; DTX on digital silence (`decide_dtx_mode`: after 200 ms, at most
+    400 ms at a time); the trailing zero bytes; SILK over its budget (the PLC byte); CBR padding.
+  - The ctls, with libopus's bounds: `opus_encoder_set_bitrate` (500 to 750 kbit/s a channel,
+    `OPUS_AUTO`, `OPUS_BITRATE_MAX`), `_vbr`, `_vbr_constraint`, `_complexity`, `_max_bandwidth`,
+    `_bandwidth`, `_force_channels`, `_signal`, `_dtx`, `_inband_fec` (0 to 2), `_packet_loss`,
+    `_lsb_depth`, `_expert_frame_duration`, `_prediction_disabled`; `opus_encoder_reset`
+    (`OPUS_RESET_STATE`: the fields libopus clears, the SILK encoder re-initialised in place, FEC's
+    last decision kept as libopus keeps it).
+  - The getters: `opus_encoder_final_range`, `opus_encoder_lookahead` (6.5 ms, an Ogg Opus
+    pre-skip), `opus_encoder_bandwidth`, `opus_encoder_bitrate`, `opus_encoder_in_dtx`.
+- **SILK at complexity 2 to 10**: `silk_nsq_del_dec` (libopus `NSQ_del_dec.c`; fixed point, exact):
+  - two to four states, each with its dither seed, shaping and LTP histories and running
+    rate/distortion; the winner's decisions out 40 samples late (fewer under a short lag), states
+    that parted from it penalised, the worst first choice replaced by the best second one;
+  - the shaping filter warped by an all-pass chain (complexity 4 and up);
+  - the states rescaled when the gain changes; the delayed decisions reset at the third subframe
+    of a voiced frame without NLSF interpolation, where the LTP state is re-whitened.
+  - `_sk_nsq_wrapper` picks it as libopus does (more than one state, or warped shaping);
+    `silk_encoder_new`, `_new_api` and `_new_channels` take complexity 0 to 10.
+- **SILK's per-packet control** (`silk_control_encoder`):
+  - `silk_control_audio_bandwidth`'s state machine: a transition down (the low-pass from full band
+    to the next rate over 128 frames), `switchReady` with the budget's cut, the switch on
+    `opusCanSwitch`, a transition up (256 frames from the switch), a transition reversed;
+  - `silk_LP_variable_cutoff` (five elliptic biquads interpolated, `silk_biquad_alt`);
+  - `silk_setup_resamplers`: at a new internal rate the history goes to int16, up to the input's
+    rate through libopus's decoder-side resampler (`_sk_dec_resampler_new`, any rate pair) and down
+    through the new encoder-side one, which leaves that resampler as if it had run all along;
+  - packet-length changes, complexity and loss per packet (`silk_setup_fs`, `_complexity`,
+    `_LBRR`);
+  - the control fields of libopus's `silk_EncControlStruct` (`_SKX_`: maximum, minimum and desired
+    internal rates, complexity, `opusCanSwitch`, `switchReady`, `allowBandwidthSwitch` from the
+    speech activity against a threshold rising over 5 s, the activity, `reducedDependency`).
+- `silk_encoder_reset`: `silk_InitEncoder` in place, nothing allocated.
+- **Tools**:
+  - `scripts/silkref/opusenc.c`: libopus's `opus_encode_float` with `RESTRICTED_SILK`, every ctl,
+    per-packet frame, rate and channel schedules, resets; writes the packets and each one's final
+    range and getters. The generator builds it against its instrumented libopus; `scripts/interop.sh`
+    against the system's (`build/opusenc-ref`; a libopus before 1.6, without `RESTRICTED_SILK`, runs
+    `OPUS_APPLICATION_AUDIO` forced to SILK at wideband at most).
+  - The interop CLI's `opusenc`, with the same keys.
+  - `scripts/silkref/patch.py` records `silk_NSQ_del_dec` (its C, SSE4.1 and AVX2 builds), and
+    `nsqprobe.c` calls it six times on inputs no encoder run produces.
+  - The generator builds libopus without intrinsics (its C code: the AVX2 float inner product sums
+    in another order, so libopus's own float output depends on the CPU there).
+  - The `opusenc` interop group (35 cases).
+  - The `opus_encode` fuzz target (`fuzz/fuzz_decode.cyr`).
+  - Benchmarks `silk_nsq_del_dec_20ms_wb`, `opus_encode_1sec_48k_silk24k_cx9`,
+    `opus_encode_1sec_48k_silk24k_cx1`, `opus_encode_1sec_48k_stereo40k_cx9`.
+
+### Changed
+
+- The SILK encoder's states start unset (`silk_enc_state_alloc`), and the first packet's control sets
+  their internal rate and packet length, as libopus's `silk_InitEncoder` and `silk_control_encoder`
+  do. `silk_enc_state_new(fs_kHz, nb_subfr)` still returns a state set up at that rate.
+- The retired 2.5.x encoder (`src/opus_legacy.cyr`, test-only, not in the bundle) gave up the names
+  libopus's API has: its `opus_encode`, `opus_encode_vbr`, `opus_encode_frame*`, `opus_encoder_*` and
+  `OPUS_SIGNAL_*` are `opus_legacy_*` now.
+- `dist/shravan.cyr` includes `src/opus_enc.cyr`.
+
+### Verified
+
+- **`test_opus_enc_vs_libopus`**: 6,391 packets in 96 configurations, each packet's length, bytes,
+  final range and the getters after it (bandwidth, in-DTX, bit rate) libopus's, by hash (the
+  generator compares the bytes too). One word a packet: the set takes 25 KB of the suite's string
+  data, now at 93% of the compiler's 2 MB. Between them:
+  - wideband down to mediumband and narrowband through SILK's transition and back up; a transition
+    reversed; an upward one ending inside a 60 ms packet; switches allowed often (white noise) and
+    rarely (the comb); CBR's budget cut at `switchReady`; the side channel held at the mid's rate;
+  - stereo to mono and back, by rate and forced, `toMono` inside a multi-frame packet;
+  - FEC by rate and loss, the bandwidth lowered for it and raised again, its hysteresis from both
+    sides, its 25% cap, the restore, 5% loss lowering nothing, the start at fullband capped to
+    wideband during a transition;
+  - DTX on digital silence and SILK's own (over a faint floor; anti-phase, the side active under a
+    silent mid), at 20 and 60 ms, inside 100 ms CBR packets, a 120 ms packet half silent;
+  - every frame size, codes 0 to 3, VBR and CBR, padding of exactly 255, `OPUS_BITRATE_MAX` padded to
+    9,000 bytes, the two-frame header's room, the expert frame duration from 10 to 60 ms;
+  - the PLC packets before and after SILK starts, at both rate limits, one-byte buffers;
+  - `OPUS_RESET_STATE` (FEC's last decision kept; the switch timer cleared);
+  - every complexity 0 to 10, every input rate, the bandwidth ctls, wideband forced into buffers too
+    small for it, voice and music at the stereo and bandwidth thresholds, LSB depth, prediction
+    disabled, bit rate auto and max; and decisions one rate either side of each threshold (the
+    equivalent rate's complexity, CBR, loss and 10 ms terms, CBR's whole bytes).
+  - Long runs are stored to their exact start (`total=`), past every mutation they catch.
+- **`test_silk_enc_nsq_dd_vs_libopus`**: libopus's own `silk_NSQ_del_dec` on six probe calls (two to
+  four states, warped and not, shaping orders 14 to 24, voiced and unvoiced, the decisions reset at
+  either subframe, the rate/distortion branch at Lambda over 2, residuals past both limits): pulses,
+  the winning seed and the whole state after, exactly.
+- **`test_opus_enc_api`**, **`test_opus_enc_hostile`**: every ctl's bounds, the frame sizes and buffers
+  libopus refuses, the getters, digital silence at exactly 2^-lsb and with NaN first and last, a NaN
+  frame and a 1e6 one cleared alike, f64 input coded as its f32 rounding, `OPUS_RESET_STATE` in place
+  giving a new encoder's packets, memory flat over 2 s of every frame size, every frame size decoding
+  to its length; NaN, infinities, huge, denormal, DC and square input with every ctl changing at
+  random packet by packet, every packet within its buffer and the stream decoding to finite audio.
+- **Beyond the suite** every packet that parts from libopus's traces to a float near-tie: a shaping
+  coefficient (`AR_Q13`, the low-frequency shaping or the harmonic gain) within 0.005 of a rounding tie
+  in libopus's single precision, every other input equal; the packets after follow. A 10 s bandwidth
+  switching run matches for its first 474 packets, the 1 s runs mostly to the end.
+- **Real audio** (Opus test vectors 1, 5 and 9, 10 s each, from 48 kHz), libopus decoding, against
+  libopus's own `opus_encode` with `RESTRICTED_SILK`: within 0.003 in correlation at 12 to 40 kbit/s,
+  mono and stereo, complexity 1, 5, 9 and 10, 20 to 60 ms, CBR (0.9948 against 0.9946 on test
+  vector 1, mono at 24 kbit/s; 0.9910/0.9896 against 0.9910/0.9895 stereo at 40), and the same bit
+  rates. With FEC and every fifth packet lost the two land within 0.013 of each other either way
+  (both encoders code LBRR in the same 393 of 500 packets; shravan recovers better with every third
+  or seventh lost).
+- **Interop sweep**, 1,157 of 1,157 (a default libopus build); the new `opusenc` group's 35, against
+  `RESTRICTED_SILK` and against the AUDIO fallback alike: correlation within 0.0015 of libopus's own
+  encoder on pink noise, the sweep's tones and the voiced source, 8 to 48 kHz, 10 to 120 ms, VBR and
+  CBR, complexity 1 to 10, mono and stereo, at libopus's lag (the lookahead, 6.5 ms) and bits; FEC
+  with every fifth packet lost recovering 0.92–0.96 from 0.80–0.86 concealed (libopus's own
+  0.88–0.97); DTX on silence between bursts leaving out the packets libopus's does; a rate falling to
+  8 kbit/s and back moving the bandwidth down and up at libopus's packets (235 and 516).
+- **Mutations**: 211 tried, 176 caught: 118 at once, 58 by inputs the search found (a rate either
+  side of each threshold, found by emulating the integer decision; bandwidth switching on white noise,
+  which lets SILK switch often; 60 ms packets for the upward transition's end; anti-phase stereo;
+  CBR at 19.4 kbit/s). 29 are equivalent, each with its reason: equal thresholds masking a raised one,
+  medium band never surviving its rewrite to wideband, single-precision rounding repeated by
+  `FLOAT2INT16`, budgets and states that can never bind or are overwritten before they are read, the
+  API's own bounds, and the code `RESTRICTED_SILK` never reaches (CELT and hybrid PLC packets, VOIP's
+  high-pass smoother, SILK over its budget). 4 stay below observability: 1-LSB changes to two
+  low-pass coefficients (2^24 changes are caught), a stale low-pass state of a few LSB under the
+  quantiser's step, and a trailing zero after a 3-byte payload. 2 did not compile; one, rewritten,
+  was caught, the other is in a PLC branch `RESTRICTED_SILK` never reaches. The search found one fidelity gap: the bandwidth thresholds'
+  interpolation shifted logically where libopus shifts arithmetically (libopus's tables never make
+  the term negative; it is `sar` now).
+- **Fuzz**: `./fuzz/run.sh 90000`, and again with `--poison`, clean, cold starts included. The
+  poison mode's first pass caught an overrun in the new target's ninth batch: each frame of an 80 to
+  120 ms packet was coded into a 1,280-byte scratch, but its budget, behind a buffer past 7,656 bytes
+  or under CBR at a high rate, runs to thousands of bytes, and its range coder clears all of its
+  storage at the end, as libopus's does. The packets were right (`o_maxbig` was byte-exact: the bytes
+  past were the frame's own dead scratch); the memory was not. Each frame's scratch is its budget now
+  (at most 11,250 bytes, 1.5 Mbit/s for 60 ms), and the target runs those extremes first, every run;
+  with the fix reverted the poison build trips on them at once. (A cold start then tripped the
+  target's own bound: CBR at `OPUS_BITRATE_MAX` pads a multi-frame packet to its whole buffer, past
+  1,276 × 6 bytes, as libopus does and `o_maxbig` checks; the bound is the buffer now.)
+- **Memory**: 9,000 packets of one stereo encoder, its rate, complexity, FEC, loss, DTX, VBR, channels
+  and frame size changing every 50 and resets among them: after the packet arena's growth to the
+  largest frame, nothing allocated.
+
+### Performance
+
+Pinned to one core, 2.12.2 and 2.12.3 alternating in one session, three rounds each (medians):
+
+| Benchmark | 2.12.2 | 2.12.3 | Real-time multiple |
+|-----------|--------|--------|--------------------|
+| `opus_encode_1sec_48k_silk24k_cx9` (new: 1 s at 48 kHz, 24 kbit/s, libopus's default complexity) | | 185.3 ms | ~5.4× |
+| `opus_encode_1sec_48k_silk24k_cx1` (new: the same at complexity 1) | | 55.0 ms | ~18× |
+| `opus_encode_1sec_48k_stereo40k_cx9` (new: stereo at 40 kbit/s, complexity 9) | | 364.3 ms | ~2.7× |
+| `silk_nsq_del_dec_20ms_wb` (new: the delayed-decision quantiser, four states, warped) | | 2.0 ms | |
+| `silk_nsq_20ms_wb` | 387.9 µs | 389.4 µs (+0.4%) | |
+| `silk_encode_1sec_wb_voiced20k` | 42.2 ms | 42.1 ms (−0.2%) | ~24× |
+| `silk_encode_1sec_48k_wb_fec20k` | 72.1 ms | 72.0 ms (−0.2%) | ~14× |
+| `silk_encode_1sec_wb_stereo32k` | 75.4 ms | 75.0 ms (−0.6%) | ~13× |
+| `silk_encode_1sec_wb_vbr20k` | 31.3 ms | 31.6 ms (+1.0%) | ~32× |
+| `silk_encode_1sec_wb_cbr12k` | 70.3 ms | 70.6 ms (+0.4%) | ~14× |
+| `silk_lpc_analysis_20ms_wb` | 257.9 µs | 265.6 µs (+3.0%) | |
+
+The per-packet control costs the SILK benches nothing measurable. Complexity 9 costs 3.4× complexity 1
+through the whole encoder: the delayed-decision quantiser is 5.2× the plain one, and four states of it
+take about half of the complexity 9 encode; the rest is the pitch search at its full complexity, the
+24th-order warped shaping analysis and the interpolation search over all NLSF survivors. That
+quantiser calls a helper for each multiply and saturation, as the stereo stage did before 2.12.2
+inlined it; it is the place to look for speed. `silk_lpc_analysis_20ms_wb` creates an encoder state
+every run, which is now set up the way the first packet's control does it. Every other benchmark moved
+between −0.7% and +1.4%, which is noise.
+
 ## [2.12.2] - 2026-11-17
 
 **SILK encode: stereo.** libopus's two-channel `silk_Encode` arrives: left and right become an adaptive

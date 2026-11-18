@@ -12,9 +12,11 @@ shravan's stages can be fed libopus's own inputs (src/silk_tests.cyr), and
 (int_signal), which shravan's encoder must reproduce byte for byte; and
 (2.12.2) stereo: silk_stereo_LR_to_MS on chosen frames, and libopus's stereo
 packets for inputs the suite builds (stereo_signal), stored as each packet's
-length and FNV-1a hash. With build/interop-cli present (scripts/interop.sh
-builds it) the generator checks that shravan's packets are libopus's, bytes
-and all.
+length and FNV-1a hash; and (2.12.3) libopus's opus_encode with
+OPUS_APPLICATION_RESTRICTED_SILK (scripts/silkref/opusenc.c), a hash a packet
+over its bytes, final range and the encoder's getters. With build/interop-cli
+present (scripts/interop.sh builds it) the generator checks that shravan's
+packets are libopus's, bytes and all.
 
 Each field holds one frame per segment, the frame's values packed as
 little-endian 32-bit words (ints, or floats as their f32 bit patterns; packets as
@@ -59,7 +61,13 @@ def build(src, work):
             "https://github.com/xiph/opus.git", tree)
     run(sys.executable, "-E", "-P", os.path.join(HERE, "patch.py"), tree)
     bld = os.path.join(work, "build")
-    run("cmake", "-S", tree, "-B", bld, "-DCMAKE_BUILD_TYPE=Release", "-DOPUS_DRED=OFF", "-DOPUS_OSCE=OFF")
+    # without intrinsics: libopus's C code, the portable reference. Its x86
+    # builds swap in SSE4.1/AVX2 versions where opus_encoder_create selects
+    # them (opus_select_arch): bit-exact for the fixed-point ones, but the AVX2
+    # silk_inner_product_FLP sums in another order, so libopus's own float
+    # output depends on the CPU there.
+    run("cmake", "-S", tree, "-B", bld, "-DCMAKE_BUILD_TYPE=Release", "-DOPUS_DRED=OFF", "-DOPUS_OSCE=OFF",
+        "-DOPUS_DISABLE_INTRINSICS=ON")
     run("cmake", "--build", bld, "-j%d" % (os.cpu_count() or 4))
     exe = os.path.join(work, "silkref")
     inc = []
@@ -70,7 +78,10 @@ def build(src, work):
     probe = os.path.join(work, "nsqprobe")
     run("cc", "-O2", "-DOPUS_BUILD", "-DUSE_ALLOCA", *inc, "-o", probe,
         os.path.join(HERE, "nsqprobe.c"), os.path.join(bld, "libopus.a"), "-lm")
-    return exe, probe
+    opusenc = os.path.join(work, "opusenc")
+    run("cc", "-O2", "-I", os.path.join(tree, "include"), "-o", opusenc,
+        os.path.join(HERE, "opusenc.c"), os.path.join(bld, "libopus.a"), "-lm")
+    return exe, probe, opusenc
 
 
 def white(fs, seconds, seed):
@@ -556,6 +567,206 @@ def rate_list(spec):
         out += [int(r), int(c or 1)]
     return out
 
+# 2.12.3: libopus's opus_encode (scripts/silkref/opusenc.c, OPUS_APPLICATION_
+# RESTRICTED_SILK) on inputs the suite builds (int_signal mono, stereo_signal
+# stereo), each packet stored as one word: the FNV-1a hash (low half) of its
+# length, bytes, final range, and the getters after it (bandwidth, in-DTX,
+# bit rate), as u32le words. name, kind, seed, rate, channels, seconds,
+# opusenc's keys, extra (prm, and stereo_signal's rkind, rseed, rg, rsh, rq).
+# Each config's seed is one whose packets are libopus's exactly; total= keeps
+# the long runs to their exact start (shravan's float stages round as
+# libopus's single precision ones only to within a near-tie, and a tie
+# rounding the other way changes the packets after it).
+#   o_bw: wideband down to mediumband through the 5 s low-pass transition
+#   (switchReady, opusCanSwitch) and back up (the transition from the other
+#   side); o_st, o_st60, o_chans, o_force1: stereo to mono (toMono's two
+#   frames) and back, by rate and forced; o_fec*: FEC by rate and loss, the
+#   bandwidth lowered for it and raised again (decide_fec's hysteresis); o_dtx,
+#   o_cx6d: DTX on digital silence (this layer's), o_sdtx: SILK's; o_f10 to
+#   o_f120c, o_mix, o_dur*: every frame size, 80 to 120 ms repacketised as code
+#   1, 2 and 3, CBR padded, the expert frame duration; o_plc60, o_tiny: the
+#   PLC packets (o_plcsw*: once SILK runs); o_reset*: OPUS_RESET_STATE (FEC's
+#   last decision kept); o_cx*: every complexity, the delayed-decision quantiser
+#   from 2 (warped from 4).
+OPUS = [
+    ("o_bw", 6, 1, 48000, 1, 10.0, ["cx=1", "rates=20000*50,8000*250,20000*200", "total=470"], {}),
+    ("o_st", 6, 1, 48000, 2, 4.0, ["cx=1", "rates=40000*50,12000*50,40000*50,12000*50"], {}),
+    ("o_st60", 6, 1, 24000, 2, 4.08, ["cx=1", "ms=60", "rates=40000*17,12000*17,40000*17,12000*17"], {}),
+    ("o_chans", 6, 1, 48000, 2, 3.0, ["cx=1", "bitrate=40000", "chans=aaaa1111222aaa"], {}),
+    ("o_force1", 6, 2, 48000, 2, 1.0, ["cx=1", "bitrate=40000", "force=1"], {}),
+    ("o_fec", 6, 5, 48000, 1, 2.0, ["cx=1", "bitrate=24000", "fec=1", "loss=10", "total=75"], {}),
+    ("o_fecbw", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=14000", "fec=1", "loss=20"], {}),
+    ("o_fecsw", 6, 2, 16000, 1, 4.0, ["cx=1", "fec=2", "loss=4", "rates=24000*50,15000*50,24000*50,15000*50"], {}),
+    ("o_dtx", 6, 3, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "dtx=1"], dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_sdtx", 6, 1, 16000, 1, 3.0, ["cx=1", "bitrate=16000", "dtx=1"], dict(prm=(14000, 100, 180, 1, 0))),
+    ("o_f10", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "ms=10"], {}),
+    ("o_f40", 6, 2, 48000, 2, 2.0, ["cx=1", "bitrate=36000", "ms=40"], {}),
+    ("o_f60", 6, 1, 12000, 1, 2.04, ["cx=1", "bitrate=14000", "ms=60"], {}),
+    ("o_f80", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=20000", "ms=80"], {}),
+    ("o_f100", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=20000", "ms=100"], {}),
+    ("o_f120c", 6, 1, 48000, 1, 2.04, ["cx=1", "bitrate=20000", "ms=120", "vbr=0"], {}),
+    ("o_f100d", 6, 4, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "ms=100", "dtx=1", "vbr=0", "total=23"],
+     dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_mix", 6, 1, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "frames=20,10,40,60,20,120,80,100"], {}),
+    ("o_dur", 6, 1, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "ms=60", "dur=5003"], {}),
+    ("o_dur40", 6, 1, 16000, 1, 3.0, ["cx=1", "bitrate=20000", "ms=120", "dur=5005", "vbr=0"], {}),
+    ("o_cbr", 6, 3, 16000, 2, 2.0, ["cx=1", "bitrate=30000", "vbr=0", "ms=40"], {}),
+    ("o_nb", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "maxbw=nb"], {}),
+    ("o_mb", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "bw=mb"], {}),
+    ("o_pred", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "pred=1"], {}),
+    ("o_lsb8", 6, 2, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "lsb=8"], dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_fs8", 6, 1, 8000, 1, 0.4, ["cx=1", "bitrate=20000"], {}),
+    ("o_fs24v", 6, 1, 24000, 2, 1.0, ["cx=1", "bitrate=32000", "vbrc=0"], {}),
+    ("o_tiny", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=20000", "maxbytes=2"], {}),
+    ("o_plc60", 6, 1, 48000, 1, 1.02, ["cx=1", "bitrate=2000", "ms=60", "vbr=0"], {}),
+    ("o_max", 6, 1, 48000, 1, 1.0, ["cx=1", "bitrate=max", "maxbytes=200"], {}),
+    ("o_auto", 6, 6, 16000, 1, 1.0, [], {}),
+    ("o_reset", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=29800", "fec=1", "loss=8", "reset=13"], {}),
+    ("o_resets", 6, 2, 48000, 2, 2.0, ["cx=1", "bitrate=30000", "reset=17", "chans=aaa1"], {}),
+    ("o_cx0", 6, 1, 48000, 1, 1.0, ["cx=0", "bitrate=20000"], {}),
+    ("o_cx2", 6, 1, 48000, 1, 1.0, ["cx=2", "bitrate=20000"], {}),
+    ("o_cx2_10", 6, 1, 16000, 1, 1.0, ["cx=2", "bitrate=16000", "ms=10"], {}),
+    ("o_cx3", 6, 3, 16000, 2, 1.0, ["cx=3", "bitrate=32000", "ms=40"], {}),
+    ("o_cx4", 6, 2, 48000, 1, 1.0, ["cx=4", "bitrate=20000"], {}),
+    ("o_cx4f", 6, 2, 48000, 1, 1.0, ["cx=4", "bitrate=24000", "fec=1", "loss=12"], {}),
+    ("o_cx5", 6, 2, 48000, 1, 1.0, ["cx=5", "bitrate=20000"], {}),
+    ("o_cx6", 6, 2, 48000, 1, 1.0, ["cx=6", "bitrate=20000"], {}),
+    ("o_cx6s", 6, 1, 24000, 2, 1.0, ["cx=6", "bitrate=36000", "ms=40"], {}),
+    ("o_cx6d", 6, 7, 16000, 1, 3.0, ["cx=6", "bitrate=16000", "dtx=1"], dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_cx7", 6, 1, 12000, 1, 1.0, ["cx=7", "bitrate=16000", "ms=10"], {}),
+    ("o_cx8", 6, 2, 12000, 1, 1.0, ["cx=8", "bitrate=16000"], {}),
+    ("o_cx9c", 6, 2, 48000, 1, 1.0, ["bitrate=32000", "vbr=0"], {}),
+    ("o_cx9s", 6, 4, 16000, 2, 1.0, ["bitrate=28000", "fec=1", "loss=5"], {}),
+    ("o_cx10", 6, 1, 48000, 1, 1.0, ["cx=10", "bitrate=24000"], {}),
+    ("o_cx10s", 6, 5, 48000, 2, 1.0, ["cx=10", "bitrate=40000"], {}),
+    # PLC packets once SILK runs (60 to 120 ms, VBR and padded), the 40 ms one
+    # before it (two empty frames), one-byte buffers; libopus's force_channels
+    # left at 1 after a multi-frame packet's toMono (it stays mono); frames
+    # over 251 bytes in two-frame packets; CBR at OPUS_BITRATE_MAX
+    ("o_plcsw", 6, 1, 48000, 1, 4.8, ["cx=1", "frames=60,120,80,100", "rates=20000*8,600*8"], {}),
+    ("o_plcswc", 6, 1, 48000, 1, 4.8, ["cx=1", "vbr=0", "frames=60,120,80,100", "rates=20000*8,600*8"], {}),
+    ("o_plc40", 6, 1, 48000, 1, 0.8, ["cx=1", "bitrate=2000", "ms=40", "vbr=0"], {}),
+    ("o_tiny1", 6, 1, 48000, 1, 1.8, ["cx=1", "maxbytes=1", "frames=60,120"], {}),
+    ("o_st120", 6, 1, 48000, 2, 3.6, ["cx=1", "ms=120", "rates=40000*3,12000*3,40000*3,12000*3,40000*3"], {}),
+    ("o_big80", 6, 3, 48000, 2, 2.0, ["cx=1", "bitrate=max", "ms=80", "maxbytes=3000"], {}),
+    ("o_maxc", 6, 1, 48000, 1, 2.0, ["cx=1", "bitrate=max", "ms=100", "vbr=0", "maxbytes=600"], {}),
+    # decisions at their thresholds, one rate a side of each: the equivalent
+    # rate's complexity, CBR, loss and 10 ms terms (the first frame's
+    # bandwidth, or its channels); the stereo decision for voice, music and
+    # auto, both ways of its hysteresis; the bandwidth's hysteresis for voice
+    # (o_bwhys, after wideband); FEC's hysteresis from no FEC, its loss cap at
+    # 25%, the bandwidth it restores where none affords FEC, none lowered at 5%
+    # loss, and its start at fullband capped to wideband while SILK's low-pass
+    # transition runs (o_fecfb); the expert duration from 60 ms up; DTX on
+    # silence a packet sooner than SILK's at 60 ms; the two-frame header's
+    # size in the budget; CBR padding of exactly 255; OPUS_BITRATE_MAX padded
+    # past 7656 bytes
+    ("o_eqcx", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=12250"], {}),
+    ("o_eqcxs", 6, 1, 48000, 2, 0.5, ["cx=1", "bitrate=17700"], {}),
+    ("o_eqvbr", 6, 1, 48000, 2, 0.5, ["cx=1", "bitrate=19600", "vbr=0"], {}),
+    ("o_eqloss", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=14400", "loss=10"], {}),
+    ("o_eqfr", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=15400", "ms=10"], {}),
+    ("o_voice", 6, 1, 48000, 2, 0.2, ["cx=1", "bitrate=19231", "signal=voice"], {}),
+    ("o_music", 6, 1, 48000, 2, 0.2, ["cx=1", "bitrate=17650", "signal=music"], {}),
+    ("o_sthr", 6, 1, 48000, 2, 0.2, ["cx=1", "bitrate=18000"], {}),
+    ("o_shys", 6, 1, 48000, 2, 0.2, ["cx=1", "bitrate=17950"], {}),
+    ("o_shys2", 6, 1, 48000, 2, 0.4, ["cx=1", "rates=8000*10,20050*10"], {}),
+    ("o_bwhys", 6, 6, 48000, 1, 8.0, ["cx=1", "signal=voice", "rates=20000*50,11264*350", "total=290"], {}),
+    ("o_fech0", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=30400", "fec=1", "loss=10"], {}),
+    ("o_fecl25", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=21200", "fec=1", "loss=26"], {}),
+    ("o_fecrest", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=16000", "fec=1", "loss=20"], {}),
+    ("o_fecle5", 6, 1, 48000, 1, 0.5, ["cx=1", "bitrate=25100", "fec=1", "loss=5"], {}),
+    ("o_fecfb", 6, 5, 48000, 1, 8.0, ["cx=1", "fec=1", "loss=3", "rates=8000*100,35000*300", "total=138"], {}),
+    ("o_dur60", 6, 1, 48000, 1, 1.2, ["cx=1", "bitrate=20000", "ms=120", "dur=5006"], {}),
+    ("o_dtx60", 6, 2, 48000, 1, 3.0, ["cx=1", "bitrate=20000", "ms=60", "dtx=1"], dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_m80cap", 6, 1, 48000, 1, 0.8, ["cx=1", "ms=80", "bitrate=64000", "maxbytes=101"], {}),
+    ("o_pad255", 6, 1, 48000, 1, 0.2, ["cx=1", "bitrate=max", "vbr=0", "maxbytes=498"], {}),
+    ("o_maxbig", 6, 1, 48000, 1, 0.48, ["cx=1", "ms=120", "vbr=0", "bitrate=max", "maxbytes=9000"], {}),
+    # and what the mutation search found no config reaching: a 120 ms packet
+    # half silent (each frame's own silence); wideband forced at a buffer too
+    # small for it (the effective rate's caps, 10 ms's two thirds); SILK's DTX
+    # (stereo over a faint floor; anti-phase, the side active under a silent
+    # mid); CBR's rate as its whole bytes (at the stereo threshold); high
+    # pitch at 8 kHz (the decision delay under the lag, voiced and after);
+    # SILK's bandwidth state machine with switches allowed often (white noise):
+    # switchReady at the transition's end, CBR's budget cut for it, a
+    # transition reversed, an upward one ending inside a 60 ms packet, the side
+    # channel held at the mid's rate when it starts mid-transition, and the
+    # switch timer cleared by OPUS_RESET_STATE
+    ("o_f120g", 6, 1, 48000, 1, 3.0, ["cx=1", "ms=120", "bitrate=20000", "total=4"], dict(prm=(14000, 100, 180, 3, 0))),
+    ("o_emr8", 6, 1, 48000, 1, 0.4, ["cx=1", "bw=wb", "bitrate=7600", "vbr=0"], {}),
+    ("o_emr7", 6, 1, 48000, 1, 0.4, ["cx=1", "bw=wb", "bitrate=6800", "vbr=0"], {}),
+    ("o_emr10", 6, 1, 48000, 1, 0.4, ["cx=1", "bw=wb", "bitrate=11200", "vbr=0", "ms=10"], {}),
+    ("o_sdtxs", 6, 1, 16000, 2, 3.0, ["cx=1", "bitrate=24000", "dtx=1", "total=100"],
+     dict(prm=(14000, 100, 180, 3, 0), rkind=1, rg=8000, rsh=8)),
+    ("o_sdtxa", 6, 1, 16000, 2, 3.0, ["cx=1", "bitrate=24000", "dtx=1", "total=60"], dict(rkind=1, rg=-16384, rsh=10)),
+    ("o_cbrr", 6, 1, 48000, 2, 0.4, ["cx=1", "vbr=0", "bitrate=19400"], {}),
+    ("o_hp8", 6, 1, 8000, 1, 1.0, ["cx=5", "bitrate=14000", "total=25"], dict(prm=(14000, 200, 300, 0, 0))),
+    ("o_hp8u", 6, 1, 8000, 1, 2.0, ["cx=5", "bitrate=14000", "total=52"], dict(prm=(14000, 200, 300, 1, 0))),
+    ("o_lprev", 6, 1, 48000, 1, 4.0, ["cx=1", "rates=20000*25,8000*40,20000*135", "total=100"],
+     dict(prm=(14000, 100, 180, 1, 0))),
+    ("o_lp60", 3, 5, 48000, 1, 9.0, ["cx=1", "ms=60", "rates=7000*10,20000*140", "total=105"], {}),
+    ("o_bwwn", 3, 1, 48000, 1, 10.0, ["cx=1", "rates=20000*25,6000*300,20000*175", "total=175"], {}),
+    ("o_bwcbr", 3, 1, 48000, 1, 10.0, ["cx=1", "vbr=0", "rates=20000*25,10000*300,20000*175", "total=180"], {}),
+    ("o_bwup", 6, 1, 48000, 1, 10.0, ["cx=1", "vbr=0", "rates=20000*25,6000*300,20000*175", "total=339"],
+     dict(prm=(14000, 100, 180, 1, 0))),
+    ("o_stbw", 6, 2, 48000, 2, 10.0, ["cx=1", "rates=30000*25,9000*300,30000*175", "chans=" + "2" * 30 + "1" * 10,
+                                     "total=100"], dict(prm=(14000, 100, 180, 1, 0))),
+    ("o_rstbw", 6, 3, 48000, 1, 9.0, ["cx=1", "rates=20000*240,8000*210", "reset=230", "total=310"], {}),
+    # the PLC packet's rate limits (3 x 8 bits a frame; 2.4 kbit/s past 20
+    # ms), and voice's bandwidth thresholds (every entry interpolated)
+    ("o_plc1k", 6, 1, 48000, 1, 0.4, ["cx=1", "bitrate=1000"], {}),
+    ("o_plc2k2", 6, 1, 48000, 1, 0.6, ["cx=1", "ms=60", "bitrate=2200"], {}),
+    ("o_bwvoice", 6, 1, 48000, 1, 0.4, ["cx=1", "signal=voice", "bitrate=12160"], {}),
+]
+
+OPUS_UNSET = -99999
+OPUS_BW = {"nb": 1101, "mb": 1102, "wb": 1103, "swb": 1104, "fb": 1105, "auto": -1000}
+# opusenc's keys in the order the suite reads them: the ctls (bitrate, vbr,
+# complexity, max bandwidth, bandwidth, force channels, signal, DTX, FEC, loss,
+# LSB depth, prediction disabled, VBR constraint, expert frame duration), then
+# the buffer, frame ms and the reset period
+OPUS_KEYS = ("bitrate", "vbr", "cx", "maxbw", "bw", "force", "signal", "dtx", "fec", "loss", "lsb", "pred", "vbrc",
+             "dur", "maxbytes", "ms", "reset")
+
+
+def opus_keys(keys):
+    """opusenc's keys as the suite's words (OPUS_UNSET where not given), and the
+    frame, rate and channel schedules."""
+    kv = dict(k.split("=", 1) for k in keys)
+    words = []
+    for k in OPUS_KEYS:
+        v = kv.get(k)
+        if v is None:
+            words.append({"maxbytes": 1276 * 6, "ms": 20, "reset": 0}.get(k, OPUS_UNSET))
+        elif k == "bitrate":
+            words.append({"auto": -1000, "max": -1}.get(v) or int(v))
+        elif k in ("maxbw", "bw"):
+            words.append(OPUS_BW[v])
+        elif k == "force":
+            words.append(-1000 if v == "auto" else int(v))
+        elif k == "signal":
+            words.append({"voice": 3001, "music": 3002}.get(v, -1000))
+        else:
+            words.append(int(v))
+    frames = [int(f) for f in kv["frames"].split(",")] if "frames" in kv else []
+    chans = [-1000 if c == "a" else int(c) for c in kv.get("chans", "")]
+    return words, frames, rate_list(kv.get("rates", "")), chans
+
+
+def opus_aux(path):
+    """opusenc's .rng file: per packet the final range, bandwidth, in-DTX, bit rate."""
+    d = open(path, "rb").read()
+    return [struct.unpack_from("<4I", d, i) for i in range(0, len(d), 16)]
+
+
+def opus_hash(pkt, aux):
+    """The suite's word for a packet: FNV-1a over its length, bytes and the
+    four words after it, low half."""
+    h = fnv_bytes(struct.pack("<I", len(pkt)) + pkt + struct.pack("<4I", *aux))
+    return struct.unpack("<i", struct.pack("<I", h & 0xFFFFFFFF))[0]
+
+
 class Writer:
     def __init__(self):
         self.parts = []
@@ -645,7 +856,7 @@ def main():
     pk_sets = []
     cli = os.path.join(ROOT, "build", "interop-cli")
     with tempfile.TemporaryDirectory() as work:
-        exe, probe = build(args.opus_src, work)
+        exe, probe, opusenc = build(args.opus_src, work)
         for name, kind, seed, fs, ms, cx, br, cbr, total, cap, *opt in PACKETS:
             extra = opt.pop() if opt and isinstance(opt[-1], dict) else {}
             loss = opt[0] if opt else 0
@@ -761,11 +972,84 @@ def main():
         for k in ("full", "reduced", "collapse", "midonly", "taper", "tomono", "minrate", "sidereset", "cond1",
                   "lbrr_both", "lbrr_mid", "lbrr_side", "dtx", "mono", "switch", "sidesat", "outhi", "outlo"):
             require(k in cover, "stereo set: no run reaches " + k)
+        # 2.12.3: the Opus layer
+        op_sets, ocover = [], set()
+        for name, kind, seed, fs, ch, secs, keys, ex in OPUS:
+            prm = ex.get("prm", COMB)
+            st_args = [ex.get(k, d) for k, d in (("rkind", 0), ("rseed", 5), ("rg", 8192), ("rsh", 1), ("rq", 0))]
+            n = int(fs * secs)
+            x = int_signal(kind, fs, n, seed, prm) if ch == 1 else stereo_signal(kind, seed, fs, n, prm, *st_args)
+            f64 = os.path.join(work, name + ".f64")
+            (x.astype(np.float64) / 32768).astype("<f8").tofile(f64)
+            pk = os.path.join(work, name + ".opk")
+            run(opusenc, f64, pk, str(fs), str(ch), *keys)
+            pks, aux = read_packets(pk), opus_aux(pk + ".rng")
+            require(len(pks) == len(aux) and pks, name + ": packet count")
+            if os.path.exists(cli):
+                mine = os.path.join(work, name + ".oshr")
+                run(cli, "opusenc", f64, mine, str(fs), str(ch), *keys)
+                mp, ma = read_packets(mine), opus_aux(mine + ".rng")
+                diff = [i for i in range(max(len(pks), len(mp)))
+                        if i >= len(pks) or i >= len(mp) or pks[i] != mp[i] or aux[i] != ma[i]]
+                require(not diff, name + ": shravan's packets or getters %s differ from libopus's" % diff[:8])
+            words, frames, rates, chans = opus_keys(keys)
+            # what the run reaches
+            ms_list = frames or [words[OPUS_KEYS.index("ms")]]
+            dur = words[OPUS_KEYS.index("dur")]
+            if dur != OPUS_UNSET and dur != 5000:
+                ms_list = [{5003: 10, 5004: 20, 5005: 40, 5006: 60}[dur]]
+            ocover.update("ms%d" % m for m in ms_list)
+            cx = words[OPUS_KEYS.index("cx")]
+            ocover.add("cx%d" % (9 if cx == OPUS_UNSET else cx))
+            ocover.add("fs%d" % fs)
+            if words[OPUS_KEYS.index("reset")]:
+                ocover.add("reset")
+            prev = None
+            for b, a in zip(pks, aux):
+                toc = b[0]
+                ocover.add("code%d" % (toc & 3))
+                if (toc & 3) == 3 and len(b) > 1:
+                    ocover.add("code3vbr" if b[1] & 0x80 else "code3cbr")
+                    if b[1] & 0x40:
+                        ocover.add("code3pad")
+                if len(b) == 1:
+                    ocover.add("toc_only")
+                if a[0] == 0 and len(b) > 1:
+                    ocover.add("range0")             # a padded PLC packet, or SILK over its budget
+                if toc >> 3 >= 12:
+                    ocover.add("plctoc")             # the PLC packet's TOC before any SILK frame
+                if a[2]:
+                    ocover.add("in_dtx")
+                ocover.add("bw%d" % a[1])
+                if (toc & 3) == 0 and toc >> 3 < 12 and len(b) > 1 and (toc >> 3) % 4 in (0, 1) and not toc & 4:
+                    if b[1] & 0x40:
+                        ocover.add("lbrr")
+                if toc >> 3 < 12:
+                    cur = ((toc >> 5) & 3, (toc >> 2) & 1)
+                    if prev is not None:
+                        if cur[0] < prev[0]:
+                            ocover.add("bwdown")
+                        if cur[0] > prev[0]:
+                            ocover.add("bwup")
+                        if cur[1] < prev[1]:
+                            ocover.add("tomono")
+                        if cur[1] > prev[1]:
+                            ocover.add("tostereo")
+                    prev = cur
+            op_sets.append(([kind, seed, fs, ch, n, len(pks), *split64(fnv_i16(x)), *prm, *st_args, *words],
+                            frames, rates, chans, [opus_hash(b, a) for b, a in zip(pks, aux)]))
+        for k in ("bwdown", "bwup", "tomono", "tostereo", "code0", "code1", "code2", "code3", "code3vbr", "code3cbr",
+                  "code3pad", "toc_only", "range0", "plctoc", "in_dtx", "lbrr", "bw1101", "bw1102", "bw1103", "reset",
+                  *("ms%d" % m for m in (10, 20, 40, 60, 80, 100, 120)), *("cx%d" % c for c in range(11)),
+                  *("fs%d" % f for f in (8000, 12000, 16000, 24000, 48000))):
+            require(k in ocover, "Opus set: no run reaches " + k)
         if not os.path.exists(cli):
             print("note: no build/interop-cli, shravan's packets not checked")
         pdump = os.path.join(work, "probe.dump")
         run(probe, env=dict(os.environ, SILKDUMP=pdump))
-        probe_calls = parse_calls(pdump)
+        probe_all = parse_calls(pdump)
+        probe_calls = [c for c in probe_all if "nsq.dd" not in c]
+        dd_calls = [c for c in probe_all if "nsq.dd" in c]
         for name, sig, fs, ms, cx, *rate in configs:
             pcm = os.path.join(work, name + ".s16")
             sig(fs, 2.0, {noise: 7, vowel: 11, white: 3}.get(sig, 1)).tofile(pcm)
@@ -884,6 +1168,24 @@ def main():
         if full:
             w.field(prefix + "_STATE", cs, lambda c: c["nsq.st_xq"] + c["nsq.st_shp"] + c["nsq.st_lpc"]
                     + c["nsq.st_ar2"] + c["nsq.st_sc"], "i")
+
+    # 2.12.3: the delayed-decision quantiser on the probe's inputs, each call
+    # from a fresh state: two to four states, warped or not, the
+    # rate/distortion branch, residuals past both limits
+    require(len(dd_calls) == 6, "NSQ_del_dec probe calls")
+    require({c["nsq.dd"][0] for c in dd_calls} == {"2", "3", "4"}, "NSQ_del_dec probe: two to four states")
+    require({c["nsq.dd"][1] != "0" for c in dd_calls} == {True, False}, "NSQ_del_dec probe: warped and not")
+    require(sum(1 for c in dd_calls if int(c["nsq.hdr"][10]) > 2048) >= 3, "NSQ_del_dec probe: Lambda over 2048")
+    pz = [int(v) for c in dd_calls for v in c["nsq.pulses"]]
+    require(max(pz) >= 30 and min(pz) <= -31, "NSQ_del_dec probe: residuals at both limits")
+    w.int("_SKD_N", len(dd_calls))
+    w.field("_SKD_HDR", dd_calls, lambda c: c["nsq.hdr"] + c["nsq.dd"] + c["nsq.seed_out"], "i")
+    w.field("_SKD_X16", dd_calls, lambda c: c["nsq.x16"], "i")
+    w.field("_SKD_PAR", dd_calls, lambda c: c["nsq.pred"] + c["nsq.ltp"] + c["nsq.harm"] + c["nsq.tilt"]
+            + c["nsq.lf"] + c["nsq.gains"] + c["nsq.pitchL"], "i")
+    w.field("_SKD_AR", dd_calls, lambda c: c["nsq.ar"], "i")
+    w.field("_SKD_PULSES", dd_calls, lambda c: c["nsq.pulses"], "i")
+    w.field("_SKD_HASH", dd_calls, lambda c: c["nsq.hash_in"] + c["nsq.hash_out"], "i")
 
     w.int("_SKQ_NSEQ", len(nseq))
     w.field("_SKQ_SEQ", [None], lambda f: [n for name, n in nseq], "i")
@@ -1067,11 +1369,22 @@ def main():
     w.field("_SKB_X1", pick, lambda f: f["x1"], "i")
     w.field("_SKB_X2", pick, lambda f: f["x2"], "i")
 
+    # 2.12.3: libopus's opus_encode, RESTRICTED_SILK (one config a segment
+    # each: its header, its frame, rate and channel schedules, and per packet
+    # one word, the hash opus_hash takes)
+    w.int("_SKO_N", len(op_sets))
+    w.field("_SKO_HDR", op_sets, lambda c: c[0], "i")
+    w.field("_SKO_FRAMES", op_sets, lambda c: c[1], "i")
+    w.field("_SKO_RATES", op_sets, lambda c: c[2], "i")
+    w.field("_SKO_CHANS", op_sets, lambda c: c[3], "i")
+    w.field("_SKO_PK", op_sets, lambda c: c[4], "i")
+
     open(OUT, "w").write("".join(w.parts))
     print("wrote %s (LPC %d, VAD %d, shape %d frames, NSQ %d + %d calls, conversion %d, pitch %d, LTP %d, HP %d, "
-          "packets %d, stereo packets %d, stereo frames %d; %d bytes)" % (OUT, len(sel), len(vad), len(shp), len(calls),
-                                     len(agg), len(conv), len(pit), len(ltp), len(hp), sum(len(c[1]) for c in pk_sets),
-                                     sum(len(c[3]) // 3 for c in st_sets), len(pick), os.path.getsize(OUT)))
+          "packets %d, stereo packets %d, stereo frames %d, Opus packets %d; %d bytes)" % (
+              OUT, len(sel), len(vad), len(shp), len(calls), len(agg), len(conv), len(pit), len(ltp), len(hp),
+              sum(len(c[1]) for c in pk_sets), sum(len(c[3]) // 3 for c in st_sets), len(pick),
+              sum(len(c[4]) for c in op_sets), os.path.getsize(OUT)))
 
 
 if __name__ == "__main__":

@@ -31,6 +31,10 @@
 #                                                  with to_mono; default ch); rates:
 #                                                  the packets' bit rates in turn,
 #                                                  cycled, as rate*count,...
+#   opusenc <in.f64> <out.pk> <fs> <ch> [k=v ...]  opus_encode (RESTRICTED_SILK) with
+#                                                  scripts/silkref/opusenc.c's keys; out.pk.rng
+#                                                  per packet the final range, bandwidth,
+#                                                  in-DTX flag and bit rate (getters)
 #   verify  <in.flac>                              flac_verify (STREAMINFO MD5)
 #   id3     <in>                                   ID3v2 title
 #   tracks  <in.mp4>                               print the audio track count and the
@@ -53,6 +57,7 @@ include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
+include "src/opus_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -449,6 +454,171 @@ fn _cli_silkenc() {
     return 0;
 }
 
+# opusenc: shravan's Opus encoder (opus_encoder_new, RESTRICTED_SILK) over an
+# interleaved f64 file, with scripts/silkref/opusenc.c's keys; packets as
+# silkenc writes them, and out.pk.rng per packet the final range, then
+# opus_encoder_bandwidth, _in_dtx and _bitrate (u32le each).
+fn _cli_key(a, k) {
+    var n = strlen(k);
+    var i = 0;
+    while (i < n) { if (load8(a + i) != load8(k + i)) { return 0; } i = i + 1; }
+    if (load8(a + n) != 61) { return 0; }
+    return a + n + 1;
+}
+
+fn _cli_bw(v) {
+    if (streq(v, "nb") == 1) { return OPUS_BANDWIDTH_NARROWBAND; }
+    if (streq(v, "mb") == 1) { return OPUS_BANDWIDTH_MEDIUMBAND; }
+    if (streq(v, "wb") == 1) { return OPUS_BANDWIDTH_WIDEBAND; }
+    if (streq(v, "swb") == 1) { return OPUS_BANDWIDTH_SUPERWIDEBAND; }
+    if (streq(v, "fb") == 1) { return OPUS_BANDWIDTH_FULLBAND; }
+    return OPUS_AUTO;
+}
+
+# "rate*count,..." into words at out; returns the count.
+fn _cli_list(q, out, max) {
+    var ql = strlen(q);
+    var qi = 0;
+    var nr = 0;
+    while (qi < ql && nr < max) {
+        var rv = 0;
+        while (qi < ql && load8(q + qi) >= 48 && load8(q + qi) <= 57) { rv = rv * 10 + load8(q + qi) - 48; qi = qi + 1; }
+        var rc = 1;
+        if (qi < ql && load8(q + qi) == 42) {
+            qi = qi + 1;
+            rc = 0;
+            while (qi < ql && load8(q + qi) >= 48 && load8(q + qi) <= 57) { rc = rc * 10 + load8(q + qi) - 48; qi = qi + 1; }
+        }
+        while (rc > 0 && nr < max) { store64(out + nr * 8, rv); nr = nr + 1; rc = rc - 1; }
+        if (qi < ql) { qi = qi + 1; }
+    }
+    return nr;
+}
+
+fn _cli_ctl(r) {
+    if (is_err(r) == 1) { _cli_fail(r); }
+    return 0;
+}
+
+fn _cli_opusenc() {
+    var v = _cli_read_vec(argv(2));
+    var fs = atoi(argv(4));
+    var ch = atoi(argv(5));
+    var enc = opus_encoder_new(fs, ch, OPUS_APPLICATION_RESTRICTED_SILK);
+    if (is_err(enc) == 1) { _cli_fail(enc); }
+    var maxbytes = 1276 * 6;
+    var ms = 20;
+    var total = 0 - 1;
+    var reset = 0;
+    var frames = alloc(4096 * 8);
+    var nframes = 0;
+    var rates = alloc(4096 * 8);
+    var nrates = 0;
+    var chans = 0;
+    var i = 6;
+    while (i < argc()) {
+        var a = argv(i);
+        var x = 0;
+        x = _cli_key(a, "bitrate");
+        if (x != 0) {
+            var b = atoi(x);
+            if (streq(x, "auto") == 1) { b = OPUS_AUTO; }
+            if (streq(x, "max") == 1) { b = OPUS_BITRATE_MAX; }
+            _cli_ctl(opus_encoder_set_bitrate(enc, b));
+        }
+        x = _cli_key(a, "vbr"); if (x != 0) { _cli_ctl(opus_encoder_set_vbr(enc, atoi(x))); }
+        x = _cli_key(a, "cx"); if (x != 0) { _cli_ctl(opus_encoder_set_complexity(enc, atoi(x))); }
+        x = _cli_key(a, "maxbw"); if (x != 0) { _cli_ctl(opus_encoder_set_max_bandwidth(enc, _cli_bw(x))); }
+        x = _cli_key(a, "bw"); if (x != 0) { _cli_ctl(opus_encoder_set_bandwidth(enc, _cli_bw(x))); }
+        x = _cli_key(a, "force");
+        if (x != 0) {
+            var fc = atoi(x);
+            if (streq(x, "auto") == 1) { fc = OPUS_AUTO; }
+            _cli_ctl(opus_encoder_set_force_channels(enc, fc));
+        }
+        x = _cli_key(a, "signal");
+        if (x != 0) {
+            var sg = OPUS_AUTO;
+            if (streq(x, "voice") == 1) { sg = OPUS_SIGNAL_VOICE; }
+            if (streq(x, "music") == 1) { sg = OPUS_SIGNAL_MUSIC; }
+            _cli_ctl(opus_encoder_set_signal(enc, sg));
+        }
+        x = _cli_key(a, "dtx"); if (x != 0) { _cli_ctl(opus_encoder_set_dtx(enc, atoi(x))); }
+        x = _cli_key(a, "fec"); if (x != 0) { _cli_ctl(opus_encoder_set_inband_fec(enc, atoi(x))); }
+        x = _cli_key(a, "loss"); if (x != 0) { _cli_ctl(opus_encoder_set_packet_loss(enc, atoi(x))); }
+        x = _cli_key(a, "lsb"); if (x != 0) { _cli_ctl(opus_encoder_set_lsb_depth(enc, atoi(x))); }
+        x = _cli_key(a, "pred"); if (x != 0) { _cli_ctl(opus_encoder_set_prediction_disabled(enc, atoi(x))); }
+        x = _cli_key(a, "maxbytes"); if (x != 0) { maxbytes = atoi(x); }
+        x = _cli_key(a, "ms"); if (x != 0) { ms = atoi(x); }
+        x = _cli_key(a, "frames"); if (x != 0) { nframes = _cli_list(x, frames, 4096); }
+        x = _cli_key(a, "rates"); if (x != 0) { nrates = _cli_list(x, rates, 4096); }
+        x = _cli_key(a, "chans"); if (x != 0) { chans = x; }
+        x = _cli_key(a, "total"); if (x != 0) { total = atoi(x); }
+        x = _cli_key(a, "vbrc"); if (x != 0) { _cli_ctl(opus_encoder_set_vbr_constraint(enc, atoi(x))); }
+        x = _cli_key(a, "dur"); if (x != 0) { _cli_ctl(opus_encoder_set_expert_frame_duration(enc, atoi(x))); }
+        x = _cli_key(a, "reset"); if (x != 0) { reset = atoi(x); }
+        i = i + 1;
+    }
+    var len = vec_len(v) / ch;
+    var pcm = alloc(fs / 1000 * 120 * ch * 8 + 8);
+    var pkt = alloc(maxbytes + 16);
+    var out = alloc(4096 * 16);
+    var cap = 4096 * 16;
+    var op = 0;
+    var rng = alloc((len / (fs / 400) + 2) * 16);
+    var pos = 0;
+    var packets = 0;
+    var going = 1;
+    while (going == 1) {
+        if (total >= 0 && packets >= total) { going = 0; }
+        else {
+            var fms = ms;
+            if (nframes > 0) { fms = load64(frames + (packets % nframes) * 8); }
+            var n = fs / 1000 * fms;
+            if (fms == 25) { n = fs / 400; }
+            if (pos + n > len) { going = 0; }
+            else {
+                if (reset > 0 && packets > 0 && packets % reset == 0) { opus_encoder_reset(enc); }
+                if (nrates > 0) { opus_encoder_set_bitrate(enc, load64(rates + (packets % nrates) * 8)); }
+                if (chans != 0) {
+                    var cc = load8(chans + packets % strlen(chans));
+                    var fcc = OPUS_AUTO;
+                    if (cc != 97) { fcc = cc - 48; }
+                    opus_encoder_set_force_channels(enc, fcc);
+                }
+                var k = 0;
+                while (k < n * ch) { store64(pcm + k * 8, vec_get(v, pos * ch + k)); k = k + 1; }
+                var r = opus_encode(enc, pcm, n, pkt, maxbytes);
+                if (is_err(r) == 1) { _cli_fail(r); }
+                if (op + 4 + r > cap) {
+                    var nc = cap * 2 + r;
+                    var no = alloc(nc);
+                    memcpy(no, out, op);
+                    out = no;
+                    cap = nc;
+                }
+                write_u32_le(out, op, r);
+                memcpy(out + op + 4, pkt, r);
+                op = op + 4 + r;
+                write_u32_le(rng, packets * 16, opus_encoder_final_range(enc));
+                write_u32_le(rng, packets * 16 + 4, opus_encoder_bandwidth(enc));
+                write_u32_le(rng, packets * 16 + 8, opus_encoder_in_dtx(enc));
+                write_u32_le(rng, packets * 16 + 12, opus_encoder_bitrate(enc));
+                pos = pos + n;
+                packets = packets + 1;
+            }
+        }
+    }
+    _cli_write(argv(3), out, op);
+    var rp = alloc(strlen(argv(3)) + 8);
+    memcpy(rp, argv(3), strlen(argv(3)));
+    memcpy(rp + strlen(argv(3)), ".rng", 5);
+    _cli_write(rp, rng, packets * 16);
+    _cli_int(packets);
+    _cli_nl();
+    return 0;
+}
+
 fn _cli_verify() {
     var lenp = alloc(8);
     var d = _cli_load(argv(2), lenp);
@@ -499,6 +669,7 @@ if (streq(cmd, "encode") == 1) { known = 1; _cli_encode(); }
 if (streq(cmd, "opusdec") == 1) { known = 1; _cli_opusdec(); }
 if (streq(cmd, "celtenc") == 1) { known = 1; _cli_celtenc(); }
 if (streq(cmd, "silkenc") == 1) { known = 1; _cli_silkenc(); }
+if (streq(cmd, "opusenc") == 1) { known = 1; _cli_opusenc(); }
 if (streq(cmd, "verify") == 1) { known = 1; _cli_verify(); }
 if (streq(cmd, "id3") == 1) { known = 1; _cli_id3(); }
 if (streq(cmd, "mem") == 1) { known = 1; _cli_mem(); }

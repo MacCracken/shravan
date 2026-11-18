@@ -16,7 +16,8 @@
 # ogg_decode, mp4_decode, aac_decode, tag_read_vorbis; since 2.9.3 also
 # opus_decode_from_packets on libopus packets, the streaming decoders (through
 # decode_reader, split at random), and tag_read_id3v2 on compressed frames, which
-# reaches sankoch's inflate.
+# reaches sankoch's inflate; the FLAC, AAC and SILK encoders on hostile input,
+# and (2.12.3) opus_encode with every ctl in and out of its bounds.
 #
 # Under `-D CYRIUS_POISON` (cyrius's poison mode: redzones around every alloc) a
 # redzone hit exits 86 at once, and the run ends with a full sweep.
@@ -43,6 +44,7 @@ include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
+include "src/opus_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -520,8 +522,8 @@ while (fi < se_iters) {
     if (bs == 0) { se_br = _fz_u(3000) + 1; }
     if (bs == 1) { se_br = 0 - _fz_u(1000); }
     if (bs == 2) { se_br = _fz_u(2000000); }
-    var se_cx = _fz_u(2);
-    if (_fz_u(6) == 0) { se_cx = _fz_u(12) - 1; }
+    var se_cx = _fz_u(11);
+    if (_fz_u(6) == 0) { se_cx = _fz_u(14) - 2; }
     var se_cbr = _fz_u(2);
     var se_api = se_rate;
     var as = _fz_u(10);
@@ -539,7 +541,7 @@ while (fi < se_iters) {
     if (se_api != 8000 && se_api != 12000 && se_api != 16000 && se_api != 24000 && se_api != 48000) { se_valid = 0; }
     if (se_ms != 10 && se_ms != 20 && se_ms != 40 && se_ms != 60) { se_valid = 0; }
     if (se_br < 1 || se_br > 1000000) { se_valid = 0; }
-    if (se_cx < 0 || se_cx > 1) { se_valid = 0; }
+    if (se_cx < 0 || se_cx > 10) { se_valid = 0; }
     var se_e = silk_encoder_new_channels(se_api, se_rate, se_ch, se_ms, se_br, se_cx, se_cbr);
     var se_bad = 0;
     if ((is_err(se_e) == 1) != (se_valid == 0)) { se_bad = 1; }
@@ -663,6 +665,295 @@ while (fi < se_iters) {
         fmt_int(se_cbr);
         syscall(1, 1, " ch ", 4);
         fmt_int(se_ch);
+        syscall(1, 1, "\n", 1);
+        syscall(60, 89);
+    }
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: opus_encode (2.12.3, OPUS_APPLICATION_RESTRICTED_SILK): the encoder
+# at any rate, channel count and application (refused but at the five rates,
+# one or two channels and RESTRICTED_SILK); every ctl now and then, in and out
+# of its bounds (refused exactly outside them); frames of every size libopus
+# takes, and others (refused), the expert frame duration; buffers from none to
+# more than a packet holds; resets; hostile input (NaN, infinities, huge,
+# denormal, full-scale square and pulses). Every packet must fit its buffer,
+# with nothing written past it, and shravan's Opus decoder must take the
+# packets, giving the duration their TOCs say. A violation exits 89.
+# ================================================================
+syscall(1, 1, "  opus_encode... ", 17);
+var oe_pcm = alloc(5760 * 2 * 8 + 64);
+var oe_buf = alloc(20000 + 64);
+# First the extremes, every run: 80 to 120 ms (several frames under one
+# budget) in stereo at the highest rates, VBR and CBR, into buffers past what a
+# packet holds, where each frame's budget runs to thousands of bytes (2.12.3:
+# its scratch was 1,280 bytes, an overrun the poison mode caught). Their noise
+# comes from their own generator, so they leave the targets' stream as it is.
+var oe_x = 0;
+var oe_xs = 99991;
+while (oe_x < 12) {
+    var xe = opus_encoder_new(48000, 2, OPUS_APPLICATION_RESTRICTED_SILK);
+    var xbr = OPUS_BITRATE_MAX;
+    if ((oe_x & 1) == 1) { xbr = 1500000; }
+    opus_encoder_set_bitrate(xe, xbr);
+    opus_encoder_set_vbr(xe, (oe_x >> 1) & 1);
+    opus_encoder_set_complexity(xe, 1);
+    if (oe_x >= 10) { opus_encoder_set_complexity(xe, 10); }
+    opus_encoder_set_inband_fec(xe, 1);
+    opus_encoder_set_packet_loss(xe, 20);
+    var xn = load64(_sk_ints("3840,4800,5760", 3) + ((oe_x >> 2) % 3) * 8);
+    var xcap = 9000;
+    if (oe_x >= 6) { xcap = 20000; }
+    var xk = 0;
+    while (xk < 2) {
+        var xi = 0;
+        while (xi < xn * 2) {
+            oe_xs = (oe_xs * 1103515245 + 12345) & 0x7FFFFFFF;
+            store64(oe_pcm + xi * 8, f64_div(f64_from((oe_xs >> 4) % 2000001 - 1000000), f64_from(1000000)));
+            xi = xi + 1;
+        }
+        var xq = 0;
+        while (xq < 64) { store8(oe_buf + xcap + xq, 0xA5); xq = xq + 1; }
+        var xr = opus_encode(xe, oe_pcm, xn, oe_buf, xcap);
+        if (xr < 1 || xr > xcap) {
+            syscall(1, 1, "opus encode failed: extreme ", 28);
+            fmt_int(oe_x);
+            syscall(1, 1, "\n", 1);
+            syscall(60, 89);
+        }
+        xq = 0;
+        while (xq < 64) {
+            if (load8(oe_buf + xcap + xq) != 0xA5) {
+                syscall(1, 1, "opus encode failed: past its buffer ", 36);
+                fmt_int(oe_x);
+                syscall(1, 1, "\n", 1);
+                syscall(60, 89);
+            }
+            xq = xq + 1;
+        }
+        xk = xk + 1;
+        total = total + 1;
+    }
+    oe_x = oe_x + 1;
+}
+var oe_iters = iters / 8;
+if (oe_iters < 1) { oe_iters = 1; }
+fi = 0;
+while (fi < oe_iters) {
+    var oe_fs = 48000;
+    var ofs = _fz_u(7);
+    if (ofs == 1) { oe_fs = 8000; }
+    if (ofs == 2) { oe_fs = 12000; }
+    if (ofs == 3) { oe_fs = 16000; }
+    if (ofs == 4) { oe_fs = 24000; }
+    if (ofs == 5 && _fz_u(4) == 0) { oe_fs = _fz_u(100000); }
+    var oe_ch = 1 + _fz_u(2);
+    if (_fz_u(20) == 0) { oe_ch = _fz_u(2) * 3; }
+    var oe_app = OPUS_APPLICATION_RESTRICTED_SILK;
+    if (_fz_u(20) == 0) { oe_app = 2047 + _fz_u(8); }
+    var oe_valid = 1;
+    if (oe_fs != 8000 && oe_fs != 12000 && oe_fs != 16000 && oe_fs != 24000 && oe_fs != 48000) { oe_valid = 0; }
+    if (oe_ch != 1 && oe_ch != 2) { oe_valid = 0; }
+    if (oe_app != OPUS_APPLICATION_RESTRICTED_SILK) { oe_valid = 0; }
+    var oe_e = opus_encoder_new(oe_fs, oe_ch, oe_app);
+    var oe_bad = 0;
+    if ((is_err(oe_e) == 1) != (oe_valid == 0)) { oe_bad = 1; }
+    if (oe_bad == 0 && oe_valid == 1) {
+        var oe_pk = vec_new();
+        store8(se_head + 9, oe_ch);
+        vec_push(oe_pk, str_from_buf(se_head, 19));
+        vec_push(oe_pk, str_from_buf(se_tags, 16));
+        var oe_dur = 0;
+        var oe_vd = OPUS_FRAMESIZE_ARG;
+        var oe_shape = _fz_u(9);
+        var oe_w = f64_div(F64_ONE, f64_from(_fz_u(60) + 2));
+        var oe_per = _fz_u(300) + 20;
+        var oe_np = _fz_u(8) + 1;
+        var oe_t = 0;
+        var p = 0;
+        while (oe_bad == 0 && p < oe_np) {
+            var v = 0;
+            var x = 0;
+            if (_fz_u(3) == 0) {
+                v = _fz_u(400000) - 1000;
+                if (_fz_u(8) == 0) { v = OPUS_AUTO; }
+                if (_fz_u(8) == 0) { v = OPUS_BITRATE_MAX; }
+                if ((is_err(opus_encoder_set_bitrate(oe_e, v)) == 1) != (v != OPUS_AUTO && v != OPUS_BITRATE_MAX && v <= 0)) { oe_bad = 20; }
+            }
+            if (_fz_u(4) == 0) {
+                v = _fz_u(14) - 2;
+                if ((is_err(opus_encoder_set_complexity(oe_e, v)) == 1) != (v < 0 || v > 10)) { oe_bad = 21; }
+            }
+            if (_fz_u(4) == 0) {
+                v = _fz_u(4) - 1;
+                if ((is_err(opus_encoder_set_vbr(oe_e, v)) == 1) != (v < 0 || v > 1)) { oe_bad = 22; }
+            }
+            if (_fz_u(6) == 0) {
+                v = _fz_u(4) - 1;
+                if ((is_err(opus_encoder_set_vbr_constraint(oe_e, v)) == 1) != (v < 0 || v > 1)) { oe_bad = 23; }
+            }
+            if (_fz_u(4) == 0) {
+                v = OPUS_BANDWIDTH_NARROWBAND - 2 + _fz_u(9);
+                if ((is_err(opus_encoder_set_max_bandwidth(oe_e, v)) == 1) != (v < OPUS_BANDWIDTH_NARROWBAND || v > OPUS_BANDWIDTH_FULLBAND)) { oe_bad = 24; }
+            }
+            if (_fz_u(4) == 0) {
+                v = OPUS_BANDWIDTH_NARROWBAND - 2 + _fz_u(9);
+                if (_fz_u(3) == 0) { v = OPUS_AUTO; }
+                if ((is_err(opus_encoder_set_bandwidth(oe_e, v)) == 1)
+                  != ((v < OPUS_BANDWIDTH_NARROWBAND || v > OPUS_BANDWIDTH_FULLBAND) && v != OPUS_AUTO)) { oe_bad = 25; }
+            }
+            if (_fz_u(4) == 0) {
+                v = _fz_u(4);
+                if (_fz_u(3) == 0) { v = OPUS_AUTO; }
+                if ((is_err(opus_encoder_set_force_channels(oe_e, v)) == 1) != ((v < 1 || v > oe_ch) && v != OPUS_AUTO)) { oe_bad = 26; }
+            }
+            if (_fz_u(6) == 0) {
+                v = OPUS_SIGNAL_VOICE - 2 + _fz_u(5);
+                if (_fz_u(3) == 0) { v = OPUS_AUTO; }
+                if ((is_err(opus_encoder_set_signal(oe_e, v)) == 1)
+                  != (v != OPUS_AUTO && v != OPUS_SIGNAL_VOICE && v != OPUS_SIGNAL_MUSIC)) { oe_bad = 27; }
+            }
+            if (_fz_u(5) == 0) {
+                v = _fz_u(4) - 1;
+                if ((is_err(opus_encoder_set_dtx(oe_e, v)) == 1) != (v < 0 || v > 1)) { oe_bad = 28; }
+            }
+            if (_fz_u(5) == 0) {
+                v = _fz_u(5) - 1;
+                if ((is_err(opus_encoder_set_inband_fec(oe_e, v)) == 1) != (v < 0 || v > 2)) { oe_bad = 29; }
+            }
+            if (_fz_u(5) == 0) {
+                v = _fz_u(111) - 5;
+                if ((is_err(opus_encoder_set_packet_loss(oe_e, v)) == 1) != (v < 0 || v > 100)) { oe_bad = 30; }
+            }
+            if (_fz_u(8) == 0) {
+                v = _fz_u(20) + 6;
+                if ((is_err(opus_encoder_set_lsb_depth(oe_e, v)) == 1) != (v < 8 || v > 24)) { oe_bad = 31; }
+            }
+            if (_fz_u(8) == 0) {
+                v = _fz_u(4) - 1;
+                if ((is_err(opus_encoder_set_prediction_disabled(oe_e, v)) == 1) != (v < 0 || v > 1)) { oe_bad = 32; }
+            }
+            if (_fz_u(10) == 0) {
+                v = OPUS_FRAMESIZE_ARG - 1 + _fz_u(12);
+                var vr = opus_encoder_set_expert_frame_duration(oe_e, v);
+                if ((is_err(vr) == 1) != (v < OPUS_FRAMESIZE_ARG || v > OPUS_FRAMESIZE_120_MS)) { oe_bad = 33; }
+                if (is_err(vr) == 0) { oe_vd = v; }
+            }
+            if (_fz_u(25) == 0) { opus_encoder_reset(oe_e); }
+            # the frame: 2.5 to 120 ms, 30 ms, or any length
+            var oe_n = 0;
+            var fz = _fz_u(12);
+            var oe_tenths = load64(_sk_ints("25,50,100,200,400,600,800,1000,1200,300,200,200", 12) + fz * 8);
+            oe_n = oe_fs / 1000 * oe_tenths / 10;
+            if (oe_tenths == 25) { oe_n = oe_fs / 400; }
+            if (_fz_u(15) == 0) { oe_n = _fz_u(oe_fs / 1000 * 120 + 2) - 1; }
+            # what libopus's frame_size_select and opus_encode_native take
+            var oe_sel = oe_n;
+            if (oe_vd != OPUS_FRAMESIZE_ARG) {
+                if (oe_vd <= OPUS_FRAMESIZE_2_5_MS + 4) { oe_sel = (oe_fs / 400) << (oe_vd - OPUS_FRAMESIZE_2_5_MS); }
+                else { oe_sel = (oe_vd - OPUS_FRAMESIZE_2_5_MS - 2) * oe_fs / 50; }
+            }
+            var oe_ok = 0;
+            var oe_m = 1;
+            while (oe_m <= 12) {
+                if (oe_m == 1 || oe_m == 2 || oe_m == 4 || oe_m == 6 || oe_m == 8 || oe_m == 10 || oe_m == 12) {
+                    if (oe_sel == oe_fs / 100 * oe_m) { oe_ok = 1; }
+                }
+                oe_m = oe_m + 1;
+            }
+            if (oe_n < oe_fs / 400 || oe_sel > oe_n) { oe_ok = 0; }
+            var oe_cap = 1500;
+            if (_fz_u(3) == 0) { oe_cap = _fz_u(60) - 1; }
+            if (_fz_u(10) == 0) { oe_cap = 7600 + _fz_u(400); }
+            if (oe_cap < 1 || (oe_cap == 1 && oe_sel == oe_fs / 10)) { oe_ok = 0; }
+            var k = 0;
+            var oe_len = oe_n;
+            if (oe_len < 0) { oe_len = 0; }
+            while (k < oe_len * oe_ch) {
+                x = f64_div(f64_from(_fz_u(2000001) - 1000000), f64_from(1000000));
+                var tt = oe_t + k / oe_ch;
+                if (oe_shape == 1) { x = f64_sin(f64_mul(oe_w, f64_from(tt))); }
+                if (oe_shape == 2) { x = f64_div(F64_ONE, f64_from(3)); }
+                if (oe_shape == 3) { x = F64_ONE; if ((tt & 16) == 16) { x = f64_neg(F64_ONE); } }
+                if (oe_shape == 4) { x = F64_ZERO; }
+                if (oe_shape == 5) { x = f64_div(f64_from(_fz_u(201) - 100), f64_from(3200)); }
+                if (oe_shape == 7) { x = F64_ZERO; if (tt % oe_per == 0) { x = F64_ONE; } }
+                if (oe_shape == 8) { x = F64_ONE; if (tt % oe_per >= oe_per / 2) { x = f64_neg(F64_ONE); } }
+                if (oe_ch == 2 && (k & 1) == 1 && oe_shape != 0 && oe_shape != 5 && _fz_u(4) == 0) { x = f64_neg(x); }
+                var sp = _fz_u(100);
+                if (sp == 0) { x = 0x7FF8000000000000; }
+                if (sp == 1) { x = 0x7FF0000000000000; }
+                if (sp == 2) { x = 0 - 0x10000000000000; }
+                if (sp == 3) { x = f64_from(1000000); }
+                if (sp == 4) { x = 1; }
+                if (oe_shape == 6) { x = 0x7FF8000000000000; }
+                store64(oe_pcm + k * 8, x);
+                k = k + 1;
+            }
+            oe_t = oe_t + oe_len;
+            var cv = oe_cap;
+            if (cv < 0) { cv = 0; }
+            var q = 0;
+            while (q < 64) { store8(oe_buf + cv + q, 0xA5); q = q + 1; }
+            var r = opus_encode(oe_e, oe_pcm, oe_n, oe_buf, oe_cap);
+            if (oe_ok == 1) {
+                # within the buffer (CBR at OPUS_BITRATE_MAX pads a multi-frame packet
+                # to all of it, past 1276 x 6 bytes, as libopus does)
+                if (r < 1 || r > oe_cap) { oe_bad = 34; }
+            } else {
+                if (r != err(ERR_ENCODE)) { oe_bad = 35; }
+            }
+            q = 0;
+            while (q < 64) { if (load8(oe_buf + cv + q) != 0xA5) { oe_bad = 36; } q = q + 1; }
+            if (oe_bad == 0 && oe_ok == 1) {
+                # the packet's duration from its TOC, at 48 kHz
+                var toc = load8(oe_buf);
+                var cfg = toc >> 3;
+                var fd = 0;
+                if (cfg < 12) { fd = load64(_sk_ints("480,960,1920,2880", 4) + (cfg & 3) * 8); }
+                else {
+                    if (cfg < 16) { fd = 480 << (cfg & 1); }
+                    else { fd = 120 << (cfg & 3); }
+                }
+                var cnt = 1;
+                if ((toc & 3) == 1 || (toc & 3) == 2) { cnt = 2; }
+                if ((toc & 3) == 3) {
+                    if (r < 2) { oe_bad = 37; }
+                    else { cnt = load8(oe_buf + 1) & 0x3F; }
+                }
+                # the frame coded: the TOC says the selected duration
+                if (cnt * fd != oe_sel * 48000 / oe_fs) { oe_bad = 38; }
+                oe_dur = oe_dur + cnt * fd;
+                vec_push(oe_pk, str_from_buf(oe_buf, r));
+            }
+            p = p + 1;
+        }
+        if (oe_bad == 0 && vec_len(oe_pk) > 2) {
+            var oe_r = opus_decode_from_packets(oe_pk, 0, 0);
+            if (is_err(oe_r) == 1) { oe_bad = 39; }
+            else {
+                var oe_d = decode_result_samples(oe_r);
+                if (vec_len(oe_d) != oe_dur * oe_ch) { oe_bad = 40; }
+                var q2 = 0;
+                while (oe_bad == 0 && q2 < vec_len(oe_d)) {
+                    var dv = vec_get(oe_d, q2);
+                    if (f64_eq(dv, dv) == 0) { oe_bad = 41; }
+                    q2 = q2 + 1;
+                }
+            }
+        }
+    }
+    if (oe_bad != 0) {
+        syscall(1, 1, "opus encode failed: ", 20);
+        fmt_int(oe_bad);
+        syscall(1, 1, " fs ", 4);
+        fmt_int(oe_fs);
+        syscall(1, 1, " ch ", 4);
+        fmt_int(oe_ch);
+        syscall(1, 1, " app ", 5);
+        fmt_int(oe_app);
         syscall(1, 1, "\n", 1);
         syscall(60, 89);
     }

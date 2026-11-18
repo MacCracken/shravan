@@ -17,6 +17,7 @@ include "src/fft.cyr"
 include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
+include "src/opus_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -630,6 +631,58 @@ fn bench_silk_nsq() {
     return bench_report(t1 - t0, iters);
 }
 
+# 2.12.3: the delayed-decision quantiser on the same frame, as complexity 10
+# runs it (four states, the shaping filter warped).
+fn bench_silk_nsq_del_dec() {
+    var h = alloc(16 * 8);
+    var k = 0;
+    var found = 0 - 1;
+    while (k < _SKQ_N && found < 0) {
+        _bench_skv_ints(_SKQ_HDR, k, h);
+        if (load64(h + 8) == 320 && load64(h + 56) == 2) { found = k; }
+        k = k + 1;
+    }
+    _bench_skv_ints(_SKQ_HDR, found, h);
+    var nb = load64(h + 24);
+    var so = load64(h + 32);
+    var st = silk_enc_state_new(16, nb);
+    silk_enc_setup_complexity(st, 10);
+    store64(st + _SKE_SHAPE_ORDER, so);
+    _ske_set_idx(st, _SKI_SEED, load64(h + 48));
+    _ske_set_idx(st, _SKI_SIGNAL_TYPE, 2);
+    _ske_set_idx(st, _SKI_QUANT_OFFSET, load64(h + 64));
+    _ske_set_idx(st, _SKI_NLSF_INTERP, load64(h + 72));
+    var x = alloc(320 * 8);
+    var par = alloc(128 * 8);
+    var arc = alloc(96 * 8);
+    var ar = alloc(96 * 8);
+    _bench_skv_ints(_SKQ_X16, found, x);
+    _bench_skv_ints(_SKQ_PAR, found, par);
+    _bench_skv_ints(_SKQ_AR, found, arc);
+    var i = 0;
+    while (i < 96) { store64(ar + i * 8, 0); i = i + 1; }
+    i = 0;
+    while (i < nb) {
+        var j = 0;
+        while (j < so) { store64(ar + (i * 24 + j) * 8, load64(arc + (i * so + j) * 8)); j = j + 1; }
+        i = i + 1;
+    }
+    var pulses = alloc(320 * 8);
+    var nsq = load64(st + _SKE_NSQ);
+    var o = 32 + nb * 5;
+    var iters = 100;
+    bench("silk_nsq_del_dec_20ms_wb", iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        _opus_frame_begin();
+        silk_nsq_del_dec(st, nsq, st + _SKE_IDX, x, pulses, par, par + 32 * 8, ar, par + o * 8, par + (o + nb) * 8,
+          par + (o + 2 * nb) * 8, par + (o + 3 * nb) * 8, par + (o + 4 * nb) * 8, load64(h + 80), load64(h + 88));
+        _opus_frame_end();
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # SILK pitch estimation (2.12.0): silk_pitch_analysis_core_FLP on libopus's
 # residual of a voiced 20 ms wideband frame, at the estimator's complexity 1
 # (the reference vectors' first such frame).
@@ -889,6 +942,37 @@ fn bench_silk_stereo_lr_to_ms() {
     return bench_report(t1 - t0, iters);
 }
 
+# 2.12.3: opus_encode (OPUS_APPLICATION_RESTRICTED_SILK), a second of the
+# voiced input at 48 kHz in 20 ms packets: complexity 9 (libopus's default:
+# four delayed-decision states, warped shaping, the full pitch search) or 1;
+# stereo, the right channel half the left and half the noise input.
+fn bench_opus_encode(name, ch, br, cx, iters) {
+    var xl = alloc(48000 * 8);
+    _bench_silk_voiced(48000, 48000, xl);
+    var x = xl;
+    if (ch == 2) {
+        var xn = alloc(48000 * 8);
+        _bench_silk_input(48000, 48000, xn);
+        x = alloc(2 * 48000 * 8);
+        for (var i = 0; i < 48000; i = i + 1) {
+            store64(x + 2 * i * 8, load64(xl + i * 8));
+            store64(x + (2 * i + 1) * 8, f64_mul(f64_add(load64(xl + i * 8), load64(xn + i * 8)), F64_HALF));
+        }
+    }
+    var buf = alloc(1500);
+    var e = opus_encoder_new(48000, ch, OPUS_APPLICATION_RESTRICTED_SILK);
+    opus_encoder_set_bitrate(e, br);
+    opus_encoder_set_complexity(e, cx);
+    for (var p = 0; p < 50; p = p + 1) { opus_encode(e, x + p * 960 * ch * 8, 960, buf, 1500); }
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        for (var q = 0; q < 50; q = q + 1) { opus_encode(e, x + q * 960 * ch * 8, 960, buf, 1500); }
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
 # ================================================================
 # Benchmark: fft_1024
 # ================================================================
@@ -1107,7 +1191,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.12.2 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.3 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -1142,6 +1226,10 @@ var silk_voiced_ns = _bench_silk_encode("silk_encode_1sec_wb_voiced20k", 20000, 
 var silk_fec_ns = bench_silk_encode_48k_fec("silk_encode_1sec_48k_wb_fec20k", 10);
 var silk_st_ns = bench_silk_encode_stereo("silk_encode_1sec_wb_stereo32k", 5);
 var silk_ms_ns = bench_silk_stereo_lr_to_ms();
+var silk_dd_ns = bench_silk_nsq_del_dec();
+var opus_e9_ns = bench_opus_encode("opus_encode_1sec_48k_silk24k_cx9", 1, 24000, 9, 5);
+var opus_e1_ns = bench_opus_encode("opus_encode_1sec_48k_silk24k_cx1", 1, 24000, 1, 10);
+var opus_es_ns = bench_opus_encode("opus_encode_1sec_48k_stereo40k_cx9", 2, 40000, 9, 3);
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

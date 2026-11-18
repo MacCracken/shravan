@@ -13,6 +13,7 @@ include "src/opus.cyr"
 include "src/opus_legacy.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
+include "src/opus_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -27,6 +28,7 @@ include "src/silk_enc_vectors.cyr"
 include "src/interop_tests.cyr"
 include "src/opus_encoder_tests.cyr"
 include "src/silk_tests.cyr"
+include "src/opus_enc_tests.cyr"
 
 # ================================================================
 # Tests
@@ -980,7 +982,7 @@ fn test_ogg_opus_dispatch() {
     for (var i = 0; i < 960; i = i + 1) { vec_push(samples, F64_ZERO); }
 
     var out_buf = alloc(65536);
-    var ogg_size = opus_encode(samples, 48000, 1, 64000, out_buf);
+    var ogg_size = opus_legacy_encode(samples, 48000, 1, 64000, out_buf);
     assert(res_ok(ogg_size) == 1, "opus encode for ogg dispatch test");
 
     # ogg_decode should detect OpusHead and dispatch
@@ -2351,7 +2353,7 @@ fft_init();
 aac_init();
 resample_init();
 
-syscall(1, 1, "shravan v2.12.2 — audio codecs for AGNOS (Cyrius)\n", 52);
+syscall(1, 1, "shravan v2.12.3 — audio codecs for AGNOS (Cyrius)\n", 52);
 syscall(1, 1, "running tests...\n", 17);
 syscall(1, 1, "\n", 1);
 
@@ -2496,6 +2498,7 @@ test_serde_audio_metadata();
 test_serde_codec_markers();
 test_opus_encoder_all();
 test_silk_all();
+test_opus_enc_all();
 
 print_summary();
 

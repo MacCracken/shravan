@@ -31,6 +31,7 @@ import wave
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "build", "interop-cli")
 OPUSREF = os.path.join(ROOT, "build", "opusref")
+OPUSENCREF = os.path.join(ROOT, "build", "opusenc-ref")
 
 # Bursts at different times per channel, a sweep and noise: transients force short
 # blocks and independent windows, noise keeps every band busy.
@@ -785,6 +786,157 @@ class Sweep:
         self.silk_api_fec_dtx(voiced, sizes)
         self.silk_stereo(ph, sizes)
 
+    def opusenc(self):
+        """The Opus encoder layer (opus_layer), on the silk group's sources."""
+        def sizes(path):
+            d = open(path, "rb").read()
+            out, p = [], 0
+            while p + 4 <= len(d):
+                n = struct.unpack_from("<I", d, p)[0]
+                out.append(n)
+                p += 4 + n
+            return out
+        ph = "(110*t+15*sin(2*PI*0.7*t)/(2*PI*0.7))"
+        voiced = ("aevalsrc=" + "+".join(f"{0.3 / k:.4f}*sin(2*PI*{k}*{ph})" for k in range(1, 9))
+                  + "+0.01*random(0)")
+        self.opus_layer(ph, sizes, voiced)
+
+    def opus_layer(self, ph, sizes, voiced):
+        """2.12.3. shravan's opus_encode (OPUS_APPLICATION_RESTRICTED_SILK) beside
+        libopus's (build/opusenc-ref: the same application, or with a libopus older
+        than 1.6 OPUS_APPLICATION_AUDIO forced to SILK at wideband at most), libopus
+        decoding both, at the input's rate: pink noise, the sweep's tones and the
+        voiced source, at 8 to 48 kHz, 10 to 120 ms, VBR and CBR, complexity 1 to
+        10 (the delayed-decision quantiser from 2), mono and stereo. Each must
+        follow the input at libopus's lag (the lookahead, 6.5 ms; within a sample
+        on the voiced source), correlate at least 0.8 and within 0.03 of libopus's,
+        at libopus's bits (within 10% under VBR, the same sizes under CBR). Then
+        in-band FEC by loss with every fifth packet lost, recovering better than
+        concealment and within 0.03 of libopus's recovery; DTX on digital silence
+        between bursts (this layer's DTX), its packets left out where libopus's are
+        (within two; against the AUDIO fallback, whose DTX follows its tonality
+        analysis, only shravan's); and a bit rate falling to 8 kbit/s and back, the bandwidth
+        going down through SILK's transition and up again where libopus's does
+        (within ten packets). (shravan's packets are libopus's byte for byte on the
+        suite's inputs, src/opus_enc_tests.cyr.)"""
+        if not os.path.exists(OPUSENCREF):
+            self.record("encode", "opus encode (RESTRICTED_SILK)", False, "no build/opusenc-ref (scripts/interop.sh)")
+            return
+        def voice(f0, seed):
+            p = ph.replace("110*t", f"{f0}*t")
+            return "+".join(f"{0.3 / k:.4f}*sin(2*PI*{k}*{p})" for k in range(1, 9)) + f"+0.01*random({seed})"
+
+        def make(src, api, ch, d):
+            if ch == 2:
+                lav = f"aevalsrc=({voice(110, 0)})|0.5*({voice(110, 0)})+0.5*({voice(165, 1)}):s={api}:d={d}"
+            else:
+                lav = {"pink": f"anoisesrc=color=pink:r={api}:a=0.25:d={d}:seed=7",
+                       "tones": signal(api, 1, d),
+                       "voiced": voiced + f":s={api}:d={d}"}[src]
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", lav, "-ac", str(ch),
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            return [x[c::ch] for c in range(ch)]
+
+        def encode(who, api, ch, keys):
+            pk = self.p(who + ".pk")
+            if who == "shravan":
+                run(CLI, "opusenc", self.p("s.f64"), pk, str(api), str(ch), *keys)
+            else:
+                out = run(OPUSENCREF, self.p("s.f64"), pk, str(api), str(ch), *keys).stdout
+                mode[0] = (out.decode() if isinstance(out, bytes) else out).split("\n")[0]
+            return pk
+
+        def follow(xs, path, api, ch):
+            y = f64(path)
+            lag0 = 13 * api // 2000
+            return [best_lag_corr(x, y[c::ch], 1, lag0 + 3, api // 10, lag0 - 3) for c, x in enumerate(xs)]
+
+        mode = [""]
+        cases = [(src, api, 1, ms, cbr, br, cx) for src in ("pink", "tones", "voiced")
+                 for api, ms, cbr, br, cx in ((48000, 20, 0, 24000, 9), (48000, 60, 1, 20000, 1), (48000, 10, 0, 24000, 5),
+                                              (48000, 120, 0, 24000, 9), (24000, 40, 1, 18000, 3), (16000, 20, 0, 20000, 10),
+                                              (12000, 80, 0, 16000, 7), (8000, 20, 1, 12000, 9))]
+        cases += [("stereo", 48000, 2, 20, 0, 40000, 9), ("stereo", 48000, 2, 80, 1, 32000, 1),
+                  ("stereo", 24000, 2, 20, 0, 36000, 6), ("stereo", 16000, 2, 60, 0, 30000, 10)]
+        for src, api, ch, ms, cbr, br, cx in cases:
+            xs = make(src, api, ch, 1.5)
+            keys = [f"bitrate={br}", f"ms={ms}", f"vbr={1 - cbr}", f"cx={cx}"]
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk = encode(who, api, ch, keys)
+                run(OPUSREF, "dec", pk, str(ch), self.p(who + ".dec"), str(api))
+                sz = sizes(pk)
+                res[who] = (follow(xs, self.p(who + ".dec"), api, ch), sum(sz) * 8 / (len(sz) * ms / 1000), set(sz))
+            (cs, rate, sz), (lcs, lrate, lsz) = res["shravan"], res["libopus"]
+            tol = 1 if src in ("voiced", "stereo") else 0
+            ok = all(abs(c[1] - l[1]) <= tol and c[0] >= 0.8 and c[0] >= l[0] - 0.03 for c, l in zip(cs, lcs))
+            ok = ok and (sz == lsz if cbr else abs(rate / lrate - 1) <= 0.10)
+            self.record("encode", f"opus {src} {api // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} cx{cx} -> libopus", ok,
+                        "corr %s (libopus %s) lag=%s (%s) %.1f kb/s (%.1f)"
+                        % ("/".join("%.4f" % c[0] for c in cs), "/".join("%.4f" % c[0] for c in lcs),
+                           ",".join(str(c[1]) for c in cs), ",".join(str(c[1]) for c in lcs), rate / 1000, lrate / 1000))
+        # in-band FEC by loss, every fifth packet lost
+        speech = voiced + "*(0.15+0.85*max(0\\,sin(2*PI*2.5*t)))"
+        for api, ms, br, cx in ((48000, 20, 24000, 9), (16000, 60, 32000, 1), (48000, 40, 32000, 5)):
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", speech + f":s={api}:d=3", "-ac", "1",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            got = {}
+            for who in ("shravan", "libopus"):
+                pk = encode(who, api, 1, [f"bitrate={br}", f"ms={ms}", f"cx={cx}", "fec=1", "loss=20"])
+                cs = []
+                for fec in (0, 1):
+                    run(OPUSREF, "dec", pk, "1", self.p("fec.dec"), str(api), "lose=5", f"fec={fec}")
+                    cs.append(follow([x], self.p("fec.dec"), api, 1)[0][0])
+                got[who] = cs
+            (c0, c1), (l0, l1) = got["shravan"], got["libopus"]
+            ok = c1 > c0 and c1 >= 0.8 and c1 >= l1 - 0.03
+            self.record("encode", f"opus fec {api // 1000}k {ms}ms cx{cx}, 1 in 5 lost -> libopus", ok,
+                        f"concealed {c0:.4f} recovered {c1:.4f} (libopus {l0:.4f} {l1:.4f})")
+        # DTX on digital silence between bursts
+        bursts = voiced + "*lt(mod(t\\,1)\\,0.35)"
+        for api, ms, cbr in ((48000, 20, 0), (48000, 60, 1), (16000, 40, 0)):
+            run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", bursts + f":s={api}:d=4", "-ac", "1",
+                "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+            x = f64(self.p("s.f64"))
+            res = {}
+            for who in ("shravan", "libopus"):
+                pk = encode(who, api, 1, ["bitrate=20000", f"ms={ms}", f"vbr={1 - cbr}", "dtx=1"])
+                sz = sizes(pk)
+                res[who] = (sum(1 for k in sz if k == 1), len(sz))
+            run(OPUSREF, "dec", self.p("shravan.pk"), "1", self.p("dtx.dec"), str(api))
+            y = f64(self.p("dtx.dec"))
+            c = follow([x], self.p("dtx.dec"), api, 1)[0][0]
+            (nd, npk), (ld, _) = res["shravan"], res["libopus"]
+            # (libopus's AUDIO fallback decides DTX by its tonality analysis: no count to compare)
+            same = abs(nd - ld) <= 2 or "RESTRICTED_SILK" not in mode[0]
+            ok = nd > 0 and same and len(y) == npk * ms * api // 1000 and c >= 0.8
+            self.record("encode", f"opus dtx {api // 1000}k {ms}ms {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                        f"{nd} of {npk} packets left out (libopus {ld}{'' if 'RESTRICTED_SILK' in mode[0] else ', AUDIO'})"
+                        f" corr={c:.4f}")
+        # the bandwidth down and up again with the bit rate
+        run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", speech + ":s=48000:d=12", "-ac", "1",
+            "-f", "f64le", "-c:a", "pcm_f64le", self.p("s.f64"))
+        bws = {}
+        for who in ("shravan", "libopus"):
+            pk = encode(who, 48000, 1, ["cx=9", "rates=24000*50,8000*300,24000*250"])
+            d = open(pk, "rb").read()
+            seq, p = [], 0
+            while p + 4 <= len(d):
+                k = struct.unpack_from("<I", d, p)[0]
+                seq.append(d[p + 4] >> 5 & 3)
+                p += 4 + k
+            bws[who] = seq
+        def at(seq, start, want):
+            return next((i for i in range(start, len(seq)) if seq[i] == want), None)
+        sd, ld = at(bws["shravan"], 50, 1), at(bws["libopus"], 50, 1)
+        su, lu = (at(bws["shravan"], 350, 2) if sd else None), (at(bws["libopus"], 350, 2) if ld else None)
+        ok = None not in (sd, ld, su, lu) and abs(sd - ld) <= 10 and abs(su - lu) <= 10
+        self.record("encode", "opus bandwidth down and up with the rate -> libopus", ok,
+                    f"mediumband from packet {sd} (libopus {ld}), wideband again from {su} ({lu})")
+        print("  note: the Opus layer's reference, libopus " + mode[0])
+
     def silk_stereo(self, ph, sizes):
         """2.12.2. Stereo against libopus's own encoder forced to two channels
         (OPUS_SET_FORCE_CHANNELS), libopus decoding both: the left a voiced source
@@ -992,10 +1144,10 @@ class Sweep:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders,silk")
+    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders,silk,opusenc")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders", "silk"]
+    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders", "silk", "opusenc"]
     if args.only:
         groups = [g for g in groups if g in args.only.split(",")]
     for tool in (CLI, OPUSREF):

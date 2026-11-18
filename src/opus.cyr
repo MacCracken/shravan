@@ -1,5 +1,5 @@
 # ================================================================
-# opus.cyr -- Opus header parsing and CELT-mode encoding (Ogg container)
+# opus.cyr -- Opus decode, OpusHead/OpusTags, and the CELT frame encoder
 # ================================================================
 #
 # Provides:
@@ -9,8 +9,9 @@
 #   opus_range_enc_init()                  -- create range encoder state
 #   opus_range_enc_encode(rc, fl, fh, total) -- encode symbol
 #   opus_range_enc_flush(rc)               -- finalize, returns (ptr, len) via Str
-#   opus_encode(samples_vec, sample_rate, channels, bitrate, out_buf)
 #   opus_decode_from_packets(packets_vec, ogg_data, ogg_len)
+#   celt_encode_frame_ec(...)              -- one CELT frame into a range coder
+# The Opus encoder (opus_encoder_new, opus_encode) is src/opus_enc.cyr (2.12.3).
 #
 # Requires: alloc, vec, str, math, ogg, fft, assert
 
