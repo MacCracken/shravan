@@ -1,6 +1,6 @@
 # Development Roadmap
 
-**Current: v2.12.3.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
+**Current: v2.12.4.** Shipped history lives in `CHANGELOG.md`; this file is forward-looking only.
 
 ## Where we are
 
@@ -12,7 +12,7 @@
 | ALAC | full, in MP4 and QuickTime | none | ffmpeg: bit-exact, mono to 7 channels, 16/24-bit |
 | MP3 | MPEG-1/2/2.5 Layer I/II/III, free format, LAME/Xing/VBRI frames skipped, gapless from the LAME tag | none | ISO 11172-4 / 13818-4 conformance vectors within 1 LSB (intensity, LSF, free format); ffmpeg Layer III exact at all 9 rates; Layer II against mpg123 |
 | AAC-LC | channel configurations 1–7 and 11–14 and any PCE layout (to 22.2), in ffmpeg's channel order; all 13 rates, TNS, short blocks, M/S, intensity, PNS | mono and stereo, all 13 rates: 3GPP psychoacoustics with tonality, block switching, TNS, M/S, intensity, PNS, a rate loop with a bit reservoir | Decode: ffmpeg, exact, every layout its encoder writes (ADTS and MP4); PNS bands at the transmitted energy. Encode: ffmpeg and faad decode every rate and bit rate (a 52-case sweep), within 0.02 of ffmpeg's own encoder's correlation; on 5.5 minutes of real recordings its NMR is lower than ffmpeg's from 64 kbit/s up, at 3–4% fewer bits, and within 0.5 dB at 32 and 48 (where both use PNS); from 96 kbit/s it loses at most 0.1% of bands (ffmpeg 0.0%) |
-| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT mono and stereo; SILK mono and stereo (mid/side, mid-only, stereo input coded mono, moves between them) at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–10, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX, internal-rate switching; the Opus encoder layer with `OPUS_APPLICATION_RESTRICTED_SILK` (bandwidth, channel and FEC decisions, DTX on silence, 10–120 ms packets, CBR padding, libopus's ctls) | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX, mono and stereo (2,537 mono and 2,724 stereo packets in the suite); on real speech and stereo music libopus decodes them as well as its own encoder's (within 0.003 in correlation mono, 0.001 stereo), and recovers lost packets from their FEC. Opus encode (RESTRICTED_SILK): libopus's `opus_encode_float` packets, final ranges and getters byte for byte (6,391 packets in 96 configurations) |
+| Opus | all 32 TOC configs, mono and stereo; FEC, PLC, DTX, every mode/bandwidth/frame-size/channel switch; multistream (mapping families 0, 1, 2, 255; family 1 in ffmpeg's channel order) | CELT as libopus's `celt_encode_with_ec` encodes it: mono, stereo and stereo coded mono, 2.5–20 ms, 8–48 kHz input, complexity 0–10, CBR, VBR and constrained VBR, the transient, pitch pre-filter, dynalloc, TF, spreading, trim, intensity and dual-stereo decisions, the hybrid's start band, LFE, the surround energy mask; SILK mono and stereo (mid/side, mid-only, stereo input coded mono, moves between them) at 8, 12 and 16 kHz from an 8–48 kHz input, 10–60 ms, VBR and CBR, complexity 0–10, voiced and unvoiced frames, LTP scaled by the expected loss, in-band FEC, DTX, internal-rate switching; the Opus encoder layer with `OPUS_APPLICATION_RESTRICTED_SILK` (bandwidth, channel and FEC decisions, DTX on silence, 10–120 ms packets, CBR padding, libopus's ctls) | libopus (a default build): exact, wideband SILK and hybrid concealment included, multistream through ffmpeg's libopus wrapper; CELT concealment within 3 LSB (its float32 against shravan's f64). SILK encode: libopus's `silk_Encode` packets byte for byte, voiced and unvoiced, resampled, with FEC and DTX, mono and stereo (2,537 mono and 2,724 stereo packets in the suite); on real speech and stereo music libopus decodes them as well as its own encoder's (within 0.003 in correlation mono, 0.001 stereo), and recovers lost packets from their FEC. Opus encode (RESTRICTED_SILK): libopus's `opus_encode_float` packets, final ranges and getters byte for byte (6,391 packets in 96 configurations). CELT encode: libopus's `celt_encode_with_ec` frames, final ranges and stage decisions byte for byte (16,162 frames in 260 configurations in the suite; 1,386 development cases, real speech and music among them), libopus's portable C build |
 | MP4 | AAC (any channel layout, a PCE in the AudioSpecificConfig) and ALAC; ffmpeg's default track, any by index; gapless (sample durations, edit lists, iTunSMPB) | none | ffmpeg, including QuickTime v1/v2, to the sample and to its length |
 
 Streaming decoders (WAV, AIFF, FLAC, and `decode_reader` over them) match the one-shot decoders sample
@@ -39,38 +39,39 @@ Open until a reference file or decoder exists for each.
   element placement and channel order are checked against ffmpeg's source (`ff_aac_get_che`,
   `sniff_channel_order`), not against a file.
 
-The remaining distance to **3.0.0** is the rest of the Opus encoder: CELT as libopus encodes it, and
-hybrid. The FLAC encoder is real since 2.10.0, the AAC encoder since 2.10.1, multichannel AAC and Opus
-decode since 2.10.3, the SILK encoder since 2.11.3 (voiced frames since 2.12.0, complexity 2–10 since
-2.12.3), and libopus's Opus encoder layer for SILK since 2.12.3.
+The remaining distance to **3.0.0** is the rest of the Opus encoder: hybrid, the mode decision and
+the applications that use CELT. The FLAC encoder is real since 2.10.0, the AAC encoder since 2.10.1,
+multichannel AAC and Opus decode since 2.10.3, the SILK encoder since 2.11.3 (voiced frames since
+2.12.0, complexity 2–10 since 2.12.3), libopus's Opus encoder layer for SILK since 2.12.3, and
+libopus's CELT encoder since 2.12.4.
 
 ## v2.12.x — hybrid encode and the Opus encoder layer · large
 
 Since 2.12.3 shravan has libopus's `opus_encode` for `OPUS_APPLICATION_RESTRICTED_SILK`
-(`src/opus_enc.cyr`) over a SILK encoder complete at every complexity: the high-pass, the bit rate,
-stereo/mono with `toMono`, bandwidth switching through SILK's low-pass transition, FEC by rate and loss,
-DTX on digital silence, 10–120 ms packets, CBR padding, the PLC packets, and libopus's ctls and getters,
-byte for byte libopus's wherever libopus's float stages round as shravan's doubles do. Verify the way
-2.11–2.12.3 did: `scripts/gen-silk-vectors.py` records libopus (`scripts/silkref/`), and the suite holds
-shravan to it, packets as hashes. The suite's string data is at 93% of the compiler's fixed 2 MB.
-- `feat(opus): CELT encode as libopus encodes it (celt_encode_with_ec)`: the transient analysis,
-  the band energies' coarse and fine quantisation, the allocation with its trim, dynamic allocation
-  and spreading decisions, the stereo modes (intensity, dual stereo), the pitch pre-filter, VBR with
-  its constraint, and the 2.5/5/10 ms frames. shravan's CELT encoder (`celt_encode_frame_ec`) writes
-  real frames libopus decodes, but makes its own decisions; `opus_encode` needs libopus's, frame for
-  frame, to extend the byte-for-byte check to CELT.
+(`src/opus_enc.cyr`) over a SILK encoder complete at every complexity, byte for byte libopus's. Since
+2.12.4 it has libopus's CELT encoder too (`src/celt_enc.cyr`, `celt_encode_with_ec` as libopus's float
+build computes it, every float operation rounded as libopus rounds it): every frame size, input rate,
+complexity and rate control, mono, stereo and stereo coded mono, the hybrid's start band after SILK's
+bits, the tonality analysis's info, LFE and the surround energy mask, frame for frame libopus's
+portable C build's. Verify the way 2.11–2.12.4 did: `scripts/gen-silk-vectors.py` and
+`scripts/gen-celt-vectors.py` record libopus (`scripts/silkref/`, its dump hooks), and the suite holds
+shravan to it, packets and stages as hashes. The suite's string data is at 94% of the compiler's
+fixed 2 MB.
 - `feat(opus): hybrid encode and the mode decision`: SILK's low band and CELT's high band over one
-  range coder (the hybrid's SILK rate split, CELT from band 17, the stereo width CELT takes from
-  `silk_encoder_stereo_width`), the mode decision by rate, signal and bandwidth (SILK, hybrid, CELT,
-  with hysteresis), switches between modes (redundancy frames, `silk_Encode`'s prefill, CELT's
-  pre-roll), and the applications that need them: `OPUS_APPLICATION_VOIP` (with its variable
-  high-pass, `hp_cutoff`, reading the smoother `silk_hp_variable_cutoff` keeps), `_AUDIO`,
-  `_RESTRICTED_LOWDELAY`, `_RESTRICTED_CELT`. `opus_encoder_new` refuses them until then.
+  range coder (the hybrid's SILK rate split, CELT from band 17 with `celt_encoder_set_silk_info` and
+  `celt_encoder_encode_ec`, the stereo width CELT takes from `silk_encoder_stereo_width`), the mode
+  decision by rate, signal and bandwidth (SILK, hybrid, CELT, with hysteresis), switches between modes
+  (redundancy frames, `silk_Encode`'s prefill, CELT's pre-roll), and the applications that need them:
+  `OPUS_APPLICATION_VOIP` (with its variable high-pass, `hp_cutoff`, reading the smoother
+  `silk_hp_variable_cutoff` keeps), `_AUDIO`, `_RESTRICTED_LOWDELAY`, `_RESTRICTED_CELT`.
+  `opus_encoder_new` refuses them until then.
 - The tonality analysis (`run_analysis`), which libopus runs from complexity 7 for those
-  applications: its voice estimate and bandwidth detection feed the mode and bandwidth decisions.
+  applications: its voice estimate and bandwidth detection feed the mode and bandwidth decisions, and
+  its `AnalysisInfo` the CELT encoder (`celt_encoder_set_analysis` takes it already).
 - Note: the float→fixed boundaries use `lrintf` (round half to **even**), which f64 code must reproduce
-  deliberately; the near-ties libopus's single precision rounds the other way are the only packets
-  that differ, and each one traced so far is one.
+  deliberately; the near-ties libopus's single precision rounds the other way are the only SILK
+  packets that differ, and each one traced so far is one. CELT's port computes in single precision
+  itself, so it has no such ties.
 
 ## v3.0.0 — production-quality, interoperable, hardened suite · MAJOR
 

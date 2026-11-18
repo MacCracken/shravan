@@ -5,6 +5,195 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.4] - 2026-11-17
+
+**Opus encode: libopus's CELT encoder.** `src/celt_enc.cyr` is libopus 1.6.1's `celt_encode_with_ec`,
+as its float build computes it: every value libopus keeps in a float is a float here, each operation
+rounded to single precision in libopus's order (Cyrius's `f32` arithmetic), and what C evaluates in
+double (a double literal, `sqrt`, `log`, `exp`, `cos`, `acos`) evaluated in double. Its frames, final
+ranges, decisions, energies and allocation are libopus's, frame for frame: 260 configurations,
+16,162 frames in the suite, every frame size, input rate, complexity and rate control, mono, stereo
+and stereo coded mono, the hybrid's start band after pre-written bits, LFE, the surround energy mask,
+the tonality analysis's info. The reference is libopus's portable C build (`OPUS_DISABLE_INTRINSICS`,
+as for SILK): its x86 SSE paths sum some floats in another order and take an approximate reciprocal in
+the PVQ search, so libopus's own CELT output differs between its builds. At complexity 10 a second of
+48 kHz audio encodes in 23 ms mono at 64 kbit/s (43× real time) and 47 ms stereo at 128 kbit/s.
+18,074 assertions (was 15,933).
+
+### Added
+
+- **The CELT encoder** (`src/celt_enc.cyr`, libopus `celt_encoder.c`, `bands.c`, `quant_bands.c`,
+  `vq.c`, `pitch.c`, `celt_lpc.c`, `celt.c`, `kiss_fft.c`, `mdct.c`):
+  - `celt_encoder_new(fs, channels)`: 8, 12, 16, 24 or 48 kHz (CELT codes at 48 kHz, its input
+    upsampled by zero-stuffing as libopus's is), one or two channels; libopus's defaults (CBR at
+    `OPUS_BITRATE_MAX`, constrained VBR once VBR is on, complexity 5, 24-bit input, clipping, every band).
+  - `celt_encoder_encode(enc, pcm, frame_size, out, max)`: 2.5, 5, 10 or 20 ms of f64 samples at the
+    encoder's rate, interleaved, taken as libopus's floats (a NaN as 0: libopus's Opus layer clears NaN
+    frames, its CELT layer asserts against them); the frame's length back, 1,275 bytes at most.
+  - `celt_encoder_encode_ec(enc, pcm, frame_size, max, ec)`: the same into a range coder that already
+    holds bits, CELT's part of a hybrid frame (libopus's `celt_encode_with_ec` with `enc`).
+  - The ctls, with libopus's bounds: `celt_encoder_set_complexity`, `_start_band`, `_end_band`,
+    `_prediction` (`CELT_SET_PREDICTION`: 0 intra frames without the pre-filter, 1 without it, 2 both),
+    `_packet_loss`, `_vbr`, `_vbr_constraint`, `_bitrate`, `_channels` (stereo coded mono),
+    `_lsb_depth`, `_phase_inversion_disabled`, `_lfe`, `_energy_mask` (the surround encoder's band
+    energies), `_analysis` (the tonality analysis's `AnalysisInfo`), `_silk_info` (the hybrid's SILK
+    frame type and offset); `celt_encoder_reset` (`OPUS_RESET_STATE`, the fields libopus clears).
+    The getters: `celt_encoder_final_range`, `_lsb_depth`, `_phase_inversion_disabled`.
+  - Every stage as libopus's float build computes it, in its order:
+    - the pre-emphasis (clipping past ±65536, the upsampled zeros), the peak and silence decision;
+    - `tone_detect` (a two-tap LPC by the covariance method, with delay doubling), the transient
+      analysis (its high-pass, the forward and backward masking, the harmonic-mean metric, weak
+      transients in a low-rate hybrid, the low-tone guard), `patch_transient_decision`;
+    - the pitch pre-filter: `pitch_downsample` (its LPC whitening), `pitch_search` (coarse at a
+      quarter rate, refined at half, interpolated), `remove_doubling`, the tone path, the gain's
+      thresholds and quantisation, `comb_filter` with its crossfade, the stereo cancel test;
+    - the forward MDCT: libopus's kiss FFT (radix 2, 3, 4 and 5, in its operation order) over the
+      static mode's float literals (195 of whose 2,880 floats differ from what their formulas give in
+      single precision), long and short blocks, the second long MDCT from complexity 8;
+    - band energies, `amp2Log2`, the surround masking, temporal VBR, normalisation;
+    - `dynalloc_analysis` (the noise floor, the spreading weights, the follower with its medians,
+      importance, the tone compensation, the leak boost, the boosts' caps), `tf_analysis` (its L1
+      metric and Viterbi search), the hybrid's TF cases;
+    - coarse energy (`quant_coarse_energy`: the intra/inter two-pass race from complexity 4, the
+      loss-biased intra choice, the decay bound, the budget's limits), fine energy, the finalisation;
+    - `spreading_decision` (and the tapset decision), the dynalloc boosts' coding, `stereo_analysis`,
+      the intensity band's hysteresis, `alloc_trim_analysis`;
+    - VBR: the constraint's bound, `compute_vbr` (activity, stereo saving, transient and tonality
+      boosts, the surround target, the depth floor, temporal VBR), the reservoir, drift and offset;
+    - the allocation (shared with the decoder, `celt_compute_allocation`, encoding its skips,
+      intensity and dual stereo), anti-collapse;
+    - `quant_all_bands`: `compute_theta` (`stereo_itheta` over libopus's polynomial `atan`, the
+      split's rounding, avoiding noise on a split), intensity and mid/side stereo, `alg_quant`
+      (`exp_rotation`, `op_pvq_search`), TF changes (`haar1`), Hadamard interleaving, and from
+      complexity 8 the stereo theta search: each band coded twice, theta rounded down and up, both
+      resynthesised (`normalise_residual`, folding, noise fill, `renormalise_vector`,
+      `stereo_merge`) and the lower distortion kept, coder and bytes restored.
+  - Built with `-D CELT_TRACE` it writes `scripts/silkref/celtdump.h`'s records (floats as bit
+    patterns) at the instrumented libopus's stage boundaries, for a frame-by-frame diff.
+- `src/celt_enc_tables.cyr` (generated, `scripts/gen-celt-tables.py`): libopus's static float mode and
+  the encoder's tables, parsed from libopus's sources rather than retyped: decimal literals rounded to
+  float as C rounds them.
+- `ec_enc_shrink` for the encoder (`_ce_ec_shrink`, its raw bits moved to the new end).
+- `fuzz/fuzz_decode.cyr`: a `celt_encode` target. It covers:
+  - any rate and channel count (the encoder takes only its five rates and one or two channels);
+  - every ctl in and out of its bounds;
+  - frames of every size, valid or not, and buffers from none to past 1,275 bytes;
+  - the hybrid's start band after random bits in the coder;
+  - the analysis info, the surround mask and resets;
+  - hostile input.
+
+  Every frame must fit its buffer with nothing written past it, and the fullband frames must play
+  back through shravan's Opus decoder.
+- `src/celt_enc_tests.cyr` tests:
+  - the API: the rates, each ctl's bounds, the getters, the frame sizes, a reset equal to a new
+    encoder, `celt_encoder_encode_ec` on an empty coder equal to `celt_encoder_encode`, and memory
+    flat over a long encode;
+  - hostile input: NaN, infinities, the largest and smallest doubles, a full-scale square, and noise
+    far above full scale, at every frame size, complexity and rate control. Each frame stays within its
+    buffer and decodes finite.
+
+### Changed
+
+- The existing CELT encoder (`celt_encode`, `celt_encode_frame_ec` in `src/opus.cyr`, shravan's own
+  decisions) is unchanged and stays public; `celt_encoder_*` is libopus's.
+- `scripts/gen-silk-vectors.py`'s libopus build also compiles `scripts/silkref/celtenc.c`, and
+  `scripts/silkref/patch.py` instruments libopus's CELT encoder (`celtdump.h`, `$CELTDUMP`); the SILK
+  vectors are unchanged.
+- `scripts/interop/cli.cyr`: `celtlib`, the CELT encoder with `celtenc.c`'s keys (`toc=1` makes Opus
+  packets); `scripts/interop/opusref.c`: `celt`, libopus's encoder forced to CELT only.
+
+### Verified
+
+- **Against libopus's CELT encoder** (`scripts/gen-celt-vectors.py`, libopus 1.6.1's portable C build):
+  260 configurations, 16,162 frames in the suite (`src/celt_enc_tests.cyr`), each checked on
+  five hashes: the frames with their final ranges, the decisions (transient, short blocks, the
+  pre-filter's on/off, pitch and gain, tf_select, spreading and tapset, trim, dual stereo, intensity,
+  coded bands, balance, bytes, silence), the energies (quantised log energies, the energy error carried
+  over), the allocation (pulses, fine bits and priorities, TF, the dynalloc boosts). The generator checks
+  shravan's frames byte for byte against libopus's too.
+- In development, the instrumented libopus and shravan built with `-D CELT_TRACE` diffed record by
+  record, every stage of every frame: 1,386 cases (every frame size, rate, complexity and rate control,
+  mono, stereo, stereo coded mono and switching, the hybrid's start band, LFE, masks, analysis info,
+  resets, real speech and music from the RFC 8251 test vectors at 5 to 96 kbit/s) exact, before and
+  after the speed-ups.
+- One bug the comparison caught on the way: `transient_analysis`'s `inv_table`, typed by hand, had 129
+  entries (a duplicated 4); every table now comes from libopus's sources (`scripts/gen-celt-tables.py`).
+- **Interop** (`scripts/interop.py`, group `celt`, the CI job): a distribution's libopus decodes
+  shravan's frames (2.5 to 20 ms, mono and stereo, complexity 0, 5 and 10, VBR and CBR, noise, tones
+  and a voiced source) and they follow the input as closely as libopus's own CELT-only encoding at the
+  same rate (+0.0002 to +0.064 in correlation, libopus's 3 Hz high-pass costing it some), at 0.98 to
+  1.03 times its bit rate: 144 of 144.
+- **Mutation testing**: one mutant on each of `src/celt_enc.cyr`'s 3,242 eligible lines (a comparison's
+  border, an operator, a constant moved 1% or by one, a min for a max, a sign or an abs dropped). Each
+  one was built and run against the suite, which kills 2,714. Of the rest, 80 change only an
+  allocation's size: scratch or state made larger, a memset of a buffer written in full before it is
+  read, two allocations made smaller whose overrun lands on memory rewritten before it is read.
+
+  The other survivors were run on 278 of the development sweep's cases, real speech and music among
+  them, against libopus's frames. 45 parted from libopus there. 24 configurations built from what those
+  inputs exercise now kill 39 of the 45 in the suite. They cover:
+  - an exactly silent channel, and identical and opposite channels;
+  - a slow chirp at 8 kbit/s;
+  - sawtooths and two tones in stereo;
+  - quiet clicks at 320 kbit/s, and clicks under a louder right channel;
+  - 2.5 ms frames at 16 kHz, and a 15 kHz tone in 2.5 ms frames;
+  - a periodic signal whose spectral tilt glides;
+  - the analysis's bandwidth at 110 kbit/s stereo;
+  - a periodic source whose pitch jumps, with the analysis.
+
+  The same configurations kill 15 that no input had moved. Among them are the VBR's tonality and
+  `pitch_change` boosts, which at 48 kbit/s the target's cap of twice the base had hidden. Two signal
+  kinds are new for these configurations, a sawtooth and the gliding tilt.
+
+  6 of the 45 move only real audio's output:
+  - Two conditions are met once each in minutes of speech and music: the pre-filter's transient guard
+    between 0.98 and 0.9898, and the tapset's hysteresis at exactly 14 or 18.
+  - Four conditions the suite does reach, but there the change is masked:
+    - the trim's stereo clamp and `tf_analysis`'s bias, both moved 1%;
+    - the split's fill bits, which only the stereo search's resynthesis reads;
+    - the PVQ search's zero-vector fallback, which the suite meets only in the empty bands above an
+      upsampled input's Nyquist frequency, where its stray writes land on zeros.
+
+  442 survivors are moved by no input. By the kind of mutation, they are 133 ties and loop bounds, 82
+  initial or assigned values, 18 flags, 12 struct offsets of zero (equivalent by construction) and 197
+  other constants, operators and conditions. Those examined are equivalent or unobservable:
+  - a later step overwrites or bounds the value;
+  - the state feeds no output (`oldLogE`'s upkeep without resynthesis, the dual-stereo norm averaging,
+    the seed written back and then replaced by the final range);
+  - an extra loop pass touches only padding;
+  - the threshold sits where no value can fall (the pre-filter gains compared with 0.4 are multiples
+    of 0.09375).
+- **Fuzzing** (`fuzz/run.sh 90000`, normal and under the allocator's poison mode): 90,234 calls of
+  `fuzz_decode` (the CELT encoder's target among them), 90,000 of `fuzz_opus` and 810,000 of
+  `fuzz_codecs`, with 2,000 and 200 cold starts, and no crash.
+
+### Performance
+
+- The CELT encoder takes the following for a second of 48 kHz audio (one core, `src/bench.cyr`, VBR):
+
+  | Configuration | Time | Real time |
+  |---|---|---|
+  | Mono, 64 kbit/s, complexity 10 | 23.3 ms | 43× |
+  | Mono, 64 kbit/s, complexity 0 | 9.2 ms | 109× |
+  | Stereo, 128 kbit/s, complexity 10 | 47.1 ms | 21× |
+  | Stereo, 128 kbit/s, complexity 5 | 34.5 ms | 29× |
+  | Mono, 2.5 ms frames, 96 kbit/s, complexity 10 | 45.6 ms | 22× |
+
+  Stage timers on stereo at complexity 10 split it as follows: `quant_all_bands` 48% (from complexity
+  8 the theta search codes each stereo band twice), the pitch pre-filter 28%, the MDCT 7.5%.
+- Speed-ups since the first exact port, each kept only with every frame unchanged:
+  - `celt_inner_prod` takes four terms a pass, the sum still in libopus's order;
+  - the pitch search's cross-correlation takes four lags at a time (`xcorr_kernel`), each sum still in
+    order;
+  - kiss FFT's radix-2 butterfly is unrolled (the case with its fixed √½ twiddles), and the radix-4
+    butterfly steps its twiddle indices instead of multiplying them;
+  - `exp_rotation`'s and `op_pvq_search`'s loops walk pointers;
+  - `icwrs` reads its table in place.
+
+  In one session pinned to one core (medians, ABBA twice), they run 1.12× as fast mono at complexity
+  10, 1.07× stereo, 1.09× stereo at complexity 5, 1.06× at 2.5 ms and 1.01× at complexity 0. The
+  controls (the FLAC encoder, SILK's Opus encode) read 1.00 and 0.98.
+
 ## [2.12.3] - 2026-11-17
 
 **Opus encode: libopus's encoder layer for SILK, and SILK at every complexity.** `opus_encode` arrives

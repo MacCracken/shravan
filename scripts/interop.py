@@ -786,6 +786,67 @@ class Sweep:
         self.silk_api_fec_dtx(voiced, sizes)
         self.silk_stereo(ph, sizes)
 
+    def celt(self):
+        """shravan's CELT encoder (src/celt_enc.cyr, libopus's celt_encode_with_ec)
+        beside libopus's own (opus_encode forced to CELT only, fullband), libopus
+        decoding both: mono and stereo, 2.5 to 20 ms, complexity 0, 5 and 10, VBR
+        and CBR, on pink noise, the sweep's tones and the voiced source. Each must
+        correlate with its input within 0.01 of libopus's and spend libopus's bits
+        within 10%. Its frames are libopus's portable C build's byte for byte
+        (src/celt_enc_tests.cyr); a distribution's libopus takes its x86 SSE
+        paths, which round some float sums in another order, and opus_encode adds
+        its 3 Hz high-pass and delay, so here the measure is the result."""
+        def frames(path):
+            d = open(path, "rb").read()
+            out, q = [], 0
+            while q + 4 <= len(d):
+                n = struct.unpack_from("<I", d, q)[0]
+                out.append(n)
+                q += 4 + n
+            return out
+        ph = "(110*t+15*sin(2*PI*0.7*t)/(2*PI*0.7))"
+        voiced = ("aevalsrc=" + "+".join(f"{0.3 / k:.4f}*sin(2*PI*{k}*{ph})" for k in range(1, 9))
+                  + "+0.01*random(0)")
+        for src in ("pink", "tones", "voiced"):
+            for ch in (1, 2):
+                lav = {"pink": "anoisesrc=color=pink:r=48000:a=0.25:d=1.2:seed=11",
+                       "tones": signal(48000, 1, 1.2),
+                       "voiced": voiced + ":s=48000:d=1.2"}[src]
+                run("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", lav, "-ac", str(ch),
+                    "-f", "f64le", "-c:a", "pcm_f64le", self.p("c.f64"))
+                if ch == 2:
+                    # an image that is not mono: the right channel delayed 1.5 ms, 4 dB down
+                    x = f64(self.p("c.f64"))
+                    st = []
+                    for i in range(0, len(x), 2):
+                        j = i - 144
+                        st += [x[i], 0.63 * x[j] if j >= 0 else 0.0]
+                    open(self.p("c.f64"), "wb").write(struct.pack("<%dd" % len(st), *st))
+                x = f64(self.p("c.f64"))
+                for n in (960, 480, 240, 120):
+                    for cx in (0, 5, 10):
+                        for cbr in (0, 1):
+                            br = 64000 * ch if n >= 480 else 96000 * ch
+                            res = {}
+                            for who in ("shravan", "libopus"):
+                                pk, back = self.p(who + ".pk"), self.p(who + ".dec")
+                                if who == "shravan":
+                                    keys = [f"n={n}", f"cx={cx}", f"bitrate={br}", "toc=1"] + ([] if cbr else ["vbr=1"])
+                                    run(CLI, "celtlib", self.p("c.f64"), pk, "48000", str(ch), *keys)
+                                else:
+                                    run(OPUSREF, "celt", self.p("c.f64"), str(ch), str(br), str(n), str(cx), str(cbr), pk)
+                                run(OPUSREF, "dec", pk, str(ch), back)
+                                # CELT's delay is its 120-sample overlap; opus_encode adds 4 ms
+                                lag0 = 120 if who == "shravan" else 312
+                                c, lag = best_lag_corr(x, f64(back), ch, lag0 + 3, 2048, lag0 - 3)
+                                sz = frames(pk)
+                                res[who] = (c, lag, sum(s - 1 for s in sz) * 8 / (len(sz) * n / 48000))
+                            (c, lag, rate), (lc, llag, lrate) = res["shravan"], res["libopus"]
+                            ok = c >= lc - 0.01 and lag == 120 and llag == 312 and abs(rate / lrate - 1) <= 0.10
+                            self.record("encode", f"celt {src} {ch}ch {n} cx{cx} {'cbr' if cbr else 'vbr'} -> libopus", ok,
+                                        f"corr={c:.4f} (libopus {lc:.4f}) lag={lag} ({llag}) "
+                                        f"{rate / 1000:.1f} kb/s ({lrate / 1000:.1f})")
+
     def opusenc(self):
         """The Opus encoder layer (opus_layer), on the silk group's sources."""
         def sizes(path):
@@ -1144,10 +1205,10 @@ class Sweep:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders,silk,opusenc")
+    ap.add_argument("--only", help="comma-separated: wav,aiff,flac,alac,mp3,aac,gapless,opus,encoders,silk,opusenc,celt")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders", "silk", "opusenc"]
+    groups = ["wav", "aiff", "flac", "alac", "mp3", "aac", "gapless", "opus", "encoders", "silk", "opusenc", "celt"]
     if args.only:
         groups = [g for g in groups if g in args.only.split(",")]
     for tool in (CLI, OPUSREF):

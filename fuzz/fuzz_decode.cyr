@@ -17,7 +17,8 @@
 # opus_decode_from_packets on libopus packets, the streaming decoders (through
 # decode_reader, split at random), and tag_read_id3v2 on compressed frames, which
 # reaches sankoch's inflate; the FLAC, AAC and SILK encoders on hostile input,
-# and (2.12.3) opus_encode with every ctl in and out of its bounds.
+# (2.12.3) opus_encode with every ctl in and out of its bounds, and (2.12.4) the
+# CELT encoder with every ctl, the hybrid's pre-written range coder and hostile input.
 #
 # Under `-D CYRIUS_POISON` (cyrius's poison mode: redzones around every alloc) a
 # redzone hit exits 86 at once, and the run ends with a full sweep.
@@ -45,6 +46,8 @@ include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
 include "src/opus_enc.cyr"
+include "src/celt_enc_tables.cyr"
+include "src/celt_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -956,6 +959,214 @@ while (fi < oe_iters) {
         fmt_int(oe_app);
         syscall(1, 1, "\n", 1);
         syscall(60, 89);
+    }
+    fi = fi + 1; total = total + 2;
+}
+syscall(1, 1, "ok\n", 3);
+
+# ================================================================
+# Target: the CELT encoder (2.12.4, libopus's celt_encode_with_ec): any rate
+# and channel count (refused but at the five rates and one or two channels);
+# every ctl now and then, in and out of its bounds (refused exactly outside
+# them); frames of every size the encoder takes, and others (refused); buffers
+# from none to past 1,275 bytes; the hybrid's start band after random bits in
+# the range coder; the tonality analysis's info, the surround energy mask,
+# resets; hostile input (NaN, infinities, huge, denormal, full-scale square
+# and pulses, clipping). Every frame within its buffer (at most 1,275 bytes),
+# nothing written past it, and the fullband frames played back through
+# shravan's Opus decoder as libopus would (a CELT-only TOC). A violation exits 90.
+# ================================================================
+syscall(1, 1, "  celt_encode... ", 17);
+var ce_info = alloc(_CEA_SIZE);
+var ce_mask = alloc(42 * 8);
+var ce_iters = iters / 8;
+if (ce_iters < 1) { ce_iters = 1; }
+fi = 0;
+while (fi < ce_iters) {
+    var ce_fs = 48000;
+    var cfs = _fz_u(7);
+    if (cfs == 1) { ce_fs = 8000; }
+    if (cfs == 2) { ce_fs = 12000; }
+    if (cfs == 3) { ce_fs = 16000; }
+    if (cfs == 4) { ce_fs = 24000; }
+    if (cfs == 5 && _fz_u(4) == 0) { ce_fs = _fz_u(100000); }
+    var ce_ch = 1 + _fz_u(2);
+    if (_fz_u(20) == 0) { ce_ch = _fz_u(2) * 3; }
+    var ce_valid = 1;
+    if (ce_fs != 8000 && ce_fs != 12000 && ce_fs != 16000 && ce_fs != 24000 && ce_fs != 48000) { ce_valid = 0; }
+    if (ce_ch != 1 && ce_ch != 2) { ce_valid = 0; }
+    var ce_e = celt_encoder_new(ce_fs, ce_ch);
+    var ce_bad = 0;
+    if ((is_err(ce_e) == 1) != (ce_valid == 0)) { ce_bad = 1; }
+    if (ce_bad == 0 && ce_valid == 1) {
+        var ce_up = 48000 / ce_fs;
+        var ce_pk = vec_new();
+        store8(se_head + 9, ce_ch);
+        vec_push(ce_pk, str_from_buf(se_head, 19));
+        vec_push(ce_pk, str_from_buf(se_tags, 16));
+        var ce_dur = 0;
+        var ce_c = ce_ch;
+        var ce_start = 0;
+        var ce_end = 21;
+        var ce_lm = 3;
+        var ce_shape = _fz_u(9);
+        var p = 0;
+        var np = 1 + _fz_u(4);
+        while (p < np && ce_bad == 0) {
+            var ck = _fz_u(16);
+            if (ck == 0) {
+                var v = _fz_u(14) - 2;
+                if ((is_err(celt_encoder_set_complexity(ce_e, v)) == 1) != (v < 0 || v > 10)) { ce_bad = 2; }
+            }
+            if (ck == 1) {
+                var v = _fz_u(24) - 2;
+                if (_fz_u(3) == 0) { v = 0; }
+                if ((is_err(celt_encoder_set_start_band(ce_e, v)) == 1) != (v < 0 || v >= 21)) { ce_bad = 3; }
+                if (v >= 0 && v < 21) { ce_start = v; }
+            }
+            if (ck == 2) {
+                var v = _fz_u(24) - 1;
+                if (_fz_u(2) == 0) { v = 21; }
+                if ((is_err(celt_encoder_set_end_band(ce_e, v)) == 1) != (v < 1 || v > 21)) { ce_bad = 4; }
+                if (v >= 1 && v <= 21) { ce_end = v; }
+            }
+            if (ck == 3) {
+                var v = _fz_u(5) - 1;
+                if ((is_err(celt_encoder_set_prediction(ce_e, v)) == 1) != (v < 0 || v > 2)) { ce_bad = 5; }
+            }
+            if (ck == 4) {
+                var v = _fz_u(110) - 3;
+                if ((is_err(celt_encoder_set_packet_loss(ce_e, v)) == 1) != (v < 0 || v > 100)) { ce_bad = 6; }
+            }
+            if (ck == 5) { celt_encoder_set_vbr(ce_e, _fz_u(2)); celt_encoder_set_vbr_constraint(ce_e, _fz_u(2)); }
+            if (ck == 6) {
+                var v = _fz_u(600000) - 2;
+                if (_fz_u(4) == 0) { v = 0 - 1; }
+                if ((is_err(celt_encoder_set_bitrate(ce_e, v)) == 1) != (v <= 500 && v != 0 - 1)) { ce_bad = 7; }
+            }
+            if (ck == 7) {
+                var v = _fz_u(4);
+                if ((is_err(celt_encoder_set_channels(ce_e, v)) == 1) != (v < 1 || v > ce_ch)) { ce_bad = 8; }
+                if (v >= 1 && v <= ce_ch) { ce_c = v; }
+            }
+            if (ck == 8) {
+                var v = _fz_u(20) + 6;
+                if ((is_err(celt_encoder_set_lsb_depth(ce_e, v)) == 1) != (v < 8 || v > 24)) { ce_bad = 9; }
+            }
+            if (ck == 9) {
+                var v = _fz_u(4) - 1;
+                if ((is_err(celt_encoder_set_phase_inversion_disabled(ce_e, v)) == 1) != (v < 0 || v > 1)) { ce_bad = 10; }
+            }
+            if (ck == 10) { celt_encoder_set_lfe(ce_e, _fz_u(2)); }
+            if (ck == 11) {
+                memset(ce_info, 0, _CEA_SIZE);
+                store64(ce_info + _CEA_VALID, _fz_u(2));
+                var ak = _CEA_TONALITY;
+                while (ak <= _CEA_MAX_PITCH_RATIO) { store64(ce_info + ak, f64_div(f64_from(_fz_u(2001) - 1000), f64_from(500))); ak = ak + 8; }
+                store64(ce_info + _CEA_BANDWIDTH, _fz_u(25) - 2);
+                var lb = 0;
+                while (lb < 19) { store64(ce_info + _CEA_LEAK_BOOST + lb * 8, _fz_u(256)); lb = lb + 1; }
+                celt_encoder_set_analysis(ce_e, ce_info);
+            }
+            if (ck == 12) {
+                var mi = 0;
+                while (mi < 42) { store64(ce_mask + mi * 8, f64_div(f64_from(_fz_u(4001) - 2000), f64_from(200))); mi = mi + 1; }
+                celt_encoder_set_energy_mask(ce_e, ce_mask);
+            }
+            if (ck == 13) { celt_encoder_set_silk_info(ce_e, _fz_u(4) - 1, _fz_u(300) - 50); }
+            if (ck == 14 && _fz_u(4) == 0) { celt_encoder_reset(ce_e); }
+            # the frame: 2.5 to 20 ms at the encoder's rate, or another size
+            var ce_n = (120 << _fz_u(4)) / ce_up;
+            var ce_ok = 1;
+            if (_fz_u(12) == 0) { ce_n = _fz_u(1000); ce_ok = 0; if (ce_n * ce_up == 120 || ce_n * ce_up == 240 || ce_n * ce_up == 480 || ce_n * ce_up == 960) { ce_ok = 1; } }
+            if (ce_n * ce_up > 960 || ce_n <= 0) { ce_ok = 0; }
+            var ce_cap = 2 + _fz_u(300);
+            if (_fz_u(4) == 0) { ce_cap = _fz_u(1400); }
+            if (ce_cap < 2) { ce_ok = 0; }
+            var k = 0;
+            var ce_len = ce_n;
+            if (ce_len < 0 || ce_len > 960) { ce_len = 960; }
+            while (k < ce_len * ce_ch) {
+                var tt = k / ce_ch;
+                var x = f64_div(f64_from(_fz_u(65536) - 32768), f64_from(32768));
+                if (ce_shape == 1) { x = f64_div(f64_from(_fz_u(201) - 100), f64_from(3200)); }
+                if (ce_shape == 2) { x = F64_ONE; if ((tt & 16) == 16) { x = f64_neg(F64_ONE); } }
+                if (ce_shape == 3) { x = F64_ZERO; }
+                if (ce_shape == 4) { x = F64_ZERO; if (tt % 97 == 0) { x = F64_ONE; } }
+                if (ce_shape == 5) { x = f64_from(_fz_u(400001) - 200000); }
+                if (ce_shape == 6) { x = 0x7FF8000000000000; }
+                if (ce_shape == 7) { x = f64_div(f64_from(_fz_u(3) - 1), f64_from(1 << 30)); }
+                var sp = _fz_u(100);
+                if (sp == 0) { x = 0x7FF8000000000000; }
+                if (sp == 1) { x = 0x7FF0000000000000; }
+                if (sp == 2) { x = 0 - 0x10000000000000; }
+                if (sp == 3) { x = f64_from(1000000); }
+                if (sp == 4) { x = 1; }
+                store64(oe_pcm + k * 8, x);
+                k = k + 1;
+            }
+            var cv = ce_cap;
+            if (cv < 0) { cv = 0; }
+            var q = 0;
+            while (q < 64) { store8(oe_buf + cv + q, 0xA5); q = q + 1; }
+            var r = 0;
+            var ce_pre = 0;
+            if (ce_start > 0 && _fz_u(2) == 0 && ce_ok == 1) {
+                ce_pre = 1;
+                var ec = ec_enc_new(oe_buf, ce_cap);
+                var nb = _fz_u(64);
+                var bi = 0;
+                while (bi < nb) { ec_enc_bit_logp(ec, _fz_u(2), 1 + _fz_u(4)); bi = bi + 1; }
+                r = celt_encoder_encode_ec(ce_e, oe_pcm, ce_n, ce_cap, ec);
+            } else {
+                r = celt_encoder_encode(ce_e, oe_pcm, ce_n, oe_buf, ce_cap);
+            }
+            var lim = ce_cap;
+            if (lim > 1275) { lim = 1275; }
+            if (ce_ok == 1) {
+                if (r < 0 || r > lim) { ce_bad = 11; }
+                if (ce_pre == 0 && r < 2) { ce_bad = 12; }
+            } else {
+                if (r != err(ERR_ENCODE)) { ce_bad = 13; }
+            }
+            q = 0;
+            while (q < 64) { if (load8(oe_buf + cv + q) != 0xA5) { ce_bad = 14; } q = q + 1; }
+            if (ce_bad == 0 && ce_ok == 1 && ce_pre == 0 && ce_start == 0 && ce_end == 21 && ce_c == ce_ch && r >= 2) {
+                var n48 = ce_n * ce_up;
+                var lm = 0;
+                while ((120 << lm) != n48) { lm = lm + 1; }
+                var pk = alloc(r + 1);
+                store8(pk, ((28 + lm) << 3) | ((ce_ch - 1) << 2));
+                memcpy(pk + 1, oe_buf, r);
+                vec_push(ce_pk, str_from_buf(pk, r + 1));
+                ce_dur = ce_dur + n48;
+            }
+            p = p + 1;
+        }
+        if (ce_bad == 0 && vec_len(ce_pk) > 2) {
+            var ce_r = opus_decode_from_packets(ce_pk, 0, 0);
+            if (is_err(ce_r) == 1) { ce_bad = 15; }
+            else {
+                var ce_d = decode_result_samples(ce_r);
+                if (vec_len(ce_d) != ce_dur * ce_ch) { ce_bad = 16; }
+                var q2 = 0;
+                while (ce_bad == 0 && q2 < vec_len(ce_d)) {
+                    var dv = vec_get(ce_d, q2);
+                    if (f64_eq(dv, dv) == 0) { ce_bad = 17; }
+                    q2 = q2 + 1;
+                }
+            }
+        }
+    }
+    if (ce_bad != 0) {
+        syscall(1, 1, "celt encode failed: ", 20);
+        fmt_int(ce_bad);
+        syscall(1, 1, " fs ", 4);
+        fmt_int(ce_fs);
+        syscall(1, 1, " ch ", 4);
+        fmt_int(ce_ch);
+        syscall(1, 1, "\n", 1);
+        syscall(60, 90);
     }
     fi = fi + 1; total = total + 2;
 }

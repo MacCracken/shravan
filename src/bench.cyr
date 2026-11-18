@@ -18,6 +18,8 @@ include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
 include "src/opus_enc.cyr"
+include "src/celt_enc_tables.cyr"
+include "src/celt_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -974,6 +976,41 @@ fn bench_opus_encode(name, ch, br, cx, iters) {
 }
 
 # ================================================================
+# Benchmark: celt_encoder_encode (2.12.4, libopus's CELT encoder): one second
+# at 48 kHz of the voiced input (the right channel the voiced and the coloured
+# noise mixed), VBR, frames of n samples.
+# ================================================================
+
+fn bench_celt_encode(name, ch, n, br, cx, iters) {
+    var xl = alloc(48000 * 8);
+    _bench_silk_voiced(48000, 48000, xl);
+    var x = xl;
+    if (ch == 2) {
+        var xn = alloc(48000 * 8);
+        _bench_silk_input(48000, 48000, xn);
+        x = alloc(2 * 48000 * 8);
+        for (var i = 0; i < 48000; i = i + 1) {
+            store64(x + 2 * i * 8, load64(xl + i * 8));
+            store64(x + (2 * i + 1) * 8, f64_mul(f64_add(load64(xl + i * 8), load64(xn + i * 8)), F64_HALF));
+        }
+    }
+    var buf = alloc(1280);
+    var e = celt_encoder_new(48000, ch);
+    celt_encoder_set_complexity(e, cx);
+    celt_encoder_set_vbr(e, 1);
+    celt_encoder_set_bitrate(e, br);
+    var frames = 48000 / n;
+    for (var p = 0; p < frames; p = p + 1) { celt_encoder_encode(e, x + p * n * ch * 8, n, buf, 1275); }
+    bench(name, iters);
+    var t0 = time_now_ns();
+    for (var it = 0; it < iters; it = it + 1) {
+        for (var q = 0; q < frames; q = q + 1) { celt_encoder_encode(e, x + q * n * ch * 8, n, buf, 1275); }
+    }
+    var t1 = time_now_ns();
+    return bench_report(t1 - t0, iters);
+}
+
+# ================================================================
 # Benchmark: fft_1024
 # ================================================================
 
@@ -1191,7 +1228,7 @@ fn bench_opus_decode_51() {
 alloc_init();
 shravan_init_constants();
 
-syscall(1, 1, "shravan v2.12.3 benchmarks\n", 27);
+syscall(1, 1, "shravan v2.12.4 benchmarks\n", 27);
 syscall(1, 1, "========================================\n\n", 42);
 
 var wav_dec_ns = bench_wav_decode_1sec();
@@ -1230,6 +1267,11 @@ var silk_dd_ns = bench_silk_nsq_del_dec();
 var opus_e9_ns = bench_opus_encode("opus_encode_1sec_48k_silk24k_cx9", 1, 24000, 9, 5);
 var opus_e1_ns = bench_opus_encode("opus_encode_1sec_48k_silk24k_cx1", 1, 24000, 1, 10);
 var opus_es_ns = bench_opus_encode("opus_encode_1sec_48k_stereo40k_cx9", 2, 40000, 9, 3);
+var celt_m10_ns = bench_celt_encode("celt_encode_1sec_48k_mono64k_cx10", 1, 960, 64000, 10, 10);
+var celt_m0_ns = bench_celt_encode("celt_encode_1sec_48k_mono64k_cx0", 1, 960, 64000, 0, 10);
+var celt_s10_ns = bench_celt_encode("celt_encode_1sec_48k_stereo128k_cx10", 2, 960, 128000, 10, 5);
+var celt_s5_ns = bench_celt_encode("celt_encode_1sec_48k_stereo128k_cx5", 2, 960, 128000, 5, 5);
+var celt_m25_ns = bench_celt_encode("celt_encode_1sec_48k_mono2.5ms_cx10", 1, 120, 96000, 10, 5);
 var mp4_dec_ns  = bench_mp4_decode_1sec();
 var mp3_dec_ns  = bench_mp3_decode_lame();
 var aac51_ns    = bench_aac_decode_51();

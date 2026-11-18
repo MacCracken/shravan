@@ -1,0 +1,5235 @@
+# ================================================================
+# celt_enc.cyr -- libopus's CELT encoder (celt_encode_with_ec), 2.12.4
+# ================================================================
+#
+# libopus v1.6.1's CELT encoder as its float build computes it: every value
+# libopus keeps in a float is a float here, each operation rounded to single
+# precision in libopus's order (Cyrius's f32 arithmetic is the addss/mulss
+# libopus's C compiles to), and the expressions C evaluates in double (a
+# double literal, sqrt, log, exp, cos, acos) evaluated in double. The
+# portable C build is the reference: built with OPUS_DISABLE_INTRINSICS, as
+# x86's SSE versions of the PVQ search, the inner products and the comb
+# filter sum in other orders (and the SSE PVQ search takes an approximate
+# reciprocal), so libopus's own CELT output differs between its builds.
+#
+# The encoder in order: the pre-emphasis, the tone detector, the transient
+# analysis, the pitch pre-filter (pitch search, doubling removal, comb filter),
+# the forward MDCT (long or short blocks, a second long MDCT from complexity
+# 8), the band energies, the surround masking (with an energy mask), temporal
+# VBR, the transient patch, normalisation, the dynamic allocation analysis,
+# the time-frequency analysis, coarse energy (the intra/inter race), the
+# spreading decision, the dynalloc boosts, the stereo decisions (dual stereo,
+# intensity), the allocation trim, VBR with its constraint and reservoir,
+# the bit allocation, fine energy, the bands (theta, PVQ, the resynthesis
+# the stereo theta search needs from complexity 8), anti-collapse and the
+# energy finalisation. Mono, stereo and stereo coded mono; 2.5, 5, 10 and
+# 20 ms; 8 to 48 kHz input (CELT's upsampling); complexity 0 to 10; CBR, VBR
+# and constrained VBR; the hybrid's start band, SILK info and pre-written
+# range coder; the tonality analysis's info; LFE; the surround energy mask.
+# Byte for byte libopus's celt_encode_with_ec.
+#
+# Built with -D CELT_TRACE it writes celtdump.h's records (scripts/silkref/)
+# at the same points as the instrumented libopus, for a line-by-line diff.
+#
+# Provides:
+#   celt_encoder_new(fs, channels)              -- 8, 12, 16, 24, 48 kHz; 1 or 2 channels
+#   celt_encoder_encode(enc, pcm, frame_size, out, max)
+#                                               -- pcm: frame_size f64 samples a channel,
+#                                                  interleaved (taken as libopus's floats);
+#                                                  the frame's bytes into out, max at most
+#   celt_encoder_encode_ec(enc, pcm, frame_size, max, ec)
+#                                               -- into a range coder already holding bits
+#                                                  (the hybrid's SILK), as libopus with enc
+#   celt_encoder_set_complexity / _start_band / _end_band / _prediction / _packet_loss /
+#     _vbr / _vbr_constraint / _bitrate / _channels / _lsb_depth / _phase_inversion_disabled /
+#     _lfe / _energy_mask / _analysis / _silk_info, celt_encoder_reset (libopus's ctls)
+#   celt_encoder_final_range / _lsb_depth / _phase_inversion_disabled (its getters)
+#
+# Requires: opus.cyr (the range coder, the CELT tables, the bit allocation,
+# the PVQ codewords), celt_enc_tables.cyr, alloc, f64, f32.
+
+# ---------------------------------------------------------------- the encoder
+
+# The encoder, 8-byte words at fixed offsets. Floats are their bit patterns.
+var _CE_CC = 0;               # channels
+var _CE_C = 8;                # stream_channels (CELT_SET_CHANNELS)
+var _CE_FORCE_INTRA = 16;
+var _CE_CLIP = 24;
+var _CE_DISABLE_PF = 32;
+var _CE_CX = 40;              # complexity
+var _CE_UPSAMPLE = 48;
+var _CE_START = 56;
+var _CE_END = 64;
+var _CE_BITRATE = 72;
+var _CE_VBR = 80;
+var _CE_CVBR = 88;            # constrained_vbr
+var _CE_LOSS = 96;
+var _CE_LSB = 104;
+var _CE_LFE = 112;
+var _CE_DISABLE_INV = 120;
+var _CE_FS = 128;
+# OPUS_RESET_STATE clears from here (libopus's ENCODER_RESET_START, rng)
+var _CE_RNG = 136;
+var _CE_SPREAD = 144;         # spread_decision
+var _CE_DINTRA = 152;         # delayedIntra (f32)
+var _CE_TONAL_AVG = 160;
+var _CE_LAST_CODED = 168;     # lastCodedBands
+var _CE_HF_AVG = 176;
+var _CE_TAPSET = 184;         # tapset_decision
+var _CE_PF_PERIOD = 192;      # prefilter_period
+var _CE_PF_GAIN = 200;        # prefilter_gain (f32)
+var _CE_PF_TAPSET = 208;
+var _CE_CONSEC = 216;         # consec_transient
+var _CE_ANA = 224;            # AnalysisInfo: _CEA_ offsets below
+var _CE_SILK_TYPE = 464;      # SILKInfo
+var _CE_SILK_OFFSET = 472;
+var _CE_PREEMPH_E = 480;      # [2] f32 (preemph_memE)
+var _CE_PREEMPH_D = 496;      # [2] (preemph_memD, the resynthesis's; unused)
+var _CE_VBR_RES = 512;        # vbr_reservoir
+var _CE_VBR_DRIFT = 520;
+var _CE_VBR_OFFSET = 528;
+var _CE_VBR_COUNT = 536;
+var _CE_OVERLAP_MAX = 544;    # f32
+var _CE_STEREO_SAVING = 552;  # f32
+var _CE_INTENSITY = 560;
+var _CE_EMASK = 568;          # energy_mask: C x 21 f64 (ptr), or 0
+var _CE_SPEC_AVG = 576;       # f32
+var _CE_RESET_WORDS = 73;     # words from _CE_RNG up to here
+var _CE_IN_MEM = 720;         # [CC x 120] f32 (ptr): the overlap
+var _CE_PF_MEM = 728;         # [CC x 1024] f32: prefilter_mem
+var _CE_OLDBANDE = 736;       # [CC x 21] f32
+var _CE_OLDLOGE = 744;
+var _CE_OLDLOGE2 = 752;
+var _CE_EERR = 760;           # energyError
+# a frame's working arrays, allocated once (the trace and the tests read them)
+var _CE_PCM = 768;            # [CC x 960] f32: the input as libopus's floats
+var _CE_IN = 776;             # [CC x 1080] f32
+var _CE_FREQ = 784;           # [CC x 960] f32
+var _CE_XN = 792;             # [2 x 960] f32: X, the normalised bands
+var _CE_BANDE = 800;          # [CC x 21] f32
+var _CE_LOGE = 808;           # [CC x 21] f32: bandLogE
+var _CE_LOGE2 = 816;          # [CC x 21] f32
+var _CE_ERROR = 824;          # [CC x 21] f32
+var _CE_OFFSETS = 832;        # [21] words
+var _CE_IMPORTANCE = 840;     # [21]
+var _CE_SPREADW = 848;        # [21]
+var _CE_TFRES = 856;          # [21]
+var _CE_CAP = 864;            # [21]
+var _CE_PULSES = 872;         # [21]
+var _CE_FINEQ = 880;          # [21]
+var _CE_FINEP = 888;          # [21]
+var _CE_CM = 896;             # [2 x 21] bytes: collapse_masks
+var _CE_SDYN = 904;           # [2 x 21] f32: surround_dynalloc
+var _CE_ECS = 912;            # the range coder when the caller passes none (96 bytes)
+var _CE_PRE = 920;            # [2 x 1984] f32: run_prefilter's pre[]
+var _CE_SCR = 928;            # [8192] f32 scratch
+var _CE_BAND = 936;           # quant_all_bands' buffers (ptr, _CEB_ layout)
+# the frame's decisions, for the tests
+var _CE_FR_TRANS = 944;       # isTransient
+var _CE_FR_SHORT = 952;       # shortBlocks
+var _CE_FR_PF = 960;          # pf_on
+var _CE_FR_PITCH = 968;       # pitch_index
+var _CE_FR_QG = 976;          # qg
+var _CE_FR_TFSEL = 984;       # tf_select
+var _CE_FR_TRIM = 992;        # alloc_trim
+var _CE_FR_DUAL = 1000;       # dual_stereo
+var _CE_FR_CODED = 1008;      # codedBands
+var _CE_FR_BALANCE = 1016;    # balance
+var _CE_FR_BYTES = 1024;      # nbCompressedBytes
+var _CE_FR_TFEST = 1032;      # tf_estimate (f32)
+var _CE_FR_SILENCE = 1040;
+var _CE_SIZE = 1048;
+
+# AnalysisInfo (libopus celt.h), inside the encoder at _CE_ANA: floats as f32
+# patterns. celt_encoder_set_analysis takes the same fields as f64.
+var _CEA_VALID = 0;
+var _CEA_TONALITY = 8;
+var _CEA_TONALITY_SLOPE = 16;
+var _CEA_NOISINESS = 24;
+var _CEA_ACTIVITY = 32;
+var _CEA_MUSIC_PROB = 40;
+var _CEA_MUSIC_PROB_MIN = 48;
+var _CEA_MUSIC_PROB_MAX = 56;
+var _CEA_BANDWIDTH = 64;
+var _CEA_ACTIVITY_PROB = 72;
+var _CEA_MAX_PITCH_RATIO = 80;
+var _CEA_LEAK_BOOST = 88;     # [19] words (unsigned char, Q6)
+var _CEA_SIZE = 240;
+
+var _CE_LEAK_BANDS = 19;
+var _CE_SPREAD_NONE = 0;
+var _CE_SPREAD_LIGHT = 1;
+var _CE_SPREAD_NORMAL = 2;
+var _CE_SPREAD_AGGRESSIVE = 3;
+
+# ---------------------------------------------------------------- constants
+
+# libopus's float literals (QCONST16(x, b) is the literal x in the float
+# build), as typed single-precision values.
+var _CEF_ZERO: f32 = 0.0;
+var _CEF_ONE: f32 = 1.0;
+var _CEF_HALF: f32 = 0.5;
+var _CEF_QUARTER: f32 = 0.25;
+var _CEF_TWO: f32 = 2.0;
+var _CEF_EPS: f32 = 0.000000000000001;                 # EPSILON
+var _CEF_1E27: f32 = 0.000000000000000000000000001;
+var _CEF_SQRT1_2: f32 = 0.70710678;        # QCONST32(.70710678f, 31)
+var _CEF_KF2: f32 = 0.7071067812;          # kf_bfly2's tw
+var _CEF_65536: f32 = 65536.0;
+var _CEF_M65536: f32 = -65536.0;
+var _CEF_SIG_SCALE: f32 = 32768.0;         # CELT_SIG_SCALE
+
+# The tables are libopus's own, generated from its sources into
+# celt_enc_tables.cyr (scripts/gen-celt-tables.py), with the shared CELT
+# tables of opus.cyr.
+var _ce_ready = 0;
+
+fn _ce_init() {
+    if (_cet_window == 0) { _cet_init(); }
+    if (_celt_eBands == 0) { _celt_alloc_tables_init(); }
+    if (_celt_eprob_inter == 0) { _celt_energy_tables_init(); }
+    if (_celt_eMeans == 0) { _celt_bands_tables_init(); }
+    if (_celt_pvqU == 0) { _celt_pvq_u_init(); }
+    _ce_ready = 1;
+    return 0;
+}
+
+# ---------------------------------------------------------------- small helpers
+
+fn _ce_imin(a, b) { if (a < b) { return a; } return b; }
+fn _ce_imax(a, b) { if (a > b) { return a; } return b; }
+fn _ce_iabs(a) { if (a < 0) { return 0 - a; } return a; }
+
+# (float)i: exact for the integers here (|i| < 2^24).
+fn _cef_i(i): i64 { return f32_from(f64_from(i)); }
+
+# (int)x, truncating, of a float; a NaN or an out-of-range value comes back
+# clamped (C's is undefined there), so an index made of it stays in range.
+fn _cef_trunc(x: f32): i64 {
+    var d = f32_to(x);
+    if (f64_eq(d, d) == 0) { return 0; }
+    if (f64_gt(d, 1073741824.0) == 1) { return 1073741824; }
+    if (f64_lt(d, 0.0 - 1073741824.0) == 1) { return 0 - 1073741824; }
+    return f64_to(d);
+}
+
+# (int)floor(d) of a double (C's floor(), then the conversion), clamped as above.
+fn _ce_floor_d(d): i64 {
+    if (f64_eq(d, d) == 0) { return 0; }
+    if (f64_gt(d, 1073741824.0) == 1) { return 1073741824; }
+    if (f64_lt(d, 0.0 - 1073741824.0) == 1) { return 0 - 1073741824; }
+    return f64_to(f64_floor(d));
+}
+
+# (int)floor(.5f + x): libopus's float-to-int rounding (the add in float).
+fn _cef_round(x: f32): i64 {
+    var h: f32 = _CEF_HALF + x;
+    return _ce_floor_d(f32_to(h));
+}
+
+# celt_sqrt (float): (float)sqrt(x), correctly rounded.
+fn _cef_sqrt(x: f32): i64 { return f32_from(f64_sqrt(f32_to(x))); }
+
+# celt_log2 (float, without FLOAT_APPROX): (float)(1.442695040888963387*log(x)).
+fn _cef_log2(x: f32): i64 { return f32_from(f64_mul(0x3FF71547652B82FE, f64_ln(f32_to(x)))); }
+
+# celt_exp2: (float)exp(0.6931471805599453094*(x)).
+fn _cef_exp2(x: f32): i64 { return f32_from(f64_exp(f64_mul(0x3FE62E42FEFA39EF, f32_to(x)))); }
+
+# celt_cos_norm: (float)cos((.5f*PI)*(x)), PI the double 3.1415926535897931.
+fn _cef_cos_norm(x: f32): i64 { return f32_from(f64_cos(f64_mul(0x3FF921FB54442D18, f32_to(x)))); }
+
+# MAX16 / MIN16 of floats: (a > b ? a : b), (a < b ? a : b), NaN as C has it.
+fn _cef_max(a: f32, b: f32): i64 { if (a > b) { return a; } return b; }
+fn _cef_min(a: f32, b: f32): i64 { if (a < b) { return a; } return b; }
+
+# celt_maxabs16 (float): the larger of the maximum and minus the minimum.
+fn _cef_maxabs(x, n): i64 {
+    var mx: f32 = _CEF_ZERO;
+    var mn: f32 = _CEF_ZERO;
+    var i = 0;
+    while (i < n) {
+        var v: f32 = load32(x + i * 4);
+        if (v > mx) { mx = v; }
+        if (v < mn) { mn = v; }
+        i = i + 1;
+    }
+    var nm: f32 = mn ^ 0x80000000;
+    if (mx > nm) { return mx; }
+    return nm;
+}
+
+# celt_inner_prod (C): sum of x[i]*y[i] in order, each product and sum a float
+# (four terms a pass, still one at a time into the sum).
+fn _cef_inner(x, y, n): i64 {
+    var s: f32 = _CEF_ZERO;
+    var px = x;
+    var py = y;
+    var e4 = x + ((n >> 2) << 4);
+    while (px < e4) {
+        var a0: f32 = load32(px);
+        var b0: f32 = load32(py);
+        var a1: f32 = load32(px + 4);
+        var b1: f32 = load32(py + 4);
+        var a2: f32 = load32(px + 8);
+        var b2: f32 = load32(py + 8);
+        var a3: f32 = load32(px + 12);
+        var b3: f32 = load32(py + 12);
+        s = s + a0 * b0;
+        s = s + a1 * b1;
+        s = s + a2 * b2;
+        s = s + a3 * b3;
+        px = px + 16;
+        py = py + 16;
+    }
+    var e = x + n * 4;
+    while (px < e) {
+        var a: f32 = load32(px);
+        var b: f32 = load32(py);
+        s = s + a * b;
+        px = px + 4;
+        py = py + 4;
+    }
+    return s;
+}
+
+# xcorr_kernel_c (pitch.h): four lags at once, out[k] = sum x[j]*y[j+k], each
+# sum in j's order (as celt_inner_prod would), x[j] read once for the four.
+fn _cef_xcorr4(x, y, len, out) {
+    var s0: f32 = _CEF_ZERO;
+    var s1: f32 = _CEF_ZERO;
+    var s2: f32 = _CEF_ZERO;
+    var s3: f32 = _CEF_ZERO;
+    var y0: f32 = load32(y);
+    var y1: f32 = load32(y + 4);
+    var y2: f32 = load32(y + 8);
+    var px = x;
+    var py = y + 12;
+    var e = x + len * 4;
+    while (px < e) {
+        var t: f32 = load32(px);
+        var y3: f32 = load32(py);
+        s0 = s0 + t * y0;
+        s1 = s1 + t * y1;
+        s2 = s2 + t * y2;
+        s3 = s3 + t * y3;
+        y0 = y1;
+        y1 = y2;
+        y2 = y3;
+        px = px + 4;
+        py = py + 4;
+    }
+    store32(out, s0);
+    store32(out + 4, s1);
+    store32(out + 8, s2);
+    store32(out + 12, s3);
+    return 0;
+}
+
+# n floats, in order: OPUS_COPY, and OPUS_MOVE where the encoder moves a
+# buffer down (the pre-filter's memory), which is the only overlap it makes.
+fn _ce_copy32(dst, src, n) {
+    var i = 0;
+    while (i < n) { store32(dst + i * 4, load32(src + i * 4)); i = i + 1; }
+    return 0;
+}
+
+fn _ce_zero32(dst, n) {
+    var i = 0;
+    while (i < n) { store32(dst + i * 4, 0); i = i + 1; }
+    return 0;
+}
+
+fn _ce_copy64(dst, src, n) {
+    var i = 0;
+    while (i < n) { store64(dst + i * 8, load64(src + i * 8)); i = i + 1; }
+    return 0;
+}
+
+# ec_enc_shrink (entenc.c): move the raw bits at the end to the new end.
+fn _ce_ec_shrink(ec, size) {
+    var buf = load64(ec + 0);
+    var storage = load64(ec + 8);
+    var eo = load64(ec + 16);
+    if (eo > 0) {
+        var i = 0;
+        var from = buf + storage - eo;
+        var to = buf + size - eo;
+        if (to < from) {
+            while (i < eo) { store8(to + i, load8(from + i)); i = i + 1; }
+        } else {
+            i = eo - 1;
+            while (i >= 0) { store8(to + i, load8(from + i)); i = i - 1; }
+        }
+    }
+    store64(ec + 8, size);
+    return 0;
+}
+
+# ---------------------------------------------------------------- the FFT and the MDCT
+
+# kiss_fft's float butterflies (kiss_fft.c), complex floats as (r, i) pairs,
+# 8 bytes each. The twiddles are the static mode's 480 (_cet_fft_tw).
+fn _ce_bfly2(fout, N) {
+    var tw: f32 = _CEF_KF2;
+    var i = 0;
+    var p = fout;
+    while (i < N) {
+        # Fout2[0]: t = Fout2[0]
+        var a0r: f32 = load32(p); var a0i: f32 = load32(p + 4);
+        var b0r: f32 = load32(p + 32); var b0i: f32 = load32(p + 36);
+        var c0r: f32 = a0r - b0r; var c0i: f32 = a0i - b0i;
+        var d0r: f32 = a0r + b0r; var d0i: f32 = a0i + b0i;
+        store32(p + 32, c0r); store32(p + 36, c0i); store32(p, d0r); store32(p + 4, d0i);
+        # Fout2[1]: t = ((r + i) tw, (i - r) tw)
+        var a1r: f32 = load32(p + 8); var a1i: f32 = load32(p + 12);
+        var b1r: f32 = load32(p + 40); var b1i: f32 = load32(p + 44);
+        var s1: f32 = b1r + b1i; var d1: f32 = b1i - b1r;
+        var t1r: f32 = s1 * tw; var t1i: f32 = d1 * tw;
+        var c1r: f32 = a1r - t1r; var c1i: f32 = a1i - t1i;
+        var e1r: f32 = a1r + t1r; var e1i: f32 = a1i + t1i;
+        store32(p + 40, c1r); store32(p + 44, c1i); store32(p + 8, e1r); store32(p + 12, e1i);
+        # Fout2[2]: t = (i, -r)
+        var a2r: f32 = load32(p + 16); var a2i: f32 = load32(p + 20);
+        var b2r: f32 = load32(p + 48); var b2i: f32 = load32(p + 52);
+        var t2i: f32 = b2r ^ 0x80000000;
+        var c2r: f32 = a2r - b2i; var c2i: f32 = a2i - t2i;
+        var e2r: f32 = a2r + b2i; var e2i: f32 = a2i + t2i;
+        store32(p + 48, c2r); store32(p + 52, c2i); store32(p + 16, e2r); store32(p + 20, e2i);
+        # Fout2[3]: t = ((i - r) tw, -(i + r) tw)
+        var a3r: f32 = load32(p + 24); var a3i: f32 = load32(p + 28);
+        var b3r: f32 = load32(p + 56); var b3i: f32 = load32(p + 60);
+        var d3: f32 = b3i - b3r; var s3: f32 = b3i + b3r; var n3: f32 = s3 ^ 0x80000000;
+        var t3r: f32 = d3 * tw; var t3i: f32 = n3 * tw;
+        var c3r: f32 = a3r - t3r; var c3i: f32 = a3i - t3i;
+        var e3r: f32 = a3r + t3r; var e3i: f32 = a3i + t3i;
+        store32(p + 56, c3r); store32(p + 60, c3i); store32(p + 24, e3r); store32(p + 28, e3i);
+        p = p + 64;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ce_bfly4(fout, fstride, m, N, mm) {
+    var i = 0;
+    if (m == 1) {
+        var p = fout;
+        while (i < N) {
+            var f0r: f32 = load32(p); var f0i: f32 = load32(p + 4);
+            var f1r: f32 = load32(p + 8); var f1i: f32 = load32(p + 12);
+            var f2r: f32 = load32(p + 16); var f2i: f32 = load32(p + 20);
+            var f3r: f32 = load32(p + 24); var f3i: f32 = load32(p + 28);
+            var s0r: f32 = f0r - f2r;
+            var s0i: f32 = f0i - f2i;
+            f0r = f0r + f2r;
+            f0i = f0i + f2i;
+            var s1r: f32 = f1r + f3r;
+            var s1i: f32 = f1i + f3i;
+            var g2r: f32 = f0r - s1r;
+            var g2i: f32 = f0i - s1i;
+            f0r = f0r + s1r;
+            f0i = f0i + s1i;
+            s1r = f1r - f3r;
+            s1i = f1i - f3i;
+            var g1r: f32 = s0r + s1i;
+            var g1i: f32 = s0i - s1r;
+            var g3r: f32 = s0r - s1i;
+            var g3i: f32 = s0i + s1r;
+            store32(p, f0r); store32(p + 4, f0i);
+            store32(p + 8, g1r); store32(p + 12, g1i);
+            store32(p + 16, g2r); store32(p + 20, g2i);
+            store32(p + 24, g3r); store32(p + 28, g3i);
+            p = p + 32;
+            i = i + 1;
+        }
+        return 0;
+    }
+    var tw = _cet_fft_tw;
+    var m2 = 2 * m;
+    var m3 = 3 * m;
+    while (i < N) {
+        var F = fout + i * mm * 8;
+        var j = 0;
+        var t1 = tw;
+        var t2 = tw;
+        var t3 = tw;
+        var d1 = fstride * 8;
+        while (j < m) {
+            var w1r: f32 = load32(t1); var w1i: f32 = load32(t1 + 4);
+            var w2r: f32 = load32(t2); var w2i: f32 = load32(t2 + 4);
+            var w3r: f32 = load32(t3); var w3i: f32 = load32(t3 + 4);
+            var a0 = F + j * 8;
+            var a1 = a0 + m * 8;
+            var a2 = a0 + m2 * 8;
+            var a3 = a0 + m3 * 8;
+            var x0r: f32 = load32(a0); var x0i: f32 = load32(a0 + 4);
+            var x1r: f32 = load32(a1); var x1i: f32 = load32(a1 + 4);
+            var x2r: f32 = load32(a2); var x2i: f32 = load32(a2 + 4);
+            var x3r: f32 = load32(a3); var x3i: f32 = load32(a3 + 4);
+            # C_MUL(scratch[0], Fout[m], *tw1) etc.
+            var s0r: f32 = x1r * w1r - x1i * w1i;
+            var s0i: f32 = x1r * w1i + x1i * w1r;
+            var s1r: f32 = x2r * w2r - x2i * w2i;
+            var s1i: f32 = x2r * w2i + x2i * w2r;
+            var s2r: f32 = x3r * w3r - x3i * w3i;
+            var s2i: f32 = x3r * w3i + x3i * w3r;
+            var s5r: f32 = x0r - s1r;
+            var s5i: f32 = x0i - s1i;
+            x0r = x0r + s1r;
+            x0i = x0i + s1i;
+            var s3r: f32 = s0r + s2r;
+            var s3i: f32 = s0i + s2i;
+            var s4r: f32 = s0r - s2r;
+            var s4i: f32 = s0i - s2i;
+            var y2r: f32 = x0r - s3r;
+            var y2i: f32 = x0i - s3i;
+            x0r = x0r + s3r;
+            x0i = x0i + s3i;
+            var y1r: f32 = s5r + s4i;
+            var y1i: f32 = s5i - s4r;
+            var y3r: f32 = s5r - s4i;
+            var y3i: f32 = s5i + s4r;
+            store32(a0, x0r); store32(a0 + 4, x0i);
+            store32(a1, y1r); store32(a1 + 4, y1i);
+            store32(a2, y2r); store32(a2 + 4, y2i);
+            store32(a3, y3r); store32(a3 + 4, y3i);
+            t1 = t1 + d1;
+            t2 = t2 + 2 * d1;
+            t3 = t3 + 3 * d1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ce_bfly3(fout, fstride, m, N, mm) {
+    var tw = _cet_fft_tw;
+    var e3: f32 = load32(tw + fstride * m * 8 + 4);       # epi3.i
+    var m2 = 2 * m;
+    var i = 0;
+    while (i < N) {
+        var F = fout + i * mm * 8;
+        var k = 0;
+        while (k < m) {
+            var t1 = tw + k * fstride * 8;
+            var t2 = tw + k * fstride * 16;
+            var w1r: f32 = load32(t1); var w1i: f32 = load32(t1 + 4);
+            var w2r: f32 = load32(t2); var w2i: f32 = load32(t2 + 4);
+            var a0 = F + k * 8;
+            var a1 = a0 + m * 8;
+            var a2 = a0 + m2 * 8;
+            var x0r: f32 = load32(a0); var x0i: f32 = load32(a0 + 4);
+            var x1r: f32 = load32(a1); var x1i: f32 = load32(a1 + 4);
+            var x2r: f32 = load32(a2); var x2i: f32 = load32(a2 + 4);
+            var s1r: f32 = x1r * w1r - x1i * w1i;
+            var s1i: f32 = x1r * w1i + x1i * w1r;
+            var s2r: f32 = x2r * w2r - x2i * w2i;
+            var s2i: f32 = x2r * w2i + x2i * w2r;
+            var s3r: f32 = s1r + s2r;
+            var s3i: f32 = s1i + s2i;
+            var s0r: f32 = s1r - s2r;
+            var s0i: f32 = s1i - s2i;
+            var h3r: f32 = s3r * _CEF_HALF;
+            var h3i: f32 = s3i * _CEF_HALF;
+            var y1r: f32 = x0r - h3r;
+            var y1i: f32 = x0i - h3i;
+            s0r = s0r * e3;
+            s0i = s0i * e3;
+            x0r = x0r + s3r;
+            x0i = x0i + s3i;
+            var y2r: f32 = y1r + s0i;
+            var y2i: f32 = y1i - s0r;
+            y1r = y1r - s0i;
+            y1i = y1i + s0r;
+            store32(a0, x0r); store32(a0 + 4, x0i);
+            store32(a1, y1r); store32(a1 + 4, y1i);
+            store32(a2, y2r); store32(a2 + 4, y2i);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _ce_bfly5(fout, fstride, m, N, mm) {
+    var tw = _cet_fft_tw;
+    var yar: f32 = load32(tw + fstride * m * 8);
+    var yai: f32 = load32(tw + fstride * m * 8 + 4);
+    var ybr: f32 = load32(tw + fstride * 2 * m * 8);
+    var ybi: f32 = load32(tw + fstride * 2 * m * 8 + 4);
+    var i = 0;
+    while (i < N) {
+        var F = fout + i * mm * 8;
+        var u = 0;
+        while (u < m) {
+            var a0 = F + u * 8;
+            var a1 = a0 + m * 8;
+            var a2 = a0 + 2 * m * 8;
+            var a3 = a0 + 3 * m * 8;
+            var a4 = a0 + 4 * m * 8;
+            var t1 = tw + u * fstride * 8;
+            var t2 = tw + 2 * u * fstride * 8;
+            var t3 = tw + 3 * u * fstride * 8;
+            var t4 = tw + 4 * u * fstride * 8;
+            var w1r: f32 = load32(t1); var w1i: f32 = load32(t1 + 4);
+            var w2r: f32 = load32(t2); var w2i: f32 = load32(t2 + 4);
+            var w3r: f32 = load32(t3); var w3i: f32 = load32(t3 + 4);
+            var w4r: f32 = load32(t4); var w4i: f32 = load32(t4 + 4);
+            var x0r: f32 = load32(a0); var x0i: f32 = load32(a0 + 4);
+            var x1r: f32 = load32(a1); var x1i: f32 = load32(a1 + 4);
+            var x2r: f32 = load32(a2); var x2i: f32 = load32(a2 + 4);
+            var x3r: f32 = load32(a3); var x3i: f32 = load32(a3 + 4);
+            var x4r: f32 = load32(a4); var x4i: f32 = load32(a4 + 4);
+            var s1r: f32 = x1r * w1r - x1i * w1i;
+            var s1i: f32 = x1r * w1i + x1i * w1r;
+            var s2r: f32 = x2r * w2r - x2i * w2i;
+            var s2i: f32 = x2r * w2i + x2i * w2r;
+            var s3r: f32 = x3r * w3r - x3i * w3i;
+            var s3i: f32 = x3r * w3i + x3i * w3r;
+            var s4r: f32 = x4r * w4r - x4i * w4i;
+            var s4i: f32 = x4r * w4i + x4i * w4r;
+            var s7r: f32 = s1r + s4r;
+            var s7i: f32 = s1i + s4i;
+            var s10r: f32 = s1r - s4r;
+            var s10i: f32 = s1i - s4i;
+            var s8r: f32 = s2r + s3r;
+            var s8i: f32 = s2i + s3i;
+            var s9r: f32 = s2r - s3r;
+            var s9i: f32 = s2i - s3i;
+            var q78r: f32 = s7r + s8r;
+            var q78i: f32 = s7i + s8i;
+            var o0r: f32 = x0r + q78r;
+            var o0i: f32 = x0i + q78i;
+            var p5r: f32 = s7r * yar + s8r * ybr;
+            var p5i: f32 = s7i * yar + s8i * ybr;
+            var s5r: f32 = x0r + p5r;
+            var s5i: f32 = x0i + p5i;
+            var s6r: f32 = s10i * yai + s9i * ybi;
+            var q6: f32 = s10r * yai + s9r * ybi;
+            var s6i: f32 = q6 ^ 0x80000000;
+            var o1r: f32 = s5r - s6r;
+            var o1i: f32 = s5i - s6i;
+            var o4r: f32 = s5r + s6r;
+            var o4i: f32 = s5i + s6i;
+            var p11r: f32 = s7r * ybr + s8r * yar;
+            var p11i: f32 = s7i * ybr + s8i * yar;
+            var s11r: f32 = x0r + p11r;
+            var s11i: f32 = x0i + p11i;
+            var s12r: f32 = s9i * yai - s10i * ybi;
+            var s12i: f32 = s10r * ybi - s9r * yai;
+            var o2r: f32 = s11r + s12r;
+            var o2i: f32 = s11i + s12i;
+            var o3r: f32 = s11r - s12r;
+            var o3i: f32 = s11i - s12i;
+            store32(a0, o0r); store32(a0 + 4, o0i);
+            store32(a1, o1r); store32(a1 + 4, o1i);
+            store32(a2, o2r); store32(a2 + 4, o2i);
+            store32(a3, o3r); store32(a3 + 4, o3i);
+            store32(a4, o4r); store32(a4 + 4, o4i);
+            u = u + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# opus_fft_impl (float) for the static mode's FFT state sh (480 >> sh points).
+fn _ce_fft_impl(sh, fout) {
+    var fac = _cet_fft_factors + sh * 80;
+    var fsv = _opus_tmp(8 * 8);
+    store64(fsv, 1);
+    var L = 0;
+    var m = 0;
+    while (1) {
+        var p = load64(fac + 2 * L * 8);
+        m = load64(fac + (2 * L + 1) * 8);
+        store64(fsv + (L + 1) * 8, load64(fsv + L * 8) * p);
+        L = L + 1;
+        if (m == 1) { break; }
+    }
+    m = load64(fac + (2 * L - 1) * 8);
+    var i = L - 1;
+    while (i >= 0) {
+        var m2 = 1;
+        if (i != 0) { m2 = load64(fac + (2 * i - 1) * 8); }
+        var r = load64(fac + 2 * i * 8);
+        var fsi = load64(fsv + i * 8);
+        if (r == 2) { _ce_bfly2(fout, fsi); }
+        if (r == 4) { _ce_bfly4(fout, fsi << sh, m, fsi, m2); }
+        if (r == 3) { _ce_bfly3(fout, fsi << sh, m, fsi, m2); }
+        if (r == 5) { _ce_bfly5(fout, fsi << sh, m, fsi, m2); }
+        m = m2;
+        i = i - 1;
+    }
+    return 0;
+}
+
+# clt_mdct_forward_c (mdct.c, float): N = 1920 >> shift input samples at inp
+# (the window applied over overlap = 120 at either end) into N/2
+# coefficients at out, every stride-th float.
+fn _ce_mdct_forward(inp, out, shift, stride) {
+    var N = 1920;
+    var trig = _cet_trig;
+    var s = 0;
+    while (s < shift) { N = N >> 1; trig = trig + N * 4; s = s + 1; }
+    var N2 = N >> 1;
+    var N4 = N >> 2;
+    var overlap = 120;
+    var win = _cet_window;
+    var scale: f32 = load32(_cet_fft_scale + shift * 4);
+    var f = _opus_tmp(N2 * 4 + 8);
+    var f2 = _opus_tmp(N4 * 8 + 8);
+    var xp1 = inp + (overlap >> 1) * 4;
+    var xp2 = inp + (N2 - 1 + (overlap >> 1)) * 4;
+    var yp = f;
+    var wp1 = win + (overlap >> 1) * 4;
+    var wp2 = win + ((overlap >> 1) - 1) * 4;
+    var i = 0;
+    var lim1 = (overlap + 3) >> 2;
+    while (i < lim1) {
+        var a: f32 = load32(xp1 + N2 * 4);
+        var w2: f32 = load32(wp2);
+        var b: f32 = load32(xp2);
+        var w1: f32 = load32(wp1);
+        var c: f32 = load32(xp1);
+        var d: f32 = load32(xp2 - N2 * 4);
+        var y0: f32 = a * w2 + b * w1;
+        var y1: f32 = c * w1 - d * w2;
+        store32(yp, y0); store32(yp + 4, y1);
+        yp = yp + 8;
+        xp1 = xp1 + 8;
+        xp2 = xp2 - 8;
+        wp1 = wp1 + 8;
+        wp2 = wp2 - 8;
+        i = i + 1;
+    }
+    wp1 = win;
+    wp2 = win + (overlap - 1) * 4;
+    while (i < N4 - lim1) {
+        store32(yp, load32(xp2));
+        store32(yp + 4, load32(xp1));
+        yp = yp + 8;
+        xp1 = xp1 + 8;
+        xp2 = xp2 - 8;
+        i = i + 1;
+    }
+    while (i < N4) {
+        var a2: f32 = load32(xp1 - N2 * 4);
+        var v1: f32 = load32(wp1);
+        var b2: f32 = load32(xp2);
+        var v2: f32 = load32(wp2);
+        var c2: f32 = load32(xp1);
+        var d2: f32 = load32(xp2 + N2 * 4);
+        var na: f32 = a2 * v1;
+        var nn: f32 = na ^ 0x80000000;
+        var z0: f32 = nn + b2 * v2;
+        var z1: f32 = c2 * v2 + d2 * v1;
+        store32(yp, z0); store32(yp + 4, z1);
+        yp = yp + 8;
+        xp1 = xp1 + 8;
+        xp2 = xp2 - 8;
+        wp1 = wp1 + 8;
+        wp2 = wp2 - 8;
+        i = i + 1;
+    }
+    # pre-rotation, scaled, into bit-reversed order
+    var rev = _cet_bitrev;
+    if (shift == 1) { rev = rev + 480 * 8; }
+    if (shift == 2) { rev = rev + 720 * 8; }
+    if (shift == 3) { rev = rev + 840 * 8; }
+    yp = f;
+    i = 0;
+    while (i < N4) {
+        var t0: f32 = load32(trig + i * 4);
+        var t1: f32 = load32(trig + (N4 + i) * 4);
+        var re: f32 = load32(yp);
+        var im: f32 = load32(yp + 4);
+        yp = yp + 8;
+        var yr: f32 = re * t0 - im * t1;
+        var yi: f32 = im * t0 + re * t1;
+        var cr: f32 = yr * scale;
+        var ci: f32 = yi * scale;
+        var dst = f2 + load64(rev + i * 8) * 8;
+        store32(dst, cr); store32(dst + 4, ci);
+        i = i + 1;
+    }
+    _ce_fft_impl(shift, f2);
+    # post-rotation
+    var fp = f2;
+    var yp1 = out;
+    var yp2 = out + stride * (N2 - 1) * 4;
+    i = 0;
+    while (i < N4) {
+        var u0: f32 = load32(trig + i * 4);
+        var u1: f32 = load32(trig + (N4 + i) * 4);
+        var fr: f32 = load32(fp);
+        var fi: f32 = load32(fp + 4);
+        var or1: f32 = fi * u1 - fr * u0;
+        var oi1: f32 = fr * u1 + fi * u0;
+        store32(yp1, or1);
+        store32(yp2, oi1);
+        fp = fp + 8;
+        yp1 = yp1 + 2 * stride * 4;
+        yp2 = yp2 - 2 * stride * 4;
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------- the front end
+
+# celt_preemphasis (celt_encoder.c, float): N samples of channel pcmp (stride
+# CC, the input as floats) times CELT_SIG_SCALE, zero-stuffed by upsample,
+# clipped to +-65536 when clip, through 1 - coef0 z^-1 (coef0 = 0.85000610f,
+# the static mode's) into inp. mem is the filter's word (f32).
+fn _ce_preemphasis(pcmp, CC, inp, N, upsample, mem, clip) {
+    var coef0: f32 = _cet_preemph0;
+    var m: f32 = load32(mem);
+    var i = 0;
+    if (upsample == 1 && clip == 0) {
+        while (i < N) {
+            var r: f32 = load32(pcmp + CC * i * 4);
+            var x: f32 = _CEF_SIG_SCALE * r;
+            var y: f32 = x - m;
+            store32(inp + i * 4, y);
+            m = coef0 * x;
+            i = i + 1;
+        }
+        store32(mem, m);
+        return 0;
+    }
+    var Nu = N / upsample;
+    if (upsample != 1) { _ce_zero32(inp, N); }
+    while (i < Nu) {
+        var r2: f32 = load32(pcmp + CC * i * 4);
+        var x2: f32 = _CEF_SIG_SCALE * r2;
+        store32(inp + i * upsample * 4, x2);
+        i = i + 1;
+    }
+    if (clip != 0) {
+        i = 0;
+        while (i < Nu) {
+            var v: f32 = load32(inp + i * upsample * 4);
+            var lo: f32 = _cef_min(_CEF_65536, v);
+            var cl: f32 = _cef_max(_CEF_M65536, lo);
+            store32(inp + i * upsample * 4, cl);
+            i = i + 1;
+        }
+    }
+    i = 0;
+    while (i < N) {
+        var x3: f32 = load32(inp + i * 4);
+        var y3: f32 = x3 - m;
+        store32(inp + i * 4, y3);
+        m = coef0 * x3;
+        i = i + 1;
+    }
+    store32(mem, m);
+    return 0;
+}
+
+# tone_lpc (celt_encoder.c, float): a two-tap LPC of x at the given delay by
+# the forward-backward covariance method, into lpc[0..1] (f32). 1 when the
+# system is ill-conditioned.
+fn _ce_tone_lpc(x, len, delay, lpc) {
+    var r00: f32 = _CEF_ZERO;
+    var r01: f32 = _CEF_ZERO;
+    var r02: f32 = _CEF_ZERO;
+    var i = 0;
+    while (i < len - 2 * delay) {
+        var a: f32 = load32(x + i * 4);
+        var b: f32 = load32(x + (i + delay) * 4);
+        var c: f32 = load32(x + (i + 2 * delay) * 4);
+        r00 = r00 + a * a;
+        r01 = r01 + a * b;
+        r02 = r02 + a * c;
+        i = i + 1;
+    }
+    var edges: f32 = _CEF_ZERO;
+    i = 0;
+    while (i < delay) {
+        var e1: f32 = load32(x + (len + i - 2 * delay) * 4);
+        var e2: f32 = load32(x + i * 4);
+        edges = edges + (e1 * e1 - e2 * e2);
+        i = i + 1;
+    }
+    var r11: f32 = r00 + edges;
+    edges = _CEF_ZERO;
+    i = 0;
+    while (i < delay) {
+        var f1: f32 = load32(x + (len + i - delay) * 4);
+        var f2: f32 = load32(x + (i + delay) * 4);
+        edges = edges + (f1 * f1 - f2 * f2);
+        i = i + 1;
+    }
+    var r22: f32 = r11 + edges;
+    edges = _CEF_ZERO;
+    i = 0;
+    while (i < delay) {
+        var g1: f32 = load32(x + (len + i - 2 * delay) * 4);
+        var g2: f32 = load32(x + (len + i - delay) * 4);
+        var g3: f32 = load32(x + i * 4);
+        var g4: f32 = load32(x + (i + delay) * 4);
+        edges = edges + (g1 * g2 - g3 * g4);
+        i = i + 1;
+    }
+    var r12: f32 = r01 + edges;
+    var R00: f32 = r00 + r22;
+    var R01: f32 = r01 + r12;
+    var R11: f32 = _CEF_TWO * r11;
+    var R02: f32 = _CEF_TWO * r02;
+    var R12: f32 = r12 + r01;
+    r00 = R00;
+    r01 = R01;
+    r11 = R11;
+    r02 = R02;
+    r12 = R12;
+    var p0011: f32 = r00 * r11;
+    var den: f32 = p0011 - r01 * r01;
+    var k001: f32 = 0.001;
+    var lim: f32 = k001 * p0011;
+    if (den < lim) { return 1; }
+    var num1: f32 = r02 * r11 - r01 * r12;
+    var nden: f32 = den ^ 0x80000000;
+    var l1: f32 = num1 / den;
+    if (num1 >= den) { l1 = _CEF_ONE; }
+    else { if (num1 <= nden) { l1 = _CEF_ONE ^ 0x80000000; } }
+    store32(lpc + 4, l1);
+    var num0: f32 = r00 * r12 - r02 * r01;
+    var h0: f32 = _CEF_HALF * num0;
+    var k2: f32 = 1.999999;
+    var l0: f32 = num0 / den;
+    if (h0 >= den) { l0 = k2; }
+    else { if (h0 <= nden) { l0 = k2 ^ 0x80000000; } }
+    store32(lpc, l0);
+    return 0;
+}
+
+# tone_detect (celt_encoder.c, float): the frequency (radians a sample) of a
+# pure or nearly pure tone in the CC channels of in (N samples each), its
+# toneishness into *tness (f32); -1 when there is none.
+fn _ce_tone_detect(st, inp, CC, N, tness) {
+    var x = _opus_tmp(N * 4 + 8);
+    var i = 0;
+    if (CC == 2) {
+        while (i < N) {
+            var a: f32 = load32(inp + i * 4);
+            var b: f32 = load32(inp + (i + N) * 4);
+            var s: f32 = a + b;
+            store32(x + i * 4, s);
+            i = i + 1;
+        }
+    } else {
+        _ce_copy32(x, inp, N);
+    }
+    var lpc = _opus_tmp(16);
+    var delay = 1;
+    var fail = _ce_tone_lpc(x, N, delay, lpc);
+    while (delay <= 16) {
+        var l0: f32 = load32(lpc);
+        var l1: f32 = load32(lpc + 4);
+        var again = fail;
+        if (fail == 0) { if (l0 > _CEF_ONE && l1 < _CEF_ZERO) { again = 1; } }
+        if (again == 0) { break; }
+        delay = delay * 2;
+        fail = _ce_tone_lpc(x, N, delay, lpc);
+    }
+    if (fail == 0) {
+        var q0: f32 = load32(lpc);
+        var q1: f32 = load32(lpc + 4);
+        var sq: f32 = q0 * q0;
+        # QCONST32(3.999999, 29) is a double: the sum is in double
+        var d = f64_add(f32_to(sq), f64_mul(3.999999, f32_to(q1)));
+        if (f64_lt(d, 0.0) == 1) {
+            var nt: f32 = q1 ^ 0x80000000;
+            store32(tness, nt);
+            var h: f32 = _CEF_HALF * q0;
+            return f32_from(f64_div(f64_acos(f32_to(h)), f64_from(delay)));
+        }
+    }
+    store32(tness, 0);
+    var m1: f32 = _CEF_ONE ^ 0x80000000;
+    return m1;
+}
+
+# transient_analysis (celt_encoder.c, float): 1 when the CC channels of in
+# (len samples each) hold a transient; tf_estimate, tf_chan and the weak flag
+# into res[0] (f32), res[1], res[2].
+fn _ce_transient_analysis(inp, len, C, allow_weak, tone_freq: f32, tness: f32, res) {
+    var fdecay: f32 = 0.0625;
+    if (allow_weak != 0) { fdecay = 0.03125; }
+    var omd: f32 = _CEF_ONE - fdecay;
+    var k875: f32 = 0.875;
+    var k125: f32 = 0.125;
+    var tmp = _opus_tmp(len * 4 + 8);
+    store64(res + 16, 0);
+    store64(res + 8, 0);
+    var len2 = len / 2;
+    var mask_metric = 0;
+    var c = 0;
+    while (c < C) {
+        var mem0: f32 = _CEF_ZERO;
+        var mem1: f32 = _CEF_ZERO;
+        var i = 0;
+        while (i < len) {
+            var x: f32 = load32(inp + (i + c * len) * 4);
+            var y: f32 = mem0 + x;
+            var mem00: f32 = mem0;
+            var t0: f32 = mem0 - x;
+            mem0 = t0 + _CEF_HALF * mem1;
+            mem1 = x - mem00;
+            store32(tmp + i * 4, y);
+            i = i + 1;
+        }
+        _ce_zero32(tmp, 12);
+        var mean: f32 = _CEF_ZERO;
+        mem0 = _CEF_ZERO;
+        i = 0;
+        while (i < len2) {
+            var u: f32 = load32(tmp + 2 * i * 4);
+            var v: f32 = load32(tmp + (2 * i + 1) * 4);
+            var x2: f32 = u * u + v * v;
+            mean = mean + x2;
+            mem0 = x2 + omd * mem0;
+            var o: f32 = fdecay * mem0;
+            store32(tmp + i * 4, o);
+            i = i + 1;
+        }
+        mem0 = _CEF_ZERO;
+        var maxE: f32 = _CEF_ZERO;
+        i = len2 - 1;
+        while (i >= 0) {
+            var tv: f32 = load32(tmp + i * 4);
+            mem0 = tv + k875 * mem0;
+            var o2: f32 = k125 * mem0;
+            store32(tmp + i * 4, o2);
+            var o3: f32 = k125 * mem0;
+            if (!(maxE > o3)) { maxE = o3; }
+            i = i - 1;
+        }
+#ifdef CELT_TRACE
+        _ce_tr_f("ta.tmp", tmp, len2);
+#endif
+        # mean = celt_sqrt(mean * maxE*.5*len2): the float product, then doubles
+        var mm: f32 = mean * maxE;
+        var md = f64_mul(f64_mul(f32_to(mm), 0.5), f64_from(len2));
+        mean = f32_from(f64_sqrt(md));
+        var hm: f32 = _CEF_EPS + mean;
+        var l2f: f32 = _cef_i(len2);
+        var norm: f32 = l2f / hm;
+        var unmask = 0;
+        var k64: f32 = 64.0;
+        i = 12;
+        while (i < len2 - 5) {
+            var tt: f32 = load32(tmp + i * 4);
+            var te: f32 = tt + _CEF_EPS;
+            var nn: f32 = k64 * norm;
+            var pr: f32 = nn * te;
+            var fl = f64_floor(f32_to(pr));
+            var id = 0;
+            if (f64_eq(fl, fl) == 1) {
+                if (f64_lt(127.0, fl) == 1) { fl = 127.0; }
+                if (f64_gt(0.0, fl) == 1) { fl = 0.0; }
+                id = f64_to(fl);
+            }
+            unmask = unmask + load64(_cet_inv_table + id * 8);
+            i = i + 4;
+        }
+        unmask = 64 * unmask * 4 / (6 * (len2 - 17));
+#ifdef CELT_TRACE
+        _ce_tr_vals("ta.unmask", 2, c, unmask, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        _ce_tr_flts("ta.mean", 3, mean, norm, maxE, 0);
+#endif
+        if (unmask > mask_metric) {
+            store64(res + 8, c);
+            mask_metric = unmask;
+        }
+        c = c + 1;
+    }
+    var is_transient = 0;
+    if (mask_metric > 200) { is_transient = 1; }
+    var k98: f32 = 0.98;
+    var k026: f32 = 0.026;
+    if (tness > k98 && tone_freq < k026) {
+        is_transient = 0;
+        mask_metric = 0;
+    }
+    if (allow_weak != 0 && is_transient != 0 && mask_metric < 600) {
+        is_transient = 0;
+        store64(res + 16, 1);
+    }
+    # tf_max = MAX16(0, celt_sqrt(27*mask_metric)-42)
+    var sq: f32 = f32_from(f64_sqrt(f64_from(27 * mask_metric)));
+    var k42: f32 = 42.0;
+    var tfm: f32 = sq - k42;
+    if (_CEF_ZERO > tfm) { tfm = _CEF_ZERO; }
+    # tf_estimate = celt_sqrt(MAX32(0, (float)0.0069 * MIN16(163, tf_max) - 0.139)), the last in double
+    var k163: f32 = 163.0;
+    var mn: f32 = tfm;
+    if (k163 < tfm) { mn = k163; }
+    var k0069: f32 = 0.0069;
+    var p: f32 = k0069 * mn;
+    var dd = f64_sub(f32_to(p), 0.139);
+    if (f64_gt(0.0, dd) == 1) { dd = 0.0; }
+    store32(res, f32_from(f64_sqrt(dd)));
+    return is_transient;
+}
+
+# patch_transient_decision (celt_encoder.c, float): 1 when newE rises well
+# above oldE (spread by -1 a band each way) on average.
+fn _ce_patch_transient(newE, oldE, start, end, C) {
+    var sp = _opus_tmp(26 * 4);
+    var one: f32 = _CEF_ONE;
+    var i = start + 1;
+    if (C == 1) {
+        store32(sp + start * 4, load32(oldE + start * 4));
+        while (i < end) {
+            var a: f32 = load32(sp + (i - 1) * 4);
+            var am: f32 = a - one;
+            var b: f32 = load32(oldE + i * 4);
+            store32(sp + i * 4, _cef_max(am, b));
+            i = i + 1;
+        }
+    } else {
+        var o0: f32 = load32(oldE + start * 4);
+        var o1: f32 = load32(oldE + (start + 21) * 4);
+        store32(sp + start * 4, _cef_max(o0, o1));
+        while (i < end) {
+            var a2: f32 = load32(sp + (i - 1) * 4);
+            var am2: f32 = a2 - one;
+            var b0: f32 = load32(oldE + i * 4);
+            var b1: f32 = load32(oldE + (i + 21) * 4);
+            var bm: f32 = _cef_max(b0, b1);
+            store32(sp + i * 4, _cef_max(am2, bm));
+            i = i + 1;
+        }
+    }
+    i = end - 2;
+    while (i >= start) {
+        var s0: f32 = load32(sp + i * 4);
+        var s1: f32 = load32(sp + (i + 1) * 4);
+        var s1m: f32 = s1 - one;
+        store32(sp + i * 4, _cef_max(s0, s1m));
+        i = i - 1;
+    }
+    var mean_diff: f32 = _CEF_ZERO;
+    var lo = _ce_imax(2, start);
+    var c = 0;
+    while (c < C) {
+        i = lo;
+        while (i < end - 1) {
+            var ne: f32 = load32(newE + (i + c * 21) * 4);
+            var x1: f32 = _cef_max(_CEF_ZERO, ne);
+            var so: f32 = load32(sp + i * 4);
+            var x2: f32 = _cef_max(_CEF_ZERO, so);
+            var d: f32 = x1 - x2;
+            var dm: f32 = _cef_max(_CEF_ZERO, d);
+            mean_diff = mean_diff + dm;
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    var dv: f32 = _cef_i(C * (end - 1 - lo));
+    mean_diff = mean_diff / dv;
+    if (mean_diff > one) { return 1; }
+    return 0;
+}
+
+# ---------------------------------------------------------------- the pitch pre-filter
+
+# _celt_lpc (celt_lpc.c, float): p LPC coefficients from ac[0..p] (f32).
+fn _ce_lpc(lpc, ac, p) {
+    var err: f32 = load32(ac);
+    _ce_zero32(lpc, p);
+    var k1e10: f32 = 0.0000000001;
+    var k001: f32 = 0.001;
+    var a0: f32 = load32(ac);
+    if (!(a0 > k1e10)) { return 0; }
+    var i = 0;
+    while (i < p) {
+        var rr: f32 = _CEF_ZERO;
+        var j = 0;
+        while (j < i) {
+            var l: f32 = load32(lpc + j * 4);
+            var a: f32 = load32(ac + (i - j) * 4);
+            rr = rr + l * a;
+            j = j + 1;
+        }
+        var an: f32 = load32(ac + (i + 1) * 4);
+        rr = rr + an;
+        var q: f32 = rr / err;
+        var r: f32 = q ^ 0x80000000;
+        store32(lpc + i * 4, r);
+        j = 0;
+        while (j < ((i + 1) >> 1)) {
+            var t1: f32 = load32(lpc + j * 4);
+            var t2: f32 = load32(lpc + (i - 1 - j) * 4);
+            var n1: f32 = t1 + r * t2;
+            var n2: f32 = t2 + r * t1;
+            store32(lpc + j * 4, n1);
+            store32(lpc + (i - 1 - j) * 4, n2);
+            j = j + 1;
+        }
+        var rr2: f32 = r * r;
+        err = err - rr2 * err;
+        var lim: f32 = k001 * a0;
+        if (err <= lim) { break; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# pitch_downsample (pitch.c, float, factor 2): the CC channels of x (ptrs in
+# xs[0..1]) halved through (1/4, 1/2, 1/4) into x_lp (len), whitened by a
+# 4th-order LPC with a zero added (celt_fir5).
+fn _ce_pitch_downsample(xs, x_lp, len, C) {
+    var q: f32 = _CEF_QUARTER;
+    var h: f32 = _CEF_HALF;
+    var x0 = load64(xs);
+    var i = 1;
+    while (i < len) {
+        var a: f32 = load32(x0 + (2 * i - 1) * 4);
+        var b: f32 = load32(x0 + (2 * i + 1) * 4);
+        var c: f32 = load32(x0 + 2 * i * 4);
+        var v: f32 = q * a + q * b + h * c;
+        store32(x_lp + i * 4, v);
+        i = i + 1;
+    }
+    var a0: f32 = load32(x0 + 4);
+    var c0: f32 = load32(x0);
+    var v0: f32 = q * a0 + h * c0;
+    store32(x_lp, v0);
+    if (C == 2) {
+        var x1 = load64(xs + 8);
+        i = 1;
+        while (i < len) {
+            var e: f32 = load32(x1 + (2 * i - 1) * 4);
+            var f: f32 = load32(x1 + (2 * i + 1) * 4);
+            var g: f32 = load32(x1 + 2 * i * 4);
+            var w: f32 = q * e + q * f + h * g;
+            var old: f32 = load32(x_lp + i * 4);
+            var nw: f32 = old + w;
+            store32(x_lp + i * 4, nw);
+            i = i + 1;
+        }
+        var e0: f32 = load32(x1 + 4);
+        var g0: f32 = load32(x1);
+        var w0: f32 = q * e0 + h * g0;
+        var old0: f32 = load32(x_lp);
+        var nw0: f32 = old0 + w0;
+        store32(x_lp, nw0);
+    }
+    # _celt_autocorr(x_lp, ac, NULL, 0, 4, len)
+    var ac = _opus_tmp(8 * 4);
+    var fastN = len - 4;
+    var k = 0;
+    while (k <= 4) {
+        var s: f32 = _cef_inner(x_lp, x_lp + k * 4, fastN);
+        var d: f32 = _CEF_ZERO;
+        var j = k + fastN;
+        while (j < len) {
+            var p1: f32 = load32(x_lp + j * 4);
+            var p2: f32 = load32(x_lp + (j - k) * 4);
+            d = d + p1 * p2;
+            j = j + 1;
+        }
+        var sd: f32 = s + d;
+        store32(ac + k * 4, sd);
+        k = k + 1;
+    }
+    var nf: f32 = 1.0001;
+    var ac0: f32 = load32(ac);
+    ac0 = ac0 * nf;
+    store32(ac, ac0);
+    var k008: f32 = 0.008;
+    i = 1;
+    while (i <= 4) {
+        var ai: f32 = load32(ac + i * 4);
+        var fi: f32 = _cef_i(i);
+        var lw: f32 = k008 * fi;
+        var t: f32 = ai * lw;
+        var t2: f32 = t * lw;
+        var na: f32 = ai - t2;
+        store32(ac + i * 4, na);
+        i = i + 1;
+    }
+    var lpc = _opus_tmp(8 * 4);
+    _ce_lpc(lpc, ac, 4);
+    var tmpg: f32 = _CEF_ONE;
+    var k9: f32 = 0.9;
+    i = 0;
+    while (i < 4) {
+        tmpg = k9 * tmpg;
+        var li: f32 = load32(lpc + i * 4);
+        var lm: f32 = li * tmpg;
+        store32(lpc + i * 4, lm);
+        i = i + 1;
+    }
+    var c1: f32 = 0.8;
+    var l0: f32 = load32(lpc);
+    var l1: f32 = load32(lpc + 4);
+    var l2: f32 = load32(lpc + 8);
+    var l3: f32 = load32(lpc + 12);
+    var n0: f32 = l0 + c1;
+    var n1: f32 = l1 + c1 * l0;
+    var n2: f32 = l2 + c1 * l1;
+    var n3: f32 = l3 + c1 * l2;
+    var n4: f32 = c1 * l3;
+    # celt_fir5
+    var m0: f32 = _CEF_ZERO;
+    var m1: f32 = _CEF_ZERO;
+    var m2: f32 = _CEF_ZERO;
+    var m3: f32 = _CEF_ZERO;
+    var m4: f32 = _CEF_ZERO;
+    i = 0;
+    while (i < len) {
+        var xi: f32 = load32(x_lp + i * 4);
+        var sum: f32 = xi;
+        sum = sum + n0 * m0;
+        sum = sum + n1 * m1;
+        sum = sum + n2 * m2;
+        sum = sum + n3 * m3;
+        sum = sum + n4 * m4;
+        m4 = m3;
+        m3 = m2;
+        m2 = m1;
+        m1 = m0;
+        m0 = xi;
+        store32(x_lp + i * 4, sum);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# find_best_pitch (pitch.c, float): the two lags of xcorr with the best
+# normalised correlation into best[0..1] (words).
+fn _ce_find_best_pitch(xcorr, y, len, max_pitch, best) {
+    var Syy: f32 = _CEF_ONE;
+    var bn0: f32 = _CEF_ONE ^ 0x80000000;
+    var bn1: f32 = bn0;
+    var bd0: f32 = _CEF_ZERO;
+    var bd1: f32 = _CEF_ZERO;
+    store64(best, 0);
+    store64(best + 8, 1);
+    var k12: f32 = 0.000000000001;
+    var j = 0;
+    while (j < len) {
+        var yj: f32 = load32(y + j * 4);
+        Syy = Syy + yj * yj;
+        j = j + 1;
+    }
+    var i = 0;
+    while (i < max_pitch) {
+        var xc: f32 = load32(xcorr + i * 4);
+        if (xc > _CEF_ZERO) {
+            var x16: f32 = xc * k12;
+            var num: f32 = x16 * x16;
+            var l1: f32 = num * bd1;
+            var r1: f32 = bn1 * Syy;
+            if (l1 > r1) {
+                var l0: f32 = num * bd0;
+                var r0: f32 = bn0 * Syy;
+                if (l0 > r0) {
+                    bn1 = bn0;
+                    bd1 = bd0;
+                    store64(best + 8, load64(best));
+                    bn0 = num;
+                    bd0 = Syy;
+                    store64(best, i);
+                } else {
+                    bn1 = num;
+                    bd1 = Syy;
+                    store64(best + 8, i);
+                }
+            }
+        }
+        var ya: f32 = load32(y + (i + len) * 4);
+        var yb: f32 = load32(y + i * 4);
+        var dy: f32 = ya * ya - yb * yb;
+        Syy = Syy + dy;
+        if (_CEF_ONE > Syy) { Syy = _CEF_ONE; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# pitch_search (pitch.c, float): the pitch lag of x_lp in y, coarse at a
+# quarter rate, then at half rate around the two best, then interpolated.
+fn _ce_pitch_search(x_lp, y, len, max_pitch) {
+    var lag = len + max_pitch;
+    var x4 = _opus_tmp((len >> 2) * 4 + 8);
+    var y4 = _opus_tmp((lag >> 2) * 4 + 8);
+    var xcorr = _opus_tmp((max_pitch >> 1) * 4 + 8);
+    var best = _opus_tmp(16);
+    var j = 0;
+    while (j < (len >> 2)) { store32(x4 + j * 4, load32(x_lp + 2 * j * 4)); j = j + 1; }
+    j = 0;
+    while (j < (lag >> 2)) { store32(y4 + j * 4, load32(y + 2 * j * 4)); j = j + 1; }
+    var i = 0;
+    var mp4 = max_pitch >> 2;
+    while (i < mp4 - 3) {
+        _cef_xcorr4(x4, y4 + i * 4, len >> 2, xcorr + i * 4);
+        i = i + 4;
+    }
+    while (i < mp4) {
+        store32(xcorr + i * 4, _cef_inner(x4, y4 + i * 4, len >> 2));
+        i = i + 1;
+    }
+    _ce_find_best_pitch(xcorr, y4, len >> 2, max_pitch >> 2, best);
+    var b0 = load64(best);
+    var b1 = load64(best + 8);
+    var m1: f32 = _CEF_ONE ^ 0x80000000;
+    i = 0;
+    while (i < (max_pitch >> 1)) {
+        store32(xcorr + i * 4, 0);
+        if (_ce_iabs(i - 2 * b0) > 2 && _ce_iabs(i - 2 * b1) > 2) { i = i + 1; continue; }
+        var s: f32 = _cef_inner(x_lp, y + i * 4, len >> 1);
+        var sm: f32 = _cef_max(m1, s);
+        store32(xcorr + i * 4, sm);
+        i = i + 1;
+    }
+    _ce_find_best_pitch(xcorr, y, len >> 1, max_pitch >> 1, best);
+    b0 = load64(best);
+    var offset = 0;
+    if (b0 > 0 && b0 < (max_pitch >> 1) - 1) {
+        var a: f32 = load32(xcorr + (b0 - 1) * 4);
+        var b: f32 = load32(xcorr + b0 * 4);
+        var c: f32 = load32(xcorr + (b0 + 1) * 4);
+        var k7: f32 = 0.7;
+        var ca: f32 = c - a;
+        var ba: f32 = b - a;
+        var ac: f32 = a - c;
+        var bc: f32 = b - c;
+        var t1: f32 = k7 * ba;
+        var t2: f32 = k7 * bc;
+        if (ca > t1) { offset = 1; }
+        else { if (ac > t2) { offset = 0 - 1; } }
+    }
+    return 2 * b0 - offset;
+}
+
+# compute_pitch_gain (pitch.c, float): xy/celt_sqrt(1+xx*yy).
+fn _ce_pitch_gain(xy: f32, xx: f32, yy: f32): i64 {
+    var p: f32 = xx * yy;
+    var s: f32 = _CEF_ONE + p;
+    var r: f32 = _cef_sqrt(s);
+    var g: f32 = xy / r;
+    return g;
+}
+
+# remove_doubling (pitch.c, float): checks the submultiples T/k of the lag
+# at *T0p (words) for a stronger correlation; the gain back (f32), the lag
+# into *T0p.
+fn _ce_remove_doubling(x, maxperiod, minperiod, N, T0p, prev_period, prev_gain: f32) {
+    var minperiod0 = minperiod;
+    maxperiod = maxperiod / 2;
+    minperiod = minperiod / 2;
+    store64(T0p, load64(T0p) / 2);
+    prev_period = prev_period / 2;
+    N = N / 2;
+    x = x + maxperiod * 4;
+    if (load64(T0p) >= maxperiod) { store64(T0p, maxperiod - 1); }
+    var T0 = load64(T0p);
+    var T = T0;
+    var yyl = _opus_tmp((maxperiod + 1) * 4 + 8);
+    var xx: f32 = _CEF_ZERO;
+    var xy: f32 = _CEF_ZERO;
+    var i = 0;
+    while (i < N) {
+        var a: f32 = load32(x + i * 4);
+        var b: f32 = load32(x + (i - T0) * 4);
+        xx = xx + a * a;
+        xy = xy + a * b;
+        i = i + 1;
+    }
+    store32(yyl, xx);
+    var yy: f32 = xx;
+    i = 1;
+    while (i <= maxperiod) {
+        var u: f32 = load32(x - i * 4);
+        var v: f32 = load32(x + (N - i) * 4);
+        var t: f32 = yy + u * u;
+        yy = t - v * v;
+        store32(yyl + i * 4, _cef_max(_CEF_ZERO, yy));
+        i = i + 1;
+    }
+    yy = load32(yyl + T0 * 4);
+    var best_xy: f32 = xy;
+    var best_yy: f32 = yy;
+    var g0: f32 = _ce_pitch_gain(xy, xx, yy);
+    var g: f32 = g0;
+    var k3: f32 = 0.3;
+    var k4: f32 = 0.4;
+    var k5: f32 = 0.5;
+    var k7: f32 = 0.7;
+    var k85: f32 = 0.85;
+    var k9: f32 = 0.9;
+    var k = 2;
+    while (k <= 15) {
+        var T1 = (2 * T0 + k) / (2 * k);
+        if (T1 < minperiod) { break; }
+        var T1b = 0;
+        if (k == 2) {
+            if (T1 + T0 > maxperiod) { T1b = T0; } else { T1b = T0 + T1; }
+        } else {
+            T1b = (2 * load64(_cet_second_check + k * 8) * T0 + k) / (2 * k);
+        }
+        var s1: f32 = _CEF_ZERO;
+        var s2: f32 = _CEF_ZERO;
+        i = 0;
+        while (i < N) {
+            var xa: f32 = load32(x + i * 4);
+            var xb: f32 = load32(x + (i - T1) * 4);
+            var xc: f32 = load32(x + (i - T1b) * 4);
+            s1 = s1 + xa * xb;
+            s2 = s2 + xa * xc;
+            i = i + 1;
+        }
+        var sx: f32 = s1 + s2;
+        var xyk: f32 = _CEF_HALF * sx;
+        var ya: f32 = load32(yyl + T1 * 4);
+        var yb: f32 = load32(yyl + T1b * 4);
+        var sy: f32 = ya + yb;
+        var yyk: f32 = _CEF_HALF * sy;
+        var g1: f32 = _ce_pitch_gain(xyk, xx, yyk);
+        var cont: f32 = _CEF_ZERO;
+        var dT = _ce_iabs(T1 - prev_period);
+        if (dT <= 1) { cont = prev_gain; }
+        else { if (dT <= 2 && 5 * k * k < T0) { cont = _CEF_HALF * prev_gain; } }
+        var t7: f32 = k7 * g0;
+        var t7c: f32 = t7 - cont;
+        var thresh: f32 = _cef_max(k3, t7c);
+        if (T1 < 3 * minperiod) {
+            var t85: f32 = k85 * g0;
+            var t85c: f32 = t85 - cont;
+            thresh = _cef_max(k4, t85c);
+        } else {
+            if (T1 < 2 * minperiod) {
+                var t9: f32 = k9 * g0;
+                var t9c: f32 = t9 - cont;
+                thresh = _cef_max(k5, t9c);
+            }
+        }
+        if (g1 > thresh) {
+            best_xy = xyk;
+            best_yy = yyk;
+            T = T1;
+            g = g1;
+        }
+        k = k + 1;
+    }
+    best_xy = _cef_max(_CEF_ZERO, best_xy);
+    var pg: f32 = _CEF_ONE;
+    if (!(best_yy <= best_xy)) {
+        var dd: f32 = best_yy + _CEF_ONE;
+        pg = best_xy / dd;
+    }
+    var xc0: f32 = _cef_inner(x, x - (T - 1) * 4, N);
+    var xc1: f32 = _cef_inner(x, x - T * 4, N);
+    var xc2: f32 = _cef_inner(x, x - (T + 1) * 4, N);
+    var offset = 0;
+    var d20: f32 = xc2 - xc0;
+    var d10: f32 = xc1 - xc0;
+    var d02: f32 = xc0 - xc2;
+    var d12: f32 = xc1 - xc2;
+    var q1: f32 = k7 * d10;
+    var q2: f32 = k7 * d12;
+    if (d20 > q1) { offset = 1; }
+    else { if (d02 > q2) { offset = 0 - 1; } }
+    if (pg > g) { pg = g; }
+    var t0n = 2 * T + offset;
+    if (t0n < minperiod0) { t0n = minperiod0; }
+    store64(T0p, t0n);
+    return pg;
+}
+
+# comb_filter (celt.c, float): y = x through the pitch comb, crossfading over
+# the window's overlap from (T0, g0, tapset0) to (T1, g1, tapset1). x reaches
+# back 1024 + 2 samples.
+fn _ce_comb_filter(y, x, T0, T1, N, g0: f32, g1: f32, tapset0, tapset1, overlap) {
+    if (g0 == _CEF_ZERO && g1 == _CEF_ZERO) {
+        if (x != y) { _ce_copy32(y, x, N); }
+        return 0;
+    }
+    T0 = _ce_imax(T0, 15);
+    T1 = _ce_imax(T1, 15);
+    var ga: f32 = load32(_cet_comb_gains + tapset0 * 12);
+    var gb: f32 = load32(_cet_comb_gains + tapset0 * 12 + 4);
+    var gc: f32 = load32(_cet_comb_gains + tapset0 * 12 + 8);
+    var gd: f32 = load32(_cet_comb_gains + tapset1 * 12);
+    var ge: f32 = load32(_cet_comb_gains + tapset1 * 12 + 4);
+    var gf: f32 = load32(_cet_comb_gains + tapset1 * 12 + 8);
+    var g00: f32 = g0 * ga;
+    var g01: f32 = g0 * gb;
+    var g02: f32 = g0 * gc;
+    var g10: f32 = g1 * gd;
+    var g11: f32 = g1 * ge;
+    var g12: f32 = g1 * gf;
+    var x1: f32 = load32(x + (1 - T1) * 4);
+    var x2: f32 = load32(x + (0 - T1) * 4);
+    var x3: f32 = load32(x + (0 - T1 - 1) * 4);
+    var x4: f32 = load32(x + (0 - T1 - 2) * 4);
+    if (g0 == g1 && T0 == T1 && tapset0 == tapset1) { overlap = 0; }
+    var win = _cet_window;
+    var i = 0;
+    while (i < overlap) {
+        var x0: f32 = load32(x + (i - T1 + 2) * 4);
+        var w: f32 = load32(win + i * 4);
+        var f: f32 = w * w;
+        var of: f32 = _CEF_ONE - f;
+        var xi: f32 = load32(x + i * 4);
+        var a0: f32 = load32(x + (i - T0) * 4);
+        var a1: f32 = load32(x + (i - T0 + 1) * 4);
+        var am1: f32 = load32(x + (i - T0 - 1) * 4);
+        var a2: f32 = load32(x + (i - T0 + 2) * 4);
+        var am2: f32 = load32(x + (i - T0 - 2) * 4);
+        var c00: f32 = of * g00;
+        var c01: f32 = of * g01;
+        var c02: f32 = of * g02;
+        var c10: f32 = f * g10;
+        var c11: f32 = f * g11;
+        var c12: f32 = f * g12;
+        var s1: f32 = a1 + am1;
+        var s2: f32 = a2 + am2;
+        var s3: f32 = x1 + x3;
+        var s4: f32 = x0 + x4;
+        var v: f32 = xi + c00 * a0;
+        v = v + c01 * s1;
+        v = v + c02 * s2;
+        v = v + c10 * x2;
+        v = v + c11 * s3;
+        v = v + c12 * s4;
+        store32(y + i * 4, v);
+        x4 = x3;
+        x3 = x2;
+        x2 = x1;
+        x1 = x0;
+        i = i + 1;
+    }
+    if (g1 == _CEF_ZERO) {
+        if (x != y) { _ce_copy32(y + overlap * 4, x + overlap * 4, N - overlap); }
+        return 0;
+    }
+    # comb_filter_const_c
+    var yy = y + i * 4;
+    var xx = x + i * 4;
+    var n = N - i;
+    x4 = load32(xx + (0 - T1 - 2) * 4);
+    x3 = load32(xx + (0 - T1 - 1) * 4);
+    x2 = load32(xx + (0 - T1) * 4);
+    x1 = load32(xx + (1 - T1) * 4);
+    var j = 0;
+    while (j < n) {
+        var y0: f32 = load32(xx + (j - T1 + 2) * 4);
+        var xj: f32 = load32(xx + j * 4);
+        var t1: f32 = x1 + x3;
+        var t2: f32 = y0 + x4;
+        var u: f32 = xj + g10 * x2;
+        u = u + g11 * t1;
+        u = u + g12 * t2;
+        store32(yy + j * 4, u);
+        x4 = x3;
+        x3 = x2;
+        x2 = x1;
+        x1 = y0;
+        j = j + 1;
+    }
+    return 0;
+}
+
+# run_prefilter (celt_encoder.c, float): the pitch pre-filter over in (CC
+# channels of N + 120), its state in the encoder. res: [0] pitch_index,
+# [1] gain1 (f32), [2] qg. Returns pf_on.
+fn _ce_run_prefilter(st, inp, CC, N, tapset, enabled, cx, tf_estimate: f32, nbAvail, tone_freq: f32, tness: f32, res) {
+    var maxp = 1024;
+    var minp = 15;
+    var overlap = 120;
+    var pre = load64(st + _CE_PRE);
+    var pfm = load64(st + _CE_PF_MEM);
+    var in_mem = load64(st + _CE_IN_MEM);
+    var pres = _opus_tmp(16);
+    var c = 0;
+    while (c < CC) {
+        var pc = pre + c * (N + maxp) * 4;
+        store64(pres + c * 8, pc);
+        _ce_copy32(pc, pfm + c * maxp * 4, maxp);
+        _ce_copy32(pc + maxp * 4, inp + (c * (N + overlap) + overlap) * 4, N);
+        c = c + 1;
+    }
+    var pitch_index = 15;
+    var gain1: f32 = _CEF_ZERO;
+    var k99: f32 = 0.99;
+    if (enabled != 0 && tness > k99) {
+        var multiple = 1;
+        var kpi: f32 = 3.1416;
+        var kpi2: f32 = 3.141593;
+        if (tone_freq >= kpi) { tone_freq = kpi2 - tone_freq; }
+        var k39: f32 = 0.39;
+        while (1) {
+            var mf: f32 = _cef_i(multiple);
+            var lim: f32 = mf * k39;
+            if (!(tone_freq >= lim)) { break; }
+            multiple = multiple + 1;
+        }
+        var k6148: f32 = 0.006148;
+        if (tone_freq > k6148) {
+            # (int)floor(.5+2.f*M_PI*multiple/tone_freq), in double
+            var tp = f64_mul(f64_mul(2.0, 0x400921FB54442D18), f64_from(multiple));
+            var pi = _ce_floor_d(f64_add(0.5, f64_div(tp, f32_to(tone_freq))));
+            pitch_index = _ce_imin(pi, 1022);
+        } else {
+            pitch_index = 15;
+        }
+        gain1 = 0.75;
+    } else {
+        if (enabled != 0 && cx >= 5) {
+            var pblen = (maxp + N) >> 1;
+            var pitch_buf = _opus_tmp(pblen * 4 + 8);
+            _ce_pitch_downsample(pres, pitch_buf, pblen, CC);
+            var ps = _ce_pitch_search(pitch_buf + (maxp >> 1) * 4, pitch_buf, N, maxp - 3 * minp);
+            var T0p = _opus_tmp(8);
+            store64(T0p, maxp - ps);
+            var pg: f32 = load32(st + _CE_PF_GAIN);
+            gain1 = _ce_remove_doubling(pitch_buf, maxp, minp, N, T0p, load64(st + _CE_PF_PERIOD), pg);
+            pitch_index = load64(T0p);
+            if (pitch_index > maxp - 2) { pitch_index = maxp - 2; }
+            var k7: f32 = 0.7;
+            gain1 = k7 * gain1;
+            var loss = load64(st + _CE_LOSS);
+            if (loss > 2) { gain1 = _CEF_HALF * gain1; }
+            if (loss > 4) { gain1 = _CEF_HALF * gain1; }
+            if (loss > 8) { gain1 = _CEF_ZERO; }
+        }
+    }
+    if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
+        var mpr: f32 = load32(st + _CE_ANA + _CEA_MAX_PITCH_RATIO);
+        gain1 = gain1 * mpr;
+    }
+    var k1: f32 = 0.1;
+    var k2: f32 = 0.2;
+    var k4: f32 = 0.4;
+    var k55: f32 = 0.55;
+    var k98: f32 = 0.98;
+    var thr: f32 = k2;
+    var prev_period = load64(st + _CE_PF_PERIOD);
+    var prev_gain: f32 = load32(st + _CE_PF_GAIN);
+    if (_ce_iabs(pitch_index - prev_period) * 10 > pitch_index) {
+        thr = thr + k2;
+        if (tf_estimate > k98) { gain1 = _CEF_ZERO; }
+    }
+    if (nbAvail < 25) { thr = thr + k1; }
+    if (nbAvail < 35) { thr = thr + k1; }
+    if (prev_gain > k4) { thr = thr - k1; }
+    if (prev_gain > k55) { thr = thr - k1; }
+    thr = _cef_max(thr, k2);
+    var pf_on = 0;
+    var qg = 0;
+    if (gain1 < thr) {
+        gain1 = _CEF_ZERO;
+    } else {
+        var dg: f32 = gain1 - prev_gain;
+        var adg: f32 = dg & 0x7FFFFFFF;
+        if (adg < k1) { gain1 = prev_gain; }
+        var k32: f32 = 32.0;
+        var k3: f32 = 3.0;
+        var g32: f32 = gain1 * k32;
+        var g3: f32 = g32 / k3;
+        qg = _cef_round(g3) - 1;
+        qg = _ce_imax(0, _ce_imin(7, qg));
+        var k09375: f32 = 0.09375;
+        var qf: f32 = _cef_i(qg + 1);
+        gain1 = k09375 * qf;
+        pf_on = 1;
+    }
+    var before = _opus_tmp(16);
+    var after = _opus_tmp(16);
+    store32(before, 0); store32(before + 4, 0);
+    store32(after, 0); store32(after + 4, 0);
+    var tps = load64(st + _CE_PF_TAPSET);
+    c = 0;
+    while (c < CC) {
+        if (load64(st + _CE_PF_PERIOD) < 15) { store64(st + _CE_PF_PERIOD, 15); }
+        var ic = inp + c * (N + overlap) * 4;
+        _ce_copy32(ic, in_mem + c * overlap * 4, overlap);
+        var bs: f32 = _CEF_ZERO;
+        var i = 0;
+        while (i < N) {
+            var v: f32 = load32(ic + (overlap + i) * 4);
+            var av: f32 = v & 0x7FFFFFFF;
+            bs = bs + av;
+            i = i + 1;
+        }
+        store32(before + c * 4, bs);
+        var pgain: f32 = load32(st + _CE_PF_GAIN);
+        var ng0: f32 = pgain ^ 0x80000000;
+        var ng1: f32 = gain1 ^ 0x80000000;
+        _ce_comb_filter(ic + overlap * 4, load64(pres + c * 8) + maxp * 4, load64(st + _CE_PF_PERIOD), pitch_index,
+            N, ng0, ng1, tps, tapset, overlap);
+        var as: f32 = _CEF_ZERO;
+        i = 0;
+        while (i < N) {
+            var w: f32 = load32(ic + (overlap + i) * 4);
+            var aw: f32 = w & 0x7FFFFFFF;
+            as = as + aw;
+            i = i + 1;
+        }
+        store32(after + c * 4, as);
+        c = c + 1;
+    }
+    var cancel = 0;
+    var b0: f32 = load32(before);
+    var a0: f32 = load32(after);
+    if (CC == 2) {
+        var b1: f32 = load32(before + 4);
+        var a1: f32 = load32(after + 4);
+        var k25: f32 = 0.25;
+        var k01: f32 = 0.01;
+        var qg1: f32 = k25 * gain1;
+        var th0: f32 = qg1 * b0 + k01 * b1;
+        var th1: f32 = qg1 * b1 + k01 * b0;
+        var d0: f32 = a0 - b0;
+        var d1: f32 = a1 - b1;
+        if (d0 > th0 || d1 > th1) { cancel = 1; }
+        var e0: f32 = b0 - a0;
+        var e1: f32 = b1 - a1;
+        if (e0 < th0 && e1 < th1) { cancel = 1; }
+    } else {
+        if (a0 > b0) { cancel = 1; }
+    }
+    if (cancel != 0) {
+        c = 0;
+        while (c < CC) {
+            var ic2 = inp + c * (N + overlap) * 4;
+            _ce_copy32(ic2 + overlap * 4, load64(pres + c * 8) + maxp * 4, N);
+            var pg2: f32 = load32(st + _CE_PF_GAIN);
+            var ng2: f32 = pg2 ^ 0x80000000;
+            _ce_comb_filter(ic2 + overlap * 4, load64(pres + c * 8) + maxp * 4, load64(st + _CE_PF_PERIOD), pitch_index,
+                overlap, ng2, _CEF_ZERO, tps, tapset, overlap);
+            c = c + 1;
+        }
+        gain1 = _CEF_ZERO;
+        pf_on = 0;
+        qg = 0;
+    }
+    c = 0;
+    while (c < CC) {
+        _ce_copy32(in_mem + c * overlap * 4, inp + (c * (N + overlap) + N) * 4, overlap);
+        var pm = pfm + c * maxp * 4;
+        _ce_copy32(pm, pm + N * 4, maxp - N);
+        _ce_copy32(pm + (maxp - N) * 4, load64(pres + c * 8) + maxp * 4, N);
+        c = c + 1;
+    }
+    store64(res, pitch_index);
+    store64(res + 8, gain1);
+    store64(res + 16, qg);
+    return pf_on;
+}
+
+# ---------------------------------------------------------------- band energies and the analysis
+
+fn _ce_eb(i) { return load64(_celt_eBands + i * 8); }
+
+# compute_band_energies (bands.c, float): the bands' amplitudes of X (C
+# channels, N = 120 << LM each) into bandE (21 a channel).
+fn _ce_band_energies(X, bandE, end, C, LM) {
+    var N = 120 << LM;
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var lo = _ce_eb(i) << LM;
+            var n = (_ce_eb(i + 1) - _ce_eb(i)) << LM;
+            var p: f32 = _cef_inner(X + (c * N + lo) * 4, X + (c * N + lo) * 4, n);
+            var s: f32 = _CEF_1E27 + p;
+            store32(bandE + (i + c * 21) * 4, _cef_sqrt(s));
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# amp2Log2 (quant_bands.c, float): log2 of the amplitudes less eMeans;
+# -14 from effEnd to end.
+fn _ce_amp2log2(effEnd, end, bandE, bandLogE, C) {
+    var m14: f32 = -14.0;
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < effEnd) {
+            var e: f32 = load32(bandE + (i + c * 21) * 4);
+            var l: f32 = _cef_log2(e);
+            var em: f32 = load32(_cet_emeans + i * 4);
+            var v: f32 = l - em;
+            store32(bandLogE + (i + c * 21) * 4, v);
+            i = i + 1;
+        }
+        while (i < end) { store32(bandLogE + (i + c * 21) * 4, m14); i = i + 1; }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# normalise_bands (bands.c, float): freq over its band amplitudes into X.
+fn _ce_normalise(freq, X, bandE, end, C, M) {
+    var N = M * 120;
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var e: f32 = load32(bandE + (i + c * 21) * 4);
+            var d: f32 = _CEF_1E27 + e;
+            var g: f32 = _CEF_ONE / d;
+            var j = M * _ce_eb(i);
+            var je = M * _ce_eb(i + 1);
+            while (j < je) {
+                var f: f32 = load32(freq + (j + c * N) * 4);
+                var v: f32 = f * g;
+                store32(X + (j + c * N) * 4, v);
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+# median_of_5 / median_of_3 (celt_encoder.c) of floats at x.
+fn _ce_median5(x): i64 {
+    var x0: f32 = load32(x);
+    var x1: f32 = load32(x + 4);
+    var t2: f32 = load32(x + 8);
+    var x3: f32 = load32(x + 12);
+    var x4: f32 = load32(x + 16);
+    var t0: f32 = x0;
+    var t1: f32 = x1;
+    if (x0 > x1) { t0 = x1; t1 = x0; }
+    var t3: f32 = x3;
+    var t4: f32 = x4;
+    if (x3 > x4) { t3 = x4; t4 = x3; }
+    if (t0 > t3) {
+        var s: f32 = t0; t0 = t3; t3 = s;
+        var s2: f32 = t1; t1 = t4; t4 = s2;
+    }
+    if (t2 > t1) {
+        if (t1 < t3) { return _cef_min(t2, t3); }
+        return _cef_min(t4, t1);
+    }
+    if (t2 < t3) { return _cef_min(t1, t3); }
+    return _cef_min(t2, t4);
+}
+
+fn _ce_median3(x): i64 {
+    var x0: f32 = load32(x);
+    var x1: f32 = load32(x + 4);
+    var t2: f32 = load32(x + 8);
+    var t0: f32 = x0;
+    var t1: f32 = x1;
+    if (x0 > x1) { t0 = x1; t1 = x0; }
+    if (t1 < t2) { return t1; }
+    if (t0 < t2) { return t2; }
+    return t0;
+}
+
+# dynalloc_analysis (celt_encoder.c, float): the boosts into offsets, the
+# band importance and spreading weights; maxDepth back (f32), tot_boost into
+# *totp.
+fn _ce_dynalloc(st, bandLogE, bandLogE2, oldBandE, start, end, C, offsets, isTransient, LM, effectiveBytes,
+                totp, sdyn, importance, spread_weight, tone_freq: f32, tness: f32) {
+    var lsb = load64(st + _CE_LSB);
+    var vbr = load64(st + _CE_VBR);
+    var cvbr = load64(st + _CE_CVBR);
+    var lfe = load64(st + _CE_LFE);
+    var follower = _opus_tmp(2 * 21 * 4);
+    var nfl = _opus_tmp(21 * 4);
+    var le3 = _opus_tmp(21 * 4);
+    var i = 0;
+    while (i < 21) { store64(offsets + i * 8, 0); i = i + 1; }
+    var tot_boost = 0;
+    var maxDepth: f32 = -31.9;
+    var k0625: f32 = 0.0625;
+    var k0062: f32 = 0.0062;
+    i = 0;
+    while (i < end) {
+        var ln: f32 = _cef_i(load64(_celt_logN + i * 8));
+        var a: f32 = k0625 * ln;
+        a = a + _CEF_HALF;
+        var dl: f32 = _cef_i(9 - lsb);
+        a = a + dl;
+        var em: f32 = load32(_cet_emeans + i * 4);
+        a = a - em;
+        var i5: f32 = _cef_i(i + 5);
+        var q: f32 = k0062 * i5;
+        q = q * i5;
+        a = a + q;
+        store32(nfl + i * 4, a);
+        i = i + 1;
+    }
+    var c = 0;
+    while (c < C) {
+        i = 0;
+        while (i < end) {
+            var le: f32 = load32(bandLogE + (c * 21 + i) * 4);
+            var nf: f32 = load32(nfl + i * 4);
+            var d: f32 = le - nf;
+            maxDepth = _cef_max(maxDepth, d);
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    # the masking model for the spreading weights
+    var mask = _opus_tmp(21 * 4);
+    var sig = _opus_tmp(21 * 4);
+    i = 0;
+    while (i < end) {
+        var l0: f32 = load32(bandLogE + i * 4);
+        var n0: f32 = load32(nfl + i * 4);
+        var m0: f32 = l0 - n0;
+        if (C == 2) {
+            var l1: f32 = load32(bandLogE + (21 + i) * 4);
+            var m1: f32 = l1 - n0;
+            m0 = _cef_max(m0, m1);
+        }
+        store32(mask + i * 4, m0);
+        store32(sig + i * 4, m0);
+        i = i + 1;
+    }
+    var two: f32 = _CEF_TWO;
+    var three: f32 = 3.0;
+    var twelve: f32 = 12.0;
+    i = 1;
+    while (i < end) {
+        var mp: f32 = load32(mask + (i - 1) * 4);
+        var mpm: f32 = mp - two;
+        var mi: f32 = load32(mask + i * 4);
+        store32(mask + i * 4, _cef_max(mi, mpm));
+        i = i + 1;
+    }
+    i = end - 2;
+    while (i >= 0) {
+        var mn: f32 = load32(mask + (i + 1) * 4);
+        var mnm: f32 = mn - three;
+        var mi2: f32 = load32(mask + i * 4);
+        store32(mask + i * 4, _cef_max(mi2, mnm));
+        i = i - 1;
+    }
+    var md12: f32 = maxDepth - twelve;
+    var mz: f32 = _cef_max(_CEF_ZERO, md12);
+    i = 0;
+    while (i < end) {
+        var sg: f32 = load32(sig + i * 4);
+        var mk: f32 = load32(mask + i * 4);
+        var mm: f32 = _cef_max(mz, mk);
+        var smr: f32 = sg - mm;
+        var sh = 0 - _cef_round(smr);
+        sh = _ce_imin(5, _ce_imax(0, sh));
+        store64(spread_weight + i * 8, 32 >> sh);
+        i = i + 1;
+    }
+    if (effectiveBytes >= 30 + 5 * LM && lfe == 0) {
+        var last = 0;
+        var half: f32 = _CEF_HALF;
+        var k15: f32 = 1.5;
+        c = 0;
+        while (c < C) {
+            i = 0;
+            while (i < end) { store32(le3 + i * 4, load32(bandLogE2 + (c * 21 + i) * 4)); i = i + 1; }
+            if (LM == 0) {
+                i = 0;
+                while (i < _ce_imin(8, end)) {
+                    var b2: f32 = load32(bandLogE2 + (c * 21 + i) * 4);
+                    var ob: f32 = load32(oldBandE + (c * 21 + i) * 4);
+                    store32(le3 + i * 4, _cef_max(b2, ob));
+                    i = i + 1;
+                }
+            }
+            var f = follower + c * 21 * 4;
+            store32(f, load32(le3));
+            i = 1;
+            while (i < end) {
+                var e3: f32 = load32(le3 + i * 4);
+                var ep: f32 = load32(le3 + (i - 1) * 4);
+                var eph: f32 = ep + half;
+                if (e3 > eph) { last = i; }
+                var fp: f32 = load32(f + (i - 1) * 4);
+                var fpp: f32 = fp + k15;
+                store32(f + i * 4, _cef_min(fpp, e3));
+                i = i + 1;
+            }
+            i = last - 1;
+            while (i >= 0) {
+                var fi: f32 = load32(f + i * 4);
+                var fn1: f32 = load32(f + (i + 1) * 4);
+                var fn2: f32 = fn1 + two;
+                var e4: f32 = load32(le3 + i * 4);
+                var mn2: f32 = _cef_min(fn2, e4);
+                store32(f + i * 4, _cef_min(fi, mn2));
+                i = i - 1;
+            }
+            var off: f32 = _CEF_ONE;
+            i = 2;
+            while (i < end - 2) {
+                var f5: f32 = load32(f + i * 4);
+                var md: f32 = _ce_median5(le3 + (i - 2) * 4);
+                var mdo: f32 = md - off;
+                store32(f + i * 4, _cef_max(f5, mdo));
+                i = i + 1;
+            }
+            var m3: f32 = _ce_median3(le3);
+            var tmp: f32 = m3 - off;
+            var fa: f32 = load32(f);
+            var fb: f32 = load32(f + 4);
+            store32(f, _cef_max(fa, tmp));
+            store32(f + 4, _cef_max(fb, tmp));
+            var m3b: f32 = _ce_median3(le3 + (end - 3) * 4);
+            tmp = m3b - off;
+            var fc: f32 = load32(f + (end - 2) * 4);
+            var fd: f32 = load32(f + (end - 1) * 4);
+            store32(f + (end - 2) * 4, _cef_max(fc, tmp));
+            store32(f + (end - 1) * 4, _cef_max(fd, tmp));
+            i = 0;
+            while (i < end) {
+                var fe: f32 = load32(f + i * 4);
+                var nfe: f32 = load32(nfl + i * 4);
+                store32(f + i * 4, _cef_max(fe, nfe));
+                i = i + 1;
+            }
+            c = c + 1;
+        }
+        var four: f32 = 4.0;
+        if (C == 2) {
+            i = start;
+            while (i < end) {
+                var g0: f32 = load32(follower + i * 4);
+                var g1: f32 = load32(follower + (21 + i) * 4);
+                var g0m: f32 = g0 - four;
+                g1 = _cef_max(g1, g0m);
+                store32(follower + (21 + i) * 4, g1);
+                var g1m: f32 = g1 - four;
+                g0 = _cef_max(g0, g1m);
+                var be0: f32 = load32(bandLogE + i * 4);
+                var be1: f32 = load32(bandLogE + (21 + i) * 4);
+                var d0: f32 = be0 - g0;
+                var d1: f32 = be1 - g1;
+                var z0: f32 = _cef_max(_CEF_ZERO, d0);
+                var z1: f32 = _cef_max(_CEF_ZERO, d1);
+                var sm: f32 = z0 + z1;
+                var hv: f32 = half * sm;
+                store32(follower + i * 4, hv);
+                i = i + 1;
+            }
+        } else {
+            i = start;
+            while (i < end) {
+                var bm: f32 = load32(bandLogE + i * 4);
+                var fm: f32 = load32(follower + i * 4);
+                var dm: f32 = bm - fm;
+                store32(follower + i * 4, _cef_max(_CEF_ZERO, dm));
+                i = i + 1;
+            }
+        }
+        i = start;
+        while (i < end) {
+            var fs1: f32 = load32(follower + i * 4);
+            var sd: f32 = load32(sdyn + i * 4);
+            store32(follower + i * 4, _cef_max(fs1, sd));
+            i = i + 1;
+        }
+        var k13: f32 = 13.0;
+        i = start;
+        while (i < end) {
+            var fs2: f32 = load32(follower + i * 4);
+            var mf: f32 = _cef_min(fs2, four);
+            var ex: f32 = _cef_exp2(mf);
+            var im: f32 = k13 * ex;
+            store64(importance + i * 8, _cef_round(im));
+            i = i + 1;
+        }
+        if ((vbr == 0 || cvbr != 0) && isTransient == 0) {
+            i = start;
+            while (i < end) {
+                var fs3: f32 = load32(follower + i * 4);
+                var fh: f32 = half * fs3;
+                store32(follower + i * 4, fh);
+                i = i + 1;
+            }
+        }
+        i = start;
+        while (i < end) {
+            var fs4: f32 = load32(follower + i * 4);
+            if (i < 8) { fs4 = fs4 * two; }
+            if (i >= 12) { fs4 = half * fs4; }
+            store32(follower + i * 4, fs4);
+            i = i + 1;
+        }
+        var k98: f32 = 0.98;
+        if (tness > k98) {
+            var k120: f32 = 120.0;
+            var t120: f32 = tone_freq * k120;
+            var fb2 = _ce_floor_d(f64_add(0.5, f64_div(f32_to(t120), 0x400921FB54442D18)));
+            var one: f32 = _CEF_ONE;
+            i = start;
+            while (i < end) {
+                var fv: f32 = load32(follower + i * 4);
+                var lo = _ce_eb(i);
+                var hi = _ce_eb(i + 1);
+                if (fb2 >= lo && fb2 <= hi) { fv = fv + two; }
+                if (fb2 >= lo - 1 && fb2 <= hi + 1) { fv = fv + one; }
+                if (fb2 >= lo - 2 && fb2 <= hi + 2) { fv = fv + one; }
+                if (fb2 >= lo - 3 && fb2 <= hi + 3) { fv = fv + half; }
+                store32(follower + i * 4, fv);
+                i = i + 1;
+            }
+            if (fb2 >= _ce_eb(end)) {
+                var fl1: f32 = load32(follower + (end - 1) * 4);
+                fl1 = fl1 + two;
+                store32(follower + (end - 1) * 4, fl1);
+                var fl2: f32 = load32(follower + (end - 2) * 4);
+                fl2 = fl2 + one;
+                store32(follower + (end - 2) * 4, fl2);
+            }
+        }
+        if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
+            var k64: f32 = 0.015625;
+            i = start;
+            while (i < _ce_imin(_CE_LEAK_BANDS, end)) {
+                var fl3: f32 = load32(follower + i * 4);
+                var lb: f32 = _cef_i(load64(st + _CE_ANA + _CEA_LEAK_BOOST + i * 8));
+                var lbs: f32 = k64 * lb;
+                fl3 = fl3 + lbs;
+                store32(follower + i * 4, fl3);
+                i = i + 1;
+            }
+        }
+        var k8: f32 = 8.0;
+        i = start;
+        while (i < end) {
+            var fw: f32 = load32(follower + i * 4);
+            fw = _cef_min(fw, four);
+            store32(follower + i * 4, fw);
+            var width = (C * (_ce_eb(i + 1) - _ce_eb(i))) << LM;
+            var boost = 0;
+            var boost_bits = 0;
+            if (width < 6) {
+                boost = _cef_trunc(fw);
+                boost_bits = (boost * width) << 3;
+            } else {
+                if (width > 48) {
+                    var f8: f32 = fw * k8;
+                    boost = _cef_trunc(f8);
+                    boost_bits = ((boost * width) << 3) / 8;
+                } else {
+                    var wf: f32 = _cef_i(width);
+                    var fwd: f32 = fw * wf;
+                    var six: f32 = 6.0;
+                    var fw6: f32 = fwd / six;
+                    boost = _cef_trunc(fw6);
+                    boost_bits = (boost * 6) << 3;
+                }
+            }
+            if ((vbr == 0 || (cvbr != 0 && isTransient == 0)) && (sar(tot_boost + boost_bits, 6)) > 2 * effectiveBytes / 3) {
+                var cap = (2 * effectiveBytes / 3) << 6;
+                store64(offsets + i * 8, cap - tot_boost);
+                tot_boost = cap;
+                break;
+            }
+            store64(offsets + i * 8, boost);
+            tot_boost = tot_boost + boost_bits;
+            i = i + 1;
+        }
+    } else {
+        i = start;
+        while (i < end) { store64(importance + i * 8, 13); i = i + 1; }
+    }
+    store64(totp, tot_boost);
+    return maxDepth;
+}
+
+# haar1 (bands.c, float).
+fn _ce_haar1(X, N0, stride) {
+    N0 = N0 >> 1;
+    var k: f32 = _CEF_SQRT1_2;
+    var i = 0;
+    while (i < stride) {
+        var j = 0;
+        while (j < N0) {
+            var pa = X + (stride * 2 * j + i) * 4;
+            var pb = X + (stride * (2 * j + 1) + i) * 4;
+            var a: f32 = load32(pa);
+            var b: f32 = load32(pb);
+            var t1: f32 = k * a;
+            var t2: f32 = k * b;
+            var s: f32 = t1 + t2;
+            var d: f32 = t1 - t2;
+            store32(pa, s);
+            store32(pb, d);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# l1_metric (celt_encoder.c, float).
+fn _ce_l1(tmp, N, LM, bias: f32): i64 {
+    var L1: f32 = _CEF_ZERO;
+    var i = 0;
+    while (i < N) {
+        var v: f32 = load32(tmp + i * 4);
+        var a: f32 = v & 0x7FFFFFFF;
+        L1 = L1 + a;
+        i = i + 1;
+    }
+    var lf: f32 = _cef_i(LM);
+    var lb: f32 = lf * bias;
+    var t: f32 = lb * L1;
+    var r: f32 = L1 + t;
+    return r;
+}
+
+# tf_analysis (celt_encoder.c, float): the per-band time-frequency
+# resolution into tf_res (words); tf_select back.
+fn _ce_tf_analysis(len, isTransient, tf_res, lambda, X, N0, LM, tf_estimate: f32, tf_chan, importance) {
+    var k04: f32 = 0.04;
+    var k25: f32 = -0.25;
+    var hmt: f32 = _CEF_HALF - tf_estimate;
+    var mx: f32 = _cef_max(k25, hmt);
+    var bias: f32 = k04 * mx;
+    var metric = _opus_tmp(21 * 8);
+    var maxN = (_ce_eb(len) - _ce_eb(len - 1)) << LM;
+    var tmp = _opus_tmp(maxN * 4 + 8);
+    var tmp1 = _opus_tmp(maxN * 4 + 8);
+    var path0 = _opus_tmp(21 * 8);
+    var path1 = _opus_tmp(21 * 8);
+    var i = 0;
+    while (i < len) {
+        var N = (_ce_eb(i + 1) - _ce_eb(i)) << LM;
+        var narrow = 0;
+        if (_ce_eb(i + 1) - _ce_eb(i) == 1) { narrow = 1; }
+        _ce_copy32(tmp, X + (tf_chan * N0 + (_ce_eb(i) << LM)) * 4, N);
+        var lmx = 0;
+        if (isTransient != 0) { lmx = LM; }
+        var L1: f32 = _ce_l1(tmp, N, lmx, bias);
+        var best: f32 = L1;
+        var best_level = 0;
+        if (isTransient != 0 && narrow == 0) {
+            _ce_copy32(tmp1, tmp, N);
+            _ce_haar1(tmp1, N >> LM, 1 << LM);
+            L1 = _ce_l1(tmp1, N, LM + 1, bias);
+            if (L1 < best) { best = L1; best_level = 0 - 1; }
+        }
+        var kmax = LM;
+        if (isTransient == 0 && narrow == 0) { kmax = LM + 1; }
+        var k = 0;
+        while (k < kmax) {
+            var B = k + 1;
+            if (isTransient != 0) { B = LM - k - 1; }
+            _ce_haar1(tmp, N >> k, 1 << k);
+            L1 = _ce_l1(tmp, N, B, bias);
+            if (L1 < best) { best = L1; best_level = k + 1; }
+            k = k + 1;
+        }
+        var mt = 0 - 2 * best_level;
+        if (isTransient != 0) { mt = 2 * best_level; }
+        if (narrow != 0 && (mt == 0 || mt == 0 - 2 * LM)) { mt = mt - 1; }
+        store64(metric + i * 8, mt);
+        i = i + 1;
+    }
+    var row = _celt_tfsel + (LM * 8 + 4 * isTransient) * 8;
+    var selcost = _opus_tmp(16);
+    var lam_nt = lambda;
+    if (isTransient != 0) { lam_nt = 0; }
+    var sel = 0;
+    while (sel < 2) {
+        var t0 = load64(row + (2 * sel) * 8);
+        var t1 = load64(row + (2 * sel + 1) * 8);
+        var cost0 = load64(importance) * _ce_iabs(load64(metric) - 2 * t0);
+        var cost1 = load64(importance) * _ce_iabs(load64(metric) - 2 * t1) + lam_nt;
+        i = 1;
+        while (i < len) {
+            var curr0 = _ce_imin(cost0, cost1 + lambda);
+            var curr1 = _ce_imin(cost0 + lambda, cost1);
+            cost0 = curr0 + load64(importance + i * 8) * _ce_iabs(load64(metric + i * 8) - 2 * t0);
+            cost1 = curr1 + load64(importance + i * 8) * _ce_iabs(load64(metric + i * 8) - 2 * t1);
+            i = i + 1;
+        }
+        store64(selcost + sel * 8, _ce_imin(cost0, cost1));
+        sel = sel + 1;
+    }
+    var tf_select = 0;
+    if (load64(selcost + 8) < load64(selcost) && isTransient != 0) { tf_select = 1; }
+    var u0 = load64(row + (2 * tf_select) * 8);
+    var u1 = load64(row + (2 * tf_select + 1) * 8);
+    var c0 = load64(importance) * _ce_iabs(load64(metric) - 2 * u0);
+    var c1 = load64(importance) * _ce_iabs(load64(metric) - 2 * u1) + lam_nt;
+    i = 1;
+    while (i < len) {
+        var cur0 = 0;
+        var cur1 = 0;
+        var from0 = c0;
+        var from1 = c1 + lambda;
+        if (from0 < from1) { cur0 = from0; store64(path0 + i * 8, 0); }
+        else { cur0 = from1; store64(path0 + i * 8, 1); }
+        from0 = c0 + lambda;
+        from1 = c1;
+        if (from0 < from1) { cur1 = from0; store64(path1 + i * 8, 0); }
+        else { cur1 = from1; store64(path1 + i * 8, 1); }
+        c0 = cur0 + load64(importance + i * 8) * _ce_iabs(load64(metric + i * 8) - 2 * u0);
+        c1 = cur1 + load64(importance + i * 8) * _ce_iabs(load64(metric + i * 8) - 2 * u1);
+        i = i + 1;
+    }
+    if (c0 < c1) { store64(tf_res + (len - 1) * 8, 0); } else { store64(tf_res + (len - 1) * 8, 1); }
+    i = len - 2;
+    while (i >= 0) {
+        if (load64(tf_res + (i + 1) * 8) == 1) { store64(tf_res + i * 8, load64(path1 + (i + 1) * 8)); }
+        else { store64(tf_res + i * 8, load64(path0 + (i + 1) * 8)); }
+        i = i - 1;
+    }
+    return tf_select;
+}
+
+# spreading_decision (bands.c, float).
+fn _ce_spreading_decision(st, X, update_hf, end, C, M, spread_weight) {
+    var N0 = M * 120;
+    if (M * (_ce_eb(end) - _ce_eb(end - 1)) <= 8) { return _CE_SPREAD_NONE; }
+    var k25: f32 = 0.25;
+    var k0625: f32 = 0.0625;
+    var k015: f32 = 0.015625;
+    var sum = 0;
+    var nbBands = 0;
+    var hf_sum = 0;
+    var c = 0;
+    while (c < C) {
+        var i = 0;
+        while (i < end) {
+            var N = M * (_ce_eb(i + 1) - _ce_eb(i));
+            if (N <= 8) { i = i + 1; continue; }
+            var x = X + (M * _ce_eb(i) + c * N0) * 4;
+            var t0 = 0;
+            var t1 = 0;
+            var t2 = 0;
+            var nf: f32 = _cef_i(N);
+            var j = 0;
+            while (j < N) {
+                var v: f32 = load32(x + j * 4);
+                var vv: f32 = v * v;
+                var x2N: f32 = vv * nf;
+                if (x2N < k25) { t0 = t0 + 1; }
+                if (x2N < k0625) { t1 = t1 + 1; }
+                if (x2N < k015) { t2 = t2 + 1; }
+                j = j + 1;
+            }
+            if (i > 21 - 4) { hf_sum = hf_sum + (32 * (t1 + t0)) / N; }
+            var tmp = 0;
+            if (2 * t2 >= N) { tmp = tmp + 1; }
+            if (2 * t1 >= N) { tmp = tmp + 1; }
+            if (2 * t0 >= N) { tmp = tmp + 1; }
+            sum = sum + tmp * load64(spread_weight + i * 8);
+            nbBands = nbBands + load64(spread_weight + i * 8);
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    if (update_hf != 0) {
+        if (hf_sum != 0) { hf_sum = hf_sum / (C * (4 - 21 + end)); }
+        var hfa = (load64(st + _CE_HF_AVG) + hf_sum) >> 1;
+        store64(st + _CE_HF_AVG, hfa);
+        hf_sum = hfa;
+        var tds = load64(st + _CE_TAPSET);
+        if (tds == 2) { hf_sum = hf_sum + 4; }
+        else { if (tds == 0) { hf_sum = hf_sum - 4; } }
+        if (hf_sum > 22) { store64(st + _CE_TAPSET, 2); }
+        else { if (hf_sum > 18) { store64(st + _CE_TAPSET, 1); } else { store64(st + _CE_TAPSET, 0); } }
+    }
+    sum = (sum << 8) / nbBands;
+    sum = (sum + load64(st + _CE_TONAL_AVG)) >> 1;
+    store64(st + _CE_TONAL_AVG, sum);
+    var last = load64(st + _CE_SPREAD);
+    sum = (3 * sum + (((3 - last) << 7) + 64) + 2) >> 2;
+    if (sum < 80) { return _CE_SPREAD_AGGRESSIVE; }
+    if (sum < 256) { return _CE_SPREAD_NORMAL; }
+    if (sum < 384) { return _CE_SPREAD_LIGHT; }
+    return _CE_SPREAD_NONE;
+}
+
+# alloc_trim_analysis (celt_encoder.c, float): the allocation trim, 0 to 10;
+# stereo_saving updated in the encoder.
+fn _ce_alloc_trim(st, X, bandLogE, end, LM, C, N0, tf_estimate: f32, intensity, surround_trim: f32, equiv_rate) {
+    var diff: f32 = _CEF_ZERO;
+    var trim: f32 = 5.0;
+    if (equiv_rate < 64000) {
+        trim = 4.0;
+    } else {
+        if (equiv_rate < 80000) {
+            var frac = (equiv_rate - 64000) >> 10;
+            var k16: f32 = 0.0625;
+            var ff: f32 = _cef_i(frac);
+            var four: f32 = 4.0;
+            trim = four + k16 * ff;
+        }
+    }
+    if (C == 2) {
+        var sum: f32 = _CEF_ZERO;
+        var i = 0;
+        while (i < 8) {
+            var lo = _ce_eb(i) << LM;
+            var n = (_ce_eb(i + 1) - _ce_eb(i)) << LM;
+            var part: f32 = _cef_inner(X + lo * 4, X + (N0 + lo) * 4, n);
+            sum = sum + part;
+            i = i + 1;
+        }
+        var k8: f32 = 0.125;
+        sum = k8 * sum;
+        var asum: f32 = sum & 0x7FFFFFFF;
+        sum = _cef_min(_CEF_ONE, asum);
+        var minXC: f32 = sum;
+        i = 8;
+        while (i < intensity) {
+            var lo2 = _ce_eb(i) << LM;
+            var n2 = (_ce_eb(i + 1) - _ce_eb(i)) << LM;
+            var part2: f32 = _cef_inner(X + lo2 * 4, X + (N0 + lo2) * 4, n2);
+            var ap: f32 = part2 & 0x7FFFFFFF;
+            minXC = _cef_min(minXC, ap);
+            i = i + 1;
+        }
+        var am: f32 = minXC & 0x7FFFFFFF;
+        minXC = _cef_min(_CEF_ONE, am);
+        var k1001: f32 = 1.001;
+        var ss: f32 = sum * sum;
+        var a1: f32 = k1001 - ss;
+        var logXC: f32 = _cef_log2(a1);
+        var mm: f32 = minXC * minXC;
+        var a2: f32 = k1001 - mm;
+        var l2: f32 = _cef_log2(a2);
+        var hl: f32 = _CEF_HALF * logXC;
+        var logXC2: f32 = _cef_max(hl, l2);
+        var k75: f32 = 0.75;
+        var m4: f32 = -4.0;
+        var tl: f32 = k75 * logXC;
+        var tm: f32 = _cef_max(m4, tl);
+        trim = trim + tm;
+        var ssv: f32 = load32(st + _CE_STEREO_SAVING);
+        var k25: f32 = _CEF_QUARTER;
+        var sp: f32 = ssv + k25;
+        var hl2: f32 = _CEF_HALF * logXC2;
+        var nh: f32 = hl2 ^ 0x80000000;
+        var ns: f32 = _cef_min(sp, nh);
+        store64(st + _CE_STEREO_SAVING, ns);
+    }
+    var c = 0;
+    while (c < C) {
+        var j = 0;
+        while (j < end - 1) {
+            var le: f32 = load32(bandLogE + (j + c * 21) * 4);
+            var wt: f32 = _cef_i(2 + 2 * j - end);
+            var pr: f32 = le * wt;
+            diff = diff + pr;
+            j = j + 1;
+        }
+        c = c + 1;
+    }
+    var dv: f32 = _cef_i(C * (end - 1));
+    diff = diff / dv;
+    var d1: f32 = diff + _CEF_ONE;
+    var six: f32 = 6.0;
+    var d6: f32 = d1 / six;
+    var two: f32 = _CEF_TWO;
+    var m2: f32 = -2.0;
+    var lim: f32 = _cef_min(two, d6);
+    var lim2: f32 = _cef_max(m2, lim);
+    trim = trim - lim2;
+    trim = trim - surround_trim;
+    var te: f32 = two * tf_estimate;
+    trim = trim - te;
+    if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
+        var slope: f32 = load32(st + _CE_ANA + _CEA_TONALITY_SLOPE);
+        var k05: f32 = 0.05;
+        var s5: f32 = slope + k05;
+        var s2: f32 = two * s5;
+        var mn: f32 = _cef_min(two, s2);
+        var mx: f32 = _cef_max(m2, mn);
+        trim = trim - mx;
+    }
+    var ti = _cef_round(trim);
+    return _ce_imax(0, _ce_imin(10, ti));
+}
+
+# stereo_analysis (celt_encoder.c, float): 1 for dual stereo (L/R cheaper
+# than M/S by the L1 norm).
+fn _ce_stereo_analysis(X, LM, N0) {
+    var sumLR: f32 = _CEF_EPS;
+    var sumMS: f32 = _CEF_EPS;
+    var i = 0;
+    while (i < 13) {
+        var j = _ce_eb(i) << LM;
+        var je = _ce_eb(i + 1) << LM;
+        while (j < je) {
+            var L: f32 = load32(X + j * 4);
+            var R: f32 = load32(X + (N0 + j) * 4);
+            var Mv: f32 = L + R;
+            var S: f32 = L - R;
+            var aL: f32 = L & 0x7FFFFFFF;
+            var aR: f32 = R & 0x7FFFFFFF;
+            var aM: f32 = Mv & 0x7FFFFFFF;
+            var aS: f32 = S & 0x7FFFFFFF;
+            var lr: f32 = aL + aR;
+            var ms: f32 = aM + aS;
+            sumLR = sumLR + lr;
+            sumMS = sumMS + ms;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    var k707: f32 = 0.707107;
+    sumMS = k707 * sumMS;
+    var thetas = 13;
+    if (LM <= 1) { thetas = thetas - 8; }
+    var a: f32 = _cef_i((_ce_eb(13) << (LM + 1)) + thetas);
+    var b: f32 = _cef_i(_ce_eb(13) << (LM + 1));
+    var l: f32 = a * sumMS;
+    var r: f32 = b * sumLR;
+    if (l > r) { return 1; }
+    return 0;
+}
+
+# hysteresis_decision (bands.c) on the integers it compares here.
+fn _ce_hysteresis(val, thr, hyst, N, prev) {
+    var i = 0;
+    while (i < N) {
+        if (val < load64(thr + i * 8)) { break; }
+        i = i + 1;
+    }
+    if (i > prev) {
+        if (val < load64(thr + prev * 8) + load64(hyst + prev * 8)) { i = prev; }
+    }
+    if (i < prev) {
+        if (val > load64(thr + (prev - 1) * 8) - load64(hyst + (prev - 1) * 8)) { i = prev; }
+    }
+    return i;
+}
+
+# compute_vbr (celt_encoder.c, float): the frame's target in eighth bits.
+fn _ce_compute_vbr(st, base_target, LM, bitrate, lastCodedBands, C, intensity, cvbr, stereo_saving: f32,
+                   tot_boost, tf_estimate: f32, pitch_change, maxDepth: f32, lfe, has_mask, surround_masking: f32,
+                   temporal_vbr: f32) {
+    var ana = st + _CE_ANA;
+    var valid = load64(ana + _CEA_VALID);
+    var coded_bands = lastCodedBands;
+    if (coded_bands == 0) { coded_bands = 21; }
+    var coded_bins = _ce_eb(coded_bands) << LM;
+    if (C == 2) { coded_bins = coded_bins + (_ce_eb(_ce_imin(intensity, coded_bands)) << LM); }
+    var target = base_target;
+    if (valid != 0) {
+        var act: f32 = load32(ana + _CEA_ACTIVITY);
+        if (f64_lt(f32_to(act), 0.4) == 1) {
+            var k4: f32 = 0.4;
+            var da: f32 = k4 - act;
+            var cb: f32 = _cef_i(coded_bins << 3);
+            var t: f32 = cb * da;
+            target = target - _cef_trunc(t);
+        }
+    }
+    if (C == 2) {
+        var csb = _ce_imin(intensity, coded_bands);
+        var dof = (_ce_eb(csb) << LM) - csb;
+        var k8: f32 = 0.8;
+        var df: f32 = _cef_i(dof);
+        var p: f32 = k8 * df;
+        var cbf: f32 = _cef_i(coded_bins);
+        var max_frac: f32 = p / cbf;
+        var one: f32 = _CEF_ONE;
+        stereo_saving = _cef_min(stereo_saving, one);
+        var tf: f32 = _cef_i(target);
+        var a: f32 = max_frac * tf;
+        var k1: f32 = 0.1;
+        var sv: f32 = stereo_saving - k1;
+        var d3: f32 = _cef_i(dof << 3);
+        var b: f32 = sv * d3;
+        var mn: f32 = _cef_min(a, b);
+        target = target - _cef_trunc(mn);
+    }
+    target = target + tot_boost - (19 << LM);
+    var cal: f32 = 0.044;
+    var tc: f32 = tf_estimate - cal;
+    var tgf: f32 = _cef_i(target);
+    var tb: f32 = tc * tgf;
+    target = target + _cef_trunc(tb);
+    if (valid != 0 && lfe == 0) {
+        var ton: f32 = load32(ana + _CEA_TONALITY);
+        var k15: f32 = 0.15;
+        var k12: f32 = 0.12;
+        var t15: f32 = ton - k15;
+        var tz: f32 = _cef_max(_CEF_ZERO, t15);
+        var tonal: f32 = tz - k12;
+        var cb2: f32 = _cef_i(coded_bins << 3);
+        var k12b: f32 = 1.2;
+        var u: f32 = cb2 * k12b;
+        var u2: f32 = u * tonal;
+        var tonal_target = target + _cef_trunc(u2);
+        if (pitch_change != 0) {
+            var k8b: f32 = 0.8;
+            var u3: f32 = cb2 * k8b;
+            tonal_target = tonal_target + _cef_trunc(u3);
+        }
+        target = tonal_target;
+    }
+    if (has_mask != 0 && lfe == 0) {
+        var cb3: f32 = _cef_i(coded_bins << 3);
+        var sm: f32 = surround_masking * cb3;
+        var surround_target = target + _cef_trunc(sm);
+        target = _ce_imax(target / 4, surround_target);
+    }
+    var bins = _ce_eb(19) << LM;
+    var cbb: f32 = _cef_i((C * bins) << 3);
+    var fdp: f32 = cbb * maxDepth;
+    var floor_depth = _cef_trunc(fdp);
+    floor_depth = _ce_imax(floor_depth, sar(target, 2));
+    target = _ce_imin(target, floor_depth);
+    if ((has_mask == 0 || lfe != 0) && cvbr != 0) {
+        var k67: f32 = 0.67;
+        var dd: f32 = _cef_i(target - base_target);
+        var e: f32 = k67 * dd;
+        target = base_target + _cef_trunc(e);
+    }
+    var k2: f32 = 0.2;
+    if (has_mask == 0 && tf_estimate < k2) {
+        var k31: f32 = 0.0000031;
+        var am = _ce_imax(0, _ce_imin(32000, 96000 - bitrate));
+        var af: f32 = _cef_i(am);
+        var amount: f32 = k31 * af;
+        var tvf: f32 = temporal_vbr * amount;
+        var tgf2: f32 = _cef_i(target);
+        var g: f32 = tvf * tgf2;
+        target = target + _cef_trunc(g);
+    }
+    return _ce_imin(2 * base_target, target);
+}
+
+# ---------------------------------------------------------------- energy quantisation
+
+fn _ce_eprob(LM, intra) {
+    if (LM == 0) { if (intra != 0) { return _celt_eprob_intra0; } return _celt_eprob_inter0; }
+    if (LM == 1) { if (intra != 0) { return _celt_eprob_intra1; } return _celt_eprob_inter1; }
+    if (LM == 2) { if (intra != 0) { return _celt_eprob_intra2; } return _celt_eprob_inter2; }
+    if (intra != 0) { return _celt_eprob_intra; }
+    return _celt_eprob_inter;
+}
+
+# loss_distortion (quant_bands.c, float).
+fn _ce_loss_distortion(eBands, oldE, start, end, C): i64 {
+    var dist: f32 = _CEF_ZERO;
+    var c = 0;
+    while (c < C) {
+        var i = start;
+        while (i < end) {
+            var a: f32 = load32(eBands + (i + c * 21) * 4);
+            var b: f32 = load32(oldE + (i + c * 21) * 4);
+            var d: f32 = a - b;
+            dist = dist + d * d;
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    var k200: f32 = 200.0;
+    return _cef_min(k200, dist);
+}
+
+# quant_coarse_energy_impl (quant_bands.c, float): the badness back.
+fn _ce_coarse_impl(start, end, eBands, oldE, budget, tell, prob, error, enc, C, LM, intra, max_decay: f32, lfe) {
+    var badness = 0;
+    var prev = _opus_tmp(16);
+    store32(prev, 0); store32(prev + 4, 0);
+    if (tell + 3 <= budget) { ec_enc_bit_logp(enc, intra, 3); }
+    var coef: f32 = _CEF_ZERO;
+    var beta: f32 = _cet_beta_intra;
+    if (intra == 0) {
+        beta = load32(_cet_beta_coef + LM * 4);
+        coef = load32(_cet_pred_coef + LM * 4);
+    }
+    var m9: f32 = -9.0;
+    var m28: f32 = -28.0;
+    var i = start;
+    while (i < end) {
+        var c = 0;
+        while (c < C) {
+            var ix = (i + c * 21) * 4;
+            var x: f32 = load32(eBands + ix);
+            var o: f32 = load32(oldE + ix);
+            var oldEv: f32 = _cef_max(m9, o);
+            var co: f32 = coef * oldEv;
+            var pv: f32 = load32(prev + c * 4);
+            var f0: f32 = x - co;
+            var f: f32 = f0 - pv;
+            var qi = _cef_round(f);
+            var ob: f32 = _cef_max(m28, o);
+            var decay_bound: f32 = ob - max_decay;
+            if (qi < 0 && x < decay_bound) {
+                var db: f32 = decay_bound - x;
+                qi = qi + _cef_trunc(db);
+                if (qi > 0) { qi = 0; }
+            }
+            var qi0 = qi;
+            tell = ec_tell(enc);
+            var bits_left = budget - tell - 3 * C * (end - i);
+            if (i != start && bits_left < 30) {
+                if (bits_left < 24) { qi = _ce_imin(1, qi); }
+                if (bits_left < 16) { qi = _ce_imax(0 - 1, qi); }
+            }
+            if (lfe != 0 && i >= 2) { qi = _ce_imin(qi, 0); }
+            if (budget - tell >= 15) {
+                var pi = 2 * _ce_imin(i, 20);
+                qi = ec_laplace_encode(enc, qi, load8(prob + pi) << 7, load8(prob + pi + 1) << 6);
+            } else {
+                if (budget - tell >= 2) {
+                    qi = _ce_imax(0 - 1, _ce_imin(qi, 1));
+                    var sym = 0;
+                    if (qi == 0 - 1) { sym = 1; }
+                    if (qi == 1) { sym = 2; }
+                    ec_enc_icdf(enc, sym, _celt_small_en_icdf, 2);
+                } else {
+                    if (budget - tell >= 1) {
+                        qi = _ce_imin(0, qi);
+                        ec_enc_bit_logp(enc, 0 - qi, 1);
+                    } else {
+                        qi = 0 - 1;
+                    }
+                }
+            }
+            var qf: f32 = _cef_i(qi);
+            var er: f32 = f - qf;
+            store32(error + ix, er);
+            badness = badness + _ce_iabs(qi0 - qi);
+            var t: f32 = co + pv;
+            t = t + qf;
+            store32(oldE + ix, t);
+            var bq: f32 = beta * qf;
+            var np: f32 = pv + qf;
+            np = np - bq;
+            store32(prev + c * 4, np);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if (lfe != 0) { return 0; }
+    return badness;
+}
+
+# quant_coarse_energy (quant_bands.c, float): intra or inter, by a two-pass
+# race from complexity 4.
+fn _ce_coarse(st, start, end, effEnd, eBands, oldE, budget, error, enc, C, LM, nbAvail, force_intra, two_pass, loss, lfe) {
+    var dintra: f32 = load32(st + _CE_DINTRA);
+    var span = end - start;
+    var intra = 0;
+    if (force_intra != 0) { intra = 1; }
+    if (two_pass == 0) {
+        var lim: f32 = _cef_i(2 * C * span);
+        if (dintra > lim && nbAvail > span * C) { intra = 1; }
+    }
+    var bf: f32 = _cef_i(budget);
+    var bd: f32 = bf * dintra;
+    var lf: f32 = _cef_i(loss);
+    var bdl: f32 = bd * lf;
+    var dv: f32 = _cef_i(C * 512);
+    var ib: f32 = bdl / dv;
+    var intra_bias = _cef_trunc(ib);
+    var newd: f32 = _ce_loss_distortion(eBands, oldE, start, effEnd, C);
+    var tell = ec_tell(enc);
+    if (tell + 3 > budget) { two_pass = 0; intra = 0; }
+    var max_decay: f32 = 16.0;
+    if (end - start > 10) {
+        var k125: f32 = 0.125;
+        var nb: f32 = _cef_i(nbAvail);
+        var md: f32 = k125 * nb;
+        max_decay = _cef_min(max_decay, md);
+    }
+    if (lfe != 0) { max_decay = 3.0; }
+    var start_state = _opus_tmp(96);
+    ec_enc_copy(start_state, enc);
+    var oldE_intra = _opus_tmp(2 * 21 * 4);
+    var error_intra = _opus_tmp(2 * 21 * 4);
+    _ce_copy32(oldE_intra, oldE, C * 21);
+    _ce_zero32(error_intra, 2 * 21);
+    var badness1 = 0;
+    if (two_pass != 0 || intra != 0) {
+        badness1 = _ce_coarse_impl(start, end, eBands, oldE_intra, budget, tell, _ce_eprob(LM, 1), error_intra, enc, C, LM, 1, max_decay, lfe);
+    }
+    if (intra == 0) {
+        var tell_intra = ec_tell_frac(enc);
+        var intra_state = _opus_tmp(96);
+        ec_enc_copy(intra_state, enc);
+        var nstart = load64(start_state + 48);
+        var nintra = load64(intra_state + 48);
+        var ibuf = load64(intra_state) + nstart;
+        var save = nintra - nstart;
+        var bits = _opus_tmp(save + 8);
+        var k = 0;
+        while (k < save) { store8(bits + k, load8(ibuf + k)); k = k + 1; }
+        ec_enc_copy(enc, start_state);
+        var badness2 = _ce_coarse_impl(start, end, eBands, oldE, budget, tell, _ce_eprob(LM, 0), error, enc, C, LM, 0, max_decay, lfe);
+        if (two_pass != 0) {
+            var take = 0;
+            if (badness1 < badness2) { take = 1; }
+            if (badness1 == badness2 && ec_tell_frac(enc) + intra_bias > tell_intra) { take = 1; }
+            if (take != 0) {
+                ec_enc_copy(enc, intra_state);
+                k = 0;
+                while (k < save) { store8(ibuf + k, load8(bits + k)); k = k + 1; }
+                _ce_copy32(oldE, oldE_intra, C * 21);
+                _ce_copy32(error, error_intra, C * 21);
+                intra = 1;
+            }
+        }
+    } else {
+        _ce_copy32(oldE, oldE_intra, C * 21);
+        _ce_copy32(error, error_intra, C * 21);
+    }
+    if (intra != 0) {
+        store64(st + _CE_DINTRA, newd);
+    } else {
+        var pc: f32 = load32(_cet_pred_coef + LM * 4);
+        var p2: f32 = pc * pc;
+        var dn: f32 = p2 * dintra;
+        dn = dn + newd;
+        store64(st + _CE_DINTRA, dn);
+    }
+    return intra;
+}
+
+# quant_fine_energy (quant_bands.c, float, no previous quantisation).
+fn _ce_fine(start, end, oldE, error, fine_quant, enc, C) {
+    var h: f32 = _CEF_HALF;
+    var k16: f32 = 0.00006103515625;            # 1.f/16384
+    var i = start;
+    while (i < end) {
+        var fq = load64(fine_quant + i * 8);
+        if (fq <= 0) { i = i + 1; continue; }
+        if (ec_tell(enc) + C * fq > load64(enc + 8) * 8) { i = i + 1; continue; }
+        var extra = 1 << fq;
+        var ef: f32 = _cef_i(extra);
+        var sc: f32 = _cef_i(1 << (14 - fq));
+        var c = 0;
+        while (c < C) {
+            var ix = (i + c * 21) * 4;
+            var e: f32 = load32(error + ix);
+            var e1: f32 = e * _CEF_ONE;
+            var eh: f32 = e1 + h;
+            var ee: f32 = eh * ef;
+            var q2 = _ce_floor_d(f32_to(ee));
+            if (q2 > extra - 1) { q2 = extra - 1; }
+            if (q2 < 0) { q2 = 0; }
+            ec_enc_bits(enc, q2, fq);
+            var qf: f32 = _cef_i(q2);
+            var qh: f32 = qf + h;
+            var o1: f32 = qh * sc;
+            var o2: f32 = o1 * k16;
+            var off: f32 = o2 - h;
+            off = off * _CEF_ONE;
+            var ov: f32 = load32(oldE + ix);
+            ov = ov + off;
+            store32(oldE + ix, ov);
+            e = e - off;
+            store32(error + ix, e);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# quant_energy_finalise (quant_bands.c, float).
+fn _ce_finalise(start, end, oldE, error, fine_quant, fine_priority, bits_left, enc, C) {
+    var h: f32 = _CEF_HALF;
+    var k16: f32 = 0.00006103515625;
+    var prio = 0;
+    while (prio < 2) {
+        var i = start;
+        while (i < end && bits_left >= C) {
+            var fq = load64(fine_quant + i * 8);
+            if (fq >= 8 || load64(fine_priority + i * 8) != prio) { i = i + 1; continue; }
+            var sc: f32 = _cef_i(1 << (14 - fq - 1));
+            var c = 0;
+            while (c < C) {
+                var ix = (i + c * 21) * 4;
+                var e: f32 = load32(error + ix);
+                var q2 = 1;
+                if (e < _CEF_ZERO) { q2 = 0; }
+                ec_enc_bits(enc, q2, 1);
+                var qf: f32 = _cef_i(q2);
+                var qh: f32 = qf - h;
+                var o1: f32 = qh * sc;
+                var off: f32 = o1 * k16;
+                if (oldE != 0) {
+                    var ov: f32 = load32(oldE + ix);
+                    ov = ov + off;
+                    store32(oldE + ix, ov);
+                }
+                e = e - off;
+                store32(error + ix, e);
+                bits_left = bits_left - 1;
+                c = c + 1;
+            }
+            i = i + 1;
+        }
+        prio = prio + 1;
+    }
+    return 0;
+}
+
+# ---------------------------------------------------------------- the bands: PVQ
+
+# exp_rotation1 (vq.c, float).
+fn _ce_rot1(X, len, stride, c: f32, s: f32) {
+    var ms: f32 = s ^ 0x80000000;
+    var st4 = stride * 4;
+    var p = X;
+    var pe = X + (len - stride) * 4;
+    while (p < pe) {
+        var x1: f32 = load32(p);
+        var x2: f32 = load32(p + st4);
+        var a: f32 = c * x2 + s * x1;
+        var b: f32 = c * x1 + ms * x2;
+        store32(p + st4, a);
+        store32(p, b);
+        p = p + 4;
+    }
+    p = X + (len - 2 * stride - 1) * 4;
+    while (p >= X) {
+        var y1: f32 = load32(p);
+        var y2: f32 = load32(p + st4);
+        var a2: f32 = c * y2 + s * y1;
+        var b2: f32 = c * y1 + ms * y2;
+        store32(p + st4, a2);
+        store32(p, b2);
+        p = p - 4;
+    }
+    return 0;
+}
+
+# exp_rotation (vq.c, float): spreading rotation, dir 1 before the search,
+# -1 to undo it.
+fn _ce_exp_rotation(X, len, dir, stride, K, spread) {
+    if (2 * K >= len || spread == _CE_SPREAD_NONE) { return 0; }
+    var factor = 15;
+    if (spread == 2) { factor = 10; }
+    if (spread == 3) { factor = 5; }
+    var lf: f32 = _cef_i(len);
+    var num: f32 = _CEF_ONE * lf;
+    var den: f32 = _cef_i(len + factor * K);
+    var gain: f32 = num / den;
+    var gg: f32 = gain * gain;
+    var theta: f32 = _CEF_HALF * gg;
+    var c: f32 = _cef_cos_norm(theta);
+    var omt: f32 = _CEF_ONE - theta;
+    var s: f32 = _cef_cos_norm(omt);
+    var stride2 = 0;
+    if (len >= 8 * stride) {
+        stride2 = 1;
+        while ((stride2 * stride2 + stride2) * stride + (stride >> 2) < len) { stride2 = stride2 + 1; }
+    }
+    len = len / stride;
+    var ns: f32 = s ^ 0x80000000;
+    var nc: f32 = c ^ 0x80000000;
+    var i = 0;
+    while (i < stride) {
+        var Xi = X + i * len * 4;
+        if (dir < 0) {
+            if (stride2 != 0) { _ce_rot1(Xi, len, stride2, s, c); }
+            _ce_rot1(Xi, len, 1, c, s);
+        } else {
+            _ce_rot1(Xi, len, 1, c, ns);
+            if (stride2 != 0) { _ce_rot1(Xi, len, stride2, s, nc); }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# op_pvq_search_c (vq.c, float): K pulses over N into iy (words); X loses
+# its signs. yy back (f32).
+fn _ce_pvq_search(X, iy, K, N): i64 {
+    var y = _opus_tmp(N * 4 + 8);
+    var signx = _opus_tmp(N * 8 + 8);
+    var j = 0;
+    while (j < N) {
+        var v: f32 = load32(X + j * 4);
+        var sg = 0;
+        if (v < _CEF_ZERO) { sg = 1; }
+        store64(signx + j * 8, sg);
+        var av: f32 = v & 0x7FFFFFFF;
+        store32(X + j * 4, av);
+        store64(iy + j * 8, 0);
+        store32(y + j * 4, 0);
+        j = j + 1;
+    }
+    var xy: f32 = _CEF_ZERO;
+    var yy: f32 = _CEF_ZERO;
+    var pulsesLeft = K;
+    if (K > (N >> 1)) {
+        var sum: f32 = _CEF_ZERO;
+        j = 0;
+        while (j < N) { var xs: f32 = load32(X + j * 4); sum = sum + xs; j = j + 1; }
+        var k64: f32 = 64.0;
+        var ok = 0;
+        if (sum > _CEF_EPS) { if (sum < k64) { ok = 1; } }
+        if (ok == 0) {
+            store32(X, _CEF_ONE);
+            j = 1;
+            while (j < N) { store32(X + j * 4, 0); j = j + 1; }
+            sum = _CEF_ONE;
+        }
+        var k8: f32 = 0.8;
+        var kf: f32 = _cef_i(K);
+        var kk: f32 = kf + k8;
+        var rs: f32 = _CEF_ONE / sum;
+        var rcp: f32 = kk * rs;
+        j = 0;
+        while (j < N) {
+            var xj: f32 = load32(X + j * 4);
+            var pr: f32 = rcp * xj;
+            var q = _ce_floor_d(f32_to(pr));
+            store64(iy + j * 8, q);
+            var yj: f32 = _cef_i(q);
+            yy = yy + yj * yj;
+            xy = xy + xj * yj;
+            var y2: f32 = yj * _CEF_TWO;
+            store32(y + j * 4, y2);
+            pulsesLeft = pulsesLeft - q;
+            j = j + 1;
+        }
+    }
+    if (pulsesLeft > N + 3) {
+        var tmp: f32 = _cef_i(pulsesLeft);
+        var y0: f32 = load32(y);
+        yy = yy + tmp * tmp;
+        yy = yy + tmp * y0;
+        store64(iy, load64(iy) + pulsesLeft);
+        pulsesLeft = 0;
+    }
+    var i = 0;
+    while (i < pulsesLeft) {
+        var best_id = 0;
+        yy = yy + _CEF_ONE;
+        var x0: f32 = load32(X);
+        var yv0: f32 = load32(y);
+        var Rxy: f32 = xy + x0;
+        var Ryy: f32 = yy + yv0;
+        Rxy = Rxy * Rxy;
+        var best_den: f32 = Ryy;
+        var best_num: f32 = Rxy;
+        var px = X + 4;
+        var py = y + 4;
+        var pe = X + N * 4;
+        while (px < pe) {
+            var xj2: f32 = load32(px);
+            var yj2: f32 = load32(py);
+            var r1: f32 = xy + xj2;
+            var r2: f32 = yy + yj2;
+            r1 = r1 * r1;
+            var lhs: f32 = best_den * r1;
+            var rhs: f32 = r2 * best_num;
+            if (lhs > rhs) {
+                best_den = r2;
+                best_num = r1;
+                best_id = (px - X) >> 2;
+            }
+            px = px + 4;
+            py = py + 4;
+        }
+        var xb: f32 = load32(X + best_id * 4);
+        var yb: f32 = load32(y + best_id * 4);
+        xy = xy + xb;
+        yy = yy + yb;
+        yb = yb + _CEF_TWO;
+        store32(y + best_id * 4, yb);
+        store64(iy + best_id * 8, load64(iy + best_id * 8) + 1);
+        i = i + 1;
+    }
+    j = 0;
+    while (j < N) {
+        if (load64(signx + j * 8) != 0) { store64(iy + j * 8, 0 - load64(iy + j * 8)); }
+        j = j + 1;
+    }
+    return yy;
+}
+
+# icwrs (cwrs.c): the index of the pulse vector y (n words), the table's
+# U(a, b) read in place (row min(a, b), column max(a, b)).
+fn _ce_icwrs(n, y) {
+    var U = _celt_pvqU;
+    var j = n - 1;
+    var yj = load64(y + j * 8);
+    var i = 0;
+    var k = yj;
+    if (yj < 0) { i = 1; k = 0 - yj; }
+    while (j > 0) {
+        j = j - 1;
+        var a = n - j;
+        if (a <= k) { i = i + load64(U + (a * 178 + k) * 8); } else { i = i + load64(U + (k * 178 + a) * 8); }
+        var yv = load64(y + j * 8);
+        if (yv < 0) {
+            k = k - yv;
+            var k1 = k + 1;
+            if (a <= k1) { i = i + load64(U + (a * 178 + k1) * 8); } else { i = i + load64(U + (k1 * 178 + a) * 8); }
+        } else {
+            k = k + yv;
+        }
+    }
+    return i;
+}
+
+# extract_collapse_mask (vq.c).
+fn _ce_collapse_mask(iy, N, B) {
+    if (B <= 1) { return 1; }
+    var N0 = N / B;
+    var cm = 0;
+    var i = 0;
+    while (i < B) {
+        var t = 0;
+        var j = 0;
+        while (j < N0) { t = t | load64(iy + (i * N0 + j) * 8); j = j + 1; }
+        if (t != 0) { cm = cm | (1 << i); }
+        i = i + 1;
+    }
+    return cm;
+}
+
+# alg_quant (vq.c, float): K pulses into X's shape, coded; X resynthesised
+# (unit norm times gain) when resynth. The collapse mask back.
+fn _ce_alg_quant(X, N, K, spread, B, enc, gain: f32, resynth) {
+    var iy = _opus_tmp((N + 3) * 8);
+    _ce_exp_rotation(X, N, 1, B, K, spread);
+    var yy: f32 = _ce_pvq_search(X, iy, K, N);
+    var cm = _ce_collapse_mask(iy, N, B);
+    ec_enc_uint(enc, _ce_icwrs(N, iy), celt_pvq_v(N, K));
+    if (resynth != 0) {
+        # normalise_residual: g = (1/celt_sqrt(Ryy))*gain, X = iy*g
+        var sq: f32 = _cef_sqrt(yy);
+        var rs: f32 = _CEF_ONE / sq;
+        var g: f32 = rs * gain;
+        var i = 0;
+        while (i < N) {
+            var q: f32 = _cef_i(load64(iy + i * 8));
+            var v: f32 = q * g;
+            store32(X + i * 4, v);
+            i = i + 1;
+        }
+        _ce_exp_rotation(X, N, 0 - 1, B, K, spread);
+    }
+    return cm;
+}
+
+# renormalise_vector (vq.c, float).
+fn _ce_renormalise(X, N, gain: f32) {
+    var p: f32 = _cef_inner(X, X, N);
+    var E: f32 = _CEF_EPS + p;
+    var sq: f32 = _cef_sqrt(E);
+    var rs: f32 = _CEF_ONE / sq;
+    var g: f32 = rs * gain;
+    var i = 0;
+    while (i < N) {
+        var x: f32 = load32(X + i * 4);
+        var v: f32 = g * x;
+        store32(X + i * 4, v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# celt_atan_norm / celt_atan2p_norm (mathops.h, float).
+var _CEF_ATN_2PI: f32 = 0.636619772367581;
+var _CEF_ATN_A03: f32 = -0.3333165943622589111328125;
+var _CEF_ATN_A05: f32 = 0.19962704181671142578125;
+var _CEF_ATN_A07: f32 = -0.1397658288478851318359375;
+var _CEF_ATN_A09: f32 = 0.097942344844341278076171875;
+var _CEF_ATN_A11: f32 = -0.057773590087890625;
+var _CEF_ATN_A13: f32 = 0.02304013632237911224365234375;
+var _CEF_ATN_A15: f32 = -0.0043554059229791164398193359375;
+var _CEF_1E18: f32 = 0.000000000000000001;
+
+fn _ce_atan_norm(x: f32): i64 {
+    var x2: f32 = x * x;
+    var p: f32 = x2 * _CEF_ATN_A15;
+    p = _CEF_ATN_A13 + p;
+    p = x2 * p;
+    p = _CEF_ATN_A11 + p;
+    p = x2 * p;
+    p = _CEF_ATN_A09 + p;
+    p = x2 * p;
+    p = _CEF_ATN_A07 + p;
+    p = x2 * p;
+    p = _CEF_ATN_A05 + p;
+    p = x2 * p;
+    p = _CEF_ATN_A03 + p;
+    var xx: f32 = x * x2;
+    var t: f32 = xx * p;
+    var s: f32 = x + t;
+    var r: f32 = _CEF_ATN_2PI * s;
+    return r;
+}
+
+fn _ce_atan2p_norm(y: f32, x: f32): i64 {
+    var n: f32 = x * x + y * y;
+    if (n < _CEF_1E18) { return 0; }
+    if (y < x) {
+        var q: f32 = y / x;
+        return _ce_atan_norm(q);
+    }
+    var q2: f32 = x / y;
+    var a: f32 = _ce_atan_norm(q2);
+    var r: f32 = _CEF_ONE - a;
+    return r;
+}
+
+# stereo_itheta (vq.c, float): the angle in Q30.
+fn _ce_stereo_itheta(X, Y, stereo, N) {
+    var Emid: f32 = _CEF_ZERO;
+    var Eside: f32 = _CEF_ZERO;
+    if (stereo != 0) {
+        var i = 0;
+        while (i < N) {
+            var a: f32 = load32(X + i * 4);
+            var b: f32 = load32(Y + i * 4);
+            var m: f32 = a + b;
+            var s: f32 = a - b;
+            Emid = Emid + m * m;
+            Eside = Eside + s * s;
+            i = i + 1;
+        }
+    } else {
+        var e1: f32 = _cef_inner(X, X, N);
+        var e2: f32 = _cef_inner(Y, Y, N);
+        Emid = Emid + e1;
+        Eside = Eside + e2;
+    }
+    var mid: f32 = _cef_sqrt(Emid);
+    var side: f32 = _cef_sqrt(Eside);
+    var k30: f32 = 1073741824.0;
+    var at: f32 = _ce_atan2p_norm(side, mid);
+    var v: f32 = k30 * at;
+    return _cef_round(v);
+}
+
+# intensity_stereo, stereo_split, stereo_merge (bands.c, float).
+fn _ce_intensity_stereo(X, Y, bandE, i, N) {
+    var left: f32 = load32(bandE + i * 4);
+    var right: f32 = load32(bandE + (i + 21) * 4);
+    var s: f32 = _CEF_EPS + left * left;
+    s = s + right * right;
+    var sq: f32 = _cef_sqrt(s);
+    var norm: f32 = _CEF_EPS + sq;
+    var a1: f32 = left / norm;
+    var a2: f32 = right / norm;
+    var j = 0;
+    while (j < N) {
+        var x: f32 = load32(X + j * 4);
+        var y: f32 = load32(Y + j * 4);
+        var v: f32 = a1 * x + a2 * y;
+        store32(X + j * 4, v);
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn _ce_stereo_split(X, Y, N) {
+    var k: f32 = _CEF_SQRT1_2;
+    var j = 0;
+    while (j < N) {
+        var x: f32 = load32(X + j * 4);
+        var y: f32 = load32(Y + j * 4);
+        var l: f32 = k * x;
+        var r: f32 = k * y;
+        var a: f32 = l + r;
+        var b: f32 = r - l;
+        store32(X + j * 4, a);
+        store32(Y + j * 4, b);
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn _ce_stereo_merge(X, Y, mid: f32, N) {
+    var xp: f32 = _cef_inner(Y, X, N);
+    var side: f32 = _cef_inner(Y, Y, N);
+    xp = mid * xp;
+    var mm: f32 = mid * mid;
+    var x2: f32 = _CEF_TWO * xp;
+    var El: f32 = mm + side;
+    El = El - x2;
+    var Er: f32 = mm + side;
+    Er = Er + x2;
+    var k6: f32 = 0.0006;
+    if (Er < k6 || El < k6) {
+        _ce_copy32(Y, X, N);
+        return 0;
+    }
+    var sl: f32 = _cef_sqrt(El);
+    var lgain: f32 = _CEF_ONE / sl;
+    var sr: f32 = _cef_sqrt(Er);
+    var rgain: f32 = _CEF_ONE / sr;
+    var j = 0;
+    while (j < N) {
+        var x: f32 = load32(X + j * 4);
+        var r: f32 = load32(Y + j * 4);
+        var l: f32 = mid * x;
+        var d: f32 = l - r;
+        var s: f32 = l + r;
+        var a: f32 = lgain * d;
+        var b: f32 = rgain * s;
+        store32(X + j * 4, a);
+        store32(Y + j * 4, b);
+        j = j + 1;
+    }
+    return 0;
+}
+
+# deinterleave_hadamard / interleave_hadamard (bands.c).
+fn _ce_deinterleave(X, N0, stride, hadamard) {
+    var N = N0 * stride;
+    var tmp = _opus_tmp(N * 4 + 8);
+    var i = 0;
+    while (i < stride) {
+        var row = i;
+        if (hadamard != 0) { row = load64(_celt_ordery + (stride - 2 + i) * 8); }
+        var j = 0;
+        while (j < N0) { store32(tmp + (row * N0 + j) * 4, load32(X + (j * stride + i) * 4)); j = j + 1; }
+        i = i + 1;
+    }
+    _ce_copy32(X, tmp, N);
+    return 0;
+}
+
+fn _ce_interleave(X, N0, stride, hadamard) {
+    var N = N0 * stride;
+    var tmp = _opus_tmp(N * 4 + 8);
+    var i = 0;
+    while (i < stride) {
+        var row = i;
+        if (hadamard != 0) { row = load64(_celt_ordery + (stride - 2 + i) * 8); }
+        var j = 0;
+        while (j < N0) { store32(tmp + (j * stride + i) * 4, load32(X + (row * N0 + j) * 4)); j = j + 1; }
+        i = i + 1;
+    }
+    _ce_copy32(X, tmp, N);
+    return 0;
+}
+
+# ---------------------------------------------------------------- the bands: the recursion
+
+# band_ctx (bands.c), 8-byte words
+var _CEC_RESYNTH = 0;
+var _CEC_I = 8;
+var _CEC_INTENSITY = 16;
+var _CEC_SPREAD = 24;
+var _CEC_TF_CHANGE = 32;
+var _CEC_EC = 40;
+var _CEC_REMAINING = 48;
+var _CEC_BANDE = 56;
+var _CEC_SEED = 64;
+var _CEC_THETA_ROUND = 72;
+var _CEC_DISABLE_INV = 80;
+var _CEC_AVOID_SPLIT = 88;
+var _CEC_WORDS = 12;
+# split_ctx
+var _CES_INV = 0;
+var _CES_IMID = 8;
+var _CES_ISIDE = 16;
+var _CES_DELTA = 24;
+var _CES_ITHETA = 32;
+var _CES_QALLOC = 40;
+
+# compute_theta (bands.c, encoder): the split angle, quantised and coded;
+# X and Y are mixed for stereo. *bp and *fillp updated.
+fn _ce_compute_theta(ctx, sctx, X, Y, N, bp, B, B0, LM, stereo, fillp) {
+    var i = load64(ctx + _CEC_I);
+    var intensity = load64(ctx + _CEC_INTENSITY);
+    var ec = load64(ctx + _CEC_EC);
+    var bandE = load64(ctx + _CEC_BANDE);
+    var b = load64(bp);
+    var pulse_cap = load64(_celt_logN + i * 8) + LM * 8;
+    var qo = 4;
+    if (stereo != 0 && N == 2) { qo = 16; }
+    var offset = (pulse_cap >> 1) - qo;
+    var qn = compute_qn(N, b, offset, pulse_cap, stereo);
+    if (stereo != 0 && i >= intensity) { qn = 1; }
+    var itheta_q30 = _ce_stereo_itheta(X, Y, stereo, N);
+    var itheta = itheta_q30 >> 16;
+    var tell = ec_tell_frac(ec);
+    var inv = 0;
+    var imid = 0;
+    var iside = 0;
+    var delta = 0;
+    if (qn != 1) {
+        var tr = load64(ctx + _CEC_THETA_ROUND);
+        if (stereo == 0 || tr == 0) {
+            itheta = (itheta * qn + 8192) >> 14;
+            if (stereo == 0 && load64(ctx + _CEC_AVOID_SPLIT) != 0 && itheta > 0 && itheta < qn) {
+                var unq = (itheta * 16384) / qn;
+                imid = bitexact_cos(unq);
+                iside = bitexact_cos(16384 - unq);
+                delta = frac_mul16((N - 1) << 7, bitexact_log2tan(iside, imid));
+                if (delta > b) { itheta = qn; }
+                else { if (delta < 0 - b) { itheta = 0; } }
+            }
+        } else {
+            var bias = (0 - 32767) / qn;
+            if (itheta > 8192) { bias = 32767 / qn; }
+            var down = _ce_imin(qn - 1, _ce_imax(0, sar(itheta * qn + bias, 14)));
+            if (tr < 0) { itheta = down; } else { itheta = down + 1; }
+        }
+        if (stereo != 0 && N > 2) {
+            var p0 = 3;
+            var x = itheta;
+            var x0 = qn / 2;
+            var ft = p0 * (x0 + 1) + x0;
+            if (x <= x0) { ec_encode(ec, p0 * x, p0 * (x + 1), ft); }
+            else { ec_encode(ec, (x - 1 - x0) + (x0 + 1) * p0, (x - x0) + (x0 + 1) * p0, ft); }
+        } else {
+            if (B0 > 1 || stereo != 0) {
+                ec_enc_uint(ec, itheta, qn + 1);
+            } else {
+                var ft2 = ((qn >> 1) + 1) * ((qn >> 1) + 1);
+                var fs = qn + 1 - itheta;
+                var fl = ft2 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                if (itheta <= (qn >> 1)) {
+                    fs = itheta + 1;
+                    fl = (itheta * (itheta + 1)) >> 1;
+                }
+                ec_encode(ec, fl, fl + fs, ft2);
+            }
+        }
+        itheta = (itheta * 16384) / qn;
+        if (stereo != 0) {
+            if (itheta == 0) { _ce_intensity_stereo(X, Y, bandE, i, N); }
+            else { _ce_stereo_split(X, Y, N); }
+        }
+    } else {
+        if (stereo != 0) {
+            if (itheta > 8192 && load64(ctx + _CEC_DISABLE_INV) == 0) { inv = 1; }
+            if (inv != 0) {
+                var j = 0;
+                while (j < N) { store32(Y + j * 4, load32(Y + j * 4) ^ 0x80000000); j = j + 1; }
+            }
+            _ce_intensity_stereo(X, Y, bandE, i, N);
+            if (b > 16 && load64(ctx + _CEC_REMAINING) > 16) {
+                ec_enc_bit_logp(ec, inv, 2);
+            } else {
+                inv = 0;
+            }
+            if (load64(ctx + _CEC_DISABLE_INV) != 0) { inv = 0; }
+            itheta = 0;
+        }
+    }
+    var qalloc = ec_tell_frac(ec) - tell;
+    store64(bp, b - qalloc);
+    var fill = load64(fillp);
+    if (itheta == 0) {
+        imid = 32767;
+        iside = 0;
+        fill = fill & ((1 << B) - 1);
+        delta = 0 - 16384;
+    } else {
+        if (itheta == 16384) {
+            imid = 0;
+            iside = 32767;
+            fill = fill & (((1 << B) - 1) << B);
+            delta = 16384;
+        } else {
+            imid = bitexact_cos(itheta);
+            iside = bitexact_cos(16384 - itheta);
+            delta = frac_mul16((N - 1) << 7, bitexact_log2tan(iside, imid));
+        }
+    }
+    store64(fillp, fill);
+    store64(sctx + _CES_INV, inv);
+    store64(sctx + _CES_IMID, imid);
+    store64(sctx + _CES_ISIDE, iside);
+    store64(sctx + _CES_DELTA, delta);
+    store64(sctx + _CES_ITHETA, itheta);
+    store64(sctx + _CES_QALLOC, qalloc);
+    return 0;
+}
+
+# quant_band_n1 (bands.c, encoder).
+fn _ce_quant_band_n1(ctx, X, Y, lowband_out) {
+    var ec = load64(ctx + _CEC_EC);
+    var resynth = load64(ctx + _CEC_RESYNTH);
+    var x = X;
+    var c = 0;
+    var n = 1;
+    if (Y != 0) { n = 2; }
+    while (c < n) {
+        var sign = 0;
+        if (load64(ctx + _CEC_REMAINING) >= 8) {
+            var v: f32 = load32(x);
+            if (v < _CEF_ZERO) { sign = 1; }
+            ec_enc_bits(ec, sign, 1);
+            store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - 8);
+        }
+        if (resynth != 0) {
+            if (sign != 0) { store32(x, _CEF_ONE ^ 0x80000000); } else { store32(x, _CEF_ONE); }
+        }
+        x = Y;
+        c = c + 1;
+    }
+    if (lowband_out != 0) { store32(lowband_out, load32(X)); }
+    return 1;
+}
+
+# quant_partition (bands.c, encoder, float).
+fn _ce_quant_partition(ctx, X, N, b, B, lowband, LM, gain: f32, fill) {
+    var i = load64(ctx + _CEC_I);
+    var spread = load64(ctx + _CEC_SPREAD);
+    var ec = load64(ctx + _CEC_EC);
+    var resynth = load64(ctx + _CEC_RESYNTH);
+    var B0 = B;
+    var cm = 0;
+    var cache = _celt_cacheBits + load64(_celt_cacheIdx + ((LM + 1) * 21 + i) * 8);
+    if (LM != 0 - 1 && b > load8(cache + load8(cache)) + 12 && N > 2) {
+        N = N >> 1;
+        var Y = X + N * 4;
+        LM = LM - 1;
+        if (B == 1) { fill = (fill & 1) | (fill << 1); }
+        B = (B + 1) >> 1;
+        var sctx = _opus_tmp(48);
+        var bp = _opus_tmp(8);
+        var fp = _opus_tmp(8);
+        store64(bp, b);
+        store64(fp, fill);
+        _ce_compute_theta(ctx, sctx, X, Y, N, bp, B, B0, LM, 0, fp);
+        b = load64(bp);
+        fill = load64(fp);
+        var imid = load64(sctx + _CES_IMID);
+        var iside = load64(sctx + _CES_ISIDE);
+        var delta = load64(sctx + _CES_DELTA);
+        var itheta = load64(sctx + _CES_ITHETA);
+        var qalloc = load64(sctx + _CES_QALLOC);
+        var k32: f32 = 0.000030517578125;      # 1.f/32768
+        var fim: f32 = _cef_i(imid);
+        var fis: f32 = _cef_i(iside);
+        var mid: f32 = k32 * fim;
+        var side: f32 = k32 * fis;
+        if (B0 > 1 && (itheta & 0x3fff) != 0) {
+            if (itheta > 8192) {
+                delta = delta - sar(delta, 4 - LM);
+            } else {
+                delta = _ce_imin(0, delta + ((N << 3) >> (5 - LM)));
+            }
+        }
+        var mbits = _ce_imax(0, _ce_imin(b, (b - delta) / 2));
+        var sbits = b - mbits;
+        store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - qalloc);
+        var next_lowband2 = 0;
+        if (lowband != 0) { next_lowband2 = lowband + N * 4; }
+        var rebalance = load64(ctx + _CEC_REMAINING);
+        var gm: f32 = gain * mid;
+        var gs: f32 = gain * side;
+        if (mbits >= sbits) {
+            cm = _ce_quant_partition(ctx, X, N, mbits, B, lowband, LM, gm, fill);
+            rebalance = mbits - (rebalance - load64(ctx + _CEC_REMAINING));
+            if (rebalance > 24 && itheta != 0) { sbits = sbits + rebalance - 24; }
+            cm = cm | (_ce_quant_partition(ctx, Y, N, sbits, B, next_lowband2, LM, gs, fill >> B) << (B0 >> 1));
+        } else {
+            cm = _ce_quant_partition(ctx, Y, N, sbits, B, next_lowband2, LM, gs, fill >> B) << (B0 >> 1);
+            rebalance = sbits - (rebalance - load64(ctx + _CEC_REMAINING));
+            if (rebalance > 24 && itheta != 16384) { mbits = mbits + rebalance - 24; }
+            cm = cm | _ce_quant_partition(ctx, X, N, mbits, B, lowband, LM, gm, fill);
+        }
+        return cm;
+    }
+    var q = celt_bits2pulses(i, LM, b);
+    var curr_bits = celt_pulses2bits(i, LM, q);
+    store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - curr_bits);
+    while (load64(ctx + _CEC_REMAINING) < 0 && q > 0) {
+        store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) + curr_bits);
+        q = q - 1;
+        curr_bits = celt_pulses2bits(i, LM, q);
+        store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - curr_bits);
+    }
+    if (q != 0) {
+        var K = celt_get_pulses(q);
+        return _ce_alg_quant(X, N, K, spread, B, ec, gain, resynth);
+    }
+    if (resynth != 0) {
+        var cm_mask = (1 << B) - 1;
+        fill = fill & cm_mask;
+        if (fill == 0) {
+            _ce_zero32(X, N);
+        } else {
+            var seed = load64(ctx + _CEC_SEED);
+            var j = 0;
+            if (lowband == 0) {
+                while (j < N) {
+                    seed = celt_lcg_rand(seed);
+                    var s32 = seed;
+                    if (s32 >= 0x80000000) { s32 = s32 - 0x100000000; }
+                    var nv: f32 = _cef_i(sar(s32, 20));
+                    store32(X + j * 4, nv);
+                    j = j + 1;
+                }
+                cm = cm_mask;
+            } else {
+                var k256: f32 = 0.00390625;
+                while (j < N) {
+                    seed = celt_lcg_rand(seed);
+                    var t: f32 = k256;
+                    if ((seed & 0x8000) == 0) { t = k256 ^ 0x80000000; }
+                    var lb: f32 = load32(lowband + j * 4);
+                    var v: f32 = lb + t;
+                    store32(X + j * 4, v);
+                    j = j + 1;
+                }
+                cm = fill;
+            }
+            store64(ctx + _CEC_SEED, seed);
+            _ce_renormalise(X, N, gain);
+        }
+    }
+    return cm;
+}
+
+# quant_band (bands.c, encoder, float): a mono band (or one channel of dual
+# stereo, or the mid/side of a stereo split).
+fn _ce_quant_band(ctx, X, N, b, B, lowband, LM, lowband_out, gain: f32, lowband_scratch, fill) {
+    var N0 = N;
+    var N_B = N;
+    var B0 = B;
+    var time_divide = 0;
+    var recombine = 0;
+    var longBlocks = 0;
+    if (B0 == 1) { longBlocks = 1; }
+    var resynth = load64(ctx + _CEC_RESYNTH);
+    var tf_change = load64(ctx + _CEC_TF_CHANGE);
+    N_B = N_B / B;
+    if (N == 1) { return _ce_quant_band_n1(ctx, X, 0, lowband_out); }
+    if (tf_change > 0) { recombine = tf_change; }
+    if (lowband_scratch != 0 && lowband != 0) {
+        if (recombine != 0 || ((N_B & 1) == 0 && tf_change < 0) || B0 > 1) {
+            _ce_copy32(lowband_scratch, lowband, N);
+            lowband = lowband_scratch;
+        }
+    }
+    var k = 0;
+    while (k < recombine) {
+        _ce_haar1(X, N >> k, 1 << k);
+        if (lowband != 0) { _ce_haar1(lowband, N >> k, 1 << k); }
+        fill = load64(_cet_bit_il + (fill & 0xF) * 8) | (load64(_cet_bit_il + (fill >> 4) * 8) << 2);
+        k = k + 1;
+    }
+    B = B >> recombine;
+    N_B = N_B << recombine;
+    while ((N_B & 1) == 0 && tf_change < 0) {
+        _ce_haar1(X, N_B, B);
+        if (lowband != 0) { _ce_haar1(lowband, N_B, B); }
+        fill = fill | (fill << B);
+        B = B << 1;
+        N_B = N_B >> 1;
+        time_divide = time_divide + 1;
+        tf_change = tf_change + 1;
+    }
+    B0 = B;
+    var N_B0 = N_B;
+    if (B0 > 1) {
+        _ce_deinterleave(X, N_B >> recombine, B0 << recombine, longBlocks);
+        if (lowband != 0) { _ce_deinterleave(lowband, N_B >> recombine, B0 << recombine, longBlocks); }
+    }
+    var cm = _ce_quant_partition(ctx, X, N, b, B, lowband, LM, gain, fill);
+    if (resynth != 0) {
+        if (B0 > 1) { _ce_interleave(X, N_B >> recombine, B0 << recombine, longBlocks); }
+        N_B = N_B0;
+        B = B0;
+        k = 0;
+        while (k < time_divide) {
+            B = B >> 1;
+            N_B = N_B << 1;
+            cm = cm | (cm >> B);
+            _ce_haar1(X, N_B, B);
+            k = k + 1;
+        }
+        k = 0;
+        while (k < recombine) {
+            cm = load64(_cet_bit_deil + cm * 8);
+            _ce_haar1(X, N0 >> k, 1 << k);
+            k = k + 1;
+        }
+        B = B << recombine;
+        if (lowband_out != 0) {
+            var n: f32 = f32_from(f64_sqrt(f64_from(N0)));
+            var j = 0;
+            while (j < N0) {
+                var x: f32 = load32(X + j * 4);
+                var v: f32 = n * x;
+                store32(lowband_out + j * 4, v);
+                j = j + 1;
+            }
+        }
+        cm = cm & ((1 << B) - 1);
+    }
+    return cm;
+}
+
+# quant_band_stereo (bands.c, encoder, float).
+fn _ce_quant_band_stereo(ctx, X, Y, N, b, B, lowband, LM, lowband_out, lowband_scratch, fill) {
+    var ec = load64(ctx + _CEC_EC);
+    var resynth = load64(ctx + _CEC_RESYNTH);
+    var i = load64(ctx + _CEC_I);
+    var bandE = load64(ctx + _CEC_BANDE);
+    if (N == 1) { return _ce_quant_band_n1(ctx, X, Y, lowband_out); }
+    var orig_fill = fill;
+    var e0: f32 = load32(bandE + i * 4);
+    var e1: f32 = load32(bandE + (21 + i) * 4);
+    var kmin: f32 = 0.0000000001;
+    if (e0 < kmin || e1 < kmin) {
+        if (e0 > e1) { _ce_copy32(Y, X, N); } else { _ce_copy32(X, Y, N); }
+    }
+    var sctx = _opus_tmp(48);
+    var bp = _opus_tmp(8);
+    var fp = _opus_tmp(8);
+    store64(bp, b);
+    store64(fp, fill);
+    _ce_compute_theta(ctx, sctx, X, Y, N, bp, B, B, LM, 1, fp);
+    b = load64(bp);
+    fill = load64(fp);
+    var inv = load64(sctx + _CES_INV);
+    var imid = load64(sctx + _CES_IMID);
+    var iside = load64(sctx + _CES_ISIDE);
+    var delta = load64(sctx + _CES_DELTA);
+    var itheta = load64(sctx + _CES_ITHETA);
+    var qalloc = load64(sctx + _CES_QALLOC);
+    var k32: f32 = 0.000030517578125;
+    var fim: f32 = _cef_i(imid);
+    var fis: f32 = _cef_i(iside);
+    var mid: f32 = k32 * fim;
+    var side: f32 = k32 * fis;
+    var cm = 0;
+    var mbits = 0;
+    var sbits = 0;
+    if (N == 2) {
+        mbits = b;
+        sbits = 0;
+        if (itheta != 0 && itheta != 16384) { sbits = 8; }
+        mbits = mbits - sbits;
+        var c = 0;
+        if (itheta > 8192) { c = 1; }
+        store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - qalloc - sbits);
+        var x2 = X;
+        var y2 = Y;
+        if (c != 0) { x2 = Y; y2 = X; }
+        var sign = 0;
+        if (sbits != 0) {
+            var a0: f32 = load32(x2);
+            var a1: f32 = load32(x2 + 4);
+            var b0: f32 = load32(y2);
+            var b1: f32 = load32(y2 + 4);
+            var cr: f32 = a0 * b1 - a1 * b0;
+            if (cr < _CEF_ZERO) { sign = 1; }
+            ec_enc_bits(ec, sign, 1);
+        }
+        sign = 1 - 2 * sign;
+        cm = _ce_quant_band(ctx, x2, N, mbits, B, lowband, LM, lowband_out, _CEF_ONE, lowband_scratch, orig_fill);
+        var sf: f32 = _cef_i(sign);
+        var nsf: f32 = _cef_i(0 - sign);
+        var xa: f32 = load32(x2);
+        var xb: f32 = load32(x2 + 4);
+        var ya: f32 = nsf * xb;
+        var yb: f32 = sf * xa;
+        store32(y2, ya);
+        store32(y2 + 4, yb);
+        if (resynth != 0) {
+            var X0: f32 = load32(X);
+            var X1: f32 = load32(X + 4);
+            var Y0: f32 = load32(Y);
+            var Y1: f32 = load32(Y + 4);
+            X0 = mid * X0;
+            X1 = mid * X1;
+            Y0 = side * Y0;
+            Y1 = side * Y1;
+            var u0: f32 = X0 - Y0;
+            var v0: f32 = X0 + Y0;
+            var u1: f32 = X1 - Y1;
+            var v1: f32 = X1 + Y1;
+            store32(X, u0); store32(Y, v0);
+            store32(X + 4, u1); store32(Y + 4, v1);
+        }
+    } else {
+        mbits = _ce_imax(0, _ce_imin(b, (b - delta) / 2));
+        sbits = b - mbits;
+        store64(ctx + _CEC_REMAINING, load64(ctx + _CEC_REMAINING) - qalloc);
+        var rebalance = load64(ctx + _CEC_REMAINING);
+        if (mbits >= sbits) {
+            cm = _ce_quant_band(ctx, X, N, mbits, B, lowband, LM, lowband_out, _CEF_ONE, lowband_scratch, fill);
+            rebalance = mbits - (rebalance - load64(ctx + _CEC_REMAINING));
+            if (rebalance > 24 && itheta != 0) { sbits = sbits + rebalance - 24; }
+            cm = cm | _ce_quant_band(ctx, Y, N, sbits, B, 0, LM, 0, side, 0, fill >> B);
+        } else {
+            cm = _ce_quant_band(ctx, Y, N, sbits, B, 0, LM, 0, side, 0, fill >> B);
+            rebalance = sbits - (rebalance - load64(ctx + _CEC_REMAINING));
+            if (rebalance > 24 && itheta != 16384) { mbits = mbits + rebalance - 24; }
+            cm = cm | _ce_quant_band(ctx, X, N, mbits, B, lowband, LM, lowband_out, _CEF_ONE, lowband_scratch, fill);
+        }
+    }
+    if (resynth != 0) {
+        if (N != 2) { _ce_stereo_merge(X, Y, mid, N); }
+        if (inv != 0) {
+            var j = 0;
+            while (j < N) { store32(Y + j * 4, load32(Y + j * 4) ^ 0x80000000); j = j + 1; }
+        }
+    }
+    return cm;
+}
+
+# special_hybrid_folding (bands.c).
+fn _ce_hybrid_folding(norm, norm2, start, M, dual_stereo) {
+    var n1 = M * (_ce_eb(start + 1) - _ce_eb(start));
+    var n2 = M * (_ce_eb(start + 2) - _ce_eb(start + 1));
+    if (n2 - n1 > 0) {
+        _ce_copy32(norm + n1 * 4, norm + (2 * n1 - n2) * 4, n2 - n1);
+        if (dual_stereo != 0) { _ce_copy32(norm2 + n1 * 4, norm2 + (2 * n1 - n2) * 4, n2 - n1); }
+    }
+    return 0;
+}
+
+# quant_all_bands (bands.c, encoder, float). The seed in *seedp.
+fn _ce_quant_all_bands(st, start, end, X_, Y_, collapse_masks, bandE, pulses, shortBlocks, spread, dual_stereo,
+                       intensity, tf_res, total_bits, balance, ec, LM, codedBands, seedp, complexity, disable_inv) {
+    var M = 1 << LM;
+    var B = 1;
+    if (shortBlocks != 0) { B = M; }
+    var C = 1;
+    if (Y_ != 0) { C = 2; }
+    var norm_offset = M * _ce_eb(start);
+    var theta_rdo = 0;
+    if (Y_ != 0 && dual_stereo == 0 && complexity >= 8) { theta_rdo = 1; }
+    var resynth = theta_rdo;
+    var nlen = M * _ce_eb(20) - norm_offset;
+    var norm = _opus_tmp(C * nlen * 4 + 8);
+    var norm2 = norm + nlen * 4;
+    var ra = M * (_ce_eb(21) - _ce_eb(20));
+    var lowband_scratch = X_ + M * _ce_eb(20) * 4;
+    var X_save = 0;
+    var Y_save = 0;
+    var X_save2 = 0;
+    var Y_save2 = 0;
+    var norm_save2 = 0;
+    var bytes_save = 0;
+    var ctx_save = 0;
+    var ctx_save2 = 0;
+    var ec_save = 0;
+    var ec_save2 = 0;
+    if (resynth != 0) {
+        lowband_scratch = _opus_tmp(ra * 4 + 8);
+        X_save = _opus_tmp(ra * 4 + 8);
+        Y_save = _opus_tmp(ra * 4 + 8);
+        X_save2 = _opus_tmp(ra * 4 + 8);
+        Y_save2 = _opus_tmp(ra * 4 + 8);
+        norm_save2 = _opus_tmp(ra * 4 + 8);
+        bytes_save = _opus_tmp(1280);
+        ctx_save = _opus_tmp(_CEC_WORDS * 8);
+        ctx_save2 = _opus_tmp(_CEC_WORDS * 8);
+        ec_save = _opus_tmp(96);
+        ec_save2 = _opus_tmp(96);
+    }
+    var ctx = _opus_tmp(_CEC_WORDS * 8);
+    store64(ctx + _CEC_RESYNTH, resynth);
+    store64(ctx + _CEC_INTENSITY, intensity);
+    store64(ctx + _CEC_SPREAD, spread);
+    store64(ctx + _CEC_EC, ec);
+    store64(ctx + _CEC_BANDE, bandE);
+    store64(ctx + _CEC_SEED, load64(seedp));
+    store64(ctx + _CEC_THETA_ROUND, 0);
+    store64(ctx + _CEC_DISABLE_INV, disable_inv);
+    var avoid = 0;
+    if (B > 1) { avoid = 1; }
+    store64(ctx + _CEC_AVOID_SPLIT, avoid);
+    var lowband_offset = 0;
+    var update_lowband = 1;
+    var i = start;
+    while (i < end) {
+        store64(ctx + _CEC_I, i);
+        var last = 0;
+        if (i == end - 1) { last = 1; }
+        var X = X_ + M * _ce_eb(i) * 4;
+        var Y = 0;
+        if (Y_ != 0) { Y = Y_ + M * _ce_eb(i) * 4; }
+        var N = M * _ce_eb(i + 1) - M * _ce_eb(i);
+        var tell = ec_tell_frac(ec);
+        if (i != start) { balance = balance - tell; }
+        var remaining_bits = total_bits - tell - 1;
+        store64(ctx + _CEC_REMAINING, remaining_bits);
+        var b = 0;
+        if (i <= codedBands - 1) {
+            var curr_balance = balance / _ce_imin(3, codedBands - i);
+            b = _ce_imax(0, _ce_imin(16383, _ce_imin(remaining_bits + 1, load64(pulses + i * 8) + curr_balance)));
+        }
+        if (resynth != 0 && (M * _ce_eb(i) - N >= M * _ce_eb(start) || i == start + 1) && (update_lowband != 0 || lowband_offset == 0)) {
+            lowband_offset = i;
+        }
+        if (i == start + 1) { _ce_hybrid_folding(norm, norm2, start, M, dual_stereo); }
+        var tf_change = load64(tf_res + i * 8);
+        store64(ctx + _CEC_TF_CHANGE, tf_change);
+        if (last != 0 && theta_rdo == 0) { lowband_scratch = 0; }
+        var effective_lowband = 0 - 1;
+        var x_cm = 0;
+        var y_cm = 0;
+        if (lowband_offset != 0 && (spread != _CE_SPREAD_AGGRESSIVE || B > 1 || tf_change < 0)) {
+            effective_lowband = _ce_imax(0, M * _ce_eb(lowband_offset) - norm_offset - N);
+            var fold_start = lowband_offset;
+            fold_start = fold_start - 1;
+            while (M * _ce_eb(fold_start) > effective_lowband + norm_offset) { fold_start = fold_start - 1; }
+            var fold_end = lowband_offset - 1;
+            fold_end = fold_end + 1;
+            while (fold_end < i && M * _ce_eb(fold_end) < effective_lowband + norm_offset + N) { fold_end = fold_end + 1; }
+            var fold_i = fold_start;
+            while (1) {
+                x_cm = x_cm | load8(collapse_masks + fold_i * C);
+                y_cm = y_cm | load8(collapse_masks + fold_i * C + C - 1);
+                fold_i = fold_i + 1;
+                if (fold_i >= fold_end) { break; }
+            }
+        } else {
+            x_cm = (1 << B) - 1;
+            y_cm = x_cm;
+        }
+        if (dual_stereo != 0 && i == intensity) {
+            dual_stereo = 0;
+            if (resynth != 0) {
+                var jn = 0;
+                var hf: f32 = _CEF_HALF;
+                while (jn < M * _ce_eb(i) - norm_offset) {
+                    var na: f32 = load32(norm + jn * 4);
+                    var nb: f32 = load32(norm2 + jn * 4);
+                    var ns: f32 = na + nb;
+                    var nh: f32 = hf * ns;
+                    store32(norm + jn * 4, nh);
+                    jn = jn + 1;
+                }
+            }
+        }
+        var lb1 = 0;
+        var lb2 = 0;
+        if (effective_lowband != 0 - 1) { lb1 = norm + effective_lowband * 4; lb2 = norm2 + effective_lowband * 4; }
+        var lo1 = 0;
+        var lo2 = 0;
+        if (last == 0) { lo1 = norm + (M * _ce_eb(i) - norm_offset) * 4; lo2 = norm2 + (M * _ce_eb(i) - norm_offset) * 4; }
+        if (dual_stereo != 0) {
+            x_cm = _ce_quant_band(ctx, X, N, b / 2, B, lb1, LM, lo1, _CEF_ONE, lowband_scratch, x_cm);
+            y_cm = _ce_quant_band(ctx, Y, N, b / 2, B, lb2, LM, lo2, _CEF_ONE, lowband_scratch, y_cm);
+        } else {
+            if (Y != 0) {
+                if (theta_rdo != 0 && i < intensity) {
+                    var be0: f32 = load32(bandE + i * 4);
+                    var be1: f32 = load32(bandE + (i + 21) * 4);
+                    var minE: f32 = _cef_min(be0, be1);
+                    var k3: f32 = 3.0;
+                    var m3: f32 = minE / k3;
+                    var w0: f32 = be0 + m3;
+                    var w1: f32 = be1 + m3;
+                    var cmm = x_cm | y_cm;
+                    ec_enc_copy(ec_save, ec);
+                    _ce_copy64(ctx_save, ctx, _CEC_WORDS);
+                    _ce_copy32(X_save, X, N);
+                    _ce_copy32(Y_save, Y, N);
+                    store64(ctx + _CEC_THETA_ROUND, 0 - 1);
+                    x_cm = _ce_quant_band_stereo(ctx, X, Y, N, b, B, lb1, LM, lo1, lowband_scratch, cmm);
+                    var dx: f32 = _cef_inner(X_save, X, N);
+                    var dy: f32 = _cef_inner(Y_save, Y, N);
+                    var dist0: f32 = w0 * dx + w1 * dy;
+                    var cm2 = x_cm;
+                    ec_enc_copy(ec_save2, ec);
+                    _ce_copy64(ctx_save2, ctx, _CEC_WORDS);
+                    _ce_copy32(X_save2, X, N);
+                    _ce_copy32(Y_save2, Y, N);
+                    if (last == 0) { _ce_copy32(norm_save2, lo1, N); }
+                    var nstart = load64(ec_save + 48);
+                    var nend = load64(ec_save + 8);
+                    var bytes_buf = load64(ec_save) + nstart;
+                    var save_bytes = nend - nstart;
+                    var kb = 0;
+                    while (kb < save_bytes) { store8(bytes_save + kb, load8(bytes_buf + kb)); kb = kb + 1; }
+                    ec_enc_copy(ec, ec_save);
+                    _ce_copy64(ctx, ctx_save, _CEC_WORDS);
+                    _ce_copy32(X, X_save, N);
+                    _ce_copy32(Y, Y_save, N);
+                    if (i == start + 1) { _ce_hybrid_folding(norm, norm2, start, M, dual_stereo); }
+                    store64(ctx + _CEC_THETA_ROUND, 1);
+                    x_cm = _ce_quant_band_stereo(ctx, X, Y, N, b, B, lb1, LM, lo1, lowband_scratch, cmm);
+                    var ex: f32 = _cef_inner(X_save, X, N);
+                    var ey: f32 = _cef_inner(Y_save, Y, N);
+                    var dist1: f32 = w0 * ex + w1 * ey;
+                    if (dist0 >= dist1) {
+                        x_cm = cm2;
+                        ec_enc_copy(ec, ec_save2);
+                        _ce_copy64(ctx, ctx_save2, _CEC_WORDS);
+                        _ce_copy32(X, X_save2, N);
+                        _ce_copy32(Y, Y_save2, N);
+                        if (last == 0) { _ce_copy32(lo1, norm_save2, N); }
+                        kb = 0;
+                        while (kb < save_bytes) { store8(bytes_buf + kb, load8(bytes_save + kb)); kb = kb + 1; }
+                    }
+                } else {
+                    store64(ctx + _CEC_THETA_ROUND, 0);
+                    x_cm = _ce_quant_band_stereo(ctx, X, Y, N, b, B, lb1, LM, lo1, lowband_scratch, x_cm | y_cm);
+                }
+            } else {
+                x_cm = _ce_quant_band(ctx, X, N, b, B, lb1, LM, lo1, _CEF_ONE, lowband_scratch, x_cm | y_cm);
+            }
+            y_cm = x_cm;
+        }
+        store8(collapse_masks + i * C, x_cm & 255);
+        store8(collapse_masks + i * C + C - 1, y_cm & 255);
+        balance = balance + load64(pulses + i * 8) + tell;
+        update_lowband = 0;
+        if (b > (N << 3)) { update_lowband = 1; }
+        store64(ctx + _CEC_AVOID_SPLIT, 0);
+        i = i + 1;
+    }
+    store64(seedp, load64(ctx + _CEC_SEED));
+    return 0;
+}
+
+# ---------------------------------------------------------------- the trace (-D CELT_TRACE)
+
+#ifdef CELT_TRACE
+var _ce_trace_fd = 0;
+var _ce_trace_buf = 0;
+fn _ce_tr_put(s) {
+    var n = 0;
+    while (load8(s + n) != 0) { n = n + 1; }
+    sys_write(_ce_trace_fd, s, n);
+    return 0;
+}
+fn _ce_tr_num(v) {
+    if (_ce_trace_buf == 0) { _ce_trace_buf = alloc(64); }
+    var b = _ce_trace_buf;
+    var neg = 0;
+    if (v < 0) { neg = 1; v = 0 - v; }
+    var t = b + 40;
+    store8(t, 0);
+    if (v == 0) { t = t - 1; store8(t, 48); }
+    while (v > 0) { t = t - 1; store8(t, 48 + v % 10); v = v / 10; }
+    if (neg != 0) { t = t - 1; store8(t, 45); }
+    _ce_tr_put(t);
+    return 0;
+}
+fn _ce_tr_hex(v) {
+    if (_ce_trace_buf == 0) { _ce_trace_buf = alloc(64); }
+    var b = _ce_trace_buf;
+    var k = 0;
+    while (k < 8) {
+        var d = (v >> (28 - 4 * k)) & 15;
+        if (d < 10) { store8(b + k, 48 + d); } else { store8(b + k, 87 + d); }
+        k = k + 1;
+    }
+    store8(b + 8, 0);
+    _ce_tr_put(b);
+    return 0;
+}
+# a 32-bit word as C's int prints it
+fn _ce_s32(v) { if (v >= 0x80000000) { return v - 0x100000000; } return v; }
+# words (signed) / floats (f32 at 4 bytes) / bytes
+fn _ce_tr_i(tag, p, n) {
+    if (_ce_trace_fd == 0) { return 0; }
+    _ce_tr_put(tag);
+    var i = 0;
+    while (i < n) { _ce_tr_put(" "); _ce_tr_num(load64(p + i * 8)); i = i + 1; }
+    _ce_tr_put("\n");
+    return 0;
+}
+fn _ce_tr_f(tag, p, n) {
+    if (_ce_trace_fd == 0) { return 0; }
+    _ce_tr_put(tag);
+    var i = 0;
+    while (i < n) { _ce_tr_put(" "); _ce_tr_hex(load32(p + i * 4) & 0xFFFFFFFF); i = i + 1; }
+    _ce_tr_put("\n");
+    return 0;
+}
+fn _ce_tr_u8(tag, p, n) {
+    if (_ce_trace_fd == 0) { return 0; }
+    _ce_tr_put(tag);
+    var i = 0;
+    while (i < n) { _ce_tr_put(" "); _ce_tr_num(load8(p + i)); i = i + 1; }
+    _ce_tr_put("\n");
+    return 0;
+}
+fn _ce_tr_vals(tag, n, a, b, c, d, e, f, g, h, k, l, m, o) {
+    if (_ce_trace_fd == 0) { return 0; }
+    var w = alloc(12 * 8);
+    store64(w, a); store64(w + 8, b); store64(w + 16, c); store64(w + 24, d); store64(w + 32, e); store64(w + 40, f);
+    store64(w + 48, g); store64(w + 56, h); store64(w + 64, k); store64(w + 72, l); store64(w + 80, m); store64(w + 88, o);
+    _ce_tr_i(tag, w, n);
+    return 0;
+}
+fn _ce_tr_flts(tag, n, a, b, c, d) {
+    if (_ce_trace_fd == 0) { return 0; }
+    var w = alloc(16);
+    store32(w, a); store32(w + 4, b); store32(w + 8, c); store32(w + 12, d);
+    _ce_tr_f(tag, w, n);
+    return 0;
+}
+#endif
+
+# ---------------------------------------------------------------- celt_encode_with_ec
+
+# compute_mdcts (celt_encoder.c, float): the MDCTs of in (CC channels of
+# N + 120) into freq, interleaving short blocks; stereo downmixed to mono
+# when C = 1; upsampled bands zeroed and rescaled.
+fn _ce_compute_mdcts(shortBlocks, inp, freq, C, CC, LM, upsample) {
+    var B = 1;
+    var N = 120 << LM;
+    var shift = 3 - LM;
+    if (shortBlocks != 0) { B = shortBlocks; N = 120; shift = 3; }
+    var c = 0;
+    while (c < CC) {
+        var b = 0;
+        while (b < B) {
+            _ce_mdct_forward(inp + (c * (B * N + 120) + b * N) * 4, freq + (b + c * N * B) * 4, shift, B);
+            b = b + 1;
+        }
+        c = c + 1;
+    }
+    var i = 0;
+    if (CC == 2 && C == 1) {
+        while (i < B * N) {
+            var a: f32 = load32(freq + i * 4);
+            var d: f32 = load32(freq + (B * N + i) * 4);
+            var ha: f32 = _CEF_HALF * a;
+            var hd: f32 = _CEF_HALF * d;
+            var s: f32 = ha + hd;
+            store32(freq + i * 4, s);
+            i = i + 1;
+        }
+    }
+    if (upsample != 1) {
+        var uf: f32 = _cef_i(upsample);
+        c = 0;
+        while (c < C) {
+            var bound = B * N / upsample;
+            i = 0;
+            while (i < bound) {
+                var v: f32 = load32(freq + (c * B * N + i) * 4);
+                v = v * uf;
+                store32(freq + (c * B * N + i) * 4, v);
+                i = i + 1;
+            }
+            _ce_zero32(freq + (c * B * N + bound) * 4, B * N - bound);
+            c = c + 1;
+        }
+    }
+    return 0;
+}
+
+# The surround masking (celt_encode_with_ec's energy_mask block): the
+# surround dynalloc into sdyn; surround_trim and surround_masking into
+# res[0], res[1] (f32).
+fn _ce_surround(st, C, sdyn, res) {
+    var emask = load64(st + _CE_EMASK);
+    var lcb = load64(st + _CE_LAST_CODED);
+    var mask_end = _ce_imax(2, lcb);
+    var mask_avg: f32 = _CEF_ZERO;
+    var diff: f32 = _CEF_ZERO;
+    var count = 0;
+    var q25: f32 = _CEF_QUARTER;
+    var m2: f32 = -2.0;
+    var c = 0;
+    var i = 0;
+    while (c < C) {
+        i = 0;
+        while (i < mask_end) {
+            var e: f32 = f32_from(load64(emask + (21 * c + i) * 8));
+            var mn: f32 = _cef_min(e, q25);
+            var mask: f32 = _cef_max(mn, m2);
+            if (mask > _CEF_ZERO) { mask = _CEF_HALF * mask; }
+            var w: f32 = _cef_i(_ce_eb(i + 1) - _ce_eb(i));
+            mask_avg = mask_avg + mask * w;
+            count = count + _ce_eb(i + 1) - _ce_eb(i);
+            var w2: f32 = _cef_i(1 + 2 * i - mask_end);
+            diff = diff + mask * w2;
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    var cf: f32 = _cef_i(count);
+    mask_avg = mask_avg / cf;
+    var k2: f32 = 0.2;
+    mask_avg = mask_avg + k2;
+    var six: f32 = 6.0;
+    var d6: f32 = diff * six;
+    var dv: f32 = _cef_i(C * (mask_end - 1) * (mask_end + 1) * mask_end);
+    diff = d6 / dv;
+    diff = _CEF_HALF * diff;
+    var k031: f32 = 0.031;
+    var nk031: f32 = k031 ^ 0x80000000;
+    var dm: f32 = _cef_min(diff, k031);
+    diff = _cef_max(dm, nk031);
+    var midband = 0;
+    while (_ce_eb(midband + 1) < _ce_eb(mask_end) / 2) { midband = midband + 1; }
+    var count_dynalloc = 0;
+    i = 0;
+    while (i < mask_end) {
+        var ib: f32 = _cef_i(i - midband);
+        var lin: f32 = mask_avg + diff * ib;
+        var um: f32 = f32_from(load64(emask + i * 8));
+        if (C == 2) {
+            var u2: f32 = f32_from(load64(emask + (21 + i) * 8));
+            um = _cef_max(um, u2);
+        }
+        um = _cef_min(um, _CEF_ZERO);
+        um = um - lin;
+        if (um > q25) {
+            var sd: f32 = um - q25;
+            store32(sdyn + i * 4, sd);
+            count_dynalloc = count_dynalloc + 1;
+        }
+        i = i + 1;
+    }
+    if (count_dynalloc >= 3) {
+        mask_avg = mask_avg + q25;
+        if (mask_avg > _CEF_ZERO) {
+            mask_avg = _CEF_ZERO;
+            diff = _CEF_ZERO;
+            _ce_zero32(sdyn, mask_end);
+        } else {
+            i = 0;
+            while (i < mask_end) {
+                var s0: f32 = load32(sdyn + i * 4);
+                var s1: f32 = s0 - q25;
+                store32(sdyn + i * 4, _cef_max(_CEF_ZERO, s1));
+                i = i + 1;
+            }
+        }
+    }
+    mask_avg = mask_avg + k2;
+    var k64: f32 = 64.0;
+    var st64: f32 = k64 * diff;
+    store32(res, st64);
+    store32(res + 4, mask_avg);
+    return 0;
+}
+
+# celt_encode_with_ec (celt_encoder.c, float): one frame of frame_size
+# samples a channel of pcm (CC channels interleaved, floats at 4 bytes) into
+# compressed (nbCompressedBytes at most), or into the range coder enc when
+# it is not 0 (compressed unused). The frame's bytes back, or an error.
+fn _ce_encode_with_ec(st, pcm, frame_size, compressed, nbCompressedBytes, enc) {
+    var CC = load64(st + _CE_CC);
+    var C = load64(st + _CE_C);
+    var start = load64(st + _CE_START);
+    var end = load64(st + _CE_END);
+    var cx = load64(st + _CE_CX);
+    var lfe = load64(st + _CE_LFE);
+    var upsample = load64(st + _CE_UPSAMPLE);
+    var bitrate = load64(st + _CE_BITRATE);
+    var vbr = load64(st + _CE_VBR);
+    var cvbr = load64(st + _CE_CVBR);
+    var hybrid = 0;
+    if (start != 0) { hybrid = 1; }
+    var overlap = 120;
+    var tf_estimate: f32 = _CEF_ZERO;
+    if (nbCompressedBytes < 2 || pcm == 0) { return err(ERR_ENCODE); }
+    frame_size = frame_size * upsample;
+    var LM = 0;
+    while (LM <= 3) {
+        if ((120 << LM) == frame_size) { break; }
+        LM = LM + 1;
+    }
+    if (LM > 3) { return err(ERR_ENCODE); }
+    var M = 1 << LM;
+    var N = M * 120;
+    var prefilter_mem = load64(st + _CE_PF_MEM);
+    var oldBandE = load64(st + _CE_OLDBANDE);
+    var oldLogE = load64(st + _CE_OLDLOGE);
+    var oldLogE2 = load64(st + _CE_OLDLOGE2);
+    var energyError = load64(st + _CE_EERR);
+    var tell0_frac = 1;
+    var tell = 1;
+    var nbFilledBytes = 0;
+    if (enc != 0) {
+        tell0_frac = ec_tell_frac(enc);
+        tell = ec_tell(enc);
+        nbFilledBytes = (tell + 4) >> 3;
+    }
+    nbCompressedBytes = _ce_imin(nbCompressedBytes, 1275);
+    var vbr_rate = 0;
+    var effectiveBytes = 0;
+    if (vbr != 0 && bitrate != 0 - 1) {
+        vbr_rate = (bitrate * 6 / (6 * 48000 / frame_size)) << 3;
+        effectiveBytes = vbr_rate >> 6;
+    } else {
+        var tmp = bitrate * frame_size;
+        if (tell > 1) { tmp = tmp + tell * 48000; }
+        if (bitrate != 0 - 1) {
+            nbCompressedBytes = _ce_imax(2, _ce_imin(nbCompressedBytes, (tmp + 4 * 48000) / (8 * 48000)));
+            if (enc != 0) { _ce_ec_shrink(enc, nbCompressedBytes); }
+        }
+        effectiveBytes = nbCompressedBytes - nbFilledBytes;
+    }
+    var nbAvailableBytes = nbCompressedBytes - nbFilledBytes;
+    var equiv_rate = ((nbCompressedBytes * 8 * 50) << (3 - LM)) - (40 * C + 20) * ((400 >> LM) - 50);
+    if (bitrate != 0 - 1) { equiv_rate = _ce_imin(equiv_rate, bitrate - (40 * C + 20) * ((400 >> LM) - 50)); }
+    if (enc == 0) {
+        enc = load64(st + _CE_ECS);
+        ec_enc_init(enc, compressed, nbCompressedBytes);
+    }
+    if (vbr_rate > 0 && cvbr != 0) {
+        var vbr_bound = vbr_rate;
+        var lo = 0;
+        if (tell == 1) { lo = 2; }
+        var max_allowed = _ce_imin(_ce_imax(lo, sar(vbr_rate + vbr_bound - load64(st + _CE_VBR_RES), 6)), nbAvailableBytes);
+        if (max_allowed < nbAvailableBytes) {
+            nbCompressedBytes = nbFilledBytes + max_allowed;
+            nbAvailableBytes = max_allowed;
+            _ce_ec_shrink(enc, nbCompressedBytes);
+        }
+    }
+    var total_bits = nbCompressedBytes * 8;
+    var effEnd = end;
+    if (effEnd > 21) { effEnd = 21; }
+    var inp = load64(st + _CE_IN);
+    var ovm: f32 = load32(st + _CE_OVERLAP_MAX);
+    var ma: f32 = _cef_maxabs(pcm, C * (N - overlap) / upsample);
+    var sample_max: f32 = _cef_max(ovm, ma);
+    var nov: f32 = _cef_maxabs(pcm + (C * (N - overlap) / upsample) * 4, C * overlap / upsample);
+    store64(st + _CE_OVERLAP_MAX, nov);
+    sample_max = _cef_max(sample_max, nov);
+    var lsbf: f32 = _cef_i(1 << load64(st + _CE_LSB));
+    var thr: f32 = _CEF_ONE / lsbf;
+    var silence = 0;
+    if (sample_max <= thr) { silence = 1; }
+    if (tell == 1) { ec_enc_bit_logp(enc, silence, 15); } else { silence = 0; }
+    if (silence != 0) {
+        if (vbr_rate > 0) {
+            nbCompressedBytes = _ce_imin(nbCompressedBytes, nbFilledBytes + 2);
+            effectiveBytes = nbCompressedBytes;
+            total_bits = nbCompressedBytes * 8;
+            nbAvailableBytes = 2;
+            _ce_ec_shrink(enc, nbCompressedBytes);
+        }
+        tell = nbCompressedBytes * 8;
+        store64(enc + 40, load64(enc + 40) + tell - ec_tell(enc));
+    }
+    var c = 0;
+    while (c < CC) {
+        var need_clip = 0;
+        if (load64(st + _CE_CLIP) != 0 && sample_max > _CEF_65536) { need_clip = 1; }
+        _ce_preemphasis(pcm + c * 4, CC, inp + (c * (N + overlap) + overlap) * 4, N, upsample, st + _CE_PREEMPH_E + c * 8, need_clip);
+        _ce_copy32(inp + c * (N + overlap) * 4, prefilter_mem + ((1 + c) * 1024 - overlap) * 4, overlap);
+        c = c + 1;
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.begin", 12, LM, C, CC, start, end, tell, nbCompressedBytes, nbAvailableBytes, effectiveBytes, vbr_rate, equiv_rate, silence);
+    _ce_tr_flts("ce.smax", 1, sample_max, 0, 0, 0);
+    _ce_tr_f("ce.pre", inp, CC * (N + overlap));
+#endif
+    var tnp = _opus_tmp(8);
+    var tone_freq: f32 = _ce_tone_detect(st, inp, CC, N + overlap, tnp);
+    var toneishness: f32 = load32(tnp);
+#ifdef CELT_TRACE
+    _ce_tr_flts("ce.tone", 2, tone_freq, toneishness, 0, 0);
+#endif
+    var isTransient = 0;
+    var shortBlocks = 0;
+    var tres = _opus_tmp(24);
+    store64(tres, 0); store64(tres + 8, 0); store64(tres + 16, 0);
+    if (cx >= 1 && lfe == 0) {
+        var allow_weak = 0;
+        if (hybrid != 0 && effectiveBytes < 15 && load64(st + _CE_SILK_TYPE) != 2) { allow_weak = 1; }
+        isTransient = _ce_transient_analysis(inp, N + overlap, CC, allow_weak, tone_freq, toneishness, tres);
+        tf_estimate = load32(tres);
+    }
+    var tf_chan = load64(tres + 8);
+    var weak_transient = load64(tres + 16);
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.trans", 3, isTransient, tf_chan, weak_transient, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_flts("ce.tfest", 2, tf_estimate, toneishness, 0, 0);
+#endif
+    var omt: f32 = _CEF_ONE - tf_estimate;
+    toneishness = _cef_min(toneishness, omt);
+    # the pitch pre-filter
+    var enabled = 0;
+    if ((lfe != 0 && nbAvailableBytes > 3) || nbAvailableBytes > 12 * C) {
+        if (hybrid == 0 && silence == 0 && tell + 16 <= total_bits && load64(st + _CE_DISABLE_PF) == 0) { enabled = 1; }
+    }
+    var prefilter_tapset = load64(st + _CE_TAPSET);
+    var pres = _opus_tmp(24);
+    var pf_on = _ce_run_prefilter(st, inp, CC, N, prefilter_tapset, enabled, cx, tf_estimate, nbAvailableBytes, tone_freq, toneishness, pres);
+    var pitch_index = load64(pres);
+    var gain1: f32 = load64(pres + 8);
+    var qg = load64(pres + 16);
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.pf", 4, pf_on, pitch_index, qg, prefilter_tapset, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_flts("ce.pfgain", 1, gain1, 0, 0, 0);
+    _ce_tr_f("ce.inpf", inp, CC * (N + overlap));
+#endif
+    var pitch_change = 0;
+    var k4: f32 = 0.4;
+    var opg: f32 = load32(st + _CE_PF_GAIN);
+    if (gain1 > k4 || opg > k4) {
+        var ton_ok = 1;
+        if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
+            var ton: f32 = load32(st + _CE_ANA + _CEA_TONALITY);
+            if (f64_gt(f32_to(ton), 0.3) == 0) { ton_ok = 0; }
+        }
+        if (ton_ok != 0) {
+            var pp = f64_from(load64(st + _CE_PF_PERIOD));
+            var pi = f64_from(pitch_index);
+            if (f64_gt(pi, f64_mul(1.26, pp)) == 1 || f64_lt(pi, f64_mul(0.79, pp)) == 1) { pitch_change = 1; }
+        }
+    }
+    if (pf_on == 0) {
+        if (hybrid == 0 && tell + 16 <= total_bits) { ec_enc_bit_logp(enc, 0, 1); }
+    } else {
+        ec_enc_bit_logp(enc, 1, 1);
+        var pi1 = pitch_index + 1;
+        var octave = ec_ilog(pi1) - 5;
+        ec_enc_uint(enc, octave, 6);
+        ec_enc_bits(enc, pi1 - (16 << octave), 4 + octave);
+        ec_enc_bits(enc, qg, 3);
+        ec_enc_icdf(enc, prefilter_tapset, _celt_tapsetIcdf, 2);
+    }
+    var transient_got_disabled = 0;
+    if (LM > 0 && ec_tell(enc) + 3 <= total_bits) {
+        if (isTransient != 0) { shortBlocks = M; }
+    } else {
+        isTransient = 0;
+        transient_got_disabled = 1;
+    }
+    var freq = load64(st + _CE_FREQ);
+    var bandE = load64(st + _CE_BANDE);
+    var bandLogE = load64(st + _CE_LOGE);
+    var bandLogE2 = load64(st + _CE_LOGE2);
+    var secondMdct = 0;
+    if (shortBlocks != 0 && cx >= 8) { secondMdct = 1; }
+    var half: f32 = _CEF_HALF;
+    var lmf: f32 = _cef_i(LM);
+    var hlm: f32 = half * lmf;
+    var i = 0;
+    if (secondMdct != 0) {
+        _ce_compute_mdcts(0, inp, freq, C, CC, LM, upsample);
+        _ce_band_energies(freq, bandE, effEnd, C, LM);
+        _ce_amp2log2(effEnd, end, bandE, bandLogE2, C);
+        c = 0;
+        while (c < C) {
+            i = 0;
+            while (i < end) {
+                var v2: f32 = load32(bandLogE2 + (21 * c + i) * 4);
+                v2 = v2 + hlm;
+                store32(bandLogE2 + (21 * c + i) * 4, v2);
+                i = i + 1;
+            }
+            c = c + 1;
+        }
+    }
+    _ce_compute_mdcts(shortBlocks, inp, freq, C, CC, LM, upsample);
+    if (CC == 2 && C == 1) { tf_chan = 0; }
+    _ce_band_energies(freq, bandE, effEnd, C, LM);
+    if (lfe != 0) {
+        var k1e4: f32 = 0.0001;
+        var b0: f32 = load32(bandE);
+        var lim: f32 = k1e4 * b0;
+        i = 2;
+        while (i < end) {
+            var be: f32 = load32(bandE + i * 4);
+            be = _cef_min(be, lim);
+            be = _cef_max(be, _CEF_EPS);
+            store32(bandE + i * 4, be);
+            i = i + 1;
+        }
+    }
+    _ce_amp2log2(effEnd, end, bandE, bandLogE, C);
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.mdct", 3, isTransient, shortBlocks, secondMdct, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_f("ce.freq", freq, C * N);
+    _ce_tr_f("ce.bandE", bandE, 21 * C);
+    _ce_tr_f("ce.logE", bandLogE, 21 * C);
+    if (secondMdct != 0) { _ce_tr_f("ce.logE2", bandLogE2, 21 * C); }
+#endif
+    var sdyn = load64(st + _CE_SDYN);
+    _ce_zero32(sdyn, 2 * 21);
+    var surround_masking: f32 = _CEF_ZERO;
+    var temporal_vbr: f32 = _CEF_ZERO;
+    var surround_trim: f32 = _CEF_ZERO;
+    if (hybrid == 0 && load64(st + _CE_EMASK) != 0 && lfe == 0) {
+        var sres = _opus_tmp(16);
+        _ce_surround(st, C, sdyn, sres);
+        surround_trim = load32(sres);
+        surround_masking = load32(sres + 4);
+    }
+    if (lfe == 0) {
+        var follow: f32 = -10.0;
+        var frame_avg: f32 = _CEF_ZERO;
+        var offset: f32 = _CEF_ZERO;
+        if (shortBlocks != 0) { offset = hlm; }
+        i = start;
+        while (i < end) {
+            var fo: f32 = follow - _CEF_ONE;
+            var l0: f32 = load32(bandLogE + i * 4);
+            var lo0: f32 = l0 - offset;
+            follow = _cef_max(fo, lo0);
+            if (C == 2) {
+                var l1: f32 = load32(bandLogE + (i + 21) * 4);
+                var lo1: f32 = l1 - offset;
+                follow = _cef_max(follow, lo1);
+            }
+            frame_avg = frame_avg + follow;
+            i = i + 1;
+        }
+        var span: f32 = _cef_i(end - start);
+        frame_avg = frame_avg / span;
+        var spec: f32 = load32(st + _CE_SPEC_AVG);
+        temporal_vbr = frame_avg - spec;
+        var k3: f32 = 3.0;
+        var m15: f32 = -1.5;
+        var tvm: f32 = _cef_max(m15, temporal_vbr);
+        temporal_vbr = _cef_min(k3, tvm);
+        var k02: f32 = 0.02;
+        var inc: f32 = k02 * temporal_vbr;
+        spec = spec + inc;
+        store64(st + _CE_SPEC_AVG, spec);
+    }
+#ifdef CELT_TRACE
+    var spv: f32 = load32(st + _CE_SPEC_AVG);
+    _ce_tr_flts("ce.tvbr", 4, temporal_vbr, spv, surround_masking, surround_trim);
+    _ce_tr_f("ce.sdyn", sdyn, end);
+#endif
+    if (secondMdct == 0) { _ce_copy32(bandLogE2, bandLogE, C * 21); }
+    if (LM > 0 && ec_tell(enc) + 3 <= total_bits && isTransient == 0 && cx >= 5 && lfe == 0 && hybrid == 0) {
+        if (_ce_patch_transient(bandLogE, oldBandE, start, end, C) != 0) {
+            isTransient = 1;
+            shortBlocks = M;
+            _ce_compute_mdcts(shortBlocks, inp, freq, C, CC, LM, upsample);
+            _ce_band_energies(freq, bandE, effEnd, C, LM);
+            _ce_amp2log2(effEnd, end, bandE, bandLogE, C);
+            c = 0;
+            while (c < C) {
+                i = 0;
+                while (i < end) {
+                    var v3: f32 = load32(bandLogE2 + (21 * c + i) * 4);
+                    v3 = v3 + hlm;
+                    store32(bandLogE2 + (21 * c + i) * 4, v3);
+                    i = i + 1;
+                }
+                c = c + 1;
+            }
+            tf_estimate = 0.2;
+        }
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.trans2", 2, isTransient, shortBlocks, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_f("ce.logEp", bandLogE, 21 * C);
+    _ce_tr_f("ce.logE2p", bandLogE2, 21 * C);
+    _ce_tr_flts("ce.tfest2", 1, tf_estimate, 0, 0, 0);
+#endif
+    if (LM > 0 && ec_tell(enc) + 3 <= total_bits) { ec_enc_bit_logp(enc, isTransient, 3); }
+    var X = load64(st + _CE_XN);
+    _ce_normalise(freq, X, bandE, effEnd, C, M);
+    var enable_tf = 0;
+    var k98: f32 = 0.98;
+    if (effectiveBytes >= 15 * C && hybrid == 0 && cx >= 2 && lfe == 0 && toneishness < k98) { enable_tf = 1; }
+    var offsets = load64(st + _CE_OFFSETS);
+    var importance = load64(st + _CE_IMPORTANCE);
+    var spread_weight = load64(st + _CE_SPREADW);
+    var totp = _opus_tmp(8);
+    var maxDepth: f32 = _ce_dynalloc(st, bandLogE, bandLogE2, oldBandE, start, end, C, offsets, isTransient, LM, effectiveBytes,
+                                     totp, sdyn, importance, spread_weight, tone_freq, toneishness);
+    var tot_boost = load64(totp);
+#ifdef CELT_TRACE
+    _ce_tr_f("ce.X", X, C * N);
+    _ce_tr_vals("ce.dyn", 2, tot_boost, enable_tf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_flts("ce.maxdepth", 1, maxDepth, 0, 0, 0);
+    _ce_tr_i("ce.offsets", offsets, 21);
+    _ce_tr_i("ce.importance", importance + start * 8, end - start);
+    _ce_tr_i("ce.spreadw", spread_weight, end);
+#endif
+    var tf_res = load64(st + _CE_TFRES);
+    var tf_select = 0;
+    if (enable_tf != 0) {
+        var lambda = _ce_imax(80, 20480 / effectiveBytes + 2);
+        tf_select = _ce_tf_analysis(effEnd, isTransient, tf_res, lambda, X, N, LM, tf_estimate, tf_chan, importance);
+        i = effEnd;
+        while (i < end) { store64(tf_res + i * 8, load64(tf_res + (effEnd - 1) * 8)); i = i + 1; }
+    } else {
+        if (hybrid != 0 && weak_transient != 0) {
+            i = 0;
+            while (i < end) { store64(tf_res + i * 8, 1); i = i + 1; }
+            tf_select = 0;
+        } else {
+            if (hybrid != 0 && effectiveBytes < 15 && load64(st + _CE_SILK_TYPE) != 2) {
+                i = 0;
+                while (i < end) { store64(tf_res + i * 8, 0); i = i + 1; }
+                tf_select = isTransient;
+            } else {
+                i = 0;
+                while (i < end) { store64(tf_res + i * 8, isTransient); i = i + 1; }
+                tf_select = 0;
+            }
+        }
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.tfsel", 1, tf_select, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_i("ce.tfres", tf_res, end);
+#endif
+    var error = load64(st + _CE_ERROR);
+    var two: f32 = _CEF_TWO;
+    var q25: f32 = _CEF_QUARTER;
+    c = 0;
+    while (c < C) {
+        i = start;
+        while (i < end) {
+            var ix = (i + c * 21) * 4;
+            var le: f32 = load32(bandLogE + ix);
+            var oe: f32 = load32(oldBandE + ix);
+            var d: f32 = le - oe;
+            var ad: f32 = d & 0x7FFFFFFF;
+            if (ad < two) {
+                var ee: f32 = load32(energyError + ix);
+                var qe: f32 = q25 * ee;
+                le = le - qe;
+                store32(bandLogE + ix, le);
+            }
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    var two_pass = 0;
+    if (cx >= 4) { two_pass = 1; }
+    _ce_coarse(st, start, end, effEnd, bandLogE, oldBandE, total_bits, error, enc, C, LM, nbAvailableBytes,
+               load64(st + _CE_FORCE_INTRA), two_pass, load64(st + _CE_LOSS), lfe);
+#ifdef CELT_TRACE
+    _ce_tr_f("ce.logEq", bandLogE, 21 * C);
+    _ce_tr_f("ce.coarse", oldBandE, 21 * C);
+    _ce_tr_f("ce.error", error, 21 * C);
+    _ce_tr_flts("ce.dintra", 1, load32(st + _CE_DINTRA), 0, 0, 0);
+#endif
+    celt_tf_encode(tf_res, isTransient, tf_select, enc, start, end, LM);
+#ifdef CELT_TRACE
+    _ce_tr_i("ce.tfcode", tf_res, end);
+#endif
+    if (ec_tell(enc) + 4 <= total_bits) {
+        if (lfe != 0) {
+            store64(st + _CE_TAPSET, 0);
+            store64(st + _CE_SPREAD, _CE_SPREAD_NORMAL);
+        } else {
+            if (hybrid != 0) {
+                if (cx == 0) { store64(st + _CE_SPREAD, _CE_SPREAD_NONE); }
+                else { if (isTransient != 0) { store64(st + _CE_SPREAD, _CE_SPREAD_NORMAL); } else { store64(st + _CE_SPREAD, _CE_SPREAD_AGGRESSIVE); } }
+            } else {
+                if (shortBlocks != 0 || cx < 3 || nbAvailableBytes < 10 * C) {
+                    if (cx == 0) { store64(st + _CE_SPREAD, _CE_SPREAD_NONE); } else { store64(st + _CE_SPREAD, _CE_SPREAD_NORMAL); }
+                } else {
+                    var uhf = 0;
+                    if (pf_on != 0 && shortBlocks == 0) { uhf = 1; }
+                    store64(st + _CE_SPREAD, _ce_spreading_decision(st, X, uhf, effEnd, C, M, spread_weight));
+                }
+            }
+        }
+        ec_enc_icdf(enc, load64(st + _CE_SPREAD), _celt_spreadIcdf, 5);
+    } else {
+        store64(st + _CE_SPREAD, _CE_SPREAD_NORMAL);
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.spread", 4, load64(st + _CE_SPREAD), load64(st + _CE_TAPSET), load64(st + _CE_TONAL_AVG), load64(st + _CE_HF_AVG), 0, 0, 0, 0, 0, 0, 0, 0);
+#endif
+    if (lfe != 0) { store64(offsets, _ce_imin(8, effectiveBytes / 3)); }
+    var cap = load64(st + _CE_CAP);
+    celt_init_caps(cap, LM, C);
+    var dynalloc_logp = 6;
+    total_bits = total_bits << 3;
+    var total_boost = 0;
+    tell = ec_tell_frac(enc);
+    i = start;
+    while (i < end) {
+        var width = (C * (_ce_eb(i + 1) - _ce_eb(i))) << LM;
+        var quanta = _ce_imin(width << 3, _ce_imax(6 << 3, width));
+        var dll = dynalloc_logp;
+        var boost = 0;
+        var j = 0;
+        while (tell + (dll << 3) < total_bits - total_boost && boost < load64(cap + i * 8)) {
+            var flag = 0;
+            if (j < load64(offsets + i * 8)) { flag = 1; }
+            ec_enc_bit_logp(enc, flag, dll);
+            tell = ec_tell_frac(enc);
+            if (flag == 0) { break; }
+            boost = boost + quanta;
+            total_boost = total_boost + quanta;
+            dll = 1;
+            j = j + 1;
+        }
+        if (j != 0) { dynalloc_logp = _ce_imax(2, dynalloc_logp - 1); }
+        store64(offsets + i * 8, boost);
+        i = i + 1;
+    }
+    var dual_stereo = 0;
+    if (C == 2) {
+        if (LM != 0) { dual_stereo = _ce_stereo_analysis(X, LM, N); }
+        var ins = _ce_hysteresis(equiv_rate / 1000, _cet_int_thr, _cet_int_hyst, 21, load64(st + _CE_INTENSITY));
+        store64(st + _CE_INTENSITY, _ce_imin(end, _ce_imax(start, ins)));
+    }
+#ifdef CELT_TRACE
+    _ce_tr_i("ce.boost", offsets, 21);
+    _ce_tr_vals("ce.stereo", 3, total_boost, dual_stereo, load64(st + _CE_INTENSITY), 0, 0, 0, 0, 0, 0, 0, 0, 0);
+#endif
+    var alloc_trim = 5;
+    if (tell + (6 << 3) <= total_bits - total_boost) {
+        if (start > 0 || lfe != 0) {
+            store64(st + _CE_STEREO_SAVING, 0);
+            alloc_trim = 5;
+        } else {
+            alloc_trim = _ce_alloc_trim(st, X, bandLogE, end, LM, C, N, tf_estimate, load64(st + _CE_INTENSITY), surround_trim, equiv_rate);
+        }
+        ec_enc_icdf(enc, alloc_trim, _celt_trimIcdf, 7);
+        tell = ec_tell_frac(enc);
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.trim", 1, alloc_trim, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    _ce_tr_flts("ce.ssave", 1, load32(st + _CE_STEREO_SAVING), 0, 0, 0);
+#endif
+    var min_allowed = ((tell + total_boost + (1 << 6) - 1) >> 6) + 2;
+    if (hybrid != 0) { min_allowed = _ce_imax(min_allowed, (tell0_frac + (37 << 3) + total_boost + (1 << 6) - 1) >> 6); }
+    if (vbr_rate > 0) {
+        var lm_diff = 3 - LM;
+        nbCompressedBytes = _ce_imin(nbCompressedBytes, 1275 >> (3 - LM));
+        var base_target = 0;
+        if (hybrid == 0) { base_target = vbr_rate - ((40 * C + 20) << 3); }
+        else { base_target = _ce_imax(0, vbr_rate - ((9 * C + 4) << 3)); }
+        if (cvbr != 0) { base_target = base_target + sar(load64(st + _CE_VBR_OFFSET), lm_diff); }
+        var target = 0;
+        if (hybrid == 0) {
+            var ssv: f32 = load32(st + _CE_STEREO_SAVING);
+            var hm = 0;
+            if (load64(st + _CE_EMASK) != 0) { hm = 1; }
+            target = _ce_compute_vbr(st, base_target, LM, equiv_rate, load64(st + _CE_LAST_CODED), C, load64(st + _CE_INTENSITY),
+                                     cvbr, ssv, tot_boost, tf_estimate, pitch_change, maxDepth, lfe, hm, surround_masking, temporal_vbr);
+        } else {
+            target = base_target;
+            var so = load64(st + _CE_SILK_OFFSET);
+            if (so < 100) { target = target + ((12 << 3) >> (3 - LM)); }
+            if (so > 100) { target = target - ((18 << 3) >> (3 - LM)); }
+            var k25: f32 = _CEF_QUARTER;
+            var tfq: f32 = tf_estimate - k25;
+            var k400: f32 = 400.0;
+            var tq: f32 = tfq * k400;
+            target = target + _cef_trunc(tq);
+            var k7: f32 = 0.7;
+            if (tf_estimate > k7) { target = _ce_imax(target, 50 << 3); }
+        }
+        target = target + tell;
+        nbAvailableBytes = sar(target + (1 << 5), 6);
+        nbAvailableBytes = _ce_imax(min_allowed, nbAvailableBytes);
+        nbAvailableBytes = _ce_imin(nbCompressedBytes, nbAvailableBytes);
+        var delta = target - vbr_rate;
+        target = nbAvailableBytes << 6;
+        if (silence != 0) {
+            nbAvailableBytes = 2;
+            target = (2 * 8) << 3;
+            delta = 0;
+        }
+        var alpha: f32 = 0.001;
+        var vc = load64(st + _CE_VBR_COUNT);
+        if (vc < 970) {
+            vc = vc + 1;
+            store64(st + _CE_VBR_COUNT, vc);
+            var vf: f32 = _cef_i(vc + 20);
+            alpha = _CEF_ONE / vf;
+        }
+        if (cvbr != 0) { store64(st + _CE_VBR_RES, load64(st + _CE_VBR_RES) + target - vbr_rate); }
+        if (cvbr != 0) {
+            var dd = (delta * (1 << lm_diff)) - load64(st + _CE_VBR_OFFSET) - load64(st + _CE_VBR_DRIFT);
+            var ddf: f32 = _cef_i(dd);
+            var ad2: f32 = alpha * ddf;
+            store64(st + _CE_VBR_DRIFT, load64(st + _CE_VBR_DRIFT) + _cef_trunc(ad2));
+            store64(st + _CE_VBR_OFFSET, 0 - load64(st + _CE_VBR_DRIFT));
+        }
+        if (cvbr != 0 && load64(st + _CE_VBR_RES) < 0) {
+            var adjust = (0 - load64(st + _CE_VBR_RES)) / (8 << 3);
+            if (silence == 0) { nbAvailableBytes = nbAvailableBytes + adjust; }
+            store64(st + _CE_VBR_RES, 0);
+        }
+        nbCompressedBytes = _ce_imin(nbCompressedBytes, nbAvailableBytes);
+        _ce_ec_shrink(enc, nbCompressedBytes);
+    }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.vbr", 7, nbCompressedBytes, nbAvailableBytes, load64(st + _CE_VBR_RES), load64(st + _CE_VBR_DRIFT),
+        load64(st + _CE_VBR_OFFSET), load64(st + _CE_VBR_COUNT), min_allowed, 0, 0, 0, 0, 0);
+#endif
+    var pulses = load64(st + _CE_PULSES);
+    var fine_quant = load64(st + _CE_FINEQ);
+    var fine_priority = load64(st + _CE_FINEP);
+    var bits = ((nbCompressedBytes * 8) << 3) - ec_tell_frac(enc) - 1;
+    var anti_collapse_rsv = 0;
+    if (isTransient != 0 && LM >= 2 && bits >= ((LM + 2) << 3)) { anti_collapse_rsv = 8; }
+    bits = bits - anti_collapse_rsv;
+    var signalBandwidth = end - 1;
+    if (load64(st + _CE_ANA + _CEA_VALID) != 0) {
+        var min_bw = 20;
+        if (equiv_rate < 80000 * C) { min_bw = 19; }
+        if (equiv_rate < 60000 * C) { min_bw = 18; }
+        if (equiv_rate < 48000 * C) { min_bw = 16; }
+        if (equiv_rate < 32000 * C) { min_bw = 13; }
+        signalBandwidth = _ce_imax(load64(st + _CE_ANA + _CEA_BANDWIDTH), min_bw);
+    }
+    if (lfe != 0) { signalBandwidth = 1; }
+    var dsp = _opus_tmp(8);
+    store64(dsp, dual_stereo);
+    var balp = _opus_tmp(8);
+    var codedBands = celt_compute_allocation(offsets, cap, alloc_trim, st + _CE_INTENSITY, dsp, bits, balp, pulses, fine_quant,
+                                             fine_priority, C, LM, enc, start, end, 1, load64(st + _CE_LAST_CODED), signalBandwidth);
+    dual_stereo = load64(dsp);
+    var balance = load64(balp);
+    var lcb = load64(st + _CE_LAST_CODED);
+    if (lcb != 0) { store64(st + _CE_LAST_CODED, _ce_imin(lcb + 1, _ce_imax(lcb - 1, codedBands))); }
+    else { store64(st + _CE_LAST_CODED, codedBands); }
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.alloc", 7, codedBands, balance, load64(st + _CE_INTENSITY), dual_stereo, bits, anti_collapse_rsv, signalBandwidth, 0, 0, 0, 0, 0);
+    _ce_tr_i("ce.pulses", pulses, 21);
+    _ce_tr_i("ce.fineq", fine_quant, 21);
+    _ce_tr_i("ce.finep", fine_priority, 21);
+#endif
+    _ce_fine(start, end, oldBandE, error, fine_quant, enc, C);
+#ifdef CELT_TRACE
+    _ce_tr_f("ce.fine", oldBandE, 21 * C);
+    _ce_tr_f("ce.ferror", error, 21 * C);
+#endif
+    _ce_zero32(energyError, 21 * CC);
+    var cm = load64(st + _CE_CM);
+    var Y = 0;
+    if (C == 2) { Y = X + N * 4; }
+    _ce_quant_all_bands(st, start, end, X, Y, cm, bandE, pulses, shortBlocks, load64(st + _CE_SPREAD), dual_stereo,
+                        load64(st + _CE_INTENSITY), tf_res, nbCompressedBytes * 64 - anti_collapse_rsv, balance, enc, LM,
+                        codedBands, st + _CE_RNG, cx, load64(st + _CE_DISABLE_INV));
+#ifdef CELT_TRACE
+    _ce_tr_u8("ce.cm", cm, C * 21);
+    _ce_tr_vals("ce.qrng", 1, _ce_s32(load64(st + _CE_RNG)), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+#endif
+    if (anti_collapse_rsv > 0) {
+        var aco = 0;
+        if (load64(st + _CE_CONSEC) < 2) { aco = 1; }
+        ec_enc_bits(enc, aco, 1);
+    }
+    _ce_finalise(start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes * 8 - ec_tell(enc), enc, C);
+    var h5: f32 = _CEF_HALF;
+    var nh5: f32 = h5 ^ 0x80000000;
+    c = 0;
+    while (c < C) {
+        i = start;
+        while (i < end) {
+            var er: f32 = load32(error + (i + c * 21) * 4);
+            var e1: f32 = _cef_min(h5, er);
+            store32(energyError + (i + c * 21) * 4, _cef_max(nh5, e1));
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+#ifdef CELT_TRACE
+    _ce_tr_f("ce.final", oldBandE, 21 * C);
+    _ce_tr_f("ce.eerr", energyError, 21 * CC);
+#endif
+    var m28: f32 = -28.0;
+    if (silence != 0) {
+        i = 0;
+        while (i < C * 21) { store32(oldBandE + i * 4, m28); i = i + 1; }
+    }
+    store64(st + _CE_PF_PERIOD, pitch_index);
+    store64(st + _CE_PF_GAIN, gain1);
+    store64(st + _CE_PF_TAPSET, prefilter_tapset);
+    if (CC == 2 && C == 1) { _ce_copy32(oldBandE + 21 * 4, oldBandE, 21); }
+    if (isTransient == 0) {
+        _ce_copy32(oldLogE2, oldLogE, CC * 21);
+        _ce_copy32(oldLogE, oldBandE, CC * 21);
+    } else {
+        i = 0;
+        while (i < CC * 21) {
+            var a1: f32 = load32(oldLogE + i * 4);
+            var a2: f32 = load32(oldBandE + i * 4);
+            store32(oldLogE + i * 4, _cef_min(a1, a2));
+            i = i + 1;
+        }
+    }
+    c = 0;
+    while (c < CC) {
+        i = 0;
+        while (i < start) {
+            store32(oldBandE + (c * 21 + i) * 4, 0);
+            store32(oldLogE + (c * 21 + i) * 4, m28);
+            store32(oldLogE2 + (c * 21 + i) * 4, m28);
+            i = i + 1;
+        }
+        i = end;
+        while (i < 21) {
+            store32(oldBandE + (c * 21 + i) * 4, 0);
+            store32(oldLogE + (c * 21 + i) * 4, m28);
+            store32(oldLogE2 + (c * 21 + i) * 4, m28);
+            i = i + 1;
+        }
+        c = c + 1;
+    }
+    if (isTransient != 0 || transient_got_disabled != 0) { store64(st + _CE_CONSEC, load64(st + _CE_CONSEC) + 1); }
+    else { store64(st + _CE_CONSEC, 0); }
+    store64(st + _CE_RNG, load64(enc + 56));
+#ifdef CELT_TRACE
+    _ce_tr_vals("ce.end", 3, _ce_s32(load64(enc + 56)), nbCompressedBytes, load64(st + _CE_CONSEC), 0, 0, 0, 0, 0, 0, 0, 0, 0);
+#endif
+    ec_enc_done(enc);
+    # the frame's decisions, for the tests
+    store64(st + _CE_FR_TRANS, isTransient);
+    store64(st + _CE_FR_SHORT, shortBlocks);
+    store64(st + _CE_FR_PF, pf_on);
+    store64(st + _CE_FR_PITCH, pitch_index);
+    store64(st + _CE_FR_QG, qg);
+    store64(st + _CE_FR_TFSEL, tf_select);
+    store64(st + _CE_FR_TRIM, alloc_trim);
+    store64(st + _CE_FR_DUAL, dual_stereo);
+    store64(st + _CE_FR_CODED, codedBands);
+    store64(st + _CE_FR_BALANCE, balance);
+    store64(st + _CE_FR_BYTES, nbCompressedBytes);
+    store64(st + _CE_FR_TFEST, tf_estimate);
+    store64(st + _CE_FR_SILENCE, silence);
+    if (load64(enc + 88) != 0) { return err(ERR_ENCODE); }
+    return nbCompressedBytes;
+}
+
+# ---------------------------------------------------------------- the API
+
+# celt_encoder_new (libopus celt_encoder_init): fs 8000, 12000, 16000, 24000
+# or 48000 (CELT runs at 48 kHz, upsampling the rest); 1 or 2 channels.
+# libopus's defaults: CBR at the frame's whole buffer (OPUS_BITRATE_MAX),
+# constrained VBR once VBR is on, complexity 5, 24-bit input, clipping,
+# every band. ERR_INVALID_RATE / ERR_INVALID_CHANNELS.
+fn celt_encoder_new(fs, channels) {
+    var up = 0;
+    if (fs == 48000) { up = 1; }
+    if (fs == 24000) { up = 2; }
+    if (fs == 16000) { up = 3; }
+    if (fs == 12000) { up = 4; }
+    if (fs == 8000) { up = 6; }
+    if (up == 0) { return err(ERR_INVALID_RATE); }
+    if (channels < 1 || channels > 2) { return err(ERR_INVALID_CHANNELS); }
+    if (_ce_ready == 0) { _ce_init(); }
+    var st = alloc(_CE_SIZE);
+    memset(st, 0, _CE_SIZE);
+    var CC = channels;
+    store64(st + _CE_IN_MEM, alloc(CC * 120 * 4 + 8));
+    store64(st + _CE_PF_MEM, alloc(CC * 1024 * 4 + 8));
+    store64(st + _CE_OLDBANDE, alloc(2 * 21 * 4));
+    store64(st + _CE_OLDLOGE, alloc(2 * 21 * 4));
+    store64(st + _CE_OLDLOGE2, alloc(2 * 21 * 4));
+    store64(st + _CE_EERR, alloc(2 * 21 * 4));
+    store64(st + _CE_PCM, alloc(2 * 960 * 4 + 8));
+    store64(st + _CE_IN, alloc(2 * 1080 * 4 + 8));
+    store64(st + _CE_FREQ, alloc(2 * 960 * 4 + 8));
+    store64(st + _CE_XN, alloc(2 * 960 * 4 + 8));
+    store64(st + _CE_BANDE, alloc(2 * 21 * 4));
+    store64(st + _CE_LOGE, alloc(2 * 21 * 4));
+    store64(st + _CE_LOGE2, alloc(2 * 21 * 4));
+    store64(st + _CE_ERROR, alloc(2 * 21 * 4));
+    store64(st + _CE_OFFSETS, alloc(21 * 8));
+    store64(st + _CE_IMPORTANCE, alloc(21 * 8));
+    store64(st + _CE_SPREADW, alloc(21 * 8));
+    store64(st + _CE_TFRES, alloc(21 * 8));
+    store64(st + _CE_CAP, alloc(21 * 8));
+    store64(st + _CE_PULSES, alloc(21 * 8));
+    store64(st + _CE_FINEQ, alloc(21 * 8));
+    store64(st + _CE_FINEP, alloc(21 * 8));
+    store64(st + _CE_CM, alloc(2 * 21 + 8));
+    store64(st + _CE_SDYN, alloc(2 * 21 * 4));
+    store64(st + _CE_ECS, alloc(96));
+    store64(st + _CE_PRE, alloc(2 * (960 + 1024) * 4 + 8));
+    memset(load64(st + _CE_PCM), 0, 2 * 960 * 4 + 8);
+    memset(load64(st + _CE_IN), 0, 2 * 1080 * 4 + 8);
+    memset(load64(st + _CE_FREQ), 0, 2 * 960 * 4 + 8);
+    memset(load64(st + _CE_XN), 0, 2 * 960 * 4 + 8);
+    memset(load64(st + _CE_BANDE), 0, 2 * 21 * 4);
+    memset(load64(st + _CE_LOGE), 0, 2 * 21 * 4);
+    memset(load64(st + _CE_LOGE2), 0, 2 * 21 * 4);
+    memset(load64(st + _CE_ERROR), 0, 2 * 21 * 4);
+    store64(st + _CE_CC, CC);
+    store64(st + _CE_C, CC);
+    store64(st + _CE_UPSAMPLE, up);
+    store64(st + _CE_FS, fs);
+    store64(st + _CE_START, 0);
+    store64(st + _CE_END, 21);
+    store64(st + _CE_CVBR, 1);
+    store64(st + _CE_CLIP, 1);
+    store64(st + _CE_BITRATE, 0 - 1);
+    store64(st + _CE_VBR, 0);
+    store64(st + _CE_FORCE_INTRA, 0);
+    store64(st + _CE_CX, 5);
+    store64(st + _CE_LSB, 24);
+    celt_encoder_reset(st);
+    return st;
+}
+
+# OPUS_RESET_STATE: everything from rng on cleared, then libopus's restarts.
+fn celt_encoder_reset(st) {
+    var k = 0;
+    while (k < _CE_RESET_WORDS) { store64(st + _CE_RNG + k * 8, 0); k = k + 1; }
+    var CC = load64(st + _CE_CC);
+    _ce_zero32(load64(st + _CE_IN_MEM), CC * 120);
+    _ce_zero32(load64(st + _CE_PF_MEM), CC * 1024);
+    _ce_zero32(load64(st + _CE_OLDBANDE), 2 * 21);
+    _ce_zero32(load64(st + _CE_EERR), 2 * 21);
+    var m28: f32 = -28.0;
+    var i = 0;
+    while (i < 2 * 21) {
+        store32(load64(st + _CE_OLDLOGE) + i * 4, m28);
+        store32(load64(st + _CE_OLDLOGE2) + i * 4, m28);
+        i = i + 1;
+    }
+    store64(st + _CE_VBR_OFFSET, 0);
+    store64(st + _CE_DINTRA, _CEF_ONE);
+    store64(st + _CE_SPREAD, _CE_SPREAD_NORMAL);
+    store64(st + _CE_TONAL_AVG, 256);
+    store64(st + _CE_HF_AVG, 0);
+    store64(st + _CE_TAPSET, 0);
+    return 0;
+}
+
+fn celt_encoder_set_complexity(st, v) {
+    if (v < 0 || v > 10) { return err(ERR_ENCODE); }
+    store64(st + _CE_CX, v);
+    return 0;
+}
+
+fn celt_encoder_set_start_band(st, v) {
+    if (v < 0 || v >= 21) { return err(ERR_ENCODE); }
+    store64(st + _CE_START, v);
+    return 0;
+}
+
+fn celt_encoder_set_end_band(st, v) {
+    if (v < 1 || v > 21) { return err(ERR_ENCODE); }
+    store64(st + _CE_END, v);
+    return 0;
+}
+
+# CELT_SET_PREDICTION: 0 independent frames (intra, no pre-filter), 1 no
+# pre-filter, 2 both (the default).
+fn celt_encoder_set_prediction(st, v) {
+    if (v < 0 || v > 2) { return err(ERR_ENCODE); }
+    var d = 0;
+    if (v <= 1) { d = 1; }
+    store64(st + _CE_DISABLE_PF, d);
+    var f = 0;
+    if (v == 0) { f = 1; }
+    store64(st + _CE_FORCE_INTRA, f);
+    return 0;
+}
+
+fn celt_encoder_set_packet_loss(st, v) {
+    if (v < 0 || v > 100) { return err(ERR_ENCODE); }
+    store64(st + _CE_LOSS, v);
+    return 0;
+}
+
+fn celt_encoder_set_vbr(st, v) { store64(st + _CE_VBR, v); return 0; }
+fn celt_encoder_set_vbr_constraint(st, v) { store64(st + _CE_CVBR, v); return 0; }
+
+# OPUS_SET_BITRATE: above 500 bit/s, or OPUS_BITRATE_MAX (-1); at most
+# 750 kbit/s a channel.
+fn celt_encoder_set_bitrate(st, v) {
+    if (v <= 500 && v != 0 - 1) { return err(ERR_ENCODE); }
+    store64(st + _CE_BITRATE, _ce_imin(v, 750000 * load64(st + _CE_CC)));
+    return 0;
+}
+
+# CELT_SET_CHANNELS: the channels coded, 1 or 2 (not more than the input's).
+fn celt_encoder_set_channels(st, v) {
+    if (v < 1 || v > 2 || v > load64(st + _CE_CC)) { return err(ERR_ENCODE); }
+    store64(st + _CE_C, v);
+    return 0;
+}
+
+fn celt_encoder_set_lsb_depth(st, v) {
+    if (v < 8 || v > 24) { return err(ERR_ENCODE); }
+    store64(st + _CE_LSB, v);
+    return 0;
+}
+
+fn celt_encoder_set_phase_inversion_disabled(st, v) {
+    if (v < 0 || v > 1) { return err(ERR_ENCODE); }
+    store64(st + _CE_DISABLE_INV, v);
+    return 0;
+}
+
+fn celt_encoder_set_lfe(st, v) { store64(st + _CE_LFE, v); return 0; }
+
+# OPUS_SET_ENERGY_MASK: C x 21 f64 band energies (the surround encoder's),
+# read at each frame; 0 for none. A reset clears it, as libopus's does.
+fn celt_encoder_set_energy_mask(st, mask) { store64(st + _CE_EMASK, mask); return 0; }
+
+# CELT_SET_ANALYSIS: the tonality analysis's AnalysisInfo, as 8-byte words
+# at the _CEA_ offsets, its floats as f64 (taken as floats).
+fn celt_encoder_set_analysis(st, info) {
+    if (info == 0) { return 0; }
+    var a = st + _CE_ANA;
+    store64(a + _CEA_VALID, load64(info + _CEA_VALID));
+    var k = _CEA_TONALITY;
+    while (k <= _CEA_MUSIC_PROB_MAX) { store64(a + k, f32_from(load64(info + k))); k = k + 8; }
+    store64(a + _CEA_BANDWIDTH, load64(info + _CEA_BANDWIDTH));
+    store64(a + _CEA_ACTIVITY_PROB, f32_from(load64(info + _CEA_ACTIVITY_PROB)));
+    store64(a + _CEA_MAX_PITCH_RATIO, f32_from(load64(info + _CEA_MAX_PITCH_RATIO)));
+    var i = 0;
+    while (i < _CE_LEAK_BANDS) { store64(a + _CEA_LEAK_BOOST + i * 8, load64(info + _CEA_LEAK_BOOST + i * 8) & 255); i = i + 1; }
+    return 0;
+}
+
+# CELT_SET_SILK_INFO: the hybrid's SILK frame type and quantisation offset.
+fn celt_encoder_set_silk_info(st, signal_type, offset) {
+    store64(st + _CE_SILK_TYPE, signal_type);
+    store64(st + _CE_SILK_OFFSET, offset);
+    return 0;
+}
+
+fn celt_encoder_final_range(st) { return load64(st + _CE_RNG); }
+fn celt_encoder_lsb_depth(st) { return load64(st + _CE_LSB); }
+fn celt_encoder_phase_inversion_disabled(st) { return load64(st + _CE_DISABLE_INV); }
+
+# The input as libopus's floats: each f64 rounded to single precision, a NaN
+# as 0 (libopus's Opus layer clears NaN frames; its CELT layer asserts).
+fn _ce_take_pcm(st, pcm, frame_size) {
+    var CC = load64(st + _CE_CC);
+    var dst = load64(st + _CE_PCM);
+    var n = CC * frame_size;
+    var i = 0;
+    while (i < n) {
+        var d = load64(pcm + i * 8);
+        if (f64_eq(d, d) == 0) { d = 0; }
+        store32(dst + i * 4, f32_from(d));
+        i = i + 1;
+    }
+    return dst;
+}
+
+fn _ce_frame_ok(st, frame_size) {
+    var up = load64(st + _CE_UPSAMPLE);
+    var n = frame_size * up;
+    if (frame_size <= 0) { return 0; }
+    if (n == 120 || n == 240 || n == 480 || n == 960) { return 1; }
+    return 0;
+}
+
+# celt_encoder_encode: a frame of frame_size samples a channel (2.5, 5, 10
+# or 20 ms at the encoder's rate) into out, max bytes at most (2 to 1275).
+# The frame's length back, or ERR_ENCODE.
+fn celt_encoder_encode(st, pcm, frame_size, out, max) {
+    if (_ce_frame_ok(st, frame_size) == 0 || max < 2) { return err(ERR_ENCODE); }
+    var outer = _opus_in_frame;
+    if (outer == 0) { _opus_frame_begin(); }
+    var p = _ce_take_pcm(st, pcm, frame_size);
+    var r = _ce_encode_with_ec(st, p, frame_size, out, _ce_imin(max, 1275), 0);
+    if (outer == 0) { _opus_frame_end(); }
+    return r;
+}
+
+# celt_encoder_encode_ec: as celt_encode_with_ec with a range coder: the
+# frame after the bits already in ec (a hybrid frame's SILK), max the
+# packet's bytes. The coder is finished (ec_enc_done); the bytes back.
+fn celt_encoder_encode_ec(st, pcm, frame_size, max, ec) {
+    if (_ce_frame_ok(st, frame_size) == 0 || max < 2 || ec == 0) { return err(ERR_ENCODE); }
+    var outer = _opus_in_frame;
+    if (outer == 0) { _opus_frame_begin(); }
+    var p = _ce_take_pcm(st, pcm, frame_size);
+    var r = _ce_encode_with_ec(st, p, frame_size, 0, max, ec);
+    if (outer == 0) { _opus_frame_end(); }
+    return r;
+}

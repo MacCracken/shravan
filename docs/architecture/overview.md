@@ -43,6 +43,15 @@ shravan/
                        stereo/mono and bandwidth decisions, FEC by loss, DTX on silence,
                        10-120 ms packets (80-120 repacketised), CBR padding, PLC packets,
                        libopus's ctls and getters; byte for byte libopus's
+    celt_enc.cyr    -- libopus's CELT encoder (celt_encode_with_ec, 2.12.4) as its float build
+                       computes it (typed f32 arithmetic, libopus's operation order): pre-emphasis,
+                       tone and transient analysis, the pitch pre-filter, the forward MDCT (kiss
+                       FFT), band energies, dynalloc, TF, coarse and fine energy, spreading, trim,
+                       stereo decisions, VBR, the allocation, the bands (PVQ, the stereo theta
+                       search with its resynthesis); celt_encoder_new / _encode / _encode_ec and
+                       libopus's ctls; frame for frame libopus's portable C build's
+    celt_enc_tables.cyr -- generated (scripts/gen-celt-tables.py): libopus's static float mode and
+                       the CELT encoder's tables, parsed from its sources
     opus_legacy.cyr -- retired 2.5.x bespoke CELT encoder (test-only, EXCLUDED from [lib] bundle)
     aac.cyr         -- AAC-LC encoder/decoder (ADTS, Huffman, TNS, M/S, PNS, intensity, short windows;
                        decode: any channel layout, configurations or a PCE, in ffmpeg's order;
@@ -56,7 +65,7 @@ shravan/
                        buffer bounded to one chunk or frame, no length ceiling
     serde.cyr       -- JSON serialization of format/pcm/error/FormatInfo/... (bayan, #derive(Serialize))
     main.cyr        -- the test harness, every suite                    -> build/shravan
-    *_tests.cyr     -- test suites (opus_rfc/opus_encoder/silk/opus_enc/interop) + opus_test_helpers;
+    *_tests.cyr     -- test suites (opus_rfc/opus_encoder/silk/opus_enc/celt_enc/interop) + opus_test_helpers;
                        NOT in [lib]
     interop_fixtures.cyr -- real ffmpeg/flac/lame/libopus output + reference decodes (generated
                        by scripts/gen-interop-fixtures.py); NOT in [lib]

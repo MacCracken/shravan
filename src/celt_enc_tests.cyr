@@ -1,0 +1,638 @@
+# celt_enc_tests.cyr -- 2.12.4: the CELT encoder (src/celt_enc.cyr) against
+# libopus's celt_encode_with_ec (src/celt_enc_vectors.cyr, from
+# scripts/gen-celt-vectors.py), its API, and hostile input.
+
+# The generator's celt_signal, sample for sample: kinds below 10 are
+# _skk_signal's (prm its five words); 10 an integer oscillator
+# s[i] = (2 prm[0] s[i-1] >> 30) - s[i-2] from s[-1] = prm[1], plus the noise
+# w >> prm[2]; 11 bursts of w halving every prm[1] samples, every prm[0], over
+# w >> prm[2]; 12 the oscillator with its coefficient prm[0] - i prm[3]; 13
+# -|w| >> prm[2] (never positive); 14 prm[2] every prm[0] samples at phase
+# prm[1], else 0; 15 w >> prm[3] and w >> prm[2] in turn, prm[0] samples each,
+# shifted by prm[1]; 16 w >> prm[2] plus w >> prm[3] from sample prm[1] of every
+# prm[0]; 17 prm[0] + (w >> prm[2]); 18 a sawtooth at prm[0] Hz, +-prm[1],
+# plus w >> prm[2]; 19 the noise's first period repeated at prm[1] Hz, prm[3]
+# bits down, plus w >> prm[2], through a one-pole low-pass whose Q14
+# coefficient glides 0 to prm[0] and back every 2 s. w is _skk_signal's four
+# LCG draws summed. Into x (words); returns the FNV-1a of the samples as 32-bit
+# words.
+fn _cek_signal(kind, fs, n, seed, x, prm) {
+    if (kind < 10) { return _skk_signal(kind, fs, n, seed, x, prm); }
+    var s = seed & 0xFFFFFFFF;
+    var h = 1469598103934665603;
+    var y1 = load64(prm + 8);
+    var y2 = 0;
+    var pat = 0;
+    if (kind == 19) {
+        y1 = 0;
+        pat = alloc((fs / load64(prm + 8)) * 8 + 8);
+    }
+    var i = 0;
+    while (i < n) {
+        var w = 0;
+        var d = 0;
+        while (d < 4) {
+            s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+            w = w + (s >> 16) - 32768;
+            d = d + 1;
+        }
+        var v = 0;
+        if (kind == 17) { v = load64(prm) + sar(w, load64(prm + 16)); }
+        if (kind == 18) {
+            var ph = (i * load64(prm)) % fs;
+            v = ((ph * 2) * load64(prm + 8)) / fs - load64(prm + 8) + sar(w, load64(prm + 16));
+        }
+        if (kind == 19) {
+            var T = fs / load64(prm + 8);
+            if (i < T) { store64(pat + i * 8, w); }
+            var t2 = i % (2 * fs);
+            if (t2 >= fs) { t2 = 2 * fs - t2; }
+            var a = (load64(prm) * t2) / fs;
+            y1 = sar(load64(pat + (i % T) * 8), load64(prm + 24)) + sar(w, load64(prm + 16)) + sar(a * y1, 14);
+            v = y1;
+        }
+        if (kind == 15) {
+            var sh = load64(prm + 24);
+            if (((i + load64(prm + 8)) / load64(prm)) % 2 == 1) { sh = load64(prm + 16); }
+            v = sar(w, sh);
+        }
+        if (kind == 16) {
+            v = sar(w, load64(prm + 16));
+            if (i % load64(prm) >= load64(prm + 8)) { v = v + sar(w, load64(prm + 24)); }
+        }
+        if (kind == 13) {
+            var aw = w;
+            if (aw < 0) { aw = 0 - aw; }
+            v = 0 - sar(aw, load64(prm + 16));
+        }
+        if (kind == 14) {
+            if (i % load64(prm) == load64(prm + 8)) { v = load64(prm + 16); }
+        }
+        if (kind == 10 || kind == 12) {
+            var c = load64(prm);
+            if (kind == 12) { c = c - i * load64(prm + 24); }
+            var y = sar(2 * c * y1, 30) - y2;
+            y2 = y1;
+            y1 = y;
+            v = y + sar(w, load64(prm + 16));
+        }
+        if (kind == 11) {
+            var t = i % load64(prm);
+            var k = t / load64(prm + 8);
+            v = sar(w, load64(prm + 16));
+            if (k < 8) { v = v + sar(w, k); }
+        }
+        if (v < 0 - 32768) { v = 0 - 32768; }
+        if (v > 32767) { v = 32767; }
+        store64(x + i * 8, v);
+        h = (h ^ (v & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+# The generator's celt_stereo: left _cek_signal(kind, seed, prm), right the
+# left times rg (Q14) plus _cek_signal(rkind, rseed, rprm) rsh bits down.
+# Interleaved into x; returns the hash of the interleaved samples.
+fn _cek_stereo(kind, fs, n, seed, prm, rkind, rseed, rprm, rg, rsh, x) {
+    var L = alloc(n * 8);
+    var O = alloc(n * 8);
+    _cek_signal(kind, fs, n, seed, L, prm);
+    _cek_signal(rkind, fs, n, rseed, O, rprm);
+    var h = 1469598103934665603;
+    var i = 0;
+    while (i < n) {
+        var l = load64(L + i * 8);
+        var r = sar(l * rg, 14) + sar(load64(O + i * 8), rsh);
+        if (r < 0 - 32768) { r = 0 - 32768; }
+        if (r > 32767) { r = 32767; }
+        store64(x + 2 * i * 8, l);
+        store64(x + (2 * i + 1) * 8, r);
+        h = (h ^ (l & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ (r & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+fn _cek_fnv_word(h, v) { return (h ^ (v & 0xFFFFFFFF)) * 1099511628211; }
+
+fn _cek_fnv_byte(h, v) { return (h ^ (v & 255)) * 1099511628211; }
+
+# celtenc.c's 32-bit LCG, and its unit draw (a multiple of 2^-24) as f64.
+fn _cek_lcg(sp) {
+    var s = (load64(sp) * 1664525 + 1013904223) & 0xFFFFFFFF;
+    store64(sp, s);
+    return s;
+}
+
+fn _cek_unit(sp) { return f64_mul(f64_from(_cek_lcg(sp) >> 8), 0x3E70000000000000); }
+
+# celtenc.c's synthetic AnalysisInfo for the frame, into info and the encoder.
+fn _cek_analysis(enc, sp, info) {
+    memset(info, 0, _CEA_SIZE);
+    var vd = 0;
+    if ((_cek_lcg(sp) >> 29) != 0) { vd = 1; }
+    store64(info + _CEA_VALID, vd);
+    store64(info + _CEA_TONALITY, _cek_unit(sp));
+    store64(info + _CEA_TONALITY_SLOPE, f64_sub(_cek_unit(sp), 0.5));
+    store64(info + _CEA_NOISINESS, _cek_unit(sp));
+    store64(info + _CEA_ACTIVITY, _cek_unit(sp));
+    store64(info + _CEA_MUSIC_PROB, _cek_unit(sp));
+    store64(info + _CEA_MUSIC_PROB_MIN, _cek_unit(sp));
+    store64(info + _CEA_MUSIC_PROB_MAX, _cek_unit(sp));
+    store64(info + _CEA_BANDWIDTH, 1 + _cek_lcg(sp) % 20);
+    store64(info + _CEA_ACTIVITY_PROB, _cek_unit(sp));
+    store64(info + _CEA_MAX_PITCH_RATIO, _cek_unit(sp));
+    var i = 0;
+    while (i < 19) { store64(info + _CEA_LEAK_BOOST + i * 8, _cek_lcg(sp) >> 24); i = i + 1; }
+    return celt_encoder_set_analysis(enc, info);
+}
+
+# The frame's decisions, energies and allocation, hashed as the generator
+# hashes libopus's dump (stage_hashes); h holds the three running hashes.
+fn _cek_stage_hash(enc, h) {
+    var C = load64(enc + _CE_C);
+    var CC = load64(enc + _CE_CC);
+    var start = load64(enc + _CE_START);
+    var end = load64(enc + _CE_END);
+    var d = load64(h);
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_TRANS));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_SHORT));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_PF));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_PITCH));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_QG));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_TFSEL));
+    d = _cek_fnv_word(d, load64(enc + _CE_SPREAD));
+    d = _cek_fnv_word(d, load64(enc + _CE_TAPSET));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_TRIM));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_DUAL));
+    d = _cek_fnv_word(d, load64(enc + _CE_INTENSITY));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_CODED));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_BALANCE));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_BYTES));
+    d = _cek_fnv_word(d, load64(enc + _CE_FR_SILENCE));
+    store64(h, d);
+    var e = load64(h + 8);
+    var le = load64(enc + _CE_LOGE);
+    var c = 0;
+    var i = 0;
+    while (c < C) {
+        i = start;
+        while (i < end) { e = _cek_fnv_word(e, load32(le + (c * 21 + i) * 4)); i = i + 1; }
+        c = c + 1;
+    }
+    var ee = load64(enc + _CE_EERR);
+    i = 0;
+    while (i < CC * 21) { e = _cek_fnv_word(e, load32(ee + i * 4)); i = i + 1; }
+    store64(h + 8, e);
+    var a = load64(h + 16);
+    var arrs = alloc(24);
+    store64(arrs, load64(enc + _CE_PULSES));
+    store64(arrs + 8, load64(enc + _CE_FINEQ));
+    store64(arrs + 16, load64(enc + _CE_FINEP));
+    var k = 0;
+    while (k < 3) {
+        i = start;
+        while (i < end) { a = _cek_fnv_word(a, load64(load64(arrs + k * 8) + i * 8)); i = i + 1; }
+        k = k + 1;
+    }
+    i = 0;
+    while (i < end) { a = _cek_fnv_word(a, load64(load64(enc + _CE_TFRES) + i * 8)); i = i + 1; }
+    i = 0;
+    while (i < 21) { a = _cek_fnv_word(a, load64(load64(enc + _CE_OFFSETS) + i * 8)); i = i + 1; }
+    store64(h + 16, a);
+    return 0;
+}
+
+# A configuration's settings (header words 23 to 41, the generator's KEYS),
+# applied in celtenc.c's order. Returns 1 when every one is accepted.
+fn _cek_apply(enc, w) {
+    var ok = 1;
+    if (is_err(celt_encoder_set_bitrate(enc, load64(w + 8))) == 1) { ok = 0; }
+    celt_encoder_set_vbr(enc, load64(w + 16));
+    celt_encoder_set_vbr_constraint(enc, load64(w + 24));
+    if (is_err(celt_encoder_set_complexity(enc, load64(w + 32))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_packet_loss(enc, load64(w + 40))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_prediction(enc, load64(w + 48))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_lsb_depth(enc, load64(w + 56))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_phase_inversion_disabled(enc, load64(w + 64))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_start_band(enc, load64(w + 72))) == 1) { ok = 0; }
+    if (is_err(celt_encoder_set_end_band(enc, load64(w + 80))) == 1) { ok = 0; }
+    celt_encoder_set_lfe(enc, load64(w + 88));
+    if (is_err(celt_encoder_set_channels(enc, load64(w + 96))) == 1) { ok = 0; }
+    return ok;
+}
+
+# libopus's celt_encode_with_ec on the generator's configurations: the packets
+# (bytes and final ranges), and the decisions, energies and allocation, frame
+# for frame, as five hashes.
+fn test_celt_enc_vs_libopus() {
+    syscall(1, 1, "=== celt encode: frames vs libopus ===\n", 39);
+    var h = alloc(64 * 8);
+    var frl = alloc(64 * 8);
+    var rts = alloc(64 * 8);
+    var szs = alloc(64 * 8);
+    var sts = alloc(64 * 8);
+    var pcm = alloc(960 * 2 * 8);
+    var buf = alloc(1280);
+    var info = alloc(_CEA_SIZE);
+    var emask = alloc(42 * 8);
+    var sh = alloc(24);
+    var anap = alloc(8);
+    var silkp = alloc(8);
+    var maskp = alloc(8);
+    var prep = alloc(8);
+    var frames = 0;
+    var c = 0;
+    while (c < _CEV_N) {
+        _skv_load(_CEV_HDR, c, h);
+        var kind = load64(h);
+        var seed = load64(h + 8);
+        var fs = load64(h + 16);
+        var ch = load64(h + 24);
+        var n = load64(h + 32);
+        var nfr = load64(h + 40);
+        var x = alloc(ch * n * 8);
+        var hx = 0;
+        if (ch == 1) { hx = _cek_signal(kind, fs, n, seed, x, h + 64); }
+        else {
+            hx = _cek_stereo(kind, fs, n, seed, h + 64, load64(h + 104), load64(h + 112), h + 136, load64(h + 120),
+                             load64(h + 128), x);
+        }
+        assert(hx == _skk_u64(load64(h + 48), load64(h + 56)), "celt encode: the suite's input is the generator's");
+        var scale = f64_pow(F64_TWO, f64_from(load64(h + 176) - 15));
+        var w = h + 184;
+        var enc = celt_encoder_new(fs, ch);
+        assert(_cek_apply(enc, w) == 1, "celt encode: the configuration's settings are accepted");
+        var nf = _skv_load(_CEV_FRAMES, c, frl);
+        var nr = _skv_load(_CEV_RATES, c, rts);
+        var ns = _skv_load(_CEV_SIZES, c, szs);
+        var nst = _skv_load(_CEV_STREAMS, c, sts);
+        store64(anap, load64(w + 120) & 0xFFFFFFFF);
+        store64(silkp, load64(w + 128) & 0xFFFFFFFF);
+        store64(maskp, load64(w + 136) & 0xFFFFFFFF);
+        store64(prep, load64(w + 144) & 0xFFFFFFFF);
+        var hp = 1469598103934665603;
+        store64(sh, 1469598103934665603);
+        store64(sh + 8, 1469598103934665603);
+        store64(sh + 16, 1469598103934665603);
+        var nbytes = 0;
+        var bad = 0 - 1;
+        var pos = 0;
+        var k = 0;
+        while (k < nfr) {
+            var fn0 = load64(w);
+            if (nf > 0) { fn0 = load64(frl + (k % nf) * 8); }
+            var reset = load64(w + 112);
+            if (reset > 0 && k > 0 && k % reset == 0) { celt_encoder_reset(enc); }
+            if (nr > 0) { celt_encoder_set_bitrate(enc, load64(rts + (k % nr) * 8)); }
+            if (nst > 0) { celt_encoder_set_channels(enc, load64(sts + (k % nst) * 8)); }
+            var bytes = load64(w + 104);
+            if (ns > 0) { bytes = load64(szs + (k % ns) * 8); }
+            if (load64(w + 120) >= 0) { _cek_analysis(enc, anap, info); }
+            if (load64(w + 128) >= 0) {
+                var stp = _cek_lcg(silkp) % 3;
+                var sof = _cek_lcg(silkp) % 200;
+                celt_encoder_set_silk_info(enc, stp, sof);
+            }
+            if (load64(w + 136) >= 0) {
+                var mi = 0;
+                while (mi < 42) {
+                    store64(emask + mi * 8, f64_div(f64_from((_cek_lcg(maskp) >> 22) - 768), f64_from(256)));
+                    mi = mi + 1;
+                }
+                celt_encoder_set_energy_mask(enc, emask);
+            }
+            var j = 0;
+            while (j < fn0 * ch) {
+                store64(pcm + j * 8, f64_mul(f64_from(load64(x + (pos * ch + j) * 8)), scale));
+                j = j + 1;
+            }
+            memset(buf, 0, 1280);
+            var r = 0;
+            if (load64(w + 144) >= 0) {
+                var ec = ec_enc_new(buf, bytes);
+                var kp = _cek_lcg(prep) % 64;
+                var pi = 0;
+                while (pi < kp) {
+                    var wv = _cek_lcg(prep);
+                    ec_enc_bit_logp(ec, (wv >> 20) & 1, 1 + (wv >> 24) % 4);
+                    pi = pi + 1;
+                }
+                var kr = _cek_lcg(prep) % 4;
+                pi = 0;
+                while (pi < kr) { ec_enc_bits(ec, _cek_lcg(prep) & 0xFFFF, 16); pi = pi + 1; }
+                r = celt_encoder_encode_ec(enc, pcm, fn0, bytes, ec);
+            } else {
+                r = celt_encoder_encode(enc, pcm, fn0, buf, bytes);
+            }
+            if (r < 0) { if (bad < 0) { bad = k; } r = 0; }
+            hp = _cek_fnv_byte(hp, r);
+            hp = _cek_fnv_byte(hp, r >> 8);
+            hp = _cek_fnv_byte(hp, 0);
+            hp = _cek_fnv_byte(hp, 0);
+            var b = 0;
+            while (b < r) { hp = _cek_fnv_byte(hp, load8(buf + b)); b = b + 1; }
+            var rng = celt_encoder_final_range(enc);
+            hp = _cek_fnv_byte(hp, rng);
+            hp = _cek_fnv_byte(hp, rng >> 8);
+            hp = _cek_fnv_byte(hp, rng >> 16);
+            hp = _cek_fnv_byte(hp, rng >> 24);
+            _cek_stage_hash(enc, sh);
+            nbytes = nbytes + r;
+            pos = pos + fn0;
+            k = k + 1;
+        }
+        assert_eq(bad, 0 - 1, "celt encode: every frame encodes");
+        assert_eq(nbytes, load64(h + 336), "celt encode: libopus's frame lengths");
+        assert(load64(sh) == _skk_u64(load64(h + 360), load64(h + 368)), "celt encode: libopus's decisions");
+        assert(load64(sh + 8) == _skk_u64(load64(h + 376), load64(h + 384)), "celt encode: libopus's energies");
+        assert(load64(sh + 16) == _skk_u64(load64(h + 392), load64(h + 400)), "celt encode: libopus's allocation");
+        assert(hp == _skk_u64(load64(h + 344), load64(h + 352)), "celt encode: libopus's frames and final ranges");
+        frames = frames + nfr;
+        c = c + 1;
+    }
+    assert(_CEV_N >= 250, "celt encode: the configurations");
+    assert(frames >= 15000, "celt encode: the frames");
+    return 0;
+}
+
+# celt_encoder_encode into a fresh encoder from x (mono or stereo f64 at fs,
+# frame n), nfr frames; the FNV-1a of the frames and final ranges.
+fn _cek_run(enc, x, ch, n, nfr, bytes) {
+    var buf = alloc(1280);
+    var h = 1469598103934665603;
+    var k = 0;
+    while (k < nfr) {
+        var r = celt_encoder_encode(enc, x + k * n * ch * 8, n, buf, bytes);
+        if (r < 0) { return 0; }
+        h = _cek_fnv_word(h, r);
+        var b = 0;
+        while (b < r) { h = _cek_fnv_byte(h, load8(buf + b)); b = b + 1; }
+        h = _cek_fnv_word(h, celt_encoder_final_range(enc));
+        k = k + 1;
+    }
+    return h;
+}
+
+# x: nfr frames of n samples a channel of _skk_signal kind 0, as f64.
+fn _cek_input(ch, n, nfr, seed) {
+    var tot = n * nfr;
+    var w = alloc(tot * ch * 8);
+    _skk_signal(0, 48000, tot * ch, seed, w, alloc(40));
+    var x = alloc(tot * ch * 8);
+    var i = 0;
+    while (i < tot * ch) { store64(x + i * 8, f64_div(f64_from(load64(w + i * 8)), f64_from(32768))); i = i + 1; }
+    return x;
+}
+
+# A new encoder at 48 kHz stereo, complexity 10, VBR at 64 kbit/s (the API
+# test's settings).
+fn _cek_new_like(e) {
+    var n = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(n, 10);
+    celt_encoder_set_vbr(n, 1);
+    celt_encoder_set_bitrate(n, 64000);
+    return n;
+}
+
+# The API: the rates and channels celt_encoder_new takes, each ctl's bounds
+# (libopus's), the getters, the frame sizes and buffers the encoder takes, a
+# reset in place equal to a new encoder, celt_encoder_encode_ec on an empty
+# coder equal to celt_encoder_encode, memory flat over a long encode.
+fn test_celt_enc_api() {
+    syscall(1, 1, "=== celt encode: API ===\n", 25);
+    assert_eq(celt_encoder_new(44100, 1), err(ERR_INVALID_RATE), "celt encode: 44.1 kHz is not a CELT rate");
+    assert_eq(celt_encoder_new(96000, 2), err(ERR_INVALID_RATE), "celt encode: nor 96 kHz (QEXT is not in libopus's default build)");
+    assert_eq(celt_encoder_new(48000, 0), err(ERR_INVALID_CHANNELS), "celt encode: no zero channels");
+    assert_eq(celt_encoder_new(48000, 3), err(ERR_INVALID_CHANNELS), "celt encode: at most two channels");
+    var rates = alloc(40);
+    store64(rates, 8000); store64(rates + 8, 12000); store64(rates + 16, 16000); store64(rates + 24, 24000); store64(rates + 32, 48000);
+    var ri = 0;
+    while (ri < 5) {
+        assert(is_err(celt_encoder_new(load64(rates + ri * 8), 1)) == 0, "celt encode: 8, 12, 16, 24 and 48 kHz");
+        ri = ri + 1;
+    }
+    var e = celt_encoder_new(48000, 1);
+    var s = celt_encoder_new(48000, 2);
+    var EE = err(ERR_ENCODE);
+    assert_eq(celt_encoder_set_complexity(e, 0 - 1), EE, "celt encode: complexity from 0");
+    assert_eq(celt_encoder_set_complexity(e, 11), EE, "celt encode: complexity to 10");
+    assert_eq(celt_encoder_set_complexity(e, 10), 0, "celt encode: complexity 10");
+    assert_eq(celt_encoder_set_start_band(e, 0 - 1), EE, "celt encode: start band from 0");
+    assert_eq(celt_encoder_set_start_band(e, 21), EE, "celt encode: start band below 21");
+    assert_eq(celt_encoder_set_start_band(e, 17), 0, "celt encode: start band 17 (the hybrid's)");
+    assert_eq(celt_encoder_set_end_band(e, 0), EE, "celt encode: end band from 1");
+    assert_eq(celt_encoder_set_end_band(e, 22), EE, "celt encode: end band to 21");
+    assert_eq(celt_encoder_set_end_band(e, 13), 0, "celt encode: end band 13 (narrowband)");
+    assert_eq(celt_encoder_set_prediction(e, 3), EE, "celt encode: prediction 0 to 2");
+    assert_eq(celt_encoder_set_prediction(e, 0 - 1), EE, "celt encode: prediction from 0");
+    assert_eq(celt_encoder_set_packet_loss(e, 101), EE, "celt encode: loss to 100");
+    assert_eq(celt_encoder_set_packet_loss(e, 0 - 1), EE, "celt encode: loss from 0");
+    assert_eq(celt_encoder_set_bitrate(e, 500), EE, "celt encode: a bit rate above 500");
+    assert_eq(celt_encoder_set_bitrate(e, 0), EE, "celt encode: no bit rate 0");
+    assert_eq(celt_encoder_set_bitrate(e, 0 - 1), 0, "celt encode: OPUS_BITRATE_MAX");
+    assert_eq(celt_encoder_set_bitrate(e, 900000), 0, "celt encode: a bit rate above 750 kbit/s a channel is clamped");
+    assert_eq(load64(e + _CE_BITRATE), 750000, "celt encode: to 750 kbit/s");
+    assert_eq(celt_encoder_set_bitrate(s, 2000000), 0, "celt encode: stereo");
+    assert_eq(load64(s + _CE_BITRATE), 1500000, "celt encode: to 1.5 Mbit/s for two channels");
+    assert_eq(celt_encoder_set_channels(e, 2), EE, "celt encode: no more channels coded than the input's");
+    assert_eq(celt_encoder_set_channels(s, 0), EE, "celt encode: no zero channels coded");
+    assert_eq(celt_encoder_set_channels(s, 1), 0, "celt encode: stereo coded mono");
+    assert_eq(celt_encoder_set_lsb_depth(e, 7), EE, "celt encode: input depth from 8 bits");
+    assert_eq(celt_encoder_set_lsb_depth(e, 25), EE, "celt encode: to 24");
+    assert_eq(celt_encoder_set_lsb_depth(e, 16), 0, "celt encode: 16 bits");
+    assert_eq(celt_encoder_lsb_depth(e), 16, "celt encode: OPUS_GET_LSB_DEPTH");
+    assert_eq(celt_encoder_set_phase_inversion_disabled(e, 2), EE, "celt encode: phase inversion 0 or 1");
+    assert_eq(celt_encoder_set_phase_inversion_disabled(e, 1), 0, "celt encode: phase inversion off");
+    assert_eq(celt_encoder_phase_inversion_disabled(e), 1, "celt encode: OPUS_GET_PHASE_INVERSION_DISABLED");
+    # the frame sizes: 2.5 to 20 ms at the encoder's rate
+    var f = celt_encoder_new(16000, 1);
+    var x = _cek_input(1, 960, 4, 5);
+    var buf = alloc(1280);
+    assert(celt_encoder_encode(f, x, 320, buf, 100) > 0, "celt encode: 20 ms at 16 kHz (320 samples, 960 at CELT's 48 kHz)");
+    assert(celt_encoder_encode(f, x, 40, buf, 100) > 0, "celt encode: 2.5 ms at 16 kHz");
+    assert_eq(celt_encoder_encode(f, x, 960, buf, 100), EE, "celt encode: 60 ms at 16 kHz is no CELT frame");
+    assert_eq(celt_encoder_encode(f, x, 100, buf, 100), EE, "celt encode: nor 100 samples");
+    var g = celt_encoder_new(48000, 1);
+    assert_eq(celt_encoder_encode(g, x, 100, buf, 100), EE, "celt encode: 100 samples is not a frame");
+    assert_eq(celt_encoder_encode(g, x, 0, buf, 100), EE, "celt encode: nor 0");
+    assert_eq(celt_encoder_encode(g, x, 960, buf, 1), EE, "celt encode: two bytes at least");
+    var r = celt_encoder_encode(g, x, 960, buf, 1280);
+    assert(r > 0 && r <= 1275, "celt encode: at most 1275 bytes whatever the buffer");
+    var ns = alloc(32);
+    store64(ns, 120); store64(ns + 8, 240); store64(ns + 16, 480); store64(ns + 24, 960);
+    var k = 0;
+    while (k < 4) {
+        assert(celt_encoder_encode(g, x, load64(ns + k * 8), buf, 3) == 3, "celt encode: CBR fills the buffer (2.5 to 20 ms)");
+        k = k + 1;
+    }
+    # a new encoder holds libopus's defaults (the configurations set every ctl):
+    # its frames are an encoder's with them set by hand
+    var xd = _cek_input(2, 960, 6, 21);
+    var d1 = celt_encoder_new(48000, 2);
+    var d2 = celt_encoder_new(48000, 2);
+    celt_encoder_set_bitrate(d2, 0 - 1);
+    celt_encoder_set_vbr(d2, 0);
+    celt_encoder_set_vbr_constraint(d2, 1);
+    celt_encoder_set_complexity(d2, 5);
+    celt_encoder_set_packet_loss(d2, 0);
+    celt_encoder_set_prediction(d2, 2);
+    celt_encoder_set_lsb_depth(d2, 24);
+    celt_encoder_set_phase_inversion_disabled(d2, 0);
+    celt_encoder_set_start_band(d2, 0);
+    celt_encoder_set_end_band(d2, 21);
+    celt_encoder_set_lfe(d2, 0);
+    celt_encoder_set_channels(d2, 2);
+    assert(_cek_run(d1, xd, 2, 960, 6, 400) == _cek_run(d2, xd, 2, 960, 6, 400), "celt encode: a new encoder has libopus's defaults");
+    # a reset is a new encoder
+    var xs = _cek_input(2, 480, 12, 9);
+    var a = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(a, 10);
+    celt_encoder_set_vbr(a, 1);
+    celt_encoder_set_bitrate(a, 64000);
+    _cek_run(a, xs, 2, 480, 12, 300);
+    celt_encoder_reset(a);
+    var b = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(b, 10);
+    celt_encoder_set_vbr(b, 1);
+    celt_encoder_set_bitrate(b, 64000);
+    assert(_cek_run(a, xs, 2, 480, 12, 300) == _cek_run(b, xs, 2, 480, 12, 300), "celt encode: OPUS_RESET_STATE in place is a new encoder");
+    assert_eq(celt_encoder_lsb_depth(a), 24, "celt encode: a reset keeps the settings");
+    # a reset clears the energy mask and the analysis info too, as libopus's does;
+    # a null AnalysisInfo changes nothing
+    var mk = alloc(42 * 8);
+    var mi = 0;
+    while (mi < 42) { store64(mk + mi * 8, f64_div(f64_from(mi % 7 - 3), f64_from(4))); mi = mi + 1; }
+    var ai = alloc(_CEA_SIZE);
+    memset(ai, 0, _CEA_SIZE);
+    store64(ai + _CEA_VALID, 1);
+    store64(ai + _CEA_TONALITY, F64_HALF);
+    store64(ai + _CEA_BANDWIDTH, 12);
+    celt_encoder_set_energy_mask(a, mk);
+    celt_encoder_set_analysis(a, ai);
+    _cek_run(a, xs, 2, 480, 4, 300);
+    celt_encoder_reset(a);
+    celt_encoder_set_analysis(a, 0);
+    assert(_cek_run(a, xs, 2, 480, 12, 300) == _cek_run(_cek_new_like(b), xs, 2, 480, 12, 300),
+           "celt encode: a reset drops the energy mask and the analysis info");
+    # an empty range coder is no coder
+    var c1 = celt_encoder_new(48000, 1);
+    var c2 = celt_encoder_new(48000, 1);
+    var bf1 = alloc(1280);
+    var bf2 = alloc(1280);
+    var same = 1;
+    k = 0;
+    while (k < 4) {
+        var r1 = celt_encoder_encode(c1, x + k * 960 * 8, 960, bf1, 90);
+        var ec = ec_enc_new(bf2, 90);
+        var r2 = celt_encoder_encode_ec(c2, x + k * 960 * 8, 960, 90, ec);
+        if (r1 != r2 || _cek_same(bf1, bf2, r1) == 0) { same = 0; }
+        if (celt_encoder_final_range(c1) != celt_encoder_final_range(c2)) { same = 0; }
+        k = k + 1;
+    }
+    assert_eq(same, 1, "celt encode: into an empty range coder, the frames of celt_encoder_encode");
+    # memory flat over a long encode
+    var m = celt_encoder_new(48000, 2);
+    celt_encoder_set_complexity(m, 10);
+    var xm = _cek_input(2, 960, 8, 3);
+    _cek_run(m, xm, 2, 960, 8, 200);
+    var before = alloc_used();
+    k = 0;
+    while (k < 25) { _cek_run_noalloc(m, xm, 2, 960, 8, 200, buf); k = k + 1; }
+    assert_eq(alloc_used() - before, 0, "celt encode: nothing allocated a frame (200 frames)");
+    return 0;
+}
+
+fn _cek_same(a, b, n) {
+    var i = 0;
+    while (i < n) { if (load8(a + i) != load8(b + i)) { return 0; } i = i + 1; }
+    return 1;
+}
+
+fn _cek_run_noalloc(enc, x, ch, n, nfr, bytes, buf) {
+    var k = 0;
+    while (k < nfr) {
+        celt_encoder_encode(enc, x + k * n * ch * 8, n, buf, bytes);
+        k = k + 1;
+    }
+    return 0;
+}
+
+# A frame as an Opus packet (code 0, CELT-only fullband, frame size by LM).
+fn _cek_packet(buf, r, n48, stereo) {
+    var LM = 0;
+    while ((120 << LM) != n48) { LM = LM + 1; }
+    var p = alloc(r + 1);
+    store8(p, ((28 + LM) << 3) | (stereo << 2));
+    memcpy(p + 1, buf, r);
+    return str_from_buf(p, r + 1);
+}
+
+# Hostile input: NaN, infinities, the largest and smallest floats, a square
+# wave at full scale, and noise far above it, through every frame size,
+# complexity and rate control, mono and stereo. Every frame codes within its
+# buffer, and libopus's decoder (shravan's, here) plays the frames back finite.
+fn test_celt_enc_hostile() {
+    syscall(1, 1, "=== celt encode: hostile input ===\n", 35);
+    var buf = alloc(1280);
+    var kinds = 7;
+    var ok = 1;
+    var plays = 1;
+    var ch = 1;
+    while (ch <= 2) {
+        var kd = 0;
+        while (kd < kinds) {
+            var LM = 0;
+            while (LM < 4) {
+                var n = 120 << LM;
+                var enc = celt_encoder_new(48000, ch);
+                celt_encoder_set_complexity(enc, (kd * 3 + LM) % 11);
+                if (kd % 2 == 1) { celt_encoder_set_vbr(enc, 1); celt_encoder_set_bitrate(enc, 6000 + 40000 * kd); }
+                var v = _oet_stream(ch, 48000);
+                var x = alloc(n * ch * 8);
+                var fr = 0;
+                while (fr < 6) {
+                    var i = 0;
+                    while (i < n * ch) {
+                        var val = 0;
+                        if (kd == 0) { val = 0x7FF8000000000000; }                     # NaN
+                        if (kd == 1) { val = 0x7FF0000000000000; if ((i & 1) == 1) { val = 0xFFF0000000000000; } }
+                        if (kd == 2) { val = 0x7FEFFFFFFFFFFFFF; }                     # the largest double
+                        if (kd == 3) { val = 0x0000000000000001; }                     # the smallest
+                        if (kd == 4) { val = F64_ONE; if (((i / 37) & 1) == 1) { val = f64_neg(F64_ONE); } }
+                        if (kd == 5) {
+                            val = f64_from(((i * 7919 + fr * 104729) % 2001) - 1000);   # +-1000 full scale
+                        }
+                        if (kd == 6) {
+                            val = 0x7FF8000000000000;
+                            if (i % 3 == 0) { val = f64_from(70000); }                 # NaN mixed with clipping
+                        }
+                        store64(x + i * 8, val);
+                        i = i + 1;
+                    }
+                    var max = 2 + (fr * 211 + kd * 31) % 400;
+                    var r = celt_encoder_encode(enc, x, n, buf, max);
+                    if (r < 2 || r > max) { ok = 0; }
+                    else { vec_push(v, _cek_packet(buf, r, n, ch - 1)); }
+                    fr = fr + 1;
+                }
+                if (_oet_decodes(v, 6 * n * ch) == 0) { plays = 0; }
+                LM = LM + 1;
+            }
+            kd = kd + 1;
+        }
+        ch = ch + 1;
+    }
+    assert_eq(ok, 1, "celt encode: hostile input codes within the buffer");
+    assert_eq(plays, 1, "celt encode: and plays back finite");
+    return 0;
+}
+
+fn test_celt_enc_all() {
+    test_celt_enc_vs_libopus();
+    test_celt_enc_api();
+    test_celt_enc_hostile();
+    return 0;
+}

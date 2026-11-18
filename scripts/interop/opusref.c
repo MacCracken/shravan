@@ -40,6 +40,11 @@
  *         lose=N  every Nth packet is lost: written as an empty packet, and the
  *                 reference conceals it (opus_decode with no data, for the
  *                 previous packet's duration)
+ *   opusref celt <in.f64> <channels> <bitrate> <n> <cx> <cbr> <out.pk>
+ *       libopus's encoder at 48 kHz forced to CELT only, fullband, frames of n
+ *       samples (120 to 960), complexity cx: the yardstick for shravan's CELT
+ *       encoder. Packets as gen writes them.
+ *
  *   opusref caps
  *       Print the library version, its decoder size and whether it is a deep-PLC
  *       build (deep_plc 1), whose wideband SILK concealment differs by design.
@@ -331,6 +336,41 @@ static int silk_file(const char *in_path, int rate, int bitrate, int ms, int cbr
     return 0;
 }
 
+/* libopus's encoder forced to CELT only, fullband, at 48 kHz: frames of n
+   samples (120 to 960), complexity cx, VBR unless cbr: the yardstick for
+   shravan's CELT encoder (src/celt_enc.cyr, libopus's celt_encode_with_ec). */
+static int celt_file(const char *in_path, int ch, int bitrate, int n, int cx, int cbr, const char *pk_path) {
+    int err;
+    OpusEncoder *enc = opus_encoder_create(48000, ch, OPUS_APPLICATION_AUDIO, &err);
+    FILE *fi = fopen(in_path, "rb"), *fp = fopen(pk_path, "wb");
+    if (!enc || !fi || !fp) return fprintf(stderr, "open failed\n"), 2;
+    opus_encoder_ctl(enc, FORCE_MODE_REQUEST, MODE_CELT_ONLY);
+    opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(cx));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(!cbr));
+    int packets = 0;
+    float *pcm = malloc(sizeof(float) * n * ch);
+    unsigned char pkt[MAX_PACKET];
+    for (;;) {
+        int i;
+        for (i = 0; i < n * ch; i++) {
+            double d;
+            if (fread(&d, 8, 1, fi) != 1) break;
+            pcm[i] = (float)d;
+        }
+        if (i < n * ch) break;
+        int len = opus_encode_float(enc, pcm, n, pkt, MAX_PACKET);
+        if (len < 1) return fprintf(stderr, "encode failed: %d\n", len), 2;
+        put_u32(fp, len);
+        fwrite(pkt, 1, len, fp);
+        packets++;
+    }
+    fclose(fp);
+    printf("packets: %d\n", packets);
+    return 0;
+}
+
 static int kv(const char *a, const char *key, int *v) {
     size_t k = strlen(key);
     if (strncmp(a, key, k) || a[k] != '=') return 0;
@@ -362,6 +402,9 @@ int main(int argc, char **argv) {
         if (fch < 0) fch = ch;
         return silk_file(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), argv[7], fec, dtx, api,
                          ch, fch);
+    }
+    if (argc == 9 && !strcmp(argv[1], "celt")) {
+        return celt_file(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), argv[8]);
     }
     if (argc == 2 && !strcmp(argv[1], "caps")) {
         /* A deep-PLC build (DRED or OSCE) carries LPCNet state in every decoder:

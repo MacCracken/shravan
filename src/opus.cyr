@@ -10,7 +10,10 @@
 #   opus_range_enc_encode(rc, fl, fh, total) -- encode symbol
 #   opus_range_enc_flush(rc)               -- finalize, returns (ptr, len) via Str
 #   opus_decode_from_packets(packets_vec, ogg_data, ogg_len)
-#   celt_encode_frame_ec(...)              -- one CELT frame into a range coder
+#   celt_encode_frame_ec(...)              -- one CELT frame into a range coder (shravan's
+#                                             own decisions; libopus's CELT encoder,
+#                                             celt_encoder_new / celt_encoder_encode, is
+#                                             src/celt_enc.cyr, 2.12.4)
 # The Opus encoder (opus_encoder_new, opus_encode) is src/opus_enc.cyr (2.12.3).
 #
 # Requires: alloc, vec, str, math, ogg, fft, assert

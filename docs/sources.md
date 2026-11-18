@@ -228,6 +228,33 @@ and `silk_NLSF_encode` directly on chosen inputs. Each ported function is
 compared against the reference implementation over randomised sweeps rather than
 against a reading of the C.
 
+## The CELT encoder (v2.12.4)
+
+`src/celt_enc.cyr` is libopus 1.6.1's `celt_encode_with_ec` and what it calls
+(`celt/celt_encoder.c`, `bands.c`, `quant_bands.c`, `vq.c`, `pitch.c`,
+`celt_lpc.c`, `celt.c`, `kiss_fft.c`, `mdct.c`, `mathops.h`), as its float build
+computes it: libopus is BSD-licensed (Xiph.Org, Skype, Microsoft, and the
+other contributors in its `COPYING`). Its tables are parsed from those sources by
+`scripts/gen-celt-tables.py` into `src/celt_enc_tables.cyr`, not retyped:
+
+- the static 48 kHz / 960 mode of `celt/static_modes_float.h` (window, MDCT and
+  FFT twiddles, bit reversals, FFT scales and factors, pre-emphasis). The
+  literals are not their formulas' single-precision values (195 of 2,880 differ
+  by an ulp), so each decimal is rounded to float as C rounds it;
+- `transient_analysis`'s `inv_table`, the intensity thresholds and hysteresis
+  (`celt_encoder.c`), `second_check` (`pitch.c`), the bit interleave tables
+  (`bands.c`), `eMeans`, `pred_coef`, `beta_coef`, `beta_intra`
+  (`quant_bands.c`, the float build's `k/32768.` initialisers), the comb
+  filter's gains (`celt.c`).
+
+A hand-typed `inv_table` with one entry too many was the one table error the
+comparison against libopus found before the generator replaced it.
+
+Reference: libopus built with `OPUS_DISABLE_INTRINSICS` (its portable C), as
+`scripts/gen-silk-vectors.py` builds it, and `scripts/silkref/celtenc.c` calling
+`celt_encode_with_ec` directly; `scripts/silkref/patch.py` instruments the
+encoder's stage boundaries (`celtdump.h`).
+
 ## Other tables
 
 - **Opus / CELT / SILK** — ported from libopus's float build and verified

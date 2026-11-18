@@ -31,6 +31,10 @@
 #                                                  with to_mono; default ch); rates:
 #                                                  the packets' bit rates in turn,
 #                                                  cycled, as rate*count,...
+#   celtlib <in.f64> <out.pk> <fs> <ch> [k=v ...]  celt_encoder_encode (libopus's CELT encoder)
+#                                                  with scripts/silkref/celtenc.c's keys; toc=1
+#                                                  makes each frame an Opus packet (CELT only);
+#                                                  out.pk.rng per frame the final range
 #   opusenc <in.f64> <out.pk> <fs> <ch> [k=v ...]  opus_encode (RESTRICTED_SILK) with
 #                                                  scripts/silkref/opusenc.c's keys; out.pk.rng
 #                                                  per packet the final range, bandwidth,
@@ -58,6 +62,8 @@ include "src/opus.cyr"
 include "src/silk.cyr"
 include "src/silk_enc.cyr"
 include "src/opus_enc.cyr"
+include "src/celt_enc_tables.cyr"
+include "src/celt_enc.cyr"
 include "src/aac.cyr"
 include "src/mp4.cyr"
 include "src/resample.cyr"
@@ -619,6 +625,203 @@ fn _cli_opusenc() {
     return 0;
 }
 
+# celtlib: celt_encoder_encode (src/celt_enc.cyr) with scripts/silkref/celtenc.c's
+# keys and synthetic AnalysisInfo / SILKInfo / energy masks / pre-written bits,
+# drawn from the same 32-bit LCG. out.pk.rng: per frame the final range.
+# Built with -D CELT_TRACE, trace=path writes the stage records.
+fn _cli_lcg(sp) {
+    var s = (load64(sp) * 1664525 + 1013904223) & 0xFFFFFFFF;
+    store64(sp, s);
+    return s;
+}
+
+fn _cli_unit(sp) { return f64_mul(f64_from(_cli_lcg(sp) >> 8), 0x3E70000000000000); }
+
+fn _cli_celtlib() {
+    var v = _cli_read_vec(argv(2));
+    var fs = atoi(argv(4));
+    var ch = atoi(argv(5));
+    var enc = celt_encoder_new(fs, ch);
+    if (is_err(enc) == 1) { _cli_fail(enc); }
+    var nb = 1275;
+    var total = 0 - 1;
+    var reset = 0;
+    var n0 = fs / 50;
+    var frames = alloc(4096 * 8);
+    var nframes = 0;
+    var rates = alloc(4096 * 8);
+    var nrates = 0;
+    var sizes = alloc(4096 * 8);
+    var nsizes = 0;
+    var streams = 0;
+    var ana = alloc(8);
+    var silk = alloc(8);
+    var mask = alloc(8);
+    var pre = alloc(8);
+    var use_ana = 0;
+    var use_silk = 0;
+    var use_mask = 0;
+    var use_pre = 0;
+    var toc = 0;
+    var i = 6;
+    while (i < argc()) {
+        var a = argv(i);
+        var x = 0;
+        x = _cli_key(a, "toc"); if (x != 0) { toc = atoi(x); }
+        x = _cli_key(a, "n"); if (x != 0) { n0 = atoi(x); }
+        x = _cli_key(a, "frames"); if (x != 0) { nframes = _cli_list(x, frames, 4096); }
+        x = _cli_key(a, "bitrate");
+        if (x != 0) {
+            var b = atoi(x);
+            if (streq(x, "max") == 1) { b = 0 - 1; }
+            _cli_ctl(celt_encoder_set_bitrate(enc, b));
+        }
+        x = _cli_key(a, "rates"); if (x != 0) { nrates = _cli_list(x, rates, 4096); }
+        x = _cli_key(a, "vbr"); if (x != 0) { _cli_ctl(celt_encoder_set_vbr(enc, atoi(x))); }
+        x = _cli_key(a, "vbrc"); if (x != 0) { _cli_ctl(celt_encoder_set_vbr_constraint(enc, atoi(x))); }
+        x = _cli_key(a, "cx"); if (x != 0) { _cli_ctl(celt_encoder_set_complexity(enc, atoi(x))); }
+        x = _cli_key(a, "loss"); if (x != 0) { _cli_ctl(celt_encoder_set_packet_loss(enc, atoi(x))); }
+        x = _cli_key(a, "pred"); if (x != 0) { _cli_ctl(celt_encoder_set_prediction(enc, atoi(x))); }
+        x = _cli_key(a, "lsb"); if (x != 0) { _cli_ctl(celt_encoder_set_lsb_depth(enc, atoi(x))); }
+        x = _cli_key(a, "inv"); if (x != 0) { _cli_ctl(celt_encoder_set_phase_inversion_disabled(enc, atoi(x))); }
+        x = _cli_key(a, "start"); if (x != 0) { _cli_ctl(celt_encoder_set_start_band(enc, atoi(x))); }
+        x = _cli_key(a, "end"); if (x != 0) { _cli_ctl(celt_encoder_set_end_band(enc, atoi(x))); }
+        x = _cli_key(a, "lfe"); if (x != 0) { _cli_ctl(celt_encoder_set_lfe(enc, atoi(x))); }
+        x = _cli_key(a, "stream"); if (x != 0) { _cli_ctl(celt_encoder_set_channels(enc, atoi(x))); }
+        x = _cli_key(a, "streams"); if (x != 0) { streams = x; }
+        x = _cli_key(a, "bytes"); if (x != 0) { nb = atoi(x); }
+        x = _cli_key(a, "sizes"); if (x != 0) { nsizes = _cli_list(x, sizes, 4096); }
+        x = _cli_key(a, "reset"); if (x != 0) { reset = atoi(x); }
+        x = _cli_key(a, "total"); if (x != 0) { total = atoi(x); }
+        x = _cli_key(a, "ana"); if (x != 0) { store64(ana, atoi(x) & 0xFFFFFFFF); use_ana = 1; }
+        x = _cli_key(a, "silk"); if (x != 0) { store64(silk, atoi(x) & 0xFFFFFFFF); use_silk = 1; }
+        x = _cli_key(a, "mask"); if (x != 0) { store64(mask, atoi(x) & 0xFFFFFFFF); use_mask = 1; }
+        x = _cli_key(a, "pre"); if (x != 0) { store64(pre, atoi(x) & 0xFFFFFFFF); use_pre = 1; }
+#ifdef CELT_TRACE
+        x = _cli_key(a, "trace"); if (x != 0) { _ce_trace_fd = syscall(2, x, 0x441, 420); }
+#endif
+        i = i + 1;
+    }
+    var len = vec_len(v) / ch;
+    var pcm = alloc(960 * 2 * 8 + 8);
+    var pkt = alloc(1276 * 2);
+    var out = alloc(4096 * 16);
+    var cap = 4096 * 16;
+    var op = 0;
+    var rng = alloc((len / (fs / 400) + 2) * 4);
+    var info = alloc(_CEA_SIZE);
+    var emask = alloc(42 * 8);
+    var pos = 0;
+    var count = 0;
+    var going = 1;
+    while (going == 1) {
+        if (total >= 0 && count >= total) { going = 0; }
+        else {
+            var n = n0;
+            if (nframes > 0) { n = load64(frames + (count % nframes) * 8); }
+            if (pos + n > len) { going = 0; }
+            else {
+                if (reset > 0 && count > 0 && count % reset == 0) { celt_encoder_reset(enc); }
+                if (nrates > 0) { celt_encoder_set_bitrate(enc, load64(rates + (count % nrates) * 8)); }
+                if (streams != 0) { celt_encoder_set_channels(enc, load8(streams + count % strlen(streams)) - 48); }
+                var bytes = nb;
+                if (nsizes > 0) { bytes = load64(sizes + (count % nsizes) * 8); }
+                if (use_ana != 0) {
+                    memset(info, 0, _CEA_SIZE);
+                    var vd = 0;
+                    if ((_cli_lcg(ana) >> 29) != 0) { vd = 1; }
+                    store64(info + _CEA_VALID, vd);
+                    store64(info + _CEA_TONALITY, _cli_unit(ana));
+                    store64(info + _CEA_TONALITY_SLOPE, f64_sub(_cli_unit(ana), 0.5));
+                    store64(info + _CEA_NOISINESS, _cli_unit(ana));
+                    store64(info + _CEA_ACTIVITY, _cli_unit(ana));
+                    store64(info + _CEA_MUSIC_PROB, _cli_unit(ana));
+                    store64(info + _CEA_MUSIC_PROB_MIN, _cli_unit(ana));
+                    store64(info + _CEA_MUSIC_PROB_MAX, _cli_unit(ana));
+                    store64(info + _CEA_BANDWIDTH, 1 + _cli_lcg(ana) % 20);
+                    store64(info + _CEA_ACTIVITY_PROB, _cli_unit(ana));
+                    store64(info + _CEA_MAX_PITCH_RATIO, _cli_unit(ana));
+                    var li = 0;
+                    while (li < 19) { store64(info + _CEA_LEAK_BOOST + li * 8, _cli_lcg(ana) >> 24); li = li + 1; }
+                    celt_encoder_set_analysis(enc, info);
+                }
+                if (use_silk != 0) {
+                    var stp = _cli_lcg(silk) % 3;
+                    var sof = _cli_lcg(silk) % 200;
+                    celt_encoder_set_silk_info(enc, stp, sof);
+                }
+                if (use_mask != 0) {
+                    var mi = 0;
+                    while (mi < 42) {
+                        store64(emask + mi * 8, f64_div(f64_from((_cli_lcg(mask) >> 22) - 768), f64_from(256)));
+                        mi = mi + 1;
+                    }
+                    celt_encoder_set_energy_mask(enc, emask);
+                }
+                var k = 0;
+                while (k < n * ch) { store64(pcm + k * 8, vec_get(v, pos * ch + k)); k = k + 1; }
+                memset(pkt, 0, 1276 * 2);
+                var r = 0;
+                if (use_pre != 0) {
+                    var ec = ec_enc_new(pkt, bytes);
+                    var kp = _cli_lcg(pre) % 64;
+                    var pi = 0;
+                    while (pi < kp) {
+                        var w = _cli_lcg(pre);
+                        ec_enc_bit_logp(ec, (w >> 20) & 1, 1 + (w >> 24) % 4);
+                        pi = pi + 1;
+                    }
+                    var kr = _cli_lcg(pre) % 4;
+                    pi = 0;
+                    while (pi < kr) { ec_enc_bits(ec, _cli_lcg(pre) & 0xFFFF, 16); pi = pi + 1; }
+                    r = celt_encoder_encode_ec(enc, pcm, n, bytes, ec);
+                } else {
+                    r = celt_encoder_encode(enc, pcm, n, pkt, bytes);
+                }
+                if (is_err(r) == 1) { _cli_fail(r); }
+                if (op + 5 + r > cap) {
+                    var nc = cap * 2 + r;
+                    var no = alloc(nc);
+                    memcpy(no, out, op);
+                    out = no;
+                    cap = nc;
+                }
+                if (toc != 0) {
+                    # an Opus packet: CELT only, the bandwidth by the end band, the
+                    # frame by its 48 kHz length, code 0
+                    var n48 = n * (48000 / fs);
+                    var lm = 0;
+                    while ((120 << lm) != n48) { lm = lm + 1; }
+                    var eb = load64(enc + _CE_END);
+                    var base = 28;
+                    if (eb <= 19) { base = 24; }
+                    if (eb <= 17) { base = 20; }
+                    if (eb <= 13) { base = 16; }
+                    write_u32_le(out, op, r + 1);
+                    store8(out + op + 4, ((base + lm) << 3) | ((load64(enc + _CE_C) - 1) << 2));
+                    memcpy(out + op + 5, pkt, r);
+                    op = op + 5 + r;
+                } else {
+                    write_u32_le(out, op, r);
+                    memcpy(out + op + 4, pkt, r);
+                    op = op + 4 + r;
+                }
+                write_u32_le(rng, count * 4, celt_encoder_final_range(enc));
+                pos = pos + n;
+                count = count + 1;
+            }
+        }
+    }
+    _cli_write(argv(3), out, op);
+    var rp = alloc(strlen(argv(3)) + 8);
+    memcpy(rp, argv(3), strlen(argv(3)));
+    memcpy(rp + strlen(argv(3)), ".rng", 5);
+    _cli_write(rp, rng, count * 4);
+    _cli_int(count);
+    _cli_nl();
+    return 0;
+}
+
 fn _cli_verify() {
     var lenp = alloc(8);
     var d = _cli_load(argv(2), lenp);
@@ -670,6 +873,7 @@ if (streq(cmd, "opusdec") == 1) { known = 1; _cli_opusdec(); }
 if (streq(cmd, "celtenc") == 1) { known = 1; _cli_celtenc(); }
 if (streq(cmd, "silkenc") == 1) { known = 1; _cli_silkenc(); }
 if (streq(cmd, "opusenc") == 1) { known = 1; _cli_opusenc(); }
+if (streq(cmd, "celtlib") == 1) { known = 1; _cli_celtlib(); }
 if (streq(cmd, "verify") == 1) { known = 1; _cli_verify(); }
 if (streq(cmd, "id3") == 1) { known = 1; _cli_id3(); }
 if (streq(cmd, "mem") == 1) { known = 1; _cli_mem(); }

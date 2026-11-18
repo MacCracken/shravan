@@ -426,4 +426,141 @@ patch("silk/stereo_LR_to_MS.c", [
     }
 """ + MS_STATE % "ms.st_out" + """    RESTORE_STACK;"""),
 ])
+
+
+# 2.12.4: the CELT encoder, celt_encode_with_ec, at each stage boundary
+# (celtdump.h, $CELTDUMP). Floats as bit patterns, so the comparison is exact.
+shutil.copy(os.path.join(HERE, "celtdump.h"), os.path.join(ROOT, "celt", "celtdump.h"))
+
+
+def patch_celt(rel, pairs):
+    path = os.path.join(ROOT, rel)
+    s = open(path).read()
+    if '#include "celtdump.h"' not in s:
+        anchor = '#include "celt_lpc.h"' if '#include "celt_lpc.h"' in s else '#include "vq.h"'
+        if s.count(anchor) < 1:
+            sys.exit("patch: no include anchor in " + rel)
+        i = s.index(anchor)
+        s = s[:i] + '#include "celtdump.h"\n' + s[i:]
+    for old, new in pairs:
+        if s.count(old) != 1:
+            sys.exit("patch: anchor not found once in %s: %r" % (rel, old[:60]))
+        s = s.replace(old, new)
+    open(path, "w").write(s)
+
+
+patch_celt("celt/celt_encoder.c", [
+    # transient_analysis's per-channel metric
+    ("""      /*for (i=0;i<len2;i++)printf("%f ", tmp[i]/mean);printf("\\n");*/""",
+     """      cd_f("ta.tmp", tmp, len2);"""),
+    ("""      unmask = 64*unmask*4/(6*(len2-17));""",
+     """      unmask = 64*unmask*4/(6*(len2-17));
+      { int t[2]; float f[3]; t[0] = c; t[1] = unmask; cd_i("ta.unmask", t, 2); f[0] = mean; f[1] = norm; f[2] = maxE; cd_f("ta.mean", f, 3); }"""),
+    # the frame's shape and budget, the silence decision, the pre-emphasised input
+    ("""   tone_freq = tone_detect(in, CC, N+overlap, &toneishness, mode->Fs);""",
+     """   { int h[12]; h[0] = LM; h[1] = C; h[2] = CC; h[3] = start; h[4] = end; h[5] = tell; h[6] = nbCompressedBytes;
+     h[7] = nbAvailableBytes; h[8] = effectiveBytes; h[9] = vbr_rate; h[10] = equiv_rate; h[11] = silence; cd_i("ce.begin", h, 12);
+     cd_flt("ce.smax", sample_max); cd_f("ce.pre", in, CC*(N+overlap)); }
+   tone_freq = tone_detect(in, CC, N+overlap, &toneishness, mode->Fs);
+   { float t[2]; t[0] = tone_freq; t[1] = toneishness; cd_f("ce.tone", t, 2); }"""),
+    ("""   toneishness = MIN32(toneishness, QCONST32(1.f, 29)-SHL32(tf_estimate, 15));""",
+     """   { int t[3]; float f[2]; t[0] = isTransient; t[1] = tf_chan; t[2] = weak_transient; cd_i("ce.trans", t, 3);
+     f[0] = tf_estimate; f[1] = toneishness; cd_f("ce.tfest", f, 2); }
+   toneishness = MIN32(toneishness, QCONST32(1.f, 29)-SHL32(tf_estimate, 15));"""),
+    ("""      if ((gain1 > QCONST16(.4f,15) || st->prefilter_gain > QCONST16(.4f,15)) && (!st->analysis.valid || st->analysis.tonality > .3)""",
+     """      { int t[4]; t[0] = pf_on; t[1] = pitch_index; t[2] = qg; t[3] = prefilter_tapset; cd_i("ce.pf", t, 4);
+        cd_flt("ce.pfgain", gain1); cd_f("ce.inpf", in, CC*(N+overlap)); }
+      if ((gain1 > QCONST16(.4f,15) || st->prefilter_gain > QCONST16(.4f,15)) && (!st->analysis.valid || st->analysis.tonality > .3)"""),
+    ("""   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);
+
+   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);""",
+     """   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);
+   { int t[3]; t[0] = isTransient; t[1] = shortBlocks; t[2] = secondMdct; cd_i("ce.mdct", t, 3);
+     cd_f("ce.freq", freq, C*N); cd_f("ce.bandE", bandE, nbEBands*C); cd_f("ce.logE", bandLogE, nbEBands*C);
+     if (secondMdct) cd_f("ce.logE2", bandLogE2, nbEBands*C); }
+
+   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);"""),
+    ("""   if (!secondMdct)
+   {
+      OPUS_COPY(bandLogE2, bandLogE, C*nbEBands);
+   }""",
+     """   { float t[4]; t[0] = temporal_vbr; t[1] = st->spec_avg; t[2] = surround_masking; t[3] = surround_trim; cd_f("ce.tvbr", t, 4);
+     cd_f("ce.sdyn", surround_dynalloc, end); }
+   if (!secondMdct)
+   {
+      OPUS_COPY(bandLogE2, bandLogE, C*nbEBands);
+   }"""),
+    ("""   ALLOC(X, C*N, celt_norm);         /**< Interleaved normalised MDCTs */""",
+     """   { int t[2]; t[0] = isTransient; t[1] = shortBlocks; cd_i("ce.trans2", t, 2);
+     cd_f("ce.logEp", bandLogE, nbEBands*C); cd_f("ce.logE2p", bandLogE2, nbEBands*C); cd_flt("ce.tfest2", tf_estimate); }
+   ALLOC(X, C*N, celt_norm);         /**< Interleaved normalised MDCTs */"""),
+    ("""   ALLOC(tf_res, nbEBands, int);""",
+     """   cd_f("ce.X", X, C*N);
+   { int t[2]; t[0] = tot_boost; t[1] = enable_tf_analysis; cd_i("ce.dyn", t, 2); cd_flt("ce.maxdepth", maxDepth);
+     cd_i("ce.offsets", offsets, nbEBands); cd_i("ce.importance", importance + start, end - start);
+     cd_i("ce.spreadw", spread_weight, end); }
+   ALLOC(tf_res, nbEBands, int);"""),
+    ("""   ALLOC(error, C*nbEBands, celt_glog);""",
+     """   cd_int("ce.tfsel", tf_select); cd_i("ce.tfres", tf_res, end);
+   ALLOC(error, C*nbEBands, celt_glog);"""),
+    ("""   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);""",
+     """   cd_f("ce.logEq", bandLogE, nbEBands*C); cd_f("ce.coarse", oldBandE, nbEBands*C); cd_f("ce.error", error, nbEBands*C);
+   cd_flt("ce.dintra", st->delayedIntra);
+   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);
+   cd_i("ce.tfcode", tf_res, end);"""),
+    ("""   /* For LFE, everything interesting is in the first band */""",
+     """   { int t[4]; t[0] = st->spread_decision; t[1] = st->tapset_decision; t[2] = st->tonal_average; t[3] = st->hf_average; cd_i("ce.spread", t, 4); }
+   /* For LFE, everything interesting is in the first band */"""),
+    ("""   alloc_trim = 5;
+   if (tell+(6<<BITRES) <= total_bits - total_boost)""",
+     """   cd_i("ce.boost", offsets, nbEBands);
+   { int t[3]; t[0] = total_boost; t[1] = dual_stereo; t[2] = st->intensity; cd_i("ce.stereo", t, 3); }
+   alloc_trim = 5;
+   if (tell+(6<<BITRES) <= total_bits - total_boost)"""),
+    ("""   /* In VBR mode the frame size must not be reduced so much that it would
+       result in the encoder running out of bits.""",
+     """   cd_int("ce.trim", alloc_trim); cd_flt("ce.ssave", st->stereo_saving);
+   /* In VBR mode the frame size must not be reduced so much that it would
+       result in the encoder running out of bits."""),
+    ("""   /* Bit allocation */
+   ALLOC(fine_quant, nbEBands, int);""",
+     """   { int t[7]; t[0] = nbCompressedBytes; t[1] = nbAvailableBytes; t[2] = st->vbr_reservoir; t[3] = st->vbr_drift;
+     t[4] = st->vbr_offset; t[5] = st->vbr_count; t[6] = min_allowed; cd_i("ce.vbr", t, 7); }
+   /* Bit allocation */
+   ALLOC(fine_quant, nbEBands, int);"""),
+    ("""   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);""",
+     """   { int t[7]; t[0] = codedBands; t[1] = balance; t[2] = st->intensity; t[3] = dual_stereo; t[4] = bits;
+     t[5] = anti_collapse_rsv; t[6] = signalBandwidth; cd_i("ce.alloc", t, 7);
+     cd_i("ce.pulses", pulses, nbEBands); cd_i("ce.fineq", fine_quant, nbEBands); cd_i("ce.finep", fine_priority, nbEBands); }
+   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);
+   cd_f("ce.fine", oldBandE, nbEBands*C); cd_f("ce.ferror", error, nbEBands*C);"""),
+    ("""   if (anti_collapse_rsv > 0)
+   {
+      anti_collapse_on = st->consec_transient<2;""",
+     """   cd_u8("ce.cm", collapse_masks, C*nbEBands); { unsigned int t = st->rng; cd_i("ce.qrng", (int *)&t, 1); }
+   if (anti_collapse_rsv > 0)
+   {
+      anti_collapse_on = st->consec_transient<2;"""),
+    ("""   if (silence)
+   {
+      for (i=0;i<C*nbEBands;i++)
+         oldBandE[i] = -GCONST(28.f);
+   }
+""",
+     """   cd_f("ce.final", oldBandE, nbEBands*C); cd_f("ce.eerr", energyError, nbEBands*CC);
+   if (silence)
+   {
+      for (i=0;i<C*nbEBands;i++)
+         oldBandE[i] = -GCONST(28.f);
+   }
+"""),
+    ("""   st->rng = enc->rng;
+
+   /* If there's any room left (can only happen for very high rates),""",
+     """   st->rng = enc->rng;
+   { int t[3]; t[0] = (int)enc->rng; t[1] = nbCompressedBytes; t[2] = st->consec_transient; cd_i("ce.end", t, 3); }
+
+   /* If there's any room left (can only happen for very high rates),"""),
+])
+
 print("patch: instrumented " + ROOT)

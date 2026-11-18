@@ -81,7 +81,11 @@ def build(src, work):
     opusenc = os.path.join(work, "opusenc")
     run("cc", "-O2", "-I", os.path.join(tree, "include"), "-o", opusenc,
         os.path.join(HERE, "opusenc.c"), os.path.join(bld, "libopus.a"), "-lm")
-    return exe, probe, opusenc
+    # 2.12.4: the CELT encoder alone (scripts/gen-celt-vectors.py)
+    celtenc = os.path.join(work, "celtenc")
+    run("cc", "-O2", "-DOPUS_BUILD", "-DUSE_ALLOCA", *inc, "-o", celtenc,
+        os.path.join(HERE, "celtenc.c"), os.path.join(bld, "libopus.a"), "-lm")
+    return exe, probe, opusenc, celtenc
 
 
 def white(fs, seconds, seed):
@@ -856,7 +860,7 @@ def main():
     pk_sets = []
     cli = os.path.join(ROOT, "build", "interop-cli")
     with tempfile.TemporaryDirectory() as work:
-        exe, probe, opusenc = build(args.opus_src, work)
+        exe, probe, opusenc, _celtenc = build(args.opus_src, work)
         for name, kind, seed, fs, ms, cx, br, cbr, total, cap, *opt in PACKETS:
             extra = opt.pop() if opt and isinstance(opt[-1], dict) else {}
             loss = opt[0] if opt else 0
