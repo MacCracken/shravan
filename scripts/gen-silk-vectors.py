@@ -1150,10 +1150,13 @@ def main():
     agg = sorted(agg, key=lambda c: -int(c["nsq.hdr"][10]))[:6]
     require(len(agg) == 6, "NSQ set: calls with Lambda_Q10 above 2048")
     # libopus's quantiser called directly (scripts/silkref/nsqprobe.c): large
-    # residuals at high Lambda, which no encoder run produces
-    require(len(probe_calls) == 4 and all(int(c["nsq.hdr"][10]) > 2048 for c in probe_calls), "NSQ probe calls")
-    big = max(abs(int(v)) for c in probe_calls for v in c["nsq.pulses"])
+    # residuals at high Lambda, which no encoder run produces; and (2.12.3) a
+    # call at the gain floor, residuals past the limits and 32-bit wraps
+    require(len(probe_calls) == 5 and all(int(c["nsq.hdr"][10]) > 2048 for c in probe_calls), "NSQ probe calls")
+    big = max(abs(int(v)) for c in probe_calls[:4] for v in c["nsq.pulses"])
     require(2 < big < 25, "NSQ probe: pulses of a few levels, unsaturated (%d)" % big)
+    pz = [int(v) for v in probe_calls[4]["nsq.pulses"]]
+    require(max(pz) >= 29 and min(pz) <= -30, "NSQ probe: the gain floor's residuals at both limits (%d, %d)" % (min(pz), max(pz)))
     agg += probe_calls
 
     def nsq_fields(prefix, cs, full):

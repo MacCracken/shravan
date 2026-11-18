@@ -17,7 +17,7 @@ conformance vectors) on real encoder output, in the suite and in a CI sweep.
 ## Quick start
 
 ```sh
-# Build + run the test suite (15,929 assertions)
+# Build + run the test suite (15,933 assertions)
 ./scripts/test-all.sh
 
 # Sweep against the reference decoders and encoders (ffmpeg, flac, mpg123, libopus)
@@ -145,13 +145,13 @@ var events = decode_reader_feed(dr, chunk, chunk_len);
 | MP3 decode, 44.1 kHz stereo, 64 kbit/s | 63 ms a second | ~16× |
 | Opus CELT decode, one 20 ms frame | 130 µs | ~150× |
 | Opus CELT encode, one 20 ms frame | 220 µs | ~90× |
-| SILK encode, 1 s wideband voiced, 20 kbit/s VBR | 42.5 ms | ~24× |
-| SILK encode, 1 s wideband stereo, 32 kbit/s VBR | 76.7 ms | ~13× |
-| SILK encode, 1 s 48 kHz voiced to wideband, FEC on | 72.1 ms | ~14× |
-| SILK encode, 1 s wideband noise, 20 kbit/s VBR | 32.6 ms | ~31× |
-| SILK encode, 1 s wideband noise, 12 kbit/s CBR | 72.8 ms | ~14× |
-| Opus encode (SILK), 1 s 48 kHz mono, 24 kbit/s, complexity 9 | 84.6 ms | ~12× |
-| Opus encode (SILK), 1 s 48 kHz mono, 24 kbit/s, complexity 1 | 53.8 ms | ~19× |
+| SILK encode, 1 s wideband voiced, 20 kbit/s VBR | 25.7 ms | ~39× |
+| SILK encode, 1 s wideband stereo, 32 kbit/s VBR | 46.5 ms | ~22× |
+| SILK encode, 1 s 48 kHz voiced to wideband, FEC on | 40.1 ms | ~25× |
+| SILK encode, 1 s wideband noise, 20 kbit/s VBR | 18.4 ms | ~54× |
+| SILK encode, 1 s wideband noise, 12 kbit/s CBR | 28.2 ms | ~35× |
+| Opus encode (SILK), 1 s 48 kHz mono, 24 kbit/s, complexity 9 | 83.6 ms | ~12× |
+| Opus encode (SILK), 1 s 48 kHz mono, 24 kbit/s, complexity 1 | 38.8 ms | ~26× |
 | Opus encode (SILK), 1 s 48 kHz stereo, 40 kbit/s, complexity 9 | 162 ms | ~6× |
 | Opus decode, 5.1 (four streams, 0.4 s) | 17.3 ms | ~23× |
 | MDCT, 2048 points | 55 µs | |
